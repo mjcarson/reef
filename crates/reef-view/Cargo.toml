@@ -1,0 +1,24 @@
+[package]
+name = "reef-view"
+description = "The in-browser viewer for reef planning graphs (wasm)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+reef-model.workspace = true
+reef-layout.workspace = true
+serde_json.workspace = true
+wasm-bindgen = "=0.2.130"
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "AddEventListenerOptions", "CanvasRenderingContext2d", "CssStyleDeclaration", "Document", "DomRect",
+  "DomParser", "DomStringMap", "DomTokenList", "HtmlDetailsElement", "Response", "SupportedType", "Url", "Element", "Event", "EventTarget", "HtmlCanvasElement", "HtmlElement",
+  "HtmlInputElement", "KeyboardEvent", "Location", "MouseEvent", "MutationObserver", "MutationObserverInit", "Node", "NodeList", "Performance",
+  "PointerEvent", "ResizeObserver", "Storage", "TextMetrics", "WheelEvent", "Window", "console",
+] }

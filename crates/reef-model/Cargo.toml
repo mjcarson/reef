@@ -1,0 +1,16 @@
+[package]
+name = "reef-model"
+description = "The node and graph model behind reef planning graphs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["parse"]
+# Frontmatter parsing. The wasm viewer only reads JSON and turns this off.
+parse = ["dep:serde_yaml_ng"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng = { version = "0.10", optional = true }

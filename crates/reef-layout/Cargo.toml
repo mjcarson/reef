@@ -1,0 +1,8 @@
+[package]
+name = "reef-layout"
+description = "Layered layout of compound directed graphs, for reef"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

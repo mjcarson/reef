@@ -1,0 +1,22 @@
+[package]
+name = "mdbook-reef"
+description = "Planning graphs for mdbook: nodes written as markdown, drawn as a zoomable, collapsible DAG"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["mdbook", "dag", "planning", "preprocessor", "diagram"]
+categories = ["command-line-utilities", "visualization"]
+
+[dependencies]
+reef-model = { workspace = true, features = ["parse"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+mdbook-preprocessor = "0.5.4"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+toml = "1"
+toml_edit = "0.25"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
