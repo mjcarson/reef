@@ -17,6 +17,13 @@ nodes:
     status: done
     needs: ["F124"]
     docs: ["../../../features/page-reads-in-runs.md"]
+    acceptance:
+      - unit: A page's archive reads are cut into runs in disk order
+        status: met
+      - unit: A run never spans two archives
+      - integration: { text: "A scan whose runs are in flight together still answers in order", test: "tests/scan_runs.rs" }
+      - feature: Reads in flight are bounded by the node's read budget
+        status: met
   - id: "F126"
     title: "F126 Encodes in steps"
     status: done

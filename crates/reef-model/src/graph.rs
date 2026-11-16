@@ -1,6 +1,7 @@
 //! The whole plan as one graph: nodes, the group tree, dependencies, and what follows from them
 //! (a group's status and progress, and which work is ready to start).
 
+use crate::accept::{AccChart, Criterion, Kind, Met, Resolved};
 use crate::perf::Performance;
 use crate::spec::{NodeSpec, Status};
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,10 @@ pub struct Node {
     /// A doc section that holds the work's measurements, read in the sidebar when it is opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub perf_doc: Option<PerfDoc>,
+    /// How the work will be known to be done. Each criterion's text is markdown as written, and
+    /// HTML in the viewer's payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<Criterion>,
     /// The node's own page, when its file is a chapter of the book.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<String>,
@@ -102,7 +107,7 @@ pub struct Node {
 impl Node {
     /// Flatten a spec and its inline members into nodes. `source` is the file it came from.
     pub fn from_spec(spec: NodeSpec, source: &str, line: usize, body: String, out: &mut Vec<Node>) {
-        let NodeSpec { id, title, status, optional, group, needs, helps, docs, collapsed, description, decisions, performance, body: inline_body, nodes } = spec;
+        let NodeSpec { id, title, status, optional, group, needs, helps, docs, collapsed, description, decisions, performance, acceptance, body: inline_body, nodes } = spec;
         let title = title
             .or_else(|| crate::spec::first_heading(&body))
             .unwrap_or_else(|| id.clone());
@@ -124,6 +129,7 @@ impl Node {
             description_raw: description,
             decisions_raw: decisions,
             performance,
+            acceptance,
             body,
             ..Node::default()
         });
@@ -180,6 +186,7 @@ pub struct Graph {
     status: Vec<Status>,
     ready: Vec<bool>,
     progress: Vec<(usize, usize)>,
+    accept: Vec<Vec<Resolved>>,
 }
 
 impl Graph {
@@ -269,6 +276,7 @@ impl Graph {
             }
         }
         g.break_cycles(&mut diags);
+        g.resolve_acceptance(&mut diags);
         g.derive();
         (g, diags)
     }
@@ -305,6 +313,78 @@ impl Graph {
                 EdgeKind::Helps => self.helps[i].retain(|&x| x != d),
             }
         }
+    }
+
+    /// Check each acceptance criterion's references, and work out whether it is met: the
+    /// author's word, or else its metric's `after` figure against its target.
+    fn resolve_acceptance(&mut self, diags: &mut Vec<Diagnostic>) {
+        let mut all = Vec::with_capacity(self.nodes.len());
+        for i in 0..self.nodes.len() {
+            let mut out = Vec::new();
+            for (k, c) in self.nodes[i].acceptance.iter().enumerate() {
+                let mut problem = |m: String| diags.push(diag(&self.nodes[i], format!("acceptance {}: {m}", k + 1)));
+                if c.text.trim().is_empty() {
+                    problem("has no text".into());
+                }
+                let refers = c.metric.is_some() || c.chart.is_some() || c.has_target() || c.node.is_some();
+                let mut r = Resolved { status: c.status.unwrap_or_default(), chart: None };
+                if c.kind != Kind::Performance {
+                    if refers {
+                        problem(format!("a {} criterion takes no `metric`, `chart`, `node` or target; those are for `performance`", c.kind.label()));
+                    }
+                    out.push(r);
+                    continue;
+                }
+                if c.metric.is_some() && c.chart.is_some() {
+                    problem("names both `metric` and `chart`; a criterion draws one".into());
+                }
+                if c.has_target() && c.metric.is_none() {
+                    problem("has a target but no `metric` to check it against".into());
+                }
+                let j = match &c.node {
+                    None => Some(i),
+                    Some(id) => match self.index.get(id) {
+                        Some(&j) => Some(j),
+                        None => {
+                            problem(format!("node `{id}` is not a node"));
+                            None
+                        }
+                    },
+                };
+                if let Some(j) = j {
+                    let perf = self.nodes[j].performance.as_ref();
+                    let id = &self.nodes[j].id;
+                    if let Some(name) = &c.metric {
+                        let metrics = perf.map_or(&[][..], |p| p.metrics.as_slice());
+                        let found = metrics.iter().position(|m| m.key() == name).or_else(|| metrics.iter().position(|m| &m.name == name));
+                        match found {
+                            Some(m) => {
+                                r.chart = Some((j, AccChart::Metric(m)));
+                                if c.status.is_none()
+                                    && let Some(ok) = c.check(&metrics[m])
+                                {
+                                    r.status = if ok { Met::Met } else { Met::Unmet };
+                                }
+                            }
+                            None => problem(format!("metric `{name}` is not in `{id}`'s performance")),
+                        }
+                    } else if let Some(chart) = &c.chart {
+                        match chart.as_str() {
+                            "change" => r.chart = Some((j, AccChart::Change)),
+                            "pair" | "before-after" => r.chart = Some((j, AccChart::Pair)),
+                            other => problem(format!("chart `{other}` is not `change` or `pair`")),
+                        }
+                        if r.chart.is_some() && perf.is_none_or(|p| p.metrics.is_empty()) {
+                            problem(format!("chart `{chart}`, but `{id}` has no performance metrics"));
+                            r.chart = None;
+                        }
+                    }
+                }
+                out.push(r);
+            }
+            all.push(out);
+        }
+        self.accept = all;
     }
 
     fn derive(&mut self) {
@@ -418,6 +498,35 @@ impl Graph {
     /// Done and total work items under a node (a leaf counts itself).
     pub fn progress(&self, i: usize) -> (usize, usize) {
         self.progress[i]
+    }
+    /// Node `i`'s acceptance criteria resolved, one for each of `node(i).acceptance`.
+    pub fn acceptance(&self, i: usize) -> &[Resolved] {
+        &self.accept[i]
+    }
+    /// For each kind in [`Kind::ALL`] that `shown` lets through: how many of node `i`'s criteria
+    /// are met, and how many there are. `deep` counts its members' too.
+    pub fn acceptance_counts(&self, i: usize, shown: &[bool; 4], deep: bool) -> [(usize, usize); 4] {
+        let mut out = [(0, 0); 4];
+        let mut add = |n: usize| {
+            for (c, r) in self.nodes[n].acceptance.iter().zip(&self.accept[n]) {
+                let k = c.kind.index();
+                if shown[k] {
+                    out[k].0 += usize::from(r.status == Met::Met);
+                    out[k].1 += 1;
+                }
+            }
+        };
+        add(i);
+        if deep {
+            for d in self.descendants(i) {
+                add(d);
+            }
+        }
+        out
+    }
+    /// Whether any node has acceptance criteria.
+    pub fn has_acceptance(&self) -> bool {
+        self.nodes.iter().any(|n| !n.acceptance.is_empty())
     }
     /// Whether `a` is a strict ancestor (enclosing group) of `b`.
     pub fn is_ancestor(&self, a: usize, b: usize) -> bool {
@@ -603,6 +712,58 @@ mod tests {
         let (_, d) = Graph::build(vec![n]);
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].to_string(), "t.md:4: performance: metric `x` has neither `before`/`after` nor `points`");
+    }
+
+    #[test]
+    fn acceptance_is_resolved() {
+        use crate::perf::{Metric, Performance, Value};
+        let crit = |kind, metric: Option<&str>, node: Option<&str>, at_least: Option<f64>| Criterion {
+            kind,
+            text: "t".into(),
+            metric: metric.map(Into::into),
+            node: node.map(Into::into),
+            at_least,
+            ..Criterion::default()
+        };
+        let mut a = node("a", None, &[], None);
+        a.performance = Some(Performance {
+            metrics: vec![Metric { name: "rw50, inserts".into(), key: Some("inserts".into()), after: Some(Value::One(6837.0)), before: Some(Value::One(3523.0)), ..Metric::default() }],
+            ..Performance::default()
+        });
+        a.acceptance = vec![
+            crit(Kind::Performance, Some("inserts"), None, Some(6000.0)),
+            crit(Kind::Performance, Some("rw50, inserts"), None, Some(9000.0)),
+            Criterion { status: Some(Met::Met), ..crit(Kind::Performance, Some("inserts"), None, Some(9000.0)) },
+            crit(Kind::Unit, None, None, None),
+            Criterion { chart: Some("change".into()), ..crit(Kind::Performance, None, None, None) },
+        ];
+        let mut b = node("b", None, &[], None);
+        b.acceptance = vec![
+            crit(Kind::Performance, Some("inserts"), Some("a"), Some(6000.0)),
+            crit(Kind::Performance, Some("nope"), Some("a"), None),
+            crit(Kind::Performance, None, Some("missing"), None),
+            crit(Kind::Feature, Some("inserts"), None, None),
+            crit(Kind::Performance, None, None, Some(1.0)),
+            Criterion { text: " ".into(), ..crit(Kind::Unit, None, None, None) },
+        ];
+        let (g, d) = Graph::build(vec![a, b]);
+        let r = g.acceptance(0);
+        assert_eq!(r[0], Resolved { status: Met::Met, chart: Some((0, AccChart::Metric(0))) });
+        assert_eq!(r[1].status, Met::Unmet);
+        assert_eq!(r[2].status, Met::Met, "the author's word wins");
+        assert_eq!(r[3], Resolved::default());
+        assert_eq!(r[4].chart, Some((0, AccChart::Change)));
+        assert_eq!(g.acceptance(1)[0], Resolved { status: Met::Met, chart: Some((0, AccChart::Metric(0))) });
+        let msgs: Vec<String> = d.iter().map(|d| d.message.clone()).collect();
+        assert_eq!(msgs.len(), 5, "{msgs:?}");
+        assert!(msgs[0].contains("acceptance 2: metric `nope` is not in `a`'s performance"), "{msgs:?}");
+        assert!(msgs[1].contains("node `missing`"), "{msgs:?}");
+        assert!(msgs[2].contains("a feature criterion takes no"), "{msgs:?}");
+        assert!(msgs[3].contains("no `metric`"), "{msgs:?}");
+        assert!(msgs[4].contains("no text"), "{msgs:?}");
+        let all = [true; 4];
+        assert_eq!(g.acceptance_counts(0, &all, false), [(0, 1), (0, 0), (2, 4), (0, 0)]);
+        assert_eq!(g.acceptance_counts(0, &[true, true, false, true], false), [(0, 1), (0, 0), (0, 0), (0, 0)]);
     }
 
     #[test]

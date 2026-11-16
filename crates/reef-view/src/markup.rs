@@ -1,7 +1,8 @@
 //! The SVG and HTML the viewer draws, as strings. Pure, so it is tested natively.
 
 use reef_layout::{Dir, Output, svg_path};
-use reef_model::{EdgeKind, Graph, Status, Visible};
+use crate::accept::{self, Filter};
+use reef_model::{EdgeKind, Graph, Kind, Status, Visible};
 use std::fmt::Write;
 
 pub const FONT_PX: f64 = 13.0;
@@ -11,11 +12,18 @@ pub const PAD_Y: f64 = 9.0;
 pub const MAX_TEXT_W: f64 = 210.0;
 pub const BAR_H: f64 = 20.0;
 pub const HEADER_H: f64 = 30.0;
+/// The row of acceptance pills under a box's title.
+pub const PILL_H: f64 = 15.0;
+const PILL_GAP: f64 = 4.0;
+/// The pills' 10.5px text against the 13px it is measured in.
+const PILL_FONT: f64 = 10.5 / FONT_PX;
 
 /// What a box needs to show: its wrapped title and its size.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoxSize {
     pub lines: Vec<String>,
+    /// The acceptance pills: each kind shown, its text and its width.
+    pub pills: Vec<(Kind, usize, usize, f64)>,
     pub w: f64,
     pub h: f64,
 }
@@ -43,24 +51,35 @@ pub fn wrap(text: &str, max: f64, measure: &dyn Fn(&str) -> f64) -> Vec<String> 
 }
 
 /// The size of each visible item. An open group's size is its minimum: room for its title.
-pub fn sizes(g: &Graph, vis: &Visible, measure: &dyn Fn(&str) -> f64) -> Vec<BoxSize> {
+/// `filter` says which kinds of acceptance criteria the boxes' pills count.
+pub fn sizes(g: &Graph, vis: &Visible, filter: &Filter, measure: &dyn Fn(&str) -> f64) -> Vec<BoxSize> {
     vis.items
         .iter()
         .map(|it| {
             let title = &g.node(it.node).title;
             if it.open {
                 let w = measure(title) + measure("▾  ") + measure(" 000/000") + 2.0 * PAD_X + 16.0;
-                return BoxSize { lines: vec![title.clone()], w, h: HEADER_H + 10.0 };
+                return BoxSize { lines: vec![title.clone()], pills: Vec::new(), w, h: HEADER_H + 10.0 };
             }
             let lines = wrap(title, MAX_TEXT_W, measure);
             let text_w = lines.iter().map(|l| measure(l)).fold(0.0, f64::max);
             let mut w = (text_w + 2.0 * PAD_X).max(96.0);
             let mut h = lines.len() as f64 * LINE_H + 2.0 * PAD_Y;
+            let pills: Vec<(Kind, usize, usize, f64)> = accept::pills(g, it.node, filter, it.collapsed)
+                .into_iter()
+                .map(|(k, m, t)| (k, m, t, (measure(&accept::pill_text(k, m, t)) * PILL_FONT + 12.0).ceil()))
+                .collect();
+            if !pills.is_empty() {
+                let row: f64 = pills.iter().map(|p| p.3).sum::<f64>() + PILL_GAP * (pills.len() - 1) as f64;
+                let indent = if it.collapsed { 16.0 } else { 0.0 };
+                w = w.max(row + indent + 2.0 * PAD_X);
+                h += PILL_H + 5.0;
+            }
             if it.collapsed {
                 w = w.max(150.0) + 18.0;
                 h += BAR_H;
             }
-            BoxSize { lines, w: w.ceil(), h: h.ceil() }
+            BoxSize { lines, pills, w: w.ceil(), h: h.ceil() }
         })
         .collect()
 }
@@ -190,6 +209,23 @@ pub fn diagram(g: &Graph, vis: &Visible, out: &Output, sizes: &[BoxSize], dir: D
             let _ = write!(s, r#"<tspan x="{text_x:.1}" y="{:.1}">{}</tspan>"#, PAD_Y + 12.5 + l as f64 * LINE_H, esc(line));
         }
         s.push_str("</text>");
+        if !sz.pills.is_empty() {
+            let mut px = text_x;
+            let py = PAD_Y + sz.lines.len() as f64 * LINE_H + 3.0;
+            for &(k, met, total, pw) in &sz.pills {
+                let _ = write!(
+                    s,
+                    r#"<g class="reef-acc-pill k-{kind}{full}"><title>{title}</title><rect x="{px:.1}" y="{py:.1}" width="{pw:.1}" height="{PILL_H}" rx="7.5"/><text x="{tx:.1}" y="{ty:.1}" text-anchor="middle">{text}</text></g>"#,
+                    kind = k.as_str(),
+                    full = if met == total { " full" } else { "" },
+                    title = esc(&accept::pill_title(k, met, total)),
+                    tx = px + pw / 2.0,
+                    ty = py + 11.0,
+                    text = esc(&accept::pill_text(k, met, total)),
+                );
+                px += pw + PILL_GAP;
+            }
+        }
         if it.collapsed {
             let (done, total) = g.progress(it.node);
             let bar_y = r.h - PAD_Y - 6.0;
@@ -239,8 +275,9 @@ pub fn sec(head: &str, class: &str, body: &str) -> String {
     format!(r#"<details class="reef-sec{class}" open><summary class="reef-sec-head"><h3>{head}</h3></summary><div class="reef-sec-body">{body}</div></details>"#)
 }
 
-/// The sidebar for node `i`. `open` says whether it is a group shown open.
-pub fn sidebar(g: &Graph, i: usize, open: Option<bool>) -> String {
+/// The sidebar for node `i`. `open` says whether it is a group shown open; `filter`, which
+/// acceptance criteria show.
+pub fn sidebar(g: &Graph, i: usize, open: Option<bool>, filter: &Filter) -> String {
     let n = g.node(i);
     let mut s = String::new();
     s.push_str(r#"<button class="reef-close" data-act="close" title="Close (Esc)">×</button>"#);
@@ -272,6 +309,7 @@ pub fn sidebar(g: &Graph, i: usize, open: Option<bool>) -> String {
     if !n.description.trim().is_empty() {
         s.push_str(&sec("Description", "", &format!(r#"<div class="reef-desc">{}</div>"#, n.description)));
     }
+    s.push_str(&accept::section(g, i, filter));
     s.push_str(&crate::perf::section(g, i));
     if !n.docs.is_empty() {
         let mut body = String::new();
@@ -358,7 +396,7 @@ mod tests {
         };
         let (g, _) = Graph::build(vec![mk("a", None, &[]), mk("g", None, &["a"]), mk("x", Some("g"), &[])]);
         let vis = g.visible(None, false, &HashSet::new());
-        let sz = sizes(&g, &vis, &measure);
+        let sz = sizes(&g, &vis, &Filter::default(), &measure);
         let input = reef_layout::Input {
             dir: Dir::TB,
             nodes: vis.items.iter().zip(&sz).map(|(it, s)| reef_layout::LNode { parent: it.parent, w: s.w, h: s.h, container: it.open }).collect(),
@@ -370,8 +408,36 @@ mod tests {
         assert!(svg.contains("&lt;a&gt;"), "escaped");
         assert!(svg.contains("collapsed"));
         assert!(svg.contains("reef-edge needs"));
-        let sb = sidebar(&g, g.index_of("g").unwrap(), Some(false));
+        let sb = sidebar(&g, g.index_of("g").unwrap(), Some(false), &Filter::default());
         assert!(sb.contains("Members"));
         assert!(sb.contains("data-goto=\"x\""));
+    }
+
+    #[test]
+    fn boxes_show_acceptance_pills() {
+        use reef_model::Criterion;
+        let crit = |kind| Criterion { kind, text: "t".into(), ..Criterion::default() };
+        let a = Node { id: "a".into(), title: "a".into(), acceptance: vec![crit(Kind::Unit), crit(Kind::Unit), crit(Kind::Feature)], ..Node::default() };
+        let b = Node { id: "b".into(), title: "b".into(), ..Node::default() };
+        let (g, _) = Graph::build(vec![a, b]);
+        let vis = g.visible(None, false, &HashSet::new());
+        let all = sizes(&g, &vis, &Filter::default(), &measure);
+        let (ia, ib) = (vis.shown_as[0].unwrap(), vis.shown_as[1].unwrap());
+        assert_eq!(all[ia].pills.iter().map(|p| (p.0, p.2)).collect::<Vec<_>>(), vec![(Kind::Unit, 2), (Kind::Feature, 1)]);
+        assert!(all[ia].h > all[ib].h, "the pills take a row");
+        let some = sizes(&g, &vis, &Filter::default().toggled(Kind::Unit).toggled(Kind::Feature), &measure);
+        assert!(some[ia].pills.is_empty());
+        assert_eq!(some[ia].h, some[ib].h, "a box with nothing shown has no pill row");
+        let input = reef_layout::Input {
+            dir: Dir::TB,
+            nodes: vis.items.iter().zip(&all).map(|(it, s)| reef_layout::LNode { parent: it.parent, w: s.w, h: s.h, container: it.open }).collect(),
+            edges: vec![],
+            spacing: Default::default(),
+        };
+        let out = reef_layout::layout(&input);
+        let svg = diagram(&g, &vis, &out, &all, Dir::TB, "u", None);
+        assert!(svg.contains(r#"class="reef-acc-pill k-unit""#), "{svg}");
+        assert!(svg.contains("<title>unit tests: 0 of 2 met</title>"), "{svg}");
+        assert!(svg.contains(">U 0/2<"), "{svg}");
     }
 }

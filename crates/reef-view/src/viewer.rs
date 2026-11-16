@@ -1,6 +1,7 @@
 //! One drawn view: its DOM, its state, and its event handlers.
 
 use crate::Plan;
+use crate::accept::{self, Filter};
 use crate::markup::{self, BoxSize, FONT_PX, HEADER_H};
 use reef_layout::{Dir, Input, LEdge, LNode, Output, Spacing};
 use reef_model::{Direction, Layout, ViewSpec, Visible};
@@ -58,6 +59,15 @@ pub struct Viewer {
     page_mode: bool,
     /// The stage size last laid out for, to keep the view centred when it changes.
     seen: (f64, f64),
+    /// Which kinds of acceptance criteria are shown, shared by every view in the book.
+    acc: Filter,
+}
+
+/// The event every view on the page hears when the acceptance filter changes.
+const ACC_EVENT: &str = "reef-acceptance";
+
+fn load_filter() -> Filter {
+    storage().and_then(|s| s.get_item(Filter::STORAGE_KEY).ok().flatten()).map_or_else(Filter::default, |v| Filter::from_stored(&v))
 }
 
 fn window() -> web_sys::Window {
@@ -96,9 +106,17 @@ impl Viewer {
         let open_page = spec.page.as_deref().map_or(String::new(), |href| {
             format!(r#"<a class="reef-button" href="{}" title="Open this plan on a page of its own">Full page ↗</a>"#, markup::esc(href))
         });
+        let acc = load_filter();
+        let has_acc = plan.graph.has_acceptance();
+        let acc_bar = if has_acc { accept::toolbar(&acc) } else { String::new() };
+        let acc_legend: String = if has_acc {
+            reef_model::Kind::ALL.iter().map(|k| format!(r#"<span><i class="reef-acc-dot k-{}"></i>{}</span>"#, k.as_str(), k.label())).collect()
+        } else {
+            String::new()
+        };
         let hint_text = if page_mode { "Scroll to zoom · drag to pan" } else { "Ctrl + scroll to zoom · drag to pan" };
         el.set_inner_html(&format!(
-            r##"<div class="reef-toolbar"><div class="reef-searchbox"><input class="reef-search" type="search" placeholder="Search nodes ( / )" aria-label="Search nodes" autocomplete="off"><ul class="reef-results" hidden></ul></div><span class="reef-spacer"></span><button data-act="expand" title="Open every group">Expand all</button><button data-act="collapse" title="Close every group">Collapse all</button><button data-act="out" title="Zoom out ( - )">−</button><button data-act="in" title="Zoom in ( + )">+</button><button data-act="fit" title="Fit to view ( 0 )">Fit</button>{open_page}<button data-act="full" title="Full screen ( f )">⛶</button></div><div class="reef-stage"><svg class="reef-svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Plan diagram"><defs><marker id="reef-arrow-{uid}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="reef-arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs><g class="reef-viewport"></g></svg><aside class="reef-side" hidden></aside><div class="reef-side-grip" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div><div class="reef-legend"><span><i class="reef-dot s-done"></i>done</span><span><i class="reef-dot s-progress"></i>in progress</span><span><i class="reef-dot s-ready"></i>ready</span><span><i class="reef-dot s-todo"></i>to do</span><span><i class="reef-dot s-blocked"></i>blocked</span><span><i class="reef-dot optional"></i>optional</span></div><div class="reef-hint">{hint_text}</div></div>"##
+            r##"<div class="reef-toolbar"><div class="reef-searchbox"><input class="reef-search" type="search" placeholder="Search nodes ( / )" aria-label="Search nodes" autocomplete="off"><ul class="reef-results" hidden></ul></div><span class="reef-spacer"></span>{acc_bar}<button data-act="expand" title="Open every group">Expand all</button><button data-act="collapse" title="Close every group">Collapse all</button><button data-act="out" title="Zoom out ( - )">−</button><button data-act="in" title="Zoom in ( + )">+</button><button data-act="fit" title="Fit to view ( 0 )">Fit</button>{open_page}<button data-act="full" title="Full screen ( f )">⛶</button></div><div class="reef-stage"><svg class="reef-svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Plan diagram"><defs><marker id="reef-arrow-{uid}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="reef-arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs><g class="reef-viewport"></g></svg><aside class="reef-side" hidden></aside><div class="reef-side-grip" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div><div class="reef-legend"><span><i class="reef-dot s-done"></i>done</span><span><i class="reef-dot s-progress"></i>in progress</span><span><i class="reef-dot s-ready"></i>ready</span><span><i class="reef-dot s-todo"></i>to do</span><span><i class="reef-dot s-blocked"></i>blocked</span><span><i class="reef-dot optional"></i>optional</span>{acc_legend}</div><div class="reef-hint">{hint_text}</div></div>"##
         ));
         let svg = q(&el, ".reef-svg");
         let vp = q(&el, ".reef-viewport");
@@ -152,6 +170,7 @@ impl Viewer {
             hint_timer: None,
             page_mode,
             seen: (0.0, 0.0),
+            acc,
         };
         let v = Rc::new(RefCell::new(v));
         {
@@ -182,7 +201,7 @@ impl Viewer {
         let plan = self.plan.clone();
         let g = &plan.graph;
         self.vis = g.visible(self.root, self.ghosts, &self.expanded);
-        let sizes = markup::sizes(g, &self.vis, &|s| self.measure(s));
+        let sizes = markup::sizes(g, &self.vis, &self.acc, &|s| self.measure(s));
         let input = Input {
             dir: self.dir,
             nodes: self.vis.items.iter().zip(&sizes).map(|(it, s)| LNode { parent: it.parent, w: s.w, h: s.h, container: it.open }).collect(),
@@ -318,7 +337,7 @@ impl Viewer {
     fn show_side(&mut self, node: usize) {
         let g = self.graph();
         let open = g.is_group(node).then(|| self.expanded.contains(&node));
-        self.side.set_inner_html(&markup::sidebar(g, node, open));
+        self.side.set_inner_html(&markup::sidebar(g, node, open, &self.acc));
         // Docs start open, and a details put in already open fires no `toggle` everywhere: fetch them now.
         if let Ok(list) = self.side.query_selector_all("details.reef-doc-read[open], details.reef-perf-doc[open]") {
             for k in 0..list.length() {
@@ -551,7 +570,46 @@ impl Viewer {
         window().document().and_then(|d| d.fullscreen_element()).is_some_and(|e| e == *self.el)
     }
 
+    /// Show or hide kind `k` of acceptance criteria, in every view in the book.
+    fn toggle_kind(&mut self, k: reef_model::Kind) {
+        let f = self.acc.toggled(k);
+        if let Some(s) = storage() {
+            let _ = s.set_item(Filter::STORAGE_KEY, &f.to_stored());
+        }
+        self.set_filter(f);
+        // The other views on this page follow.
+        if let Some(doc) = window().document()
+            && let Ok(e) = Event::new(ACC_EVENT)
+        {
+            let _ = doc.dispatch_event(&e);
+        }
+    }
+
+    /// Draw again with filter `f`: the boxes' pills, the toolbar's chips, and the sidebar's
+    /// Acceptance section, in place so the sidebar keeps its scroll.
+    fn set_filter(&mut self, f: Filter) {
+        if f == self.acc {
+            return;
+        }
+        self.acc = f;
+        self.render();
+        self.refresh_selection();
+        if let Ok(Some(bar)) = self.el.query_selector(".reef-toolbar .reef-acc-filter") {
+            bar.set_outer_html(&accept::toolbar(&f));
+        }
+        if let (Some(n), false) = (self.selected, self.side.hidden())
+            && let Ok(Some(sec)) = self.side.query_selector(".reef-acc")
+        {
+            let html = accept::section(self.graph(), n, &f);
+            sec.set_outer_html(&html);
+        }
+    }
+
     fn act(&mut self, act: &str) {
+        if let Some(k) = accept::act_kind(act) {
+            self.toggle_kind(k);
+            return;
+        }
         match act {
             "fit" => self.fit(),
             "in" => self.zoom_center(1.25),
@@ -862,8 +920,12 @@ impl Viewer {
         }
         observer.forget();
 
-        let vc = v.clone();
         let doc: web_sys::EventTarget = window().document().expect("a document").into();
+        // Another view changed the acceptance filter.
+        let vc = v.clone();
+        listen(&doc, ACC_EVENT, true, move |_: Event| with(&vc, |v| v.set_filter(load_filter())));
+
+        let vc = v.clone();
         listen(&doc, "fullscreenchange", true, move |_: Event| {
             let vc = vc.clone();
             // Let the new size settle first.

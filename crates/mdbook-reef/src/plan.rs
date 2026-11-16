@@ -182,6 +182,9 @@ impl Plan {
         {
             p.note = Some(render(note, &n.source, None, false));
         }
+        for c in &mut n.acceptance {
+            c.text = inline_html(&render(&c.text, &n.source, None, false));
+        }
         for link in &n.docs_raw {
             if !n.description.is_empty() && !n.design.is_empty() && n.perf_doc.is_some() {
                 break;
@@ -239,6 +242,15 @@ impl Plan {
             })
             .collect();
         serde_json::to_string(&Payload { nodes }).expect("serializable")
+    }
+}
+
+/// Rendered markdown that is one paragraph, without its `<p>`, so it sits in a line.
+fn inline_html(html: &str) -> String {
+    let t = html.trim();
+    match t.strip_prefix("<p>").and_then(|r| r.strip_suffix("</p>")) {
+        Some(inner) if !inner.contains("<p>") => inner.to_string(),
+        _ => t.to_string(),
     }
 }
 
@@ -575,6 +587,28 @@ mod tests {
         assert_eq!(o2["perf_doc"]["heading"], "results-1", "the file's own id for the second Evidence: {o2}");
         assert_eq!(o2["perf_doc"]["heading_text"], "Results");
         assert!(node("o3").get("perf_doc").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acceptance_in_the_payload() {
+        let dir = std::env::temp_dir().join(format!("reef-accept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.md"),
+            "---\nid: a\nperformance:\n  metrics:\n    - { name: n, before: 2, after: 1 }\nacceptance:\n  - unit: Answers **at once**\n  - perf: { text: Halves, metric: n, at-most: 1 }\n---\n",
+        )
+        .unwrap();
+        let plan = Plan::load(&dir, &Config::default());
+        assert!(plan.diags.is_empty(), "{}", plan.errors());
+        let json: serde_json::Value = serde_json::from_str(&plan.payload_json(&HashSet::new())).unwrap();
+        let acc = &json["nodes"][0]["acceptance"];
+        assert_eq!(acc[0]["kind"], "unit");
+        assert_eq!(acc[0]["text"], "Answers <strong>at once</strong>");
+        assert_eq!(acc[1]["at-most"], 1.0);
+        let nodes: Vec<reef_model::Node> = serde_json::from_value(json["nodes"].clone()).unwrap();
+        assert_eq!(nodes[0].acceptance[1].metric.as_deref(), Some("n"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

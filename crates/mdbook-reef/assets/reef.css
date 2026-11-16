@@ -483,3 +483,89 @@ html.coal .reef, html.navy .reef, html.ayu .reef {
 .reef-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
 .reef-swatch.reef-perf-before { background: var(--reef-perf-before); }
 .reef-swatch.reef-perf-after { background: var(--reef-perf-after); }
+
+/* Acceptance criteria: one hue a kind, apart from the status colours and the charts' orange and
+   blue. Every badge also names its kind, so colour never carries it alone. */
+.reef {
+    --reef-k-unit: #0e7c86;
+    --reef-k-integration: #7a4cc0;
+    --reef-k-perf: #9a6200;
+    --reef-k-feature: #b0306f;
+    --reef-k-fg: #ffffff;
+}
+html.coal .reef, html.navy .reef, html.ayu .reef {
+    --reef-k-unit: #3cb7c0;
+    --reef-k-integration: #a888e8;
+    --reef-k-perf: #d6a530;
+    --reef-k-feature: #e46ea8;
+    --reef-k-fg: #10141a;
+}
+.k-unit { --reef-k: var(--reef-k-unit); }
+.k-integration { --reef-k: var(--reef-k-integration); }
+.k-perf { --reef-k: var(--reef-k-perf); }
+.k-feature { --reef-k: var(--reef-k-feature); }
+
+/* Pills on a box */
+.reef-acc-pill rect { fill: var(--reef-box); stroke: var(--reef-k); stroke-width: 1.2px; }
+.reef-acc-pill text { fill: var(--reef-k); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.reef-acc-pill.full rect { fill: var(--reef-k); }
+.reef-acc-pill.full text { fill: var(--reef-k-fg); }
+.reef-acc-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    margin-right: 5px;
+    vertical-align: -1px;
+    background: var(--reef-k);
+}
+
+/* Filter chips, in the toolbar and the sidebar */
+.reef-acc-filter { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.reef-toolbar .reef-acc-chip, .reef-acc-chip {
+    font: inherit;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    border: 1.5px solid var(--reef-k);
+    background: transparent;
+    color: var(--reef-k);
+    cursor: pointer;
+    opacity: 0.55;
+    text-decoration: line-through;
+}
+.reef-toolbar .reef-acc-chip.on, .reef-acc-chip.on {
+    background: var(--reef-k);
+    color: var(--reef-k-fg);
+    opacity: 1;
+    text-decoration: none;
+}
+.reef-toolbar .reef-acc-chip:hover, .reef-acc-chip:hover { border-color: var(--reef-k); opacity: 1; }
+.reef-acc-count { font-variant-numeric: tabular-nums; opacity: 0.85; }
+@media (max-width: 640px) { .reef-toolbar .reef-acc-filter { display: none; } }
+
+/* The sidebar's Acceptance section */
+.reef-acc-chips { display: flex; gap: 4px; flex-wrap: wrap; margin: 2px 0 8px; }
+.reef-acc-list { list-style: none; padding: 0; margin: 0; }
+.reef-acc-item { padding: 5px 0 5px 8px; border-left: 3px solid var(--reef-k); margin-bottom: 6px; }
+.reef-acc-line { display: flex; gap: 6px; align-items: baseline; }
+.reef-acc-text { flex: 1; min-width: 0; }
+.reef-acc-text p { margin: 0.2em 0; }
+.reef-acc-badge {
+    flex: none;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: var(--reef-k);
+    color: var(--reef-k-fg);
+    white-space: nowrap;
+}
+.reef-acc-state { flex: none; width: 1em; text-align: center; font-weight: 700; color: var(--reef-muted); }
+.reef-acc-met .reef-acc-state { color: var(--reef-done); }
+.reef-acc-unmet .reef-acc-state { color: var(--reef-blocked); }
+.reef-acc-meta { font-size: 11px; color: var(--reef-muted); margin: 2px 0 0 calc(1em + 6px); }
+.reef-acc-meta code { font-size: 11px; }
+.reef-acc-item .reef-perf-chart { margin-top: 4px; }
+.reef-acc-target { stroke: var(--reef-k-perf); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.reef-perf-chart .reef-acc-target-text { fill: var(--reef-k-perf); font-size: 10px; }

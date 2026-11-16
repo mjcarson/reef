@@ -21,7 +21,7 @@
 
 use crate::markup::esc;
 use reef_model::perf::{self, Better, Metric, Performance, Value};
-use reef_model::{Graph, Node};
+use reef_model::{AccChart, Graph, Node};
 use std::fmt::Write;
 
 /// The charts' width in SVG units. They scale to the sidebar's width.
@@ -40,6 +40,9 @@ pub enum ChartRef {
     Sweep(usize),
     /// A group's members, followed for the metric with this key.
     Trend(String),
+    /// The chart the node's acceptance criterion at this index draws: a metric of its own or
+    /// another node's, or a whole chart, with the criterion's target drawn on it.
+    Accept(usize),
 }
 
 impl ChartRef {
@@ -49,6 +52,7 @@ impl ChartRef {
             ChartRef::Pair => ("pair", String::new()),
             ChartRef::Sweep(k) => ("sweep", k.to_string()),
             ChartRef::Trend(key) => ("trend", key.clone()),
+            ChartRef::Accept(c) => ("accept", c.to_string()),
         };
         format!(r#" data-node="{i}" data-chart="{kind}" data-arg="{}""#, esc(&arg))
     }
@@ -60,11 +64,13 @@ impl ChartRef {
             "pair" => ChartRef::Pair,
             "sweep" => ChartRef::Sweep(arg.parse().ok()?),
             "trend" => ChartRef::Trend(arg.to_string()),
+            "accept" => ChartRef::Accept(arg.parse().ok()?),
             _ => return None,
         })
     }
 
-    /// Whether a drag zooms it: the charts with an x axis.
+    /// Whether a drag zooms it: the charts with an x axis. A criterion's chart is one when it
+    /// draws a sweep, which takes the graph to tell; see [`zoomable`].
     pub fn zoomable(&self) -> bool {
         matches!(self, ChartRef::Sweep(_) | ChartRef::Trend(_))
     }
@@ -314,12 +320,16 @@ fn hbar(x0: f64, x1: f64, y: f64, h: f64) -> String {
 }
 
 fn svg_open(h: f64, label: &str, i: usize, r: &ChartRef, v: &ChartView) -> String {
+    svg_open_z(h, label, i, r, v, r.zoomable())
+}
+
+fn svg_open_z(h: f64, label: &str, i: usize, r: &ChartRef, v: &ChartView, zoomable: bool) -> String {
     format!(
         r#"<svg class="reef-perf-chart{zoom}" viewBox="0 0 {W} {h:.0}" role="img" aria-label="{}"{}{}>"#,
         esc(label),
         r.attrs(i),
         v.attrs(),
-        zoom = if r.zoomable() { " reef-perf-zoomable" } else { "" },
+        zoom = if zoomable { " reef-perf-zoomable" } else { "" },
     )
 }
 
@@ -331,14 +341,63 @@ const OVERLAY: &str = r#"<g class="reef-perf-overlay"></g>"#;
 pub fn chart(g: &Graph, i: usize, r: &ChartRef, v: &ChartView) -> String {
     let p = g.node(i).performance.as_ref();
     match r {
-        ChartRef::Change => p.map_or(String::new(), |p| change_bars(i, p, v)),
-        ChartRef::Pair => p.map_or(String::new(), |p| pair_bars(i, p, v)),
+        ChartRef::Change => p.map_or(String::new(), |p| change_bars(i, p, v, r)),
+        ChartRef::Pair => p.map_or(String::new(), |p| pair_bars(i, p, v, r, &both(p), &[])),
         ChartRef::Sweep(k) => p.and_then(|p| Some((p, p.metrics.get(*k)?))).map_or(String::new(), |(p, m)| {
-            line_svg(&sweep_chart(m, p), v, i, r)
+            line_svg(&sweep_chart(m, p, &[]), v, i, r)
         }),
         ChartRef::Trend(key) => trends(g, i).into_iter().find(|t| &t.key == key).map_or(String::new(), |t| {
             line_svg(&trend_chart(g, &t).0, v, i, r)
         }),
+        ChartRef::Accept(c) => {
+            let Some((p, ch, targets)) = accept_chart(g, i, *c) else { return String::new() };
+            match ch {
+                AccDraw::Change => change_bars(i, p, v, r),
+                AccDraw::Pair(ms) => pair_bars(i, p, v, r, &ms, &targets),
+                AccDraw::Sweep(m) => line_svg(&sweep_chart(m, p, &targets), v, i, r),
+            }
+        }
+    }
+}
+
+/// What a criterion's chart draws, resolved.
+enum AccDraw<'a> {
+    Change,
+    Pair(Vec<(usize, &'a Metric)>),
+    Sweep(&'a Metric),
+}
+
+/// The chart node `i`'s criterion `c` draws: the performance it is drawn from, which chart,
+/// and the target lines to draw on it.
+fn accept_chart(g: &Graph, i: usize, c: usize) -> Option<(&Performance, AccDraw<'_>, Vec<f64>)> {
+    let (j, ch) = g.acceptance(i).get(c)?.chart?;
+    let crit = g.node(i).acceptance.get(c)?;
+    let p = g.node(j).performance.as_ref()?;
+    let targets: Vec<f64> = [crit.at_least, crit.at_most].into_iter().flatten().collect();
+    let draw = match ch {
+        AccChart::Change => AccDraw::Change,
+        AccChart::Pair => AccDraw::Pair(both(p)),
+        AccChart::Metric(k) => {
+            let m = p.metrics.get(k)?;
+            if !m.points.is_empty() {
+                AccDraw::Sweep(m)
+            } else if m.before.is_some() || m.after.is_some() {
+                AccDraw::Pair(vec![(k, m)])
+            } else {
+                return None;
+            }
+        }
+    };
+    // A whole chart has no one metric for a target to belong to.
+    let targets = if matches!(ch, AccChart::Metric(_)) { targets } else { Vec::new() };
+    Some((p, draw, targets))
+}
+
+/// Whether a drag zooms chart `r` of node `i`: the charts with an x axis.
+pub fn zoomable(g: &Graph, i: usize, r: &ChartRef) -> bool {
+    match r {
+        ChartRef::Accept(c) => matches!(accept_chart(g, i, *c), Some((_, AccDraw::Sweep(_), _))),
+        r => r.zoomable(),
     }
 }
 
@@ -347,11 +406,19 @@ pub fn hover(g: &Graph, i: usize, r: &ChartRef, v: &ChartView, x: f64, y: f64) -
     let p = g.node(i).performance.as_ref();
     match r {
         ChartRef::Change => change_hover(p?, y),
-        ChartRef::Pair => pair_hover(p?, v, y),
+        ChartRef::Pair => pair_hover(p?, &both(p?), y),
         ChartRef::Sweep(k) => {
             let p = p?;
             let m = p.metrics.get(*k)?;
-            sweep_hover(m, p, v, x)
+            sweep_hover(m, p, &[], v, x)
+        }
+        ChartRef::Accept(c) => {
+            let (p, ch, targets) = accept_chart(g, i, *c)?;
+            match ch {
+                AccDraw::Change => change_hover(p, y),
+                AccDraw::Pair(ms) => pair_hover(p, &ms, y),
+                AccDraw::Sweep(m) => sweep_hover(m, p, &targets, v, x),
+            }
         }
         ChartRef::Trend(key) => {
             let t = trends(g, i).into_iter().find(|t| &t.key == key)?;
@@ -377,8 +444,12 @@ fn line_chart(g: &Graph, i: usize, r: &ChartRef) -> Option<LineChart> {
     match r {
         ChartRef::Sweep(k) => {
             let p = g.node(i).performance.as_ref()?;
-            Some(sweep_chart(p.metrics.get(*k)?, p))
+            Some(sweep_chart(p.metrics.get(*k)?, p, &[]))
         }
+        ChartRef::Accept(c) => match accept_chart(g, i, *c)? {
+            (p, AccDraw::Sweep(m), targets) => Some(sweep_chart(m, p, &targets)),
+            _ => None,
+        },
         ChartRef::Trend(key) => {
             let t = trends(g, i).into_iter().find(|t| &t.key == key)?;
             Some(trend_chart(g, &t).0)
@@ -401,13 +472,13 @@ fn signed(m: &Metric) -> f64 {
 
 /// One bar a metric, from a centre line, on a log scale of the ratio: right is better, left
 /// worse, whichever way the metric improves.
-fn change_bars(i: usize, p: &Performance, v: &ChartView) -> String {
+fn change_bars(i: usize, p: &Performance, v: &ChartView, r: &ChartRef) -> String {
     let ms = changed(p);
     let max = ms.iter().map(|(_, m)| signed(m).abs()).fold(0.25f64.log2().abs() / 2.0, f64::max);
     let mid = W / 2.0;
     let half = mid - 52.0;
     let h = CH_TOP + ms.len() as f64 * CH_ROW + 2.0;
-    let mut s = svg_open(h, "Each metric's change: right is better, left is worse", i, &ChartRef::Change, v);
+    let mut s = svg_open(h, "Each metric's change: right is better, left is worse", i, r, v);
     let _ = write!(
         s,
         r#"<text class="reef-perf-axis-text" x="{:.1}" y="10" text-anchor="end">← worse</text><text class="reef-perf-axis-text" x="{:.1}" y="10">better →</text>"#,
@@ -489,14 +560,14 @@ const LEGEND: f64 = 18.0;
 
 /// Small multiples: each metric's two figures as bars on its own scale from zero, a range drawn
 /// as a whisker. A side hidden from the legend is left out and the scale fits the other.
-fn pair_bars(i: usize, p: &Performance, v: &ChartView) -> String {
-    let ms = both(p);
+/// `ms` are the metrics to draw, with their index; `targets` are drawn on each as dashed lines.
+fn pair_bars(i: usize, p: &Performance, v: &ChartView, r: &ChartRef, ms: &[(usize, &Metric)], targets: &[f64]) -> String {
     let (bl, al) = (p.before_label(), p.after_label());
     let side_w = (bl.chars().count().max(al.chars().count()) as f64 * CHAR_W + 8.0).clamp(36.0, 96.0);
     let x0 = side_w;
     let span = W - x0 - 96.0;
     let h = LEGEND + ms.len() as f64 * PB_BLOCK;
-    let mut s = svg_open(h, &format!("{bl} and {al}, each metric on its own scale"), i, &ChartRef::Pair, v);
+    let mut s = svg_open(h, &format!("{bl} and {al}, each metric on its own scale"), i, r, v);
     legend(&mut s, 4.0, 4.0, &[("reef-perf-before", bl), ("reef-perf-after", al)], v);
     for (row, (k, m)) in ms.iter().enumerate() {
         let y = LEGEND + row as f64 * PB_BLOCK;
@@ -506,6 +577,7 @@ fn pair_bars(i: usize, p: &Performance, v: &ChartView) -> String {
             .enumerate()
             .filter(|(j, _)| v.shows(*j))
             .map(|(_, (val, _, _))| val.hi())
+            .chain(targets.iter().copied())
             .fold(f64::MIN_POSITIVE, f64::max);
         let x = |val: f64| x0 + (val.max(0.0) / top).min(1.04) * span;
         let unit = m.unit.as_deref().map_or(String::new(), |u| format!(" ({u})"));
@@ -542,6 +614,16 @@ fn pair_bars(i: usize, p: &Performance, v: &ChartView) -> String {
             }
             let _ = write!(s, r#"<text class="reef-perf-value" x="{:.1}" y="{:.1}">{}</text>"#, x(val.hi()) + 5.0, by + PB_BAR - 2.5, perf::number(val.mid()));
         }
+        for &t in targets {
+            let _ = write!(
+                s,
+                r#"<line class="reef-acc-target" x1="{tx:.1}" y1="{a:.1}" x2="{tx:.1}" y2="{b:.1}"><title>target {}</title></line>"#,
+                perf::number(t),
+                tx = x(t),
+                a = y + PB_TITLE - 4.0,
+                b = y + PB_TITLE + 2.0 * PB_BAR + PB_GAP + 4.0,
+            );
+        }
         let _ = write!(
             s,
             r#"<line class="reef-perf-baseline" x1="{x0:.1}" y1="{:.1}" x2="{x0:.1}" y2="{:.1}"/></g>"#,
@@ -554,8 +636,7 @@ fn pair_bars(i: usize, p: &Performance, v: &ChartView) -> String {
     s
 }
 
-fn pair_hover(p: &Performance, _v: &ChartView, y: f64) -> Option<Hover> {
-    let ms = both(p);
+fn pair_hover(p: &Performance, ms: &[(usize, &Metric)], y: f64) -> Option<Hover> {
     let row = ((y - LEGEND) / PB_BLOCK).floor();
     if row < 0.0 {
         return None;
@@ -714,6 +795,8 @@ struct LineChart {
     x_names: Option<Vec<String>>,
     legend: bool,
     h: f64,
+    /// Targets drawn as dashed lines across the plot.
+    targets: Vec<f64>,
 }
 
 /// A line chart laid out for a view: its plot, and each shown series cut to the x range.
@@ -772,6 +855,7 @@ fn layout(lc: &LineChart, v: &ChartView) -> Layout {
         .collect();
     // The y scale fits what is shown: the cut lines and the ranges of the points inside.
     let mut vals: Vec<f64> = cuts.iter().flatten().flatten().map(|p| p.1).collect();
+    vals.extend(lc.targets.iter().copied());
     for (k, s) in lc.series.iter().enumerate() {
         if v.shows(k) {
             vals.extend(s.pts.iter().filter(|p| p.0 >= x_lo && p.0 <= x_hi).flat_map(|p| [p.1.lo(), p.1.hi()]));
@@ -788,7 +872,8 @@ fn layout(lc: &LineChart, v: &ChartView) -> Layout {
 fn line_svg(lc: &LineChart, v: &ChartView, i: usize, r: &ChartRef) -> String {
     let lay = layout(lc, v);
     let p = &lay.plot;
-    let mut s = svg_open(lc.h, &lc.aria, i, r, v);
+    // Every line chart has an x axis to zoom along.
+    let mut s = svg_open_z(lc.h, &lc.aria, i, r, v, true);
     if lc.legend {
         let items: Vec<(&str, &str)> = lc.series.iter().map(|l| (l.cls, l.label.as_str())).collect();
         legend(&mut s, 4.0, 4.0, &items, v);
@@ -851,6 +936,17 @@ fn line_svg(lc: &LineChart, v: &ChartView, i: usize, r: &ChartRef) -> String {
     }
     // The plot area takes the pointer: hover, drag to zoom.
     let _ = write!(s, r#"<rect class="reef-perf-plot" x="{l:.1}" y="{t:.1}" width="{w:.1}" height="{h:.1}"/>"#, l = p.l, t = p.t, w = p.r - p.l, h = p.b - p.t);
+    for &t in &lc.targets {
+        let y = p.y(t);
+        let _ = write!(
+            s,
+            r#"<line class="reef-acc-target" x1="{l:.1}" y1="{y:.1}" x2="{r:.1}" y2="{y:.1}"/><text class="reef-acc-target-text" x="{r:.1}" y="{ty:.1}" text-anchor="end">target {}</text>"#,
+            tick(t),
+            l = p.l,
+            r = p.r,
+            ty = y - 3.0,
+        );
+    }
     // Series: lines, whiskers, dots.
     for (k, line) in lc.series.iter().enumerate() {
         let Some(c) = &lay.cut[k] else { continue };
@@ -916,7 +1012,7 @@ fn crosshair(lc: &LineChart, p: &Plot, x: f64, at: &[(usize, Value)]) -> String 
 
 // Sweeps --------------------------------------------------------------------------------------
 
-fn sweep_chart(m: &Metric, p: &Performance) -> LineChart {
+fn sweep_chart(m: &Metric, p: &Performance, targets: &[f64]) -> LineChart {
     let mut pts = m.points.clone();
     pts.sort_by(|a, b| a.0.total_cmp(&b.0));
     let side = |pick: fn(&(f64, Option<f64>, Option<f64>)) -> Option<f64>| -> Vec<(f64, Value)> {
@@ -939,11 +1035,12 @@ fn sweep_chart(m: &Metric, p: &Performance) -> LineChart {
         x_names: None,
         legend: true,
         h: 196.0,
+        targets: targets.to_vec(),
     }
 }
 
-fn sweep_hover(m: &Metric, p: &Performance, v: &ChartView, px: f64) -> Option<Hover> {
-    let lc = sweep_chart(m, p);
+fn sweep_hover(m: &Metric, p: &Performance, targets: &[f64], v: &ChartView, px: f64) -> Option<Hover> {
+    let lc = sweep_chart(m, p, targets);
     let lay = layout(&lc, v);
     let (x, at) = snap(&lc, &lay, px)?;
     let unit = m.unit.as_deref();
@@ -1069,6 +1166,7 @@ fn trend_chart(g: &Graph, t: &Trend) -> (LineChart, Vec<Option<usize>>) {
         x_names: Some(names),
         legend: false,
         h: 186.0,
+        targets: Vec::new(),
     };
     (lc, members)
 }

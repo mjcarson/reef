@@ -56,6 +56,8 @@ collapsed: false               # a group that starts open (groups start collapse
 description: Reads in runs.    # the sidebar's description (default: taken from the docs)
 decisions:                     # the sidebar's design choices (alias: design; default: from the docs)
   - Runs cut in disk order, issued in the merge's order.
+acceptance:                    # how it will be known to be done (alias: criteria); see below
+  - unit: An empty key list answers at once
 performance:                   # how the work changed what was measured (alias: perf); see below
   metrics:
     - { name: "inserts a second", better: higher, before: 3523, after: [6837, 6783, 6915] }
@@ -85,6 +87,7 @@ header stays pinned to the sidebar's top while you scroll through the section, s
 can be folded from anywhere in it. The sections, all open to start:
 
 - **Description:** a brief form of the work.
+- **Acceptance:** its acceptance criteria. See [Acceptance criteria](#acceptance-criteria).
 - **Performance:** it shows how the work changed what was measured. See
   [Performance](#performance).
 - **Documentation:** each doc link, with *Open page ↗*, and below it that section of the doc,
@@ -175,6 +178,49 @@ The build checks `performance` and reports, with `file:line`:
 - a range that is not `[median, lo, hi]` in order;
 - a `before` of zero.
 
+### Acceptance criteria
+
+A node's `acceptance` key lists how the work will be known to be done. Each criterion is one of
+four kinds, each with its own colour: **unit test**, **integration test**, **performance** and
+**feature**.
+
+```yaml
+acceptance:
+  - unit: An empty key list answers at once          # <kind>: <text>, the short form
+  - integration: { text: A dropped client's scan ends, test: "tests/scan.rs::dropped_client" }
+  - feature: Saved positions survive a restart
+    status: met                                       # todo | met | unmet (default: todo)
+  - kind: performance                                 # the long form
+    text: Shared syncs carry at least 6,000 inserts a second
+    metric: inserts                                   # a metric's key or name: its chart is drawn here
+    node: O151                                        # whose metric (default: this node's)
+    at-least: 6000                                    # or at-most: checked against the metric's after
+  - perf: { text: Every metric's change, chart: change }   # a whole chart: change | pair
+```
+
+- **Kinds:** `unit` (`unit-test`), `integration` (`integration-test`, `e2e`), `performance`
+  (`perf`, `bench`), `feature` (`feature-support`, `support`). The text is markdown.
+- **Met or not:** what `status` says. Failing that, a performance criterion with a target is
+  met when its metric's `after` median is within it (for a sweep, every point measured after);
+  otherwise it is still to do.
+- **Charts:** a performance criterion with a `metric` draws that metric under it: its sweep
+  when it has `points`, else its before and after bars. The target is a dashed line. The chart
+  answers the pointer like those in the Performance section.
+
+The sidebar's Acceptance section lists each criterion with its kind's badge and ✓ met, ✗ not
+met or ○ to do. On the diagram, a box with criteria shows a pill for each kind with how many are
+met (`U 1/2`), filled once all are; a collapsed group counts its members'.
+
+The chips in the toolbar and in the Acceptance section show or hide each kind. The choice
+holds for every view in the book and is remembered in the browser. The build checks, with
+`file:line`:
+
+- a criterion with no text;
+- a `metric` that is not in the node's `performance`, or a `node` that is not a node;
+- a target with no `metric`, or both `metric` and `chart`, or a `chart` other than `change`
+  or `pair`;
+- a `metric`, `chart`, `node` or target on a criterion that is not `performance`.
+
 ## Drawing a view
 
 ````markdown
@@ -221,6 +267,7 @@ Opening and closing groups is remembered for each page in the browser.
 
 ```sh
 mdbook-reef check [book]     # the build's checks without building, for CI; exit 1 on problems
+mdbook-reef skill [book]     # write the Claude skill to the repo's .claude/skills/reef (--print to show it)
 mdbook-reef import plan.md --out src/plans/scans [--fence N] [--root id]
 ```
 
@@ -267,5 +314,4 @@ cd example-book && mdbook serve
 ```
 
 `assets/reef.js` is generated, but it is committed so that `mdbook-reef` builds without the wasm
-mdbook-reef skill [book]     # write the Claude skill to the repo's .claude/skills/reef (--print to show it)
 toolchain.

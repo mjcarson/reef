@@ -3,6 +3,8 @@ id: "after23opt"
 title: "After M23, optional"
 group: "scans-plan"
 helps: ["M23"]
+acceptance:
+  - perf: { text: "The opt-in shared WAL mode at least doubles rw50's inserts a second", node: O151, metric: inserts, at-least: 7046 }
 nodes:
   - id: "O144"
     title: "O144 A page's reads let go as they fold, moot"
@@ -33,6 +35,15 @@ nodes:
         - { name: "rw50, read p99", key: read-p99, unit: ms, before: [0.956, 0.921, 0.983], after: [1.58, 1.47, 1.63] }
         - { name: "insert100, inserts a second", better: higher, before: [3567, 3532, 3589], after: [6873, 6061, 6959] }
         - { name: "insert100, insert p99", unit: ms, before: [17.6, 17.5, 17.7], after: [11.1, 10.8, 14.2] }
+    acceptance:
+      - perf: { text: "Shared syncs carry at least 6,000 rw50 inserts a second", metric: inserts, at-least: 6000 }
+      - perf: { text: "Reads keep their p99 under a millisecond", metric: read-p99, at-most: 1 }
+      - perf: { text: "Every metric's change, side by side", chart: change }
+      - unit: "`wal-sync = shared` parses, and `buffered` stays the default"
+        status: met
+      - integration: { text: "The rw50 cell runs to its end under both modes", test: "lab/cells/rw50", status: met }
+      - feature: "The mode is opt-in, per node, from its config"
+        status: met
   - id: "O152"
     title: "O152 A step's own cpu read only past its bound, not taken"
     status: done

@@ -109,7 +109,7 @@ impl State {
                 }
             }
         }
-        let (Some(k), Ok(Some(sec))) = (k, el.closest(".reef-perf")) else { return };
+        let (Some(k), Ok(Some(sec))) = (k, el.closest(".reef-perf, .reef-acc-item")) else { return };
         if let Ok(list) = sec.query_selector_all(&format!(r#"[data-metric="{k}"]"#)) {
             for j in 0..list.length() {
                 if let Some(e) = list.item(j).and_then(|n| n.dyn_into::<Element>().ok()) {
@@ -203,7 +203,7 @@ impl State {
             return;
         }
         let Some((svg, node, r, v)) = chart_at(&t) else { return };
-        if !r.zoomable() {
+        if !perf::zoomable(self.graph(), node, &r) {
             return;
         }
         let (x, y) = to_svg(&svg, e.client_x() as f64, e.client_y() as f64);

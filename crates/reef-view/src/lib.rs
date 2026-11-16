@@ -4,6 +4,7 @@
 //! puts the plan's nodes in one `script.reef-data` on the page. This finds them, lays each view
 //! out, and draws it as SVG with pan, zoom, collapsible groups, search and a sidebar.
 
+mod accept;
 mod chartui;
 mod docs;
 mod markup;

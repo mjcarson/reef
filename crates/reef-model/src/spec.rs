@@ -70,6 +70,10 @@ pub struct NodeSpec {
     /// sidebar as a table and charts.
     #[serde(default, alias = "perf")]
     pub performance: Option<crate::perf::Performance>,
+    /// How the work will be known to be done: unit and integration tests, performance figures
+    /// and features that must work.
+    #[serde(default, alias = "criteria")]
+    pub acceptance: Vec<crate::accept::Criterion>,
     /// Markdown shown in the sidebar for an inline node. A file node's body is its file.
     #[serde(default)]
     pub body: Option<String>,
@@ -251,6 +255,19 @@ mod tests {
         assert_eq!(p.metrics[1].points[1], (4.0, None, Some(5.0)));
         let err = parse_node_file("---\nid: a\nperformance:\n  metrics:\n    - name: x\n      before: [1, 2]\n---\n").unwrap_err();
         assert!(err.line.is_some(), "{err:?}");
+    }
+
+    #[test]
+    fn acceptance() {
+        let text = "---\nid: a\nacceptance:\n  - unit: Empty answers at once\n  - integration: { text: Ends, test: tests/scan.rs }\n  - feature: Survives a restart\n    status: met\n  - kind: performance\n    text: Doubles\n    metric: inserts\n    at-least: 6000\n---\n";
+        let (spec, _) = parse_node_file(text).unwrap().unwrap();
+        let a = &spec.acceptance;
+        assert_eq!(a.len(), 4);
+        assert_eq!(a[0].kind, crate::accept::Kind::Unit);
+        assert_eq!(a[1].test.as_deref(), Some("tests/scan.rs"));
+        assert_eq!(a[2].status, Some(crate::accept::Met::Met));
+        assert_eq!((a[3].kind, a[3].at_least), (crate::accept::Kind::Performance, Some(6000.0)));
+        assert!(parse_node_file("---\nid: a\nacceptance:\n  - Just text\n---\n").is_err());
     }
 
     #[test]
