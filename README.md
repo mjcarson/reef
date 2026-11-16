@@ -33,6 +33,13 @@ mdbook-reef install path/to/book             # writes reef.js + reef.css, edits 
 `output.html.additional-js` and `additional-css`. `reef.js` is a single classic script with the
 wasm inlined, so the book also works when opened straight from `file://`.
 
+`install` also writes a [Claude skill](crates/mdbook-reef/assets/skill/SKILL.md) to
+`.claude/skills/reef/` at the root of the git repository that holds the book (skip it with
+`--no-skill`). It teaches coding agents to draw new work as nodes before starting it, to mark
+it done and its acceptance criteria met in the change that finishes it, to record benchmark
+figures in `performance`, and to run `mdbook-reef check` after every edit. After upgrading
+reef, `mdbook-reef skill [book]` refreshes it.
+
 ## Writing nodes
 
 ```markdown
@@ -260,4 +267,5 @@ cd example-book && mdbook serve
 ```
 
 `assets/reef.js` is generated, but it is committed so that `mdbook-reef` builds without the wasm
+mdbook-reef skill [book]     # write the Claude skill to the repo's .claude/skills/reef (--print to show it)
 toolchain.
