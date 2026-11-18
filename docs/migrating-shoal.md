@@ -26,12 +26,14 @@ This note is a proposal; nothing in shoal has been changed. It was tried on a sc
 
 Each of the 190 work items says why it is needed and what finishing it will do. Where shoal's
 docs say it, the sidebar takes it from them: feature pages give *Context* and *What it does*,
-resolved items *Symptom* and *The fix*, optimization entries their *Impact* row, and spikes
-their record's opening. Where they don't, the part is written in the node's `description`. In
-the PoC, 82 work items take both parts from their docs, and 108 have at least one written:
-82 whys and 85 whats in all, most of them for boxes with no doc, such as "The exit's quick
-passes". 65 boxes also get design choices from their docs. This adds about 350 KB of data to
-each page that draws the plan.
+resolved items *Symptom* and *The fix*, and optimization entries their *Impact* row. A doc's
+opening paragraph is never taken, since in shoal's docs it is usually a status line
+("Reported 2026-10-29. This is the record of spike X16"). Where the docs don't say a part, it
+is written in the node's `description`. In the PoC, 53 work items take both parts from their
+docs, and 137 have at least one written: 82 whys and 137 whats in all. That includes every
+spike, milestone and box with no doc, such as "The exit's quick passes". 65 boxes also get
+design choices from their docs. This adds about 325 KB of data to each page that draws the
+plan.
 
 How the eight diagrams became views:
 

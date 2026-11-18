@@ -26,6 +26,7 @@ nodes:
     docs: ["../../../appendix/known-issues.md#404-a-bootstraps-seeded-grants-commit-scan-before-the-scans-wire-version-is-activated"]
     description:
       why: "A bootstrap's seeded grants are committed outside the path that holds `scan` back, so a configuration granting `[read, scan]` leaves a member built before scans unable to read its policy."
+      what: "A bootstrap commits no `scan` below the scans' wire version, warning by name, and shoaladm grants its inventory's `scan` again once activated, so a deployment loses nothing it asked for."
   - id: "F152"
     title: "F152 A cluster node's page: voters, floors, barriers"
     needs: ["I404"]
@@ -38,6 +39,7 @@ nodes:
     docs: ["../../../appendix/known-issues.md#393-a-get-at-one-that-reaches-a-learners-shard-is-served-from-the-learners-copy"]
     description:
       why: "A get at `One` that reaches a move's destination before the move is published is answered from the learner's copy, which may be far behind or rebuilt empty."
+      what: "A get at `One` that reaches a learner's copy is refused, `Unavailable` to a client and `StaleTopology` to a peer, by the rule M25 gives a scan's page."
   - id: "Deal"
     title: "The lanes dealt and taken, shared with the bench"
     needs: ["I393"]
@@ -62,12 +64,14 @@ nodes:
     docs: ["../../../appendix/known-issues.md#401-on-a-node-that-authenticates-nobody-one-slow-reader-sheds-every-clients-scans"]
     description:
       why: "On a node that authenticates nobody every connection is one principal, so one slow reader's unread pages hold half the scan budget and every other client's scans are shed."
+      what: "On a node that authenticates nobody, each connection is held to the budget's share rather than one anonymous principal, so one slow reader no longer sheds every other client's scans."
   - id: "I402"
     title: "Item 402: a client sending no cancels gives a page's place back early"
     needs: ["I401"]
     docs: ["../../../appendix/known-issues.md#402-a-client-that-does-not-cancel-abandoned-pages-gives-a-pages-place-back-before-its-node-does"]
     description:
       why: "A client built with `cancel_abandoned(false)` gives an abandoned page's place back while its node still holds it, so its next page on that connection may be shed."
+      what: "Without cancels, a client keeps a page's place until its reader delivers or drains the answer, so its count matches its node's and its next page on that connection isn't shed for it."
   - id: "Fail"
     title: "A kill, a move, a restart, held to the oracle"
     needs: ["I402"]

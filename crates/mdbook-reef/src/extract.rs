@@ -3,9 +3,9 @@
 //!
 //! A doc link points at a file or at one heading of it. The why is the first paragraph of a
 //! subsection named like "Context", or a table row named like "Impact". The what is the same
-//! from a subsection or row named like "What it does", or failing that the section's own first
-//! paragraph. The design choices are a subsection named like "Design choices". Struck-through
-//! text is left out, since a brief form says what is true now.
+//! from a subsection or row named like "What it does". The design choices are a subsection
+//! named like "Design choices". Struck-through text is left out, since a brief form says what is
+//! true now.
 
 use crate::plan::{heading_spans, md_options, render};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -99,42 +99,30 @@ fn table_row<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
 
 /// One part of a node's brief form in a doc section, such as its why or its what: the first
 /// paragraph with text left once struck-through text is dropped, from a subsection named in
-/// `names`, else a table row named in `names`, else, with `fallback`, the section's own first
-/// paragraph.
+/// `names`, else a table row named in `names`.
 ///
-/// Returns the subsection's title or the row's name it was found under (`None` for the
-/// section's own paragraph) and the rendered html.
+/// A section's own opening is never taken, since it rarely says either plainly. Returns the
+/// subsection's title or the row's name it was found under, and the rendered html.
 ///
 /// # Arguments
 ///
 /// * `sec` - The doc section to look in
 /// * `names` - The subsection titles and table row names that hold this part
 /// * `source` - The doc's file, for its links
-/// * `fallback` - Whether to fall back to the section's own first paragraph
-pub fn brief_part(sec: &str, names: &[String], source: &str, fallback: bool) -> Option<(Option<String>, String)> {
-    // the first paragraph with text in a piece of the section
-    let first_paragraph = |part: &str| top_paragraphs(part).into_iter().map(|p| render(p, source, None, true)).find(|h| has_text(h));
+pub fn brief_part(sec: &str, names: &[String], source: &str) -> Option<(String, String)> {
     // a subsection named for this part comes first
-    let named = subsection(sec, names);
-    if let Some((title, text)) = &named
-        && let Some(html) = first_paragraph(text)
-    {
-        return Some((Some(title.clone()), html));
+    if let Some((title, text)) = subsection(sec, names) {
+        // its first paragraph with text
+        return top_paragraphs(text)
+            .into_iter()
+            .map(|p| render(p, source, None, true))
+            .find(|h| has_text(h))
+            .map(|html| (title, html));
     }
-    // then a register entry's table row, when there is no such subsection
-    if named.is_none()
-        && let Some((name, cell)) = table_row(sec, names)
-    {
-        let html = render(cell, source, None, true);
-        if has_text(&html) {
-            return Some((Some(name), html));
-        }
-    }
-    // then, if asked for, the section's own first paragraph
-    if fallback {
-        return first_paragraph(sec).map(|html| (None, html));
-    }
-    None
+    // then a register entry's table row
+    let (name, cell) = table_row(sec, names)?;
+    let html = render(cell, source, None, true);
+    has_text(&html).then_some((name, html))
 }
 
 /// The design choices in a doc section: the subsection named in `names`, rendered, with the
@@ -294,19 +282,16 @@ mod tests {
     fn a_feature_page() {
         let sec = section(FEATURE, None).unwrap();
         // the what comes from its subsection, which it names
-        let (from, d) = brief_part(sec, &names(&["What it does"]), "features/f1.md", true).unwrap();
-        assert_eq!(from.as_deref(), Some("What it does"));
+        let (from, d) = brief_part(sec, &names(&["What it does"]), "features/f1.md").unwrap();
+        assert_eq!(from, "What it does");
         assert!(d.contains("It does  this") || d.contains("It does this"), "{d}");
         assert!(!d.contains("that"), "struck text dropped: {d}");
         assert!(d.contains("href=\"reef-root:/features/f2.html\""), "links rebased: {d}");
         // the why comes from the context
-        let (from, why) = brief_part(sec, &names(&["Why", "Context"]), "features/f1.md", false).unwrap();
-        assert_eq!((from.as_deref(), why.trim()), (Some("Context"), "<p>Why it exists.</p>"));
-        // with no subsection of its names and no fallback, there is no why
-        assert!(brief_part(sec, &names(&["Motivation"]), "features/f1.md", false).is_none());
-        // with the fallback, the section's own first paragraph
-        let (from, own) = brief_part(sec, &names(&["Motivation"]), "features/f1.md", true).unwrap();
-        assert_eq!((from, own.trim()), (None, "<p>Why it exists.</p>"));
+        let (from, why) = brief_part(sec, &names(&["Why", "Context"]), "features/f1.md").unwrap();
+        assert_eq!((from.as_str(), why.trim()), ("Context", "<p>Why it exists.</p>"));
+        // with no subsection or row of its names, nothing, not the section's own opening
+        assert!(brief_part(sec, &names(&["Motivation"]), "features/f1.md").is_none());
         let (from, html) = design(sec, &names(&["design choices"]), "features/f1.md").unwrap();
         assert_eq!(from, "Design choices");
         assert!(html.contains("<p>Intro.</p>"), "{html}");
@@ -321,13 +306,12 @@ mod tests {
     fn an_anchored_entry_skips_its_table() {
         let md = "# Optimizations\n\n### O1. First\n\n| | |\n|---|---|\n| **Rank** | high |\n\nThe first entry.\n\n### O2. Second\n\nThe second.\n";
         let sec = section(md, Some("o1-first")).unwrap();
-        // the section's own paragraph, past its register table
-        let (from, html) = brief_part(sec, &names(&["What it does"]), "a.md", true).unwrap();
-        assert_eq!((from, html.trim()), (None, "<p>The first entry.</p>"));
+        // the entry's own paragraph is never taken
+        assert!(brief_part(sec, &names(&["What it does"]), "a.md").is_none());
         // a row of the register table, named
-        let (from, html) = brief_part(sec, &names(&["What it does", "Rank"]), "a.md", false).unwrap();
-        assert_eq!((from.as_deref(), html.trim()), (Some("Rank"), "<p>high</p>"));
-        assert!(brief_part(sec, &names(&["Impact"]), "a.md", false).is_none());
+        let (from, html) = brief_part(sec, &names(&["What it does", "Rank"]), "a.md").unwrap();
+        assert_eq!((from.as_str(), html.trim()), ("Rank", "<p>high</p>"));
+        assert!(brief_part(sec, &names(&["Impact"]), "a.md").is_none());
         assert!(design(sec, &names(&["Design choices"]), "a.md").is_none());
         assert!(section(md, Some("nope")).is_none());
     }

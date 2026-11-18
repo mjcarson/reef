@@ -69,6 +69,8 @@ nodes:
     status: done
     needs: ["I390"]
     docs: ["../../../features/scan-link-pace.md"]
+    description:
+      what: "A node paces each scan's answers to a share of the link they leave by, 25% unless set, so a resident scan no longer fills its client's link; loopback is never paced."
   - id: "Sweep"
     title: "The share's sweep on the lab"
     status: done
@@ -81,6 +83,8 @@ nodes:
     status: done
     needs: ["Sweep", "I392"]
     docs: ["../../../appendix/resolved/paced-scan-reads-and-inserts.md"]
+    description:
+      what: "The cell's inserts beside a paced resident scan hold the budget once item 392 paces the walk's map reads, and its reads are judged against a twin flow with no Shoal in it."
   - id: "I392"
     title: "Item 392: a scan's walk reads the map from the device, unpaced, uncounted"
     status: done

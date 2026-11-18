@@ -24,8 +24,7 @@ pub struct Config {
     /// first cells of a table row (`| **Impact** | ... |`) whose second cell does.
     pub why_sections: Vec<String>,
     /// The subsections of a doc whose first paragraph says what finishing a node's work will
-    /// do, or the first cells of a table row whose second cell does. Failing both, the linked
-    /// section's own first paragraph.
+    /// do, or the first cells of a table row whose second cell does.
     #[serde(alias = "description-sections")]
     pub what_sections: Vec<String>,
     /// The subsections of a doc that hold a node's design choices.
@@ -256,20 +255,19 @@ impl Plan {
             });
             let Some(text) = text.as_deref() else { continue };
             let Some(sec) = extract::section(text, anchor.as_deref()) else { continue };
-            // the why only from a section named for it, since a doc's opening may not say why
+            // the why from a section or table row named for it
             if !has_text(&n.why)
-                && let Some((from, html)) = extract::brief_part(sec, &self.config.why_sections, &path, false)
+                && let Some((from, html)) = extract::brief_part(sec, &self.config.why_sections, &path)
             {
                 n.why = html;
-                n.why_from = from;
+                n.why_from = Some(from);
             }
-            // the what from a section named for it, else the linked section's own opening,
-            // which is labelled with the doc's name
+            // the what likewise: never a doc's opening, which rarely says it plainly
             if !has_text(&n.what)
-                && let Some((from, html)) = extract::brief_part(sec, &self.config.what_sections, &path, true)
+                && let Some((from, html)) = extract::brief_part(sec, &self.config.what_sections, &path)
             {
                 n.what = html;
-                n.what_from = from.or_else(|| self.doc_link(&n.source, link).ok().map(|l| l.label));
+                n.what_from = Some(from);
             }
             if n.design.is_empty()
                 && let Some((from, html)) = extract::design(sec, &self.config.design_sections, &path)
@@ -641,7 +639,7 @@ mod tests {
         // an optimization register entry: its why is its Impact row, its what its own opening
         std::fs::write(
             dir.join("opt.md"),
-            "# Opts\n\n### O1. One\n\n| | |\n| --- | --- |\n| **Impact** | Quadratic |\n\nCounts once.\n\n### O2. Two\n\nNo why here.\n",
+            "# Opts\n\n### O1. One\n\n| | |\n| --- | --- |\n| **Impact** | Quadratic |\n| **Summary** | Counts once |\n\nAn opening.\n\n### O2. Two\n\nNo why or what here.\n",
         )
         .unwrap();
         // a group, which needs neither, and members that have, lack or half-have them
@@ -654,13 +652,12 @@ mod tests {
         // only the two members missing a part are problems, each at its own line
         let diags: Vec<String> = plan.diags.iter().map(|d| d.to_string()).collect();
         assert_eq!(diags.len(), 2, "{diags:?}");
-        assert!(diags[0].starts_with("g.md:5: `o2` does not say why it is needed"), "{diags:?}");
-        assert!(diags[0].contains("Why, Context, Motivation"), "names the sections: {diags:?}");
+        assert!(diags[0].starts_with("g.md:5: `o2` does not say why it is needed or what finishing it will do"), "{diags:?}");
         assert!(diags[1].starts_with("g.md:7: `plain` does not say why it is needed or what finishing it will do"), "{diags:?}");
-        // the register entry's parts, labelled by the row and the doc they came from
+        // the register entry's parts, labelled by the rows they came from, not its opening
         let o1 = plan.graph.node(plan.graph.index_of("o1").unwrap());
         assert_eq!((o1.why.trim(), o1.why_from.as_deref()), ("<p>Quadratic</p>", Some("Impact")));
-        assert_eq!((o1.what.trim(), o1.what_from.as_deref()), ("<p>Counts once.</p>", Some("O1. One")));
+        assert_eq!((o1.what.trim(), o1.what_from.as_deref()), ("<p>Counts once</p>", Some("Summary")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -676,7 +673,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("plan/a.md"),
-            "---\nid: a\nnodes:\n  - id: o1\n    docs: [../opt.md#o1-one]\n    performance:\n      note: Medians of **eight**.\n      metrics:\n        - { name: n, before: 2, after: 1 }\n  - { id: o2, docs: [../opt.md#o2-two], description: { why: W } }\n  - { id: o3, docs: [../opt.md#o3-three], description: { why: W } }\n---\n",
+            "---\nid: a\nnodes:\n  - id: o1\n    docs: [../opt.md#o1-one]\n    description: { what: X }\n    performance:\n      note: Medians of **eight**.\n      metrics:\n        - { name: n, before: 2, after: 1 }\n  - { id: o2, docs: [../opt.md#o2-two], description: { why: W, what: X } }\n  - { id: o3, docs: [../opt.md#o3-three], description: { why: W, what: X } }\n---\n",
         )
         .unwrap();
         let plan = Plan::load(&dir, &Config::default());

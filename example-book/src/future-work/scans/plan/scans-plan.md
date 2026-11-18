@@ -21,6 +21,7 @@ nodes:
     docs: ["../walk-beside-the-foreground.md"]
     description:
       why: "Nobody had measured what the walk as it stands costs a foreground's tail beside a scan, so the plan could not tell whether its rebuild or its pacing comes first (Q33, Q34)."
+      what: "M22 has its baseline, and the plan knows the walk misses W7's budget beside a scan, its reads' queue and device hurting more than its loop, so X18 comes first."
   - id: "X20"
     title: "X20 ScyllaDB's scan path at the source"
     status: done
@@ -28,17 +29,21 @@ nodes:
     docs: ["../scylladb-scan-sources.md"]
     description:
       why: "The plan copies five of ScyllaDB's scan mechanisms from W3's readings of its default branch and posts, some only recalled, and nobody had measured what its own full scan costs a foreground."
+      what: "W3's readings are checked at a pinned release, none wrong in a way that changes the design, and ScyllaDB's own unpaced scan is shown to miss W7's budget too."
   - id: "X37"
     title: "X37 A tablet's records together, priced"
     status: done
     docs: ["../tablet-records-together.md"]
     description:
       why: "Nobody knew what writing a merge in key order costs, or whether a tablet's records stay together enough to read ten partitions a device read, W12's cost budget, so Q62 stayed open."
+      what: "Q62 is settled in part: merges in key order are the layout, costing a merge 0.45% of its time, and whether a churned table needs consolidated blocks goes to M23's plan."
   - id: "Shed"
     title: "O139 A shed stream moves on"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o139-a-scan-driver-asks-a-shed-tablet-again-where-another-tablet-would-be-answered"]
+    description:
+      what: "A shed scan stream puts its tablet back on the queue at its cursor and takes the next, so it is asked on another shard rather than of the full one again."
   - id: "Q62"
     title: "Q62 decided"
     status: done
@@ -54,6 +59,7 @@ nodes:
     docs: ["../page-rebuilt.md"]
     description:
       why: "X16 found a walked partition costing up to 73 µs of a Zen1 host's cpu, about a device read each, outside W12's cost budget; which change to a page's reads closes that was unknown."
+      what: "The plan knows W5's reads in order of worth: runs in disk order over merges in key order meet W12's cost budget, then reads in flight, then one operation a record."
   - id: "X17b"
     title: "X17 A page rebuilt: plan, encodes, positions"
     status: done
@@ -61,6 +67,7 @@ nodes:
     docs: ["../page-rebuilt.md"]
     description:
       why: "X16 found a resident sorted table's captures holding a shard's loop up to 6.5 ms, and Q35 waited on what rows encoded on the shard cost against partitions sent whole."
+      what: "It settles that M23 plans a page and encodes in steps bounded by bytes, that Q35's opt-in to partitions moves forward, and that saved positions stay optional."
   - id: "X18"
     title: "X18 Table reads paced by idle time"
     status: done
@@ -68,6 +75,7 @@ nodes:
     docs: ["../table-reads-paced.md"]
     description:
       why: "Once X17's walk in runs read past a device's default ceiling, the pace alone had to hold W7's budget, and which ceiling and trickle do so on each lab device was unknown (Q34)."
+      what: "The ceiling, not idle gating, is the pace; no byte ceiling tried holds the cell's read p99 on the SSDs; and a disk's pace must be in device time."
   - id: "M22"
     title: "M22 The harness and the facts"
     status: done
@@ -75,6 +83,7 @@ nodes:
     docs: ["../milestones.md#m22-the-harness-and-the-facts"]
     description:
       why: "No scan could be judged: nothing checked a scan against P20 to P22, the fixture could not drive one, and what the walk costs the reference cell was unmeasured."
+      what: "Scans can be judged: the bench runs a scan as a kind and an event, the fixture's oracle checks P20 to P22 against a group's history, and X16's baseline is taken."
   - id: "SortKeys"
     title: "Sort keys of any Ord type, Resolved 207, F131"
     status: done
@@ -95,6 +104,7 @@ nodes:
     docs: ["../milestones.md#m23-the-walk-rebuilt-for-load"]
     description:
       why: "The walk as it stood held neither W7's budget beside a scan nor W12's cost budget, and isolation had to be proven in process before any client could scan."
+      what: "A scan's page is planned, read in runs, paced in device time and encoded in steps on the shard, and the object store's drivers run on the same rebuilt walk."
   - id: "Q35"
     title: "Q35 What a scan's answer carries"
     status: done
@@ -120,6 +130,7 @@ nodes:
     docs: ["../the-edges.md"]
     description:
       why: "Nobody knew what a scan costs at its edges, so M24 and M26 could not say what to bound, nor whether M24 must split a sorted partition too large for one page."
+      what: "M24 splits a sorted partition too large for a page, refusing no row for its size; a listing's fields are kept apart before M26; a page's work bound is at most 4 MiB."
   - id: "Bounded"
     title: "Large sorted partitions as bounded records"
     status: done
@@ -137,6 +148,8 @@ nodes:
     status: done
     needs: ["X19"]
     docs: ["../../../appendix/optimizations.md#o162-a-walked-archived-partition-is-copied-while-its-runs-buffer-holds-it"]
+    description:
+      what: "A walked archived record is handed out where its read put it, so an archived partition draws its own bytes from the scan budget once, where it drew them twice."
   - id: "Floor"
     title: "A scan budget of at least the largest row"
     status: done
@@ -151,6 +164,7 @@ nodes:
     docs: ["../milestones.md#m24-scans-on-one-node"]
     description:
       why: "Nothing a client could call scanned a table: there were no scan frames on the wire, no client driver, no SHQL `SCAN` and no `scan` privilege."
+      what: "A client scans a standalone node over the wire with `client.scan`, SHQL's `SCAN` or `shoalctl`, under the `scan` grant, its answers paced to a share of the link."
   - id: "X38"
     title: "X38 Which copies a scan reads, two ways"
     status: done
@@ -158,6 +172,7 @@ nodes:
     docs: ["../copies-two-ways.md"]
     description:
       why: "Q38's design left open which of a tablet's voter copies a scan prefers, followers then leaders or every voter alike, and the user asked for it measured before M25."
+      what: "Q38's copy choice is settled: followers then leaders, since every voter alike read no faster, with each tablet dealt once to a member's lane and idle members taking from others."
   - id: "Q38"
     title: "Q38 Which copies a scan reads, and its levels"
     status: done
@@ -177,6 +192,7 @@ nodes:
     docs: ["../milestones.md#m25-scans-across-a-cluster"]
     description:
       why: "A cluster node grants no scans, so nothing reads a cluster's copies under floors and read levels or carries a scan through a move, a failover or a restart."
+      what: "A client scans across a cluster from voter copies, followers then leaders, at `One` or `Quorum`, carried through a move, failover or restart, and resumable by a fresh client from its token."
   - id: "Apart"
     title: "A listing's fields kept apart from inline bytes"
     needs: ["X19"]
@@ -189,6 +205,7 @@ nodes:
     docs: ["../milestones.md#m26-listing-a-buckets-objects"]
     description:
       why: "A bucket's objects cannot be listed: R25's listing of every live object a page at a time, each with what a stat answers and none of its bytes, does not exist."
+      what: "A caller lists a bucket's live objects a page at a time, with `client.bucket::<M>().list()` or `shoalctl`, under the bucket's `scan` grant, each entry's fields and none of its bytes."
   - id: "X21"
     title: "X21 Declared order, priced"
     needs: ["M25"]
@@ -201,6 +218,7 @@ nodes:
     docs: ["../milestones.md#m27-ordered-scans-by-declared-order"]
     description:
       why: "A partition key is hashed whole, scattering a placement value's partitions over all 4096 tablets, so no scan can read them in an order or between bounds (R22)."
+      what: "A schema declares placement and order fields and a spread, and a scan reads one placement value's partitions in the order of their encodings, between bounds."
   - id: "X22"
     title: "X22 The ordered listing, two ways"
     needs: ["M27"]
@@ -213,6 +231,7 @@ nodes:
     docs: ["../milestones.md#m28-the-ordered-listing"]
     description:
       why: "M26's listing is unordered, with no prefix or delimiter, so no caller can list a bucket's objects in path order or by prefix."
+      what: "A bucket lists in the byte order of its paths, with a prefix, a delimiter's common prefixes and a continuation, on the layout X22 chooses."
 ---
 # What's left to do
 

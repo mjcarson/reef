@@ -18,16 +18,22 @@ nodes:
     status: done
     needs: ["I386"]
     docs: ["../../../appendix/resolved/reached-never-in-a-refused-tablet.md"]
+    description:
+      what: "A page's progress never lands in a tablet it refused, so a scan whose copy refuses a tablet where it stands ends by that refusal's own code, not `MalformedScan`."
   - id: "I389"
     title: "Item 389: a page in rows shed at a chunk was refused whole"
     status: done
     needs: ["I387"]
     docs: ["../../../appendix/resolved/rows-page-shed-answers-what-it-covered.md"]
+    description:
+      what: "A page in rows shed at a chunk cuts its body back to the last partition it holds whole and answers what it covered, refused only if it covered nothing."
   - id: "Principal"
     title: "F148 A scan's share a principal"
     status: done
     needs: ["I389"]
     docs: ["../../../features/scan-shares.md"]
+    description:
+      what: "Principals contending for a shard's scan class share it fairly, a lone tenant keeping the whole class, and one principal's unwritten answers hold at most half the node's scan budget."
   - id: "I380"
     title: "Item 380: a client that never reads holds its scans' draws"
     status: done
@@ -45,6 +51,7 @@ nodes:
     docs: ["../cursor-sent-ahead.md"]
     description:
       why: "W4 left the next cursor sent ahead to be priced on M24's streams; the plan can't keep it, or drop the client's default to one stream a shard, until it is measured."
+      what: "The plan knows the cursor sent ahead lets one stream a shard read as fast as two, but costs the cell's reads 1.06 times at p99, so it is not kept."
   - id: "Cursor"
     title: "The next cursor sent ahead of a page's rows, not taken"
     status: done
@@ -59,11 +66,14 @@ nodes:
     docs: ["../saved-positions-priced.md"]
     description:
       why: "X17 found nothing to save on the lab's one-page tablets, so the plan can't build or drop W5's saved positions until a page's cost many pages deep in a tablet is priced."
+      what: "At 62,914 partitions a tablet a page's pass over its tablet's keys held its loop up to 840 µs, 55% of its time on the shard, so saved positions are built (F150)."
   - id: "Saved"
     title: "F150 Saved positions between pages"
     status: done
     needs: ["X40"]
     docs: ["../../../features/saved-positions.md"]
+    description:
+      what: "A scan's later pages of a tablet take their keys from the position the page before saved, finding them in about 7 µs whatever the tablet's depth, where each passed over every key."
   - id: "X41"
     title: "X41 A scan answer's hop between shards, priced"
     status: done
@@ -71,6 +81,7 @@ nodes:
     docs: ["../answer-hop-priced.md"]
     description:
       why: "A scan's answer is written by whichever shard accepted its connection, not always the one that read it; nothing had priced that hop, so W6's hand-off couldn't be decided."
+      what: "A hopped 4 MiB answer costs 1.06 to 1.07 times the cpu of one written where it was read, 0.07% of a Zen1 core at the default share, so the hand-off is not built."
   - id: "Handoff"
     title: "A scan connection handed to its slot, not taken"
     status: done

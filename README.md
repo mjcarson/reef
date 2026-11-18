@@ -124,8 +124,10 @@ the sidebar says where from (*from Context*):
 
 - **why:** the first paragraph of a subsection with one of the `why-sections` names, or the
   second cell of a table row (`| **Impact** | ... |`) with one of them.
-- **what:** the same with the `what-sections` names. Failing both, the first paragraph of the
-  linked section.
+- **what:** the same with the `what-sections` names.
+
+A doc's opening paragraph is never taken for either: it is more often a status line ("Reported
+2026-10-29.") than a plain why or what.
 
 A node that is not a group and has no why or no what, written or taken, fails the build with
 `file:line`.

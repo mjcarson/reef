@@ -18,16 +18,22 @@ nodes:
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o145-a-planned-partitions-encode-step-is-a-message-through-its-loop-each"]
+    description:
+      what: "A scan's small resident partitions share encode steps, so a `Keyword` scan beside the cell takes 0.72 encode steps a resident partition rather than 1.33, nothing else moving past its noise."
   - id: "O150"
     title: "O150 No merge read of a row an insert replaces"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o150-a-merge-reads-the-archived-record-of-every-partition-an-insert-replaces-whole"]
+    description:
+      what: "A merge skips reading the archived record of a partition a plain insert replaces whole, so overwriting archived rows costs a Zen1 drive about 0.03 device reads an insert, not 0.97."
   - id: "O151"
     title: "O151 WAL syncs bound by a loaded 970 EVO, opt-in"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o151-a-zen1-nodes-wal-syncs-are-bound-by-its-970-evos-flushes-once-the-drive-is-loaded"]
+    description:
+      what: "`buffered` stays the WAL's default and F138's shared and direct modes an opt-in: shared doubled the cell's inserts but lost the mixed bench's throughput and write tail."
     performance:
       labels: [Buffered, Shared]
       note: "M23's cell alone (2026-11-09): medians and ranges of eight side-rounds, F138's build `3f87e3ff` on both sides. The mixed bench went the other way (shared 0.67 times the operations a second at 2.15 times the write p99), so `buffered` stays the default."
@@ -51,21 +57,29 @@ nodes:
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o152-a-steps-own-cpu-read-only-past-its-bound"]
+    description:
+      what: "Every step still reads its own cpu at its stop, as F130 built it: reading it only past the bound saved about 32 µs of cluster cpu a second, which no figure showed."
   - id: "O153"
     title: "O153 Measuring logic behind a feature, not taken"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o153-always-on-measuring-logic-behind-a-feature-flag-measured"]
+    description:
+      what: "Every figure stays compiled into every build, so the lab measures the shipped build: stubbing them all out moved nothing past its noise, and the two cheap fixes stand."
   - id: "O154"
     title: "O154 A capture's view allocates nothing on the loop"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o154-a-captures-view-allocates-nothing-on-the-loop"]
+    description:
+      what: "A warmed capture's step asks the allocator for nothing, and the Zen1 hosts' `Big` captures past 100 µs on their own cpu fell from 21 to 1 over six rounds."
   - id: "O155"
     title: "O155 Two scan reads a device collapse a scan, a floor"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o155-two-scan-reads-a-device-collapse-a-scans-rate-ninefold"]
+    description:
+      what: "Scan reads a device are floored at four, so a node set to two scans `Big` 1.45 times as fast alone and 1.91 times beside the cell, which is unmoved."
 ---
 # After M23, optional
 

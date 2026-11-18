@@ -7,6 +7,8 @@ nodes:
     title: "Item 338: a node below its resident floor evicts each check"
     status: done
     docs: ["../../../appendix/resolved/resident-floor-reserve.md"]
+    description:
+      what: "A node past its resident floor warns, keeps a reserve of rows rather than evicting them at every check, and one whose floor leaves its rows nothing is refused at ready."
   - id: "I340"
     title: "Item 340: an archive the map forgot is never deleted"
     status: done
@@ -19,6 +21,8 @@ nodes:
     title: "Item 352: every core probed after each applied batch"
     status: done
     docs: ["../../../appendix/resolved/core-probes-off-the-loop.md"]
+    description:
+      what: "A shard probes its groups' cores at most once a second, off its loop, and the cell's read p99 beside its inserts fell from 2.42 to 0.75 ms."
   - id: "I355"
     title: "Item 355: a scan's tablet shed for a minute, given up"
     status: done
@@ -31,6 +35,8 @@ nodes:
     title: "Item 358: no control leader for 15 s under load"
     status: done
     docs: ["../../../appendix/resolved/control-answers-waited-for.md"]
+    description:
+      what: "A loaded control follower's answers are waited for at least a second rather than dropped past 50 ms, so a first initialization under load finds its control leader."
   - id: "I359"
     title: "Item 359: the cell's own climb, not the scan's"
     status: done
@@ -43,6 +49,8 @@ nodes:
     title: "Item 361: a missing archive fails every archive pass"
     status: done
     docs: ["../../../appendix/resolved/lost-archive-skipped.md"]
+    description:
+      what: "An archive pass skips an archive whose file is gone, warning of it once and counting it, and goes on copying and deleting the shard's other archives."
   - id: "I363"
     title: "Item 363: a copy that lost an archive is not repaired"
     docs: ["../../../appendix/known-issues.md#363-a-copy-that-lost-an-archive-is-not-repaired"]
@@ -79,6 +87,7 @@ nodes:
     docs: ["../../../appendix/resolved/dropped-client-connects-quietly.md"]
     description:
       why: "Every `shoal-workload` run whose client was dropped while its pool was connecting logged ERRORs for connections nobody needed, in the bench log where failures are read."
+      what: "A connection finishing its handshakes after its client was dropped is refused `ClientDropped` at no log level, so a bench's log holds no ERROR for it."
   - id: "I362"
     title: "Item 362: a bundle its access check refuses ended its node"
     status: done
@@ -108,25 +117,35 @@ nodes:
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o140-a-resident-reads-p99-beside-the-cells-inserts-is-six-times-scylladbs-on-the-same-hosts"]
+    description:
+      what: "The cell's resident read tail beside synced inserts is attributed to item 352 and O159, both fixed, so its read p99 is 0.77 ms where ScyllaDB's synced cell reads at 3.11."
   - id: "O156"
     title: "O156 An integer sort key beside a padded string"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o156-an-integer-sort-key-priced-beside-a-padded-string"]
+    description:
+      what: "The measurement prices an integer sort key: it saves a fifth of a resident get of named keys, a tenth of a range or page and a ninth of a partition's load."
   - id: "O157"
     title: "O157 A node's heap on transparent huge pages"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o157-a-nodes-heap-on-transparent-huge-pages"]
+    description:
+      what: "A node keeps its heap on transparent huge pages by default, since without them its foreground's tails lose; turning them off near a node's floor is a deployment's choice."
   - id: "O158"
     title: "O158 What openraft holds of every node's floor"
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o158-what-openraft-holds-of-every-nodes-floor"]
+    description:
+      what: "openraft's queues and histograms and Shoal's retry table no longer pre-size a group, so a node's resident set at ready is a quarter of before and loaded 0.62, the foreground unmoved."
   - id: "O159"
     title: "O159 A segment's checkpoint holds a shard's loop"
     status: done
     docs: ["../../../appendix/optimizations.md#o159-a-compacted-segments-checkpoint-and-its-evictable-marking-hold-a-shards-loop-for-milliseconds"]
+    description:
+      what: "A compacted segment's checkpoint write and evictable marking hold a Zen1 shard's loop at most a quarter of a millisecond a step, where they held it 16 and 4 ms."
   - id: "O160"
     title: "O160 A shard's tick and a sealed segment"
     optional: true
@@ -138,6 +157,8 @@ nodes:
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o161-a-wal-batch-is-made-durable-by-a-flush-where-a-fua-write-would-do"]
+    description:
+      what: "The WAL keeps making each batch durable by `fdatasync`: on the lab's 970 EVOs a FUA write measured twice the cost of a write and a flush."
   - id: "O163"
     title: "O163 A partition refused only once it is read"
     optional: true

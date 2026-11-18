@@ -24,6 +24,8 @@ nodes:
     title: "Item 398: saved positions cost more than their bound said"
     status: done
     docs: ["../../../appendix/resolved/saved-position-costs.md"]
+    description:
+      what: "A shard thread's saved positions stay within their stated bound: every byte they hold is counted, no table's positions keep another's out, and no oversized range is copied to be saved."
   - id: "I399"
     title: "Item 399: a body past its reservation grew to a power of two"
     status: done

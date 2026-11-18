@@ -8,6 +8,8 @@ nodes:
     title: "O149 Larger WAL segments: 40 MiB the default"
     status: done
     docs: ["../../../appendix/optimizations.md#o149-larger-wal-segments-keep-a-tablets-records-together-four-times-longer"]
+    description:
+      what: "A WAL segment is 40 MiB by default, so a scan of `Big` reads 37.5 partitions a device read against 9.8, with no foreground figure the user's rule named disjointly worse."
   - id: "Rate"
     title: "W12's rate read again at O149's segments"
     status: done
@@ -19,6 +21,8 @@ nodes:
     title: "O147 A shard's io_uring workers off its cpu, own kept"
     status: done
     docs: ["../../../appendix/optimizations.md#o147-each-shards-io_uring-workers-run-on-the-shards-own-cpu"]
+    description:
+      what: "A node can move its shards' io_uring workers off their cpus with F139's `resources.io_worker_cpus`, an opt-in; `own` stays the default, since moving them cost the cell a quarter of its inserts."
   - id: "O170"
     title: "O170 Every shard's blocking thread on one shard's cpu"
     status: done

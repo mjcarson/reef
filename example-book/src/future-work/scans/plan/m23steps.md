@@ -73,6 +73,8 @@ nodes:
     status: done
     needs: ["Quick"]
     docs: ["../../../appendix/optimizations.md#o146-four-scan-reads-a-device-held-a-scan-alone-to-two-thirds-of-its-rate"]
+    description:
+      what: "`scans.device_reads` defaults to sixteen scan reads in flight a device, where F128 set four, and a scan of a tenth of `Big` alone reads a 970 EVO at 11.9 to 13.4 MiB a second against 8.5."
   - id: "O148"
     title: "O148 A shed stream's wait doubled"
     status: done
