@@ -24,11 +24,14 @@ This note is a proposal; nothing in shoal has been changed. It was tried on a sc
 
 `mdbook-reef check` finds no problems: 202 nodes, 125 arrows, 10 fences.
 
-The sidebar's description and design choices come from shoal's docs as they stand. Feature
-pages give *What it does* and *Design choices*, resolved items *Symptom* and *The fix*, and
-optimization entries their *Impact* row. In the PoC, 138 of the 202 boxes get a description
-and 65 get design choices. The boxes with neither are those with no doc, such as "The exit's
-quick passes". This adds about 200 KB of data to each page that draws the plan.
+Each of the 190 work items says why it is needed and what finishing it will do. Where shoal's
+docs say it, the sidebar takes it from them: feature pages give *Context* and *What it does*,
+resolved items *Symptom* and *The fix*, optimization entries their *Impact* row, and spikes
+their record's opening. Where they don't, the part is written in the node's `description`. In
+the PoC, 82 work items take both parts from their docs, and 108 have at least one written:
+82 whys and 85 whats in all, most of them for boxes with no doc, such as "The exit's quick
+passes". 65 boxes also get design choices from their docs. This adds about 350 KB of data to
+each page that draws the plan.
 
 How the eight diagrams became views:
 

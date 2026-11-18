@@ -275,6 +275,44 @@ pub fn sec(head: &str, class: &str, body: &str) -> String {
     format!(r#"<details class="reef-sec{class}" open><summary class="reef-sec-head"><h3>{head}</h3></summary><div class="reef-sec-body">{body}</div></details>"#)
 }
 
+/// A note saying which doc heading a brief part was taken from, or nothing when it was written.
+///
+/// # Arguments
+///
+/// * `from` - The doc heading or table row the part was taken from, if it was
+fn from_note(from: Option<&str>) -> String {
+    from.map_or(String::new(), |f| format!(r#" <span class="reef-note">from <em>{}</em></span>"#, esc(f)))
+}
+
+/// The sidebar's Description section: why the work is needed and what finishing it will do,
+/// each labelled, then the longer explanation. Empty when the node has none of them.
+///
+/// # Arguments
+///
+/// * `n` - The node to describe
+fn description(n: &reef_model::Node) -> String {
+    // the labelled parts that have text, each with where it was taken from
+    let parts = [("Why", &n.why, n.why_from.as_deref()), ("What", &n.what, n.what_from.as_deref())];
+    let mut body = String::new();
+    let mut list = String::new();
+    for (label, html, from) in parts {
+        if !html.trim().is_empty() {
+            let _ = write!(list, "<dt>{label}{}</dt><dd>{html}</dd>", from_note(from));
+        }
+    }
+    if !list.is_empty() {
+        let _ = write!(body, r#"<dl class="reef-ww">{list}</dl>"#);
+    }
+    // the longer explanation goes below them
+    if !n.details.trim().is_empty() {
+        let _ = write!(body, r#"<div class="reef-desc">{}</div>"#, n.details);
+    }
+    if body.is_empty() {
+        return String::new();
+    }
+    sec("Description", "", &body)
+}
+
 /// The sidebar for node `i`. `open` says whether it is a group shown open; `filter`, which
 /// acceptance criteria show.
 pub fn sidebar(g: &Graph, i: usize, open: Option<bool>, filter: &Filter) -> String {
@@ -306,9 +344,7 @@ pub fn sidebar(g: &Graph, i: usize, open: Option<bool>, filter: &Filter) -> Stri
         let _ = write!(s, r#"<button class="reef-button" data-act="toggle-sel">{}</button>"#, if open { "Collapse" } else { "Expand" });
     }
     s.push_str(r#"<button class="reef-button" data-act="center">Show in diagram</button></div>"#);
-    if !n.description.trim().is_empty() {
-        s.push_str(&sec("Description", "", &format!(r#"<div class="reef-desc">{}</div>"#, n.description)));
-    }
+    s.push_str(&description(n));
     s.push_str(&accept::section(g, i, filter));
     s.push_str(&crate::perf::section(g, i));
     if !n.docs.is_empty() {
@@ -332,7 +368,7 @@ pub fn sidebar(g: &Graph, i: usize, open: Option<bool>, filter: &Filter) -> Stri
         s.push_str(&sec("Documentation", "", &body));
     }
     if !n.design.trim().is_empty() {
-        let from = n.design_from.as_deref().map_or(String::new(), |f| format!(r#" <span class="reef-note">from <em>{}</em></span>"#, esc(f)));
+        let from = from_note(n.design_from.as_deref());
         s.push_str(&sec(&format!("Design choices{from}"), "", &format!(r#"<div class="reef-design">{}</div>"#, n.design)));
     }
     if g.is_group(i) {
@@ -411,6 +447,30 @@ mod tests {
         let sb = sidebar(&g, g.index_of("g").unwrap(), Some(false), &Filter::default());
         assert!(sb.contains("Members"));
         assert!(sb.contains("data-goto=\"x\""));
+    }
+
+    #[test]
+    fn sidebar_says_why_and_what() {
+        // a node whose why was taken from a doc and whose what and details were written
+        let a = Node {
+            id: "a".into(),
+            title: "a".into(),
+            why: "<p>Slow.</p>".into(),
+            why_from: Some("Context".into()),
+            what: "<p>Fast.</p>".into(),
+            details: "<p>More.</p>".into(),
+            ..Node::default()
+        };
+        let b = Node { id: "b".into(), title: "b".into(), ..Node::default() };
+        let (g, _) = Graph::build(vec![a, b]);
+        let sb = sidebar(&g, g.index_of("a").unwrap(), None, &Filter::default());
+        // each part is labelled, in order, and only the taken one says where it came from
+        let ww = r#"<dl class="reef-ww"><dt>Why <span class="reef-note">from <em>Context</em></span></dt><dd><p>Slow.</p></dd><dt>What</dt><dd><p>Fast.</p></dd></dl>"#;
+        assert!(sb.contains(ww), "{sb}");
+        // the longer explanation follows them
+        assert!(sb.contains(&format!(r#"{ww}<div class="reef-desc"><p>More.</p></div>"#)), "{sb}");
+        // a node with none of them has no Description section
+        assert!(!sidebar(&g, g.index_of("b").unwrap(), None, &Filter::default()).contains("Description"));
     }
 
     #[test]

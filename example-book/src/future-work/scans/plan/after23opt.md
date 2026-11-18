@@ -11,6 +11,8 @@ nodes:
     status: done
     optional: true
     docs: ["../../../appendix/optimizations.md#o144-a-scan-page-holds-its-reads-beside-the-partitions-folded-from-them"]
+    description:
+      what: "A scan page holds its bytes once rather than about twice its byte bound: since F134 the partitions it hands out are its reads' own buffers, with no copy beside them."
   - id: "O145"
     title: "O145 Partitions together in a step"
     status: done

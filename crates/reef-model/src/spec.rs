@@ -58,10 +58,11 @@ pub struct NodeSpec {
     /// Whether this group starts collapsed. Groups start collapsed unless this says `false`.
     #[serde(default)]
     pub collapsed: Option<bool>,
-    /// A brief form of the work, as markdown, shown first in the sidebar. Default: taken from
-    /// the first doc that has one.
+    /// Why the work is needed and what finishing it will do, shown first in the sidebar, with
+    /// a longer explanation below them. A plain string is the longer explanation alone. A part
+    /// not written is taken from the first doc that has it.
     #[serde(default)]
-    pub description: Option<String>,
+    pub description: Option<Description>,
     /// The design choices, as markdown: one string, or a list of them drawn as bullets.
     /// Default: taken from the first doc that has them.
     #[serde(default, deserialize_with = "one_or_many", alias = "design")]
@@ -80,6 +81,61 @@ pub struct NodeSpec {
     /// Members with no file of their own.
     #[serde(default)]
     pub nodes: Vec<NodeSpec>,
+}
+
+/// Why a piece of work is needed, what finishing it will do, and a longer explanation, each as
+/// markdown.
+///
+/// Written as a map of `why`, `what` and `details`, or as a plain string, which is `details`
+/// alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Description {
+    /// Why the plan needs this work: the problem it solves or the gap it fills
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// What will be true, or possible, once this work is done
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub what: Option<String>,
+    /// A longer explanation, shown below the why and the what
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
+/// The keys a description's map form may hold.
+const DESCRIPTION_KEYS: [&str; 3] = ["why", "what", "details"];
+
+impl<'de> Deserialize<'de> for Description {
+    /// Read a description from a plain string or from a map of its parts
+    ///
+    /// # Arguments
+    ///
+    /// * `d` - The deserializer to read the description from
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        use serde_json::Value as J;
+        // read the description as a generic value so both of its forms can be told apart
+        let map = match J::deserialize(d)? {
+            // a plain string is the longer explanation alone
+            J::String(s) => return Ok(Description { details: Some(s), ..Description::default() }),
+            // an empty description says nothing
+            J::Null => return Ok(Description::default()),
+            J::Object(m) => m,
+            _ => return Err(D::Error::custom("a description is a string, or a map of `why`, `what` and `details`")),
+        };
+        // refuse a key that is not one of the parts, so a typo is not silently dropped
+        if let Some(key) = map.keys().find(|k| !DESCRIPTION_KEYS.contains(&k.as_str())) {
+            return Err(D::Error::custom(format!("description has no key `{key}`: its keys are `why`, `what` and `details`")));
+        }
+        // take each part, which must be a string when it is given
+        let part = |key: &str| -> Result<Option<String>, D::Error> {
+            match map.get(key) {
+                None | Some(J::Null) => Ok(None),
+                Some(J::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(D::Error::custom(format!("description `{key}:` is markdown text"))),
+            }
+        };
+        Ok(Description { why: part("why")?, what: part("what")?, details: part("details")? })
+    }
 }
 
 fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
@@ -237,9 +293,25 @@ mod tests {
 
     #[test]
     fn description_and_decisions() {
+        // a plain string is the longer explanation alone
         let (spec, _) = parse_node_file("---\nid: a\ndescription: Short.\ndecisions: One.\n---\n").unwrap().unwrap();
-        assert_eq!(spec.description.as_deref(), Some("Short."));
+        let d = spec.description.unwrap();
+        assert_eq!((d.why, d.what, d.details.as_deref()), (None, None, Some("Short.")));
         assert_eq!(spec.decisions, vec!["One."]);
+        // the map form holds each part
+        let text = "---\nid: a\ndescription:\n  why: Slow.\n  what: Fast.\n  details: |\n    More.\n---\n";
+        let (spec, _) = parse_node_file(text).unwrap().unwrap();
+        let d = spec.description.unwrap();
+        assert_eq!((d.why.as_deref(), d.what.as_deref(), d.details.as_deref()), (Some("Slow."), Some("Fast."), Some("More.\n")));
+        // the flow form an inline node uses
+        let (spec, _) = parse_node_file("---\nid: g\nnodes:\n  - { id: b, description: { what: Done. } }\n---\n").unwrap().unwrap();
+        assert_eq!(spec.nodes[0].description.as_ref().unwrap().what.as_deref(), Some("Done."));
+        // a key that is not a part is refused, at the description's line
+        let err = parse_node_file("---\nid: a\ndescription:\n  wy: Typo.\n---\n").unwrap_err();
+        assert!(err.message.contains("`wy`") && err.message.contains("`why`, `what` and `details`"), "{err:?}");
+        assert!(err.line.is_some(), "{err:?}");
+        // a part that is not text is refused
+        assert!(parse_node_file("---\nid: a\ndescription: { why: [x] }\n---\n").is_err());
         let (spec, _) = parse_node_file("---\nid: a\ndesign: [x, y]\n---\n").unwrap().unwrap();
         assert_eq!(spec.decisions, vec!["x", "y"]);
     }

@@ -11,7 +11,7 @@ If the frontmatter is wrong, every diagram is wrong. Update it in the **same cha
 work it describes, never as a follow-up.
 
 The full key reference is in [reference.md](reference.md). Read it before writing
-`acceptance` or `performance`, or a fence.
+`description`, `acceptance` or `performance`, or a fence.
 
 ## 1. Find the plan
 
@@ -30,7 +30,7 @@ If the work has no node, add one.
 - **Where:** follow how the group's siblings are written. Usually that is an inline entry in the
   group's `nodes:` list, with `docs` pointing at the work's own page if it has one. Use a node
   file of its own (with `group:`) only where the siblings do. Don't make up a design page just
-  to have something to link: with no page, leave out `docs` and write a one-line `description`.
+  to have something to link: with no page, leave out `docs`.
 - **Which group:** adding work to a group whose members are all done reopens it, and everything
   that needs that group waits again. Do that only when the work really gates what comes after;
   otherwise put it in the open group that comes next, or a new group.
@@ -41,9 +41,17 @@ If the work has no node, add one.
   Naming a group means all of it. Never name the node's own group.
 - **`helps` and `optional: true`:** for work that helps but does not gate.
 - **`docs`:** link the design or feature page, relative to this file. Add a `#heading` anchor
-  only if the page holds more than this work, and only one that exists. The sidebar shows that section, and takes the description and design choices
-  from it, so the page should have a "What it does"/"Summary" and "Design choices" section, or
-  write `description` and `decisions` in frontmatter.
+  only if the page holds more than this work, and only one that exists. The sidebar shows that
+  section, and takes the design choices from its "Design choices" section, or write `decisions`
+  in frontmatter.
+- **`description`:** always write `why` and `what`, even when the node links a doc. The build
+  fails on work that has neither written nor found in its doc, and a doc's opening paragraph
+  rarely says either plainly. One or two plain sentences each, about 30 words at most:
+  - `why`: the problem or gap. What is slow, wrong, missing or unknown without this work, or for
+    a spike, what the plan can't decide until it is answered.
+  - `what`: what will be true or possible once it is done. The outcome, not the steps.
+  - Name the specific thing (the shard's loop, a scan's page), never "improves performance".
+  - `details` holds anything longer. Write only what is known: no invented figures.
 - **`acceptance`:** write the criteria now, before the code: how will it be known to be done?
   One per line, each `unit`, `integration`, `performance` or `feature`. Add `test:` with the
   test's path once the test exists.
@@ -81,6 +89,7 @@ In the same change that finishes the work:
 - Each acceptance criterion gets `status: met` or `status: unmet`. Leave a performance criterion
   with a `metric` and `at-least`/`at-most` alone: its status is derived from the `after` figure.
 - If the result moved later work (it unblocked, dropped or added something), update those nodes.
+- If what was built differs from what was planned, update `description.what` to say what it does.
 
 ## 6. Always check
 
@@ -91,8 +100,8 @@ mdbook-reef check <book>
 ```
 
 It exits non-zero and prints `file:line` for unknown ids, cycles, a node that needs its own
-group, duplicate ids, doc links to missing files or headings, and malformed `acceptance` or
-`performance`. Fix every problem before you finish. If `mdbook-reef` is not on the PATH, the
+group, duplicate ids, doc links to missing files or headings, work with no `why` or `what`, and
+malformed `description`, `acceptance` or `performance`. Fix every problem before you finish. If `mdbook-reef` is not on the PATH, the
 `command` in `book.toml`'s `[preprocessor.reef]` says how the book runs it.
 
 ## Don't

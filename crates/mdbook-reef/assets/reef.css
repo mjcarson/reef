@@ -322,6 +322,20 @@ html:has(.reef-page) .nav-wide-wrapper, html:has(.reef-page) .content .nav-wrapp
 .reef-sec > summary > h3 { margin: 0; flex: none; }
 .reef-sec > summary:hover::before, .reef-sec > summary:hover > h3 { color: var(--reef-ready); }
 /* Description, documentation and design choices */
+.reef-ww { margin: 0.2em 0 0.4em; }
+.reef-ww dt {
+    margin: 0.6em 0 0.1em;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--reef-muted);
+}
+.reef-ww dt:first-child { margin-top: 0.2em; }
+.reef-ww dt .reef-note { text-transform: none; letter-spacing: normal; font-weight: normal; }
+.reef-ww dd { margin: 0; }
+.reef-ww dd p { margin: 0.15em 0; }
+.reef-desc { margin-top: 0.5em; }
 .reef-desc p { margin: 0.3em 0; }
 .reef-doc { margin: 0.4em 0 0.7em; }
 .reef-doc-head { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }

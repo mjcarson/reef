@@ -10,7 +10,7 @@ pub mod view;
 pub use accept::{AccChart, Criterion, Kind, Met, Resolved};
 pub use graph::{Diagnostic, EdgeKind, Graph, Link, Node, PerfDoc};
 pub use perf::{Better, Metric, Performance, Value};
-pub use spec::{NodeSpec, Status};
+pub use spec::{Description, NodeSpec, Status};
 pub use view::{Direction, Expand, Layout, ViewSpec, VisEdge, VisItem, Visible};
 
 /// What the preprocessor embeds in a page and the viewer reads.

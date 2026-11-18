@@ -13,12 +13,13 @@ mermaid shrinks the whole diagram to the page width and it cannot be zoomed.
   and every diagram that shows it agrees.
 - **Groups collapse.** A feature shows as one box with its progress (`7/9`) until you open it, so
   the whole plan fits on one screen and you drill into the part you care about.
-- **Click a box** to open a sidebar with its rendered markdown, what it needs, what needs it, its
-  docs, and a link to its page.
+- **Click a box** to open a sidebar that says why the work is needed and what finishing it will
+  do, then its rendered markdown, what it needs, what needs it, its docs, and a link to its page.
 - **Status is derived.** A group is done when its members are; a box is *ready* when everything it
   and its groups need is done, so "what can start now" is never kept up by hand.
-- **Checked at build time.** Unknown ids, cycles, a box that needs its own group, and doc links
-  to missing files or headings all fail the build with `file:line`.
+- **Checked at build time.** Unknown ids, cycles, a box that needs its own group, doc links
+  to missing files or headings, and work that does not say why it is needed or what it will do
+  all fail the build with `file:line`.
 - The viewer is Rust compiled to wasm. Layout of a few hundred boxes takes milliseconds, so every
   collapse or expand lays the whole view out again.
 
@@ -53,7 +54,10 @@ needs: [m22, w1]               # solid arrows from each; naming a group needs al
 helps: [o171]                  # dashed arrows: helps, does not gate
 docs: [milestones.md#m23-the-walk-rebuilt-for-load, ../../features/f125.md]
 collapsed: false               # a group that starts open (groups start collapsed)
-description: Reads in runs.    # the sidebar's description (default: taken from the docs)
+description:                   # why it is needed and what finishing it will do; see below
+  why: A scan's archive reads wait on each other, one page at a time.
+  what: A page's archive reads go out together, in disk order.
+  details: Longer markdown, shown below them.
 decisions:                     # the sidebar's design choices (alias: design; default: from the docs)
   - Runs cut in disk order, issued in the merge's order.
 acceptance:                    # how it will be known to be done (alias: criteria); see below
@@ -86,7 +90,8 @@ Clicking a box opens a sidebar. Each of its sections folds from its header (▾)
 header stays pinned to the sidebar's top while you scroll through the section, so a long one
 can be folded from anywhere in it. The sections, all open to start:
 
-- **Description:** a brief form of the work.
+- **Description:** *Why* the work is needed and *what* finishing it will do, then any longer
+  details. See [Why and what](#why-and-what).
 - **Acceptance:** its acceptance criteria. See [Acceptance criteria](#acceptance-criteria).
 - **Performance:** it shows how the work changed what was measured. See
   [Performance](#performance).
@@ -96,20 +101,46 @@ can be folded from anywhere in it. The sections, all open to start:
 - **Design choices.**
 - **The rest:** members, needs, what needs it, and the node's own body.
 
-The description and design choices are written in frontmatter (`description`, `decisions`) or
-taken at build time from the node's first doc that has them:
+### Why and what
 
-- **Description:** the first paragraph of a subsection with one of these names, or the second
-  cell of a table row (`| **Impact** | ... |`) with one of them. Failing both, the first
-  paragraph of the linked section.
-- **Design choices:** the subsection with one of these names. A list whose items open with a
-  bold lead shows each choice folded, with its lead as the summary.
+Every piece of work says why it is needed and what finishing it will do, so that reading the
+plan answers both without opening each doc. A node's `description` holds them:
 
-Struck-through text is left out of both, since they say what is true now. The default names:
+```yaml
+description:
+  why: A caller holding a long key list waits for every shard before it sees any row.
+  what: Callers step through named keys as pipelined gets, each key handed back in order.
+  details: |                   # optional: a longer explanation, shown below them
+    Markdown.
+```
+
+- **why:** the problem it solves or the gap it fills: what is slow, wrong, missing or unknown
+  without it.
+- **what:** what will be true, or possible, once it is done: the outcome, not the steps.
+- A plain string, `description: Some text.`, is `details` alone.
+
+A part that is not written is taken at build time from the node's first doc that has it, and
+the sidebar says where from (*from Context*):
+
+- **why:** the first paragraph of a subsection with one of the `why-sections` names, or the
+  second cell of a table row (`| **Impact** | ... |`) with one of them.
+- **what:** the same with the `what-sections` names. Failing both, the first paragraph of the
+  linked section.
+
+A node that is not a group and has no why or no what, written or taken, fails the build with
+`file:line`.
+
+The design choices are written in `decisions` or taken from the subsection with one of the
+`design-sections` names. A list whose items open with a bold lead shows each choice folded,
+with its lead as the summary.
+
+Struck-through text is left out of what is taken from docs, since it says what is true now.
+The default names:
 
 ```toml
 [preprocessor.reef]
-description-sections = ["What it does", "Symptom", "Summary", "Overview", "Impact"]
+why-sections = ["Why", "Context", "Motivation", "Problem", "Symptom", "Question", "The question", "Impact"]
+what-sections = ["What it does", "What", "Summary", "Overview", "The fix"]  # was description-sections
 design-sections = ["Design choices", "Design", "Decisions", "The fix"]
 performance-sections = ["Performance", "Results", "Benchmark", "Benchmarks", "Measurements"]
 ```

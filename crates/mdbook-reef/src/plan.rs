@@ -1,6 +1,6 @@
 //! Finding a book's nodes, checking them, and rendering them for the viewer.
 
-use crate::extract;
+use crate::extract::{self, has_text};
 use crate::paths::{self, Target};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use reef_model::spec::{frontmatter_is_yaml, parse_node_file};
@@ -20,9 +20,14 @@ pub const ROOT: &str = "reef-root:/";
 pub struct Config {
     /// Directories under `src` to look for nodes in. Default: all of `src`.
     pub roots: Vec<String>,
-    /// The subsections of a doc whose first paragraph is a node's description, or the first
-    /// cells of a table row (`| **Impact** | ... |`) whose second cell is.
-    pub description_sections: Vec<String>,
+    /// The subsections of a doc whose first paragraph says why a node's work is needed, or the
+    /// first cells of a table row (`| **Impact** | ... |`) whose second cell does.
+    pub why_sections: Vec<String>,
+    /// The subsections of a doc whose first paragraph says what finishing a node's work will
+    /// do, or the first cells of a table row whose second cell does. Failing both, the linked
+    /// section's own first paragraph.
+    #[serde(alias = "description-sections")]
+    pub what_sections: Vec<String>,
     /// The subsections of a doc that hold a node's design choices.
     pub design_sections: Vec<String>,
     /// The subsections of a doc that hold the work's measurements. A linked heading without one
@@ -35,7 +40,8 @@ impl Default for Config {
         let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect();
         Config {
             roots: Vec::new(),
-            description_sections: v(&["What it does", "Symptom", "Summary", "Overview", "Impact"]),
+            why_sections: v(&["Why", "Context", "Motivation", "Problem", "Symptom", "Question", "The question", "Impact"]),
+            what_sections: v(&["What it does", "What", "Summary", "Overview", "The fix"]),
             design_sections: v(&["Design choices", "Design", "Decisions", "The fix"]),
             performance_sections: v(&["Performance", "Results", "Benchmark", "Benchmarks", "Measurements"]),
         }
@@ -120,7 +126,53 @@ impl Plan {
         }
         let mut plan = plan;
         plan.diags.extend(doc_diags);
+        // fill in every node's brief form once, from what is written or else from its docs
+        let mut texts: HashMap<String, Option<String>> = HashMap::new();
+        for k in 0..plan.graph.nodes.len() {
+            // brief a copy, since briefing reads the plan the node is part of
+            let mut n = plan.graph.nodes[k].clone();
+            plan.brief(&mut n, &mut texts);
+            plan.graph.nodes[k] = n;
+        }
+        // every piece of work must say why it is needed and what finishing it will do
+        let missing: Vec<Diagnostic> = (0..plan.graph.len())
+            .filter(|&i| !plan.graph.is_group(i))
+            .filter_map(|i| plan.missing_brief(plan.graph.node(i)))
+            .collect();
+        plan.diags.extend(missing);
         plan
+    }
+
+    /// A problem for a piece of work that does not say why it is needed or what finishing it
+    /// will do, once its docs have been looked in.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The briefed node to check
+    fn missing_brief(&self, n: &Node) -> Option<Diagnostic> {
+        // the parts with nothing written and nothing found
+        let why = !has_text(&n.why);
+        let what = !has_text(&n.what);
+        // name the doc sections each missing part could have come from
+        let sections = |names: &[String]| names.join(", ");
+        let message = match (why, what) {
+            (false, false) => return None,
+            (true, false) => format!(
+                "`{}` does not say why it is needed: write `description: {{ why: ... }}`, or link a doc with a section named one of {}",
+                n.id,
+                sections(&self.config.why_sections)
+            ),
+            (false, true) => format!(
+                "`{}` does not say what finishing it will do: write `description: {{ what: ... }}`, or link a doc with a section named one of {}",
+                n.id,
+                sections(&self.config.what_sections)
+            ),
+            (true, true) => format!(
+                "`{}` does not say why it is needed or what finishing it will do: write `description: {{ why: ..., what: ... }}`",
+                n.id
+            ),
+        };
+        Some(Diagnostic { source: n.source.clone(), line: Some(n.line), message })
     }
 
     /// Headings of a book file, as `(id, text, level)`, or `None` if there is no such file.
@@ -163,11 +215,15 @@ impl Plan {
         }
     }
 
-    /// Fill in a node's description and design choices: as written, or else from the first of
-    /// its docs that has them. `texts` caches doc files by path.
+    /// Fill in a node's why, what, details and design choices: as written, or else from the
+    /// first of its docs that has them. `texts` caches doc files by path.
     fn brief(&self, n: &mut Node, texts: &mut HashMap<String, Option<String>>) {
+        // render each part of the description that is written
         if let Some(d) = &n.description_raw {
-            n.description = render(d, &n.source, None, false);
+            let part = |md: &Option<String>| md.as_deref().map_or(String::new(), |md| render(md, &n.source, None, false));
+            n.why = part(&d.why);
+            n.what = part(&d.what);
+            n.details = part(&d.details);
         }
         match n.decisions_raw.as_slice() {
             [] => {}
@@ -186,7 +242,7 @@ impl Plan {
             c.text = inline_html(&render(&c.text, &n.source, None, false));
         }
         for link in &n.docs_raw {
-            if !n.description.is_empty() && !n.design.is_empty() && n.perf_doc.is_some() {
+            if has_text(&n.why) && has_text(&n.what) && !n.design.is_empty() && n.perf_doc.is_some() {
                 break;
             }
             let Target::Internal { path, anchor } = paths::resolve(&n.source, link) else { continue };
@@ -200,10 +256,20 @@ impl Plan {
             });
             let Some(text) = text.as_deref() else { continue };
             let Some(sec) = extract::section(text, anchor.as_deref()) else { continue };
-            if n.description.is_empty()
-                && let Some(d) = extract::description(sec, &self.config.description_sections, &path)
+            // the why only from a section named for it, since a doc's opening may not say why
+            if !has_text(&n.why)
+                && let Some((from, html)) = extract::brief_part(sec, &self.config.why_sections, &path, false)
             {
-                n.description = d;
+                n.why = html;
+                n.why_from = from;
+            }
+            // the what from a section named for it, else the linked section's own opening,
+            // which is labelled with the doc's name
+            if !has_text(&n.what)
+                && let Some((from, html)) = extract::brief_part(sec, &self.config.what_sections, &path, true)
+            {
+                n.what = html;
+                n.what_from = from.or_else(|| self.doc_link(&n.source, link).ok().map(|l| l.label));
             }
             if n.design.is_empty()
                 && let Some((from, html)) = extract::design(sec, &self.config.design_sections, &path)
@@ -225,7 +291,7 @@ impl Plan {
     /// The viewer's data: every node, its body rendered, its links resolved. Links start with
     /// [`ROOT`]. `chapters` are the book's chapter files, which have pages of their own.
     pub fn payload_json(&self, chapters: &HashSet<String>) -> String {
-        let mut texts: HashMap<String, Option<String>> = HashMap::new();
+        // each node's brief form was filled in when the plan was loaded
         let nodes = self
             .graph
             .nodes
@@ -234,7 +300,6 @@ impl Plan {
                 let mut n = n.clone();
                 n.html = render_body(&n.body, &n.source, &n.title);
                 n.docs = n.docs_raw.iter().filter_map(|d| self.doc_link(&n.source, d).ok()).collect();
-                self.brief(&mut n, &mut texts);
                 if chapters.contains(&n.source) {
                     n.page = Some(format!("{ROOT}{}", paths::html_of(&n.source)));
                 }
@@ -535,26 +600,67 @@ mod tests {
         std::fs::create_dir_all(dir.join("plan")).unwrap();
         std::fs::write(
             dir.join("f.md"),
-            "# F\n\n## What it does\n\nTaken.\n\n## Design choices\n\n- **Chosen.** Why.\n",
+            "# F\n\n## Context\n\nNeeded.\n\n## What it does\n\nTaken.\n\n## Design choices\n\n- **Chosen.** Why.\n",
         )
         .unwrap();
         std::fs::write(
             dir.join("plan/a.md"),
-            "---\nid: a\ndocs: [../f.md]\nnodes:\n  - { id: b, docs: [../f.md], description: Mine, decisions: [x, y] }\n---\n",
+            "---\nid: a\ndocs: [../f.md]\nnodes:\n  - { id: b, docs: [../f.md], description: { what: Mine, details: Longer }, decisions: [x, y] }\n---\n",
         )
         .unwrap();
         let plan = Plan::load(&dir, &Config::default());
         assert!(plan.diags.is_empty(), "{}", plan.errors());
         let json: serde_json::Value = serde_json::from_str(&plan.payload_json(&HashSet::new())).unwrap();
         let node = |id: &str| json["nodes"].as_array().unwrap().iter().find(|n| n["id"] == id).unwrap().clone();
+        // a node with nothing written takes each part from its doc, and says where from
         let a = node("a");
-        assert_eq!(a["description"].as_str().unwrap().trim(), "<p>Taken.</p>");
+        assert_eq!(a["why"].as_str().unwrap().trim(), "<p>Needed.</p>");
+        assert_eq!(a["why_from"], "Context");
+        assert_eq!(a["what"].as_str().unwrap().trim(), "<p>Taken.</p>");
+        assert_eq!(a["what_from"], "What it does");
+        assert!(a.get("details").is_none());
         assert!(a["design"].as_str().unwrap().contains("<summary>Chosen.</summary>"));
         assert_eq!(a["design_from"], "Design choices");
+        // what is written wins, and only what is missing is taken from the doc
         let b = node("b");
-        assert_eq!(b["description"].as_str().unwrap().trim(), "<p>Mine</p>");
+        assert_eq!(b["why"].as_str().unwrap().trim(), "<p>Needed.</p>");
+        assert_eq!(b["why_from"], "Context");
+        assert_eq!(b["what"].as_str().unwrap().trim(), "<p>Mine</p>");
+        assert!(b.get("what_from").is_none(), "{b}");
+        assert_eq!(b["details"].as_str().unwrap().trim(), "<p>Longer</p>");
         assert!(b["design"].as_str().unwrap().contains("<li>x</li>"), "{b}");
         assert!(b.get("design_from").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_must_say_why_and_what() {
+        let dir = std::env::temp_dir().join(format!("reef-why-what-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // an optimization register entry: its why is its Impact row, its what its own opening
+        std::fs::write(
+            dir.join("opt.md"),
+            "# Opts\n\n### O1. One\n\n| | |\n| --- | --- |\n| **Impact** | Quadratic |\n\nCounts once.\n\n### O2. Two\n\nNo why here.\n",
+        )
+        .unwrap();
+        // a group, which needs neither, and members that have, lack or half-have them
+        std::fs::write(
+            dir.join("g.md"),
+            "---\nid: g\nnodes:\n  - { id: o1, docs: [opt.md#o1-one] }\n  - id: o2\n    docs: [opt.md#o2-two]\n  - id: plain\n    description: Only details.\n  - { id: whole, description: { why: Slow., what: Fast. } }\n---\n",
+        )
+        .unwrap();
+        let plan = Plan::load(&dir, &Config::default());
+        // only the two members missing a part are problems, each at its own line
+        let diags: Vec<String> = plan.diags.iter().map(|d| d.to_string()).collect();
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(diags[0].starts_with("g.md:5: `o2` does not say why it is needed"), "{diags:?}");
+        assert!(diags[0].contains("Why, Context, Motivation"), "names the sections: {diags:?}");
+        assert!(diags[1].starts_with("g.md:7: `plain` does not say why it is needed or what finishing it will do"), "{diags:?}");
+        // the register entry's parts, labelled by the row and the doc they came from
+        let o1 = plan.graph.node(plan.graph.index_of("o1").unwrap());
+        assert_eq!((o1.why.trim(), o1.why_from.as_deref()), ("<p>Quadratic</p>", Some("Impact")));
+        assert_eq!((o1.what.trim(), o1.what_from.as_deref()), ("<p>Counts once.</p>", Some("O1. One")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -570,7 +676,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("plan/a.md"),
-            "---\nid: a\nnodes:\n  - id: o1\n    docs: [../opt.md#o1-one]\n    performance:\n      note: Medians of **eight**.\n      metrics:\n        - { name: n, before: 2, after: 1 }\n  - { id: o2, docs: [../opt.md#o2-two] }\n  - { id: o3, docs: [../opt.md#o3-three] }\n---\n",
+            "---\nid: a\nnodes:\n  - id: o1\n    docs: [../opt.md#o1-one]\n    performance:\n      note: Medians of **eight**.\n      metrics:\n        - { name: n, before: 2, after: 1 }\n  - { id: o2, docs: [../opt.md#o2-two], description: { why: W } }\n  - { id: o3, docs: [../opt.md#o3-three], description: { why: W } }\n---\n",
         )
         .unwrap();
         let plan = Plan::load(&dir, &Config::default());
@@ -597,7 +703,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("a.md"),
-            "---\nid: a\nperformance:\n  metrics:\n    - { name: n, before: 2, after: 1 }\nacceptance:\n  - unit: Answers **at once**\n  - perf: { text: Halves, metric: n, at-most: 1 }\n---\n",
+            "---\nid: a\ndescription: { why: W, what: X }\nperformance:\n  metrics:\n    - { name: n, before: 2, after: 1 }\nacceptance:\n  - unit: Answers **at once**\n  - perf: { text: Halves, metric: n, at-most: 1 }\n---\n",
         )
         .unwrap();
         let plan = Plan::load(&dir, &Config::default());

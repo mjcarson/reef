@@ -3,7 +3,7 @@
 
 use crate::accept::{AccChart, Criterion, Kind, Met, Resolved};
 use crate::perf::Performance;
-use crate::spec::{NodeSpec, Status};
+use crate::spec::{Description, NodeSpec, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -71,13 +71,26 @@ pub struct Node {
     pub body: String,
     /// The description as written, if any.
     #[serde(skip)]
-    pub description_raw: Option<String>,
+    pub description_raw: Option<Description>,
     /// The design choices as written.
     #[serde(skip)]
     pub decisions_raw: Vec<String>,
-    /// The description rendered: written, or taken from a doc.
+    /// Why the work is needed, rendered: written, or taken from a doc.
     #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub description: String,
+    pub why: String,
+    /// Where the why was taken from: the doc heading or table row's name. `None` when written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why_from: Option<String>,
+    /// What finishing the work will do, rendered: written, or taken from a doc.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub what: String,
+    /// Where the what was taken from: the doc heading, table row or doc's name. `None` when
+    /// written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub what_from: Option<String>,
+    /// The longer explanation, rendered, as written.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub details: String,
     /// The design choices rendered: written, or taken from a doc.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub design: String,

@@ -530,6 +530,11 @@ pub fn run(args: Args) -> Result<()> {
     for r in &chart.report {
         eprintln!("note: {r}");
     }
+    // every imported box must still say why it is needed and what finishing it will do
+    eprintln!(
+        "note: each of the {} boxes needs `description: {{ why: ..., what: ... }}`, or a linked doc that says them, before the book builds; `mdbook-reef check` lists those that don't",
+        chart.nodes.len()
+    );
     Ok(())
 }
 

@@ -12,6 +12,9 @@ nodes:
     title: "W12's rate read again at O149's segments"
     status: done
     needs: ["O149"]
+    description:
+      why: "At M23's exit the share's 75 ms bought a 970 EVO about 20 MiB a second, not the 32 expected, and the user had W12's rate read again at O149's segments."
+      what: "W12's rate is the share's at 40 MiB segments: 26.7 MiB a second of a Zen1 host's 970 EVO, against 13.9 at 10 MiB in the same rounds."
   - id: "O147"
     title: "O147 A shard's io_uring workers off its cpu, own kept"
     status: done
@@ -21,13 +24,20 @@ nodes:
     status: done
     needs: ["O147"]
     docs: ["../../../appendix/optimizations.md#o170-every-shards-blocking-thread-runs-on-the-first-shards-cpu"]
+    description:
+      what: "Under F139's opt-in every shard's blocking thread runs on the cpus named for its io_uring workers, not on the first shard's cpu; under the default `own` nothing moves."
   - id: "O171"
     title: "O171 Syncs from fewer cpus, fewer queues"
     optional: true
     helps: ["O147"]
     docs: ["../../../appendix/optimizations.md#o171-a-nodes-syncs-sent-from-fewer-cpus-go-through-fewer-of-its-drives-queues"]
+    description:
+      what: "Each shard's syncs keep a drive queue of their own with its io_uring workers off its cpu, so moving the workers no longer costs the cell a quarter of its inserts."
   - id: "Host"
     title: "Polled NVMe queues, the WAL apart"
+    description:
+      why: "No lab SSD has polled queues, so every scan read completes by an interrupt, and the WAL's synced flushes share the device a scan reads (W42's factor A)."
+      what: "Polled NVMe queues on a host and the WAL on a device of its own are priced on the rebuilt walk, so a deployment knows what each buys a scan."
 ---
 # After M23
 

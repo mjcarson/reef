@@ -13,7 +13,9 @@ needs: [F124, w1]              # solid arrows from each; a group means all of it
 helps: [O171]                  # dashed arrows: helps, does not gate
 docs: [../features/page-reads-in-runs.md#design-choices]   # relative to this file (aliases: doc, links)
 collapsed: false               # on a group: start open (groups start collapsed)
-description: Reads in runs.    # the sidebar's description (default: taken from the docs)
+description:                   # why it is needed and what finishing it will do; see below
+  why: A scan's archive reads wait on each other, one page at a time.
+  what: A page's archive reads go out together, in disk order.
 decisions:                     # the sidebar's design choices (alias: design; default: from the docs)
   - Runs cut in disk order, issued in the merge's order.
 acceptance: [...]              # see below (alias: criteria)
@@ -34,6 +36,25 @@ The body is what the sidebar shows.
   status, progress (`7/9`) and readiness are derived; do not set `status` on it.
 - Quote YAML strings that contain `:`, `#`, or start with a symbol.
 - Unknown keys (e.g. `tags:`) are ignored.
+
+## description
+
+```yaml
+description:
+  why: A caller with a long key list waits for every shard before it sees any row.   # the problem or gap
+  what: Callers step through named keys as pipelined gets, each key back in order.   # the outcome once done
+  details: |                     # optional, markdown, shown below them
+    Longer background, scope, what is left out.
+description: Some text.          # a plain string is `details` alone
+```
+
+- Every node that is not a group needs a `why` and a `what`, written or taken from its first doc
+  that has them: `why` from a section (or `| **Impact** |`-style table row) named Why, Context,
+  Motivation, Problem, Symptom, Question, The question or Impact; `what` from What it does, What, Summary,
+  Overview or The fix, else the linked section's first paragraph. Write both anyway.
+- One or two plain sentences each. `why`: what is slow, wrong, missing or unknown without the
+  work. `what`: what is true or possible once it is done, not how.
+- The only keys are `why`, `what` and `details`. Inline: `description: { why: ..., what: ... }`.
 
 ## acceptance
 
