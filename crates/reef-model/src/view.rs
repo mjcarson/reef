@@ -260,7 +260,7 @@ mod tests {
             title: id.into(),
             parent: parent.map(Into::into),
             needs: needs.iter().map(|s| s.to_string()).collect(),
-            source: "t.md".into(),
+            origin: crate::Origin::File { source: "t.md".into(), line: 0 },
             ..Node::default()
         }
     }

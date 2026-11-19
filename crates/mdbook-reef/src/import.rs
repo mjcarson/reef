@@ -663,12 +663,13 @@ mod tests {
     fn files_round_trip_through_the_model() {
         let c = parse(SAMPLE);
         let files = render_files(&c, "plan", "Plan", "x.md", 1);
-        let mut nodes = Vec::new();
-        for (name, text) in &files {
+        let mut records = Vec::new();
+        for (order, (name, text)) in files.iter().enumerate() {
             let (spec, fm) = reef_model::spec::parse_node_file(text).unwrap().unwrap_or_else(|| panic!("{name}"));
-            reef_model::Node::from_spec(spec, name, 1, fm.body.to_string(), &mut nodes);
+            let origin = reef_model::Origin::File { source: name.clone(), line: 1 };
+            records.push(reef_model::Record { spec, body: fm.body.to_string(), order: order as u64, origin });
         }
-        let (g, d) = reef_model::Graph::build(nodes);
+        let (g, d) = reef_model::Graph::build(reef_model::nodes_from_records(records));
         assert!(d.is_empty(), "{d:?}");
         assert!(g.index_of("Pace_2").is_some());
         assert_eq!(g.node(g.index_of("w1").unwrap()).parent.as_deref(), Some("plan"));

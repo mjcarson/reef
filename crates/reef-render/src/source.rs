@@ -199,9 +199,12 @@ mod tests {
         // a missing doc has no headings
         assert!(docs.headings("gone.md").is_none());
         // a boxed or borrowed source reads the same
-        let boxed: Box<dyn DocSource> = Box::new(docs.clone());
-        assert_eq!(boxed.headings("n.md"), Some(heads.clone()));
-        assert_eq!((&docs).headings("n.md"), Some(heads));
+        /// The headings of `n.md` in any source
+        fn heads_of(source: impl DocSource) -> Option<Headings> {
+            source.headings("n.md")
+        }
+        assert_eq!(heads_of(Box::new(docs.clone()) as Box<dyn DocSource>), Some(heads.clone()));
+        assert_eq!(heads_of(&docs), Some(heads));
     }
 
     #[test]

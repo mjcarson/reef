@@ -3,6 +3,7 @@
 
 use crate::accept::{AccChart, Criterion, Kind, Met, Resolved};
 use crate::perf::Performance;
+use crate::record::Origin;
 use crate::spec::{Description, NodeSpec, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -54,12 +55,9 @@ pub struct Node {
     pub helps: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapsed: Option<bool>,
-    /// The file this node was written in, relative to the book's `src`.
-    #[serde(default)]
-    pub source: String,
-    /// The line of that file the node starts on.
-    #[serde(default)]
-    pub line: usize,
+    /// Where this node was written: a file and line, or a stored node's full name.
+    #[serde(flatten)]
+    pub origin: Origin,
     /// Whether this node is an entry in another node's `nodes:` list rather than a file.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inline: bool,
@@ -118,8 +116,16 @@ pub struct Node {
 }
 
 impl Node {
-    /// Flatten a spec and its inline members into nodes. `source` is the file it came from.
-    pub fn from_spec(spec: NodeSpec, source: &str, line: usize, body: String, out: &mut Vec<Node>) {
+    /// Flatten a spec and its inline members into nodes, as
+    /// [`nodes_from_records`](crate::nodes_from_records) does for each record.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The node as written
+    /// * `origin` - Where it was written
+    /// * `body` - Its body as markdown, unless its spec holds one
+    /// * `out` - The nodes to add it and its members to
+    pub(crate) fn from_spec(spec: NodeSpec, origin: Origin, body: String, out: &mut Vec<Node>) {
         let NodeSpec { id, title, status, optional, group, needs, helps, docs, collapsed, description, decisions, performance, acceptance, body: inline_body, nodes } = spec;
         let title = title
             .or_else(|| crate::spec::first_heading(&body))
@@ -135,8 +141,7 @@ impl Node {
             needs,
             helps,
             collapsed,
-            source: source.to_string(),
-            line,
+            origin: origin.clone(),
             inline: false,
             docs_raw: docs,
             description_raw: description,
@@ -147,11 +152,17 @@ impl Node {
             ..Node::default()
         });
         for mut child in nodes {
+            // a member belongs to the node that lists it unless it names a group
             if child.group.is_none() {
                 child.group = Some(parent_id.clone());
             }
+            // a stored node's member is named in its plan, and a file's shares its file
+            let child_origin = match &origin {
+                Origin::Stored { name } => name.sibling(child.id.as_str()).map_or_else(|_| origin.clone(), |name| Origin::Stored { name }),
+                Origin::File { .. } => origin.clone(),
+            };
             let start = out.len();
-            Node::from_spec(child, source, line, String::new(), out);
+            Node::from_spec(child, child_origin, String::new(), out);
             for n in &mut out[start..] {
                 n.inline = true;
             }
@@ -218,7 +229,7 @@ impl Graph {
                 let first = &g.nodes[first];
                 diags.push(diag(
                     &node,
-                    format!("duplicate id `{}`, first defined at {}:{}", node.id, first.source, first.line),
+                    format!("duplicate id `{}`, first defined at {}", node.id, first.origin),
                 ));
                 continue;
             }
@@ -635,8 +646,14 @@ impl Graph {
     }
 }
 
+/// A problem found in a node, at where it was written
+///
+/// # Arguments
+///
+/// * `node` - The node the problem is in
+/// * `message` - What the problem is
 fn diag(node: &Node, message: String) -> Diagnostic {
-    Diagnostic { source: node.source.clone(), line: Some(node.line), message }
+    node.origin.diagnostic(message)
 }
 
 /// Find any cycle in a directed graph, returned as the edge labels along it.
@@ -695,7 +712,7 @@ mod tests {
             parent: parent.map(Into::into),
             needs: needs.iter().map(|s| s.to_string()).collect(),
             status,
-            source: "t.md".into(),
+            origin: Origin::File { source: "t.md".into(), line: 0 },
             ..Node::default()
         }
     }
@@ -720,7 +737,7 @@ mod tests {
     fn performance_is_checked() {
         use crate::perf::{Metric, Performance};
         let mut n = node("a", None, &[], None);
-        n.line = 4;
+        n.origin = Origin::File { source: "t.md".into(), line: 4 };
         n.performance = Some(Performance { metrics: vec![Metric { name: "x".into(), ..Metric::default() }], ..Performance::default() });
         let (_, d) = Graph::build(vec![n]);
         assert_eq!(d.len(), 1);

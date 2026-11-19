@@ -400,7 +400,7 @@ pub fn sidebar(g: &Graph, i: usize, open: Option<bool>, filter: &Filter) -> Stri
     if !n.html.trim().is_empty() {
         let _ = write!(s, r#"<div class="reef-body">{}</div>"#, n.html);
     }
-    let _ = write!(s, r#"<div class="reef-source">{}:{}</div>"#, esc(&n.source), n.line);
+    let _ = write!(s, r#"<div class="reef-source">{}</div>"#, esc(&n.origin.to_string()));
     s
 }
 

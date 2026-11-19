@@ -163,8 +163,8 @@ impl<S: DocSource> Renderer<S> {
         // every doc link must name a doc, and a heading of it if it names one
         for n in &graph.nodes {
             for d in &n.docs_raw {
-                if let Err(msg) = self.doc_link(&n.source, d) {
-                    diags.push(Diagnostic { source: n.source.clone(), line: Some(n.line), message: msg });
+                if let Err(msg) = self.doc_link(n.origin.base(), d) {
+                    diags.push(n.origin.diagnostic(msg));
                 }
             }
         }
@@ -209,7 +209,7 @@ impl<S: DocSource> Renderer<S> {
                 n.id
             ),
         };
-        Some(Diagnostic { source: n.source.clone(), line: Some(n.line), message })
+        Some(n.origin.diagnostic(message))
     }
 
     /// Fill in a node's why, what, details and design choices: as written, or else from the
@@ -219,9 +219,11 @@ impl<S: DocSource> Renderer<S> {
     ///
     /// * `n` - The node to brief
     fn brief(&self, n: &mut Node) {
+        // the path the node's links are written relative to
+        let base = n.origin.base().to_string();
         // render each part of the description that is written
         if let Some(d) = &n.description_raw {
-            let part = |md: &Option<String>| md.as_deref().map_or(String::new(), |md| render(md, &n.source, None, false));
+            let part = |md: &Option<String>| md.as_deref().map_or(String::new(), |md| render(md, &base, None, false));
             n.why = part(&d.why);
             n.what = part(&d.what);
             n.details = part(&d.details);
@@ -229,28 +231,28 @@ impl<S: DocSource> Renderer<S> {
         // render the design choices that are written, as a list if there are several
         match n.decisions_raw.as_slice() {
             [] => {}
-            [one] => n.design = render(one, &n.source, None, false),
+            [one] => n.design = render(one, &base, None, false),
             many => {
                 let list: String = many.iter().map(|d| format!("- {}\n", d.replace('\n', "\n  "))).collect();
-                n.design = render(&list, &n.source, None, false);
+                n.design = render(&list, &base, None, false);
             }
         }
         // render the note under the measurements
         if let Some(p) = &mut n.performance
             && let Some(note) = &p.note
         {
-            p.note = Some(render(note, &n.source, None, false));
+            p.note = Some(render(note, &base, None, false));
         }
         // render each acceptance criterion so it sits in a line
         for c in &mut n.acceptance {
-            c.text = inline_html(&render(&c.text, &n.source, None, false));
+            c.text = inline_html(&render(&c.text, &base, None, false));
         }
         // take whatever is still missing from the docs, in the order they are linked
         for link in &n.docs_raw {
             if has_text(&n.why) && has_text(&n.what) && !n.design.is_empty() && n.perf_doc.is_some() {
                 break;
             }
-            let Target::Internal { path, anchor } = paths::resolve(&n.source, link) else { continue };
+            let Target::Internal { path, anchor } = paths::resolve(&base, link) else { continue };
             if !path.ends_with(".md") {
                 continue;
             }
@@ -280,7 +282,7 @@ impl<S: DocSource> Renderer<S> {
             // where the measurements are, linked as the doc is
             if n.perf_doc.is_none() {
                 n.perf_doc = perf_doc(&text, sec, anchor.is_some(), &self.sections.performance_sections)
-                    .and_then(|pd| self.doc_link(&n.source, link).ok().map(|l| PerfDoc { href: l.href, label: l.label, ..pd }));
+                    .and_then(|pd| self.doc_link(&base, link).ok().map(|l| PerfDoc { href: l.href, label: l.label, ..pd }));
             }
         }
     }
@@ -300,8 +302,8 @@ impl<S: DocSource> Renderer<S> {
             .map(|n| {
                 let mut n = n.clone();
                 // render its body and resolve its doc links
-                n.html = render_body(&n.body, &n.source, &n.title);
-                n.docs = n.docs_raw.iter().filter_map(|d| self.doc_link(&n.source, d).ok()).collect();
+                n.html = render_body(&n.body, n.origin.base(), &n.title);
+                n.docs = n.docs_raw.iter().filter_map(|d| self.doc_link(n.origin.base(), d).ok()).collect();
                 // link its own page
                 n.page = page_of(&n);
                 n
@@ -339,15 +341,14 @@ fn perf_doc(text: &str, sec: &str, anchored: bool, names: &[String]) -> Option<P
 mod tests {
     use super::*;
     use crate::source::MemSource;
-    use reef_model::Node;
+    use reef_model::{Node, NodeName, Origin};
 
     /// A node written in `plan/a.md` that links to `docs`
     fn linked(id: &str, docs: &[&str]) -> Node {
         Node {
             id: id.into(),
             title: id.into(),
-            source: "plan/a.md".into(),
-            line: 3,
+            origin: Origin::File { source: "plan/a.md".into(), line: 3 },
             docs_raw: docs.iter().map(|d| d.to_string()).collect(),
             ..Node::default()
         }
@@ -398,12 +399,29 @@ mod tests {
         let mut n = linked("a", &["../design.md"]);
         n.body = "# a\n\nSee [d](../design.md#rows).\n".into();
         let (g, _) = Graph::build(vec![n]);
-        let p = r.payload(&g, |n| Some(format!("{ROOT}{}", paths::html_of(&n.source))));
+        let p = r.payload(&g, |n| n.origin.file().map(|f| format!("{ROOT}{}", paths::html_of(f))));
         let a = &p.nodes[0];
         // the body is rendered, its repeated title dropped, and its doc links resolved
         assert_eq!(a.html.trim(), "<p>See <a href=\"reef-root:/design.html#rows\">d</a>.</p>");
         assert_eq!(a.docs, vec![Link { label: "Design".into(), href: "reef-root:/design.html".into() }]);
         assert_eq!(a.page.as_deref(), Some("reef-root:/plan/a.html"));
+    }
+
+    #[test]
+    fn stored_nodes_link_from_the_root() {
+        let r = Renderer::new(MemSource::new().with("design.md", DESIGN), Sections::default());
+        // a stored node's links are written from the root of its plan's docs
+        let name: NodeName = "reef/central/a".parse().unwrap();
+        let mut n = Node { id: "a".into(), origin: Origin::Stored { name }, docs_raw: vec!["design.md#rows".into(), "gone.md".into()], ..Node::default() };
+        n.body = "See [d](design.md).\n".into();
+        let (mut g, _) = Graph::build(vec![n]);
+        let diags: Vec<String> = r.prepare(&mut g).iter().map(|d| d.to_string()).collect();
+        assert_eq!(g.node(0).why_from.as_deref(), Some("Context"));
+        // its problems are at its name
+        assert_eq!(diags, ["reef/central/a: doc `gone.md` not found (looked for src/gone.md)"]);
+        let p = r.payload(&g, |_| None);
+        assert!(p.nodes[0].html.contains("href=\"reef-root:/design.html\""), "{}", p.nodes[0].html);
+        assert_eq!(p.nodes[0].docs[0].href, "reef-root:/design.html#rows");
     }
 
     #[test]

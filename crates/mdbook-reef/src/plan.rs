@@ -2,10 +2,10 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
 use reef_model::spec::parse_node_file;
-use reef_model::{Diagnostic, Graph, Layout, Node, ViewSpec};
+use reef_model::{Diagnostic, Graph, Layout, Node, Origin, Record, ViewSpec, nodes_from_records};
 use reef_render::paths;
 use reef_render::{DocSource, FsSource, ROOT, Renderer, Sections, is_reef, md_options};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::Path;
 
@@ -83,22 +83,29 @@ impl Plan {
     /// * `docs` - Where the docs the nodes link to are read from
     pub fn load_with(src: &Path, config: &Config, docs: Box<dyn DocSource>) -> Plan {
         let mut diags = Vec::new();
-        let mut nodes: Vec<Node> = Vec::new();
-        // parse every node file, and put each inline node at the line its id is on
-        for rel in markdown_files(src, &config.roots) {
+        let mut records = Vec::new();
+        // each node file's frontmatter and the line it starts on, to place its inline nodes
+        let mut yamls: HashMap<String, (String, usize)> = HashMap::new();
+        // read every node file into a record, in the order the files sort in
+        for (order, rel) in markdown_files(src, &config.roots).into_iter().enumerate() {
             let Ok(text) = std::fs::read_to_string(src.join(&rel)) else { continue };
             match parse_node_file(&text) {
                 Ok(Some((spec, fm))) => {
-                    let start = nodes.len();
-                    Node::from_spec(spec, &rel, 1, fm.body.to_string(), &mut nodes);
-                    for n in &mut nodes[start..] {
-                        if n.inline {
-                            n.line = line_of_id(fm.yaml, &n.id).map_or(1, |l| l + fm.yaml_line - 1);
-                        }
-                    }
+                    yamls.insert(rel.clone(), (fm.yaml.to_string(), fm.yaml_line));
+                    let origin = Origin::File { source: rel, line: 1 };
+                    records.push(Record { spec, body: fm.body.to_string(), order: order as u64, origin });
                 }
                 Ok(None) => {}
-                Err(e) => diags.push(Diagnostic { source: rel.clone(), line: e.line, message: e.message }),
+                Err(e) => diags.push(Diagnostic { source: rel, line: e.line, message: e.message }),
+            }
+        }
+        // turn the records into nodes, and put each inline node at the line its id is on
+        let mut nodes = nodes_from_records(records);
+        for n in nodes.iter_mut().filter(|n| n.inline) {
+            if let Origin::File { source, line } = &mut n.origin
+                && let Some((yaml, yaml_line)) = yamls.get(source.as_str())
+            {
+                *line = line_of_id(yaml, &n.id).map_or(1, |l| l + yaml_line - 1);
             }
         }
         // check the nodes as one graph
@@ -123,7 +130,9 @@ impl Plan {
     /// * `chapters` - The book's chapter files, which have pages of their own
     pub fn payload_json(&self, chapters: &HashSet<String>) -> String {
         // a node written in a chapter links to the chapter's page
-        let page_of = |n: &Node| chapters.contains(&n.source).then(|| format!("{ROOT}{}", paths::html_of(&n.source)));
+        let page_of = |n: &Node| {
+            n.origin.file().filter(|f| chapters.contains(*f)).map(|f| format!("{ROOT}{}", paths::html_of(f)))
+        };
         serde_json::to_string(&self.renderer.payload(&self.graph, page_of)).expect("serializable")
     }
 }
