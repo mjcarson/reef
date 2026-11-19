@@ -1,7 +1,8 @@
 //! What a node's author writes: the frontmatter of a markdown file, or one entry in a group's
 //! `nodes:` list.
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Where a piece of work stands. A group's status is derived from its members unless it names
 /// one itself.
@@ -31,56 +32,135 @@ impl Status {
 
 /// One node as written. Unknown keys are ignored so a file's frontmatter can carry other
 /// tools' keys (an Obsidian `tags:` list, say) beside reef's.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// It serializes as canonical frontmatter: its keys in the order below, each left out at its
+/// default, and acceptance criteria in their short form (`- unit: <text>`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NodeSpec {
     /// Unique across the book. The only required key.
     pub id: String,
     /// Shown on the box. Defaults to the file's first heading, then to the id.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default)]
+    /// Where the work stands, as its author says. Default: to do, or for a group, what its
+    /// members add up to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     /// Drawn dashed. Optional work helps rather than gates.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub optional: bool,
     /// The group this node belongs to. Inline nodes belong to the node that lists them.
-    #[serde(default, alias = "parent")]
+    #[serde(default, alias = "parent", skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Work that must be done before this can start: a solid arrow from each.
-    #[serde(default, deserialize_with = "one_or_many", alias = "after", alias = "requires")]
+    #[serde(default, deserialize_with = "one_or_many", alias = "after", alias = "requires", skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     /// Work that helps this but does not gate it: a dashed arrow from each.
-    #[serde(default, deserialize_with = "one_or_many")]
+    #[serde(default, deserialize_with = "one_or_many", skip_serializing_if = "Vec::is_empty")]
     pub helps: Vec<String>,
     /// Links to the docs that describe this work, relative to the file that names them.
-    #[serde(default, deserialize_with = "one_or_many", alias = "doc", alias = "links")]
+    #[serde(default, deserialize_with = "one_or_many", alias = "doc", alias = "links", skip_serializing_if = "Vec::is_empty")]
     pub docs: Vec<String>,
     /// Whether this group starts collapsed. Groups start collapsed unless this says `false`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapsed: Option<bool>,
     /// Why the work is needed and what finishing it will do, shown first in the sidebar, with
     /// a longer explanation below them. A plain string is the longer explanation alone. A part
     /// not written is taken from the first doc that has it.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<Description>,
     /// The design choices, as markdown: one string, or a list of them drawn as bullets.
     /// Default: taken from the first doc that has them.
-    #[serde(default, deserialize_with = "one_or_many", alias = "design")]
+    #[serde(default, deserialize_with = "one_or_many", alias = "design", skip_serializing_if = "Vec::is_empty")]
     pub decisions: Vec<String>,
     /// How the work changed performance: metrics measured before and after it, drawn in the
     /// sidebar as a table and charts.
-    #[serde(default, alias = "perf")]
+    #[serde(default, alias = "perf", skip_serializing_if = "Option::is_none")]
     pub performance: Option<crate::perf::Performance>,
     /// How the work will be known to be done: unit and integration tests, performance figures
     /// and features that must work.
-    #[serde(default, alias = "criteria")]
+    #[serde(default, alias = "criteria", serialize_with = "short_criteria", skip_serializing_if = "Vec::is_empty")]
     pub acceptance: Vec<crate::accept::Criterion>,
     /// Markdown shown in the sidebar for an inline node. A file node's body is its file.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     /// Members with no file of their own.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<NodeSpec>,
+}
+
+#[cfg(feature = "parse")]
+impl NodeSpec {
+    /// Print this spec as canonical YAML frontmatter, without its `---` fences
+    ///
+    /// Reading what it prints with [`NodeSpec::from_yaml`] gives back the same spec.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_model::NodeSpec;
+    ///
+    /// let spec = NodeSpec::from_yaml("id: C4\nneeds: C1\nacceptance:\n  - { unit: Round-trips }\n").unwrap();
+    /// assert_eq!(spec.to_yaml(), "id: C4\nneeds:\n- C1\nacceptance:\n- unit: Round-trips\n");
+    /// ```
+    pub fn to_yaml(&self) -> String {
+        // every key is a string, a number, a bool or a list or map of them, which YAML can
+        // always hold
+        serde_yaml_ng::to_string(self).expect("a node spec prints as YAML")
+    }
+
+    /// Read a spec from YAML frontmatter, without its `---` fences
+    ///
+    /// # Arguments
+    ///
+    /// * `yaml` - The frontmatter, as `reef node put` or a store keeps it
+    pub fn from_yaml(yaml: &str) -> Result<NodeSpec, SpecError> {
+        serde_yaml_ng::from_str(yaml).map_err(|e| SpecError { line: e.location().map(|l| l.line()), message: e.to_string() })
+    }
+}
+
+/// Write acceptance criteria in the short form a book writes them in: each criterion's kind
+/// as its key, holding its text, with any of its other keys beside it
+///
+/// # Arguments
+///
+/// * `criteria` - The criteria to write
+/// * `s` - The serializer to write them to
+fn short_criteria<S: Serializer>(criteria: &[crate::accept::Criterion], s: S) -> Result<S::Ok, S::Error> {
+    /// One criterion in its short form
+    struct Short<'a>(&'a crate::accept::Criterion);
+
+    impl Serialize for Short<'_> {
+        /// Write the criterion's kind and text, then each other key it has
+        ///
+        /// # Arguments
+        ///
+        /// * `s` - The serializer to write it to
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            let c = self.0;
+            let mut map = s.serialize_map(None)?;
+            // its kind's key holds its text
+            map.serialize_entry(c.kind.as_str(), &c.text)?;
+            // then each other key it has, in the order the reference gives them
+            if let Some(status) = &c.status {
+                map.serialize_entry("status", status)?;
+            }
+            for (key, value) in [("test", &c.test), ("metric", &c.metric), ("node", &c.node), ("chart", &c.chart)] {
+                if let Some(value) = value {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            for (key, value) in [("at-least", &c.at_least), ("at-most", &c.at_most)] {
+                if let Some(value) = value {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            map.end()
+        }
+    }
+
+    // write each criterion in turn
+    s.collect_seq(criteria.iter().map(Short))
 }
 
 /// Why a piece of work is needed, what finishing it will do, and a longer explanation, each as
@@ -340,6 +420,25 @@ mod tests {
         assert_eq!(a[2].status, Some(crate::accept::Met::Met));
         assert_eq!((a[3].kind, a[3].at_least), (crate::accept::Kind::Performance, Some(6000.0)));
         assert!(parse_node_file("---\nid: a\nacceptance:\n  - Just text\n---\n").is_err());
+    }
+
+    #[test]
+    fn prints_canonical_yaml() {
+        let text = "---\nnodes:\n  - { id: m, body: \"Line one.\\n\\nLine two.\\n\" }\nid: g\ntitle: \"G: a group\"\nstatus: wip\noptional: true\nparent: top\nneeds: a\nhelps: [b]\ndoc: x.md#y\ncollapsed: false\ndescription: { why: Slow., what: Fast. }\ndesign: One way.\nperf:\n  metrics:\n    - { name: n, better: higher, before: 2, after: [4, 3, 5] }\ncriteria:\n  - unit: Answers at once\n  - kind: performance\n    text: Doubles\n    metric: n\n    at-least: 4\n  - feature: { text: Survives, status: met, test: t.rs }\ntags: [ignored]\n---\n";
+        let (spec, _) = parse_node_file(text).unwrap().unwrap();
+        // every key in order under its own name, aliases and unknown keys gone, criteria short
+        let yaml = spec.to_yaml();
+        let expected = "id: g\ntitle: 'G: a group'\nstatus: in-progress\noptional: true\ngroup: top\nneeds:\n- a\nhelps:\n- b\ndocs:\n- x.md#y\ncollapsed: false\ndescription:\n  why: Slow.\n  what: Fast.\ndecisions:\n- One way.\nperformance:\n  metrics:\n  - name: n\n    better: higher\n    before: 2.0\n    after:\n    - 4.0\n    - 3.0\n    - 5.0\nacceptance:\n- unit: Answers at once\n- perf: Doubles\n  metric: n\n  at-least: 4.0\n- feature: Survives\n  status: met\n  test: t.rs\nnodes:\n- id: m\n  body: |\n    Line one.\n\n    Line two.\n";
+        assert_eq!(yaml, expected);
+        // and it reads back as the same spec
+        assert_eq!(NodeSpec::from_yaml(&yaml).unwrap(), spec);
+        // a spec with nothing but its id prints just that
+        assert_eq!(NodeSpec { id: "a".into(), ..NodeSpec::default() }.to_yaml(), "id: a\n");
+        // a value that would read as another type is quoted
+        let odd = NodeSpec { id: "123".into(), title: Some("yes".into()), ..NodeSpec::default() };
+        assert_eq!(NodeSpec::from_yaml(&odd.to_yaml()).unwrap(), odd);
+        // a problem in what is read names its line
+        assert_eq!(NodeSpec::from_yaml("id: a\nstatus: nope\n").unwrap_err().line, Some(2));
     }
 
     #[test]
