@@ -1,0 +1,12 @@
+[book]
+title = "reef: the centralized planner"
+authors = ["reef"]
+language = "en"
+src = "src"
+
+[preprocessor.reef]
+command = "cargo run -q --release -p mdbook-reef --"
+
+[output.html]
+additional-js = ["reef.js"]
+additional-css = ["reef.css"]

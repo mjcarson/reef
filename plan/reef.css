@@ -1,0 +1,586 @@
+/* reef: planning graphs for mdbook. Colours come from the book's theme variables, so every
+   theme works and a theme switch needs no reload. */
+
+.reef {
+    --reef-done: #2e7d32;
+    --reef-done-fg: #ffffff;
+    --reef-progress: #e0a100;
+    --reef-blocked: #d32f2f;
+    --reef-ready: var(--links, #2b79a2);
+    --reef-line: color-mix(in srgb, var(--fg, #333) 55%, transparent);
+    --reef-frame: color-mix(in srgb, var(--fg, #333) 5%, var(--bg, #fff));
+    --reef-box: var(--bg, #fff);
+    --reef-border: color-mix(in srgb, var(--fg, #333) 40%, var(--bg, #fff));
+    --reef-muted: color-mix(in srgb, var(--fg, #333) 60%, var(--bg, #fff));
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 260px;
+    margin: 1em 0;
+    border: 1px solid var(--table-border-color, var(--reef-border));
+    border-radius: 8px;
+    background: var(--bg, #fff);
+    color: var(--fg, #333);
+    overflow: hidden;
+    font-size: 13px;
+    outline: none;
+}
+.reef:focus-visible { box-shadow: 0 0 0 2px var(--reef-ready); }
+.reef:fullscreen { height: 100vh !important; margin: 0; border-radius: 0; border: 0; }
+.reef .reef-noscript { padding: 1em; }
+
+/* layout = "page": the view fills the page to the right of the book's sidebar. Only a page
+   holding such a view is changed. Its text column loses mdbook's max-width and becomes a column
+   exactly as tall as the window under the menu bar. Text above the view shrinks the view rather
+   than scrolling the page. The previous and next arrows go, since the sidebar is the way on. */
+html:has(.reef-page) .content { padding-bottom: 0; overflow: hidden; }
+html:has(.reef-page) .content main {
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - var(--menu-bar-height, 50px));
+    height: calc(100dvh - var(--menu-bar-height, 50px));
+    box-sizing: border-box;
+    padding-bottom: 8px;
+}
+html:has(.reef-page) .content main > :first-child { margin-top: 0.4em; }
+html:has(.reef-page) .content main > h1:first-child { margin-bottom: 0.2em; }
+html:has(.reef-page) .nav-wide-wrapper, html:has(.reef-page) .content .nav-wrapper { display: none; }
+.reef.reef-page { flex: 1 1 auto; min-height: 240px; margin: 0.4em 0 0; }
+
+.reef-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px;
+    border-bottom: 1px solid var(--table-border-color, var(--reef-border));
+    background: var(--sidebar-bg, var(--reef-frame));
+    color: var(--sidebar-fg, var(--fg));
+    flex-wrap: wrap;
+}
+.reef-spacer { flex: 1; }
+.reef-toolbar button, .reef-button {
+    font: inherit;
+    font-size: 12px;
+    padding: 3px 9px;
+    min-width: 28px;
+    border: 1px solid var(--searchbar-border-color, var(--reef-border));
+    border-radius: 4px;
+    background: var(--searchbar-bg, var(--bg));
+    color: var(--searchbar-fg, var(--fg));
+    cursor: pointer;
+    text-decoration: none !important;
+    display: inline-block;
+    line-height: 1.4;
+}
+.reef-toolbar button:hover, .reef-button:hover { border-color: var(--reef-ready); }
+.reef-searchbox { position: relative; flex: 0 1 280px; min-width: 140px; }
+.reef-search {
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    padding: 4px 8px;
+    border: 1px solid var(--searchbar-border-color, var(--reef-border));
+    border-radius: 4px;
+    background: var(--searchbar-bg, var(--bg));
+    color: var(--searchbar-fg, var(--fg));
+}
+.reef-results {
+    position: absolute;
+    z-index: 5;
+    left: 0;
+    top: calc(100% + 4px);
+    width: min(440px, 80vw);
+    max-height: 340px;
+    overflow: auto;
+    margin: 0;
+    padding: 4px 0;
+    list-style: none;
+    background: var(--theme-popup-bg, var(--bg));
+    border: 1px solid var(--theme-popup-border, var(--reef-border));
+    border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+.reef-results a { display: block; padding: 4px 10px; color: var(--fg) !important; text-decoration: none !important; }
+.reef-results a:hover { background: var(--theme-hover, var(--reef-frame)); }
+.reef-results code { font-size: 11px; opacity: 0.7; }
+
+.reef-stage { position: relative; flex: 1; min-height: 0; --reef-side-w: min(400px, 88%); }
+.reef-svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: grab;
+    font-size: 13px;
+}
+.reef-svg.reef-panning { cursor: grabbing; }
+
+/* Boxes */
+.reef-box { fill: var(--reef-box); stroke: var(--reef-border); stroke-width: 1.2px; }
+.reef-label { fill: var(--fg); }
+.reef-node { cursor: pointer; }
+.reef-node:hover .reef-box { stroke: var(--reef-ready); stroke-width: 2px; }
+.reef-node.s-done .reef-box { fill: var(--reef-done); stroke: #1b5e20; }
+.reef-node.s-done .reef-label, .reef-node.s-done .reef-count, .reef-node.s-done .reef-chev { fill: var(--reef-done-fg); }
+.reef-node.s-progress .reef-box { stroke: var(--reef-progress); stroke-width: 2.4px; }
+.reef-node.s-blocked .reef-box { stroke: var(--reef-blocked); stroke-width: 2.4px; }
+.reef-node.s-ready .reef-box { stroke: var(--reef-ready); stroke-width: 2.4px; fill: color-mix(in srgb, var(--reef-ready) 12%, var(--reef-box)); }
+.reef-node.optional .reef-box { stroke-dasharray: 5 4; }
+.reef-node.ghost { opacity: 0.45; }
+.reef-node.collapsed .reef-box { stroke-width: 2px; filter: drop-shadow(3px 3px 0 var(--reef-border)); }
+.reef-node.sel .reef-box { stroke: var(--reef-ready); stroke-width: 3.5px; filter: drop-shadow(0 0 6px var(--reef-ready)); }
+.reef-tick { display: none; }
+.reef-chev { fill: var(--reef-muted); font-size: 12px; }
+.reef-expand { cursor: pointer; }
+.reef-expand-hit, .reef-head-hit { fill: transparent; }
+.reef-expand:hover .reef-chev { fill: var(--reef-ready); }
+.reef-count { fill: var(--reef-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.reef-bar-bg { fill: color-mix(in srgb, var(--fg) 15%, transparent); }
+.reef-bar { fill: var(--reef-done); }
+.reef-node.s-done .reef-bar-bg { fill: rgba(255, 255, 255, 0.3); }
+.reef-node.s-done .reef-bar { fill: #ffffff; }
+
+/* Open groups */
+.reef-frame { fill: var(--reef-frame); stroke: var(--reef-border); stroke-width: 1.2px; }
+.reef-group.s-done .reef-frame { stroke: var(--reef-done); }
+.reef-group.s-progress .reef-frame { stroke: var(--reef-progress); }
+.reef-group.optional .reef-frame { stroke-dasharray: 6 4; }
+.reef-head { cursor: pointer; }
+.reef-group-title { fill: var(--fg); font-weight: 600; }
+.reef-head:hover .reef-group-title, .reef-head:hover .reef-chev { fill: var(--reef-ready); }
+
+/* Arrows */
+.reef-edge { fill: none; stroke: var(--reef-line); stroke-width: 1.4px; }
+.reef-edge.helps { stroke-dasharray: 5 4; }
+.reef-edge.hl { stroke: var(--reef-ready); stroke-width: 2.4px; }
+.reef-arrowhead { fill: var(--reef-line); }
+
+/* Hover: light the lineage, fade the rest */
+.reef-svg.reef-dim .reef-node:not(.lit), .reef-svg.reef-dim .reef-edge:not(.lit) { opacity: 0.18; }
+.reef-svg.reef-dim .reef-group:not(.lit) .reef-frame { opacity: 0.4; }
+.reef-svg.reef-dim .reef-edge.lit { stroke: var(--reef-ready); stroke-width: 2px; }
+.reef-node, .reef-edge { transition: opacity 120ms; }
+.reef-svg.reef-flash .reef-node.sel .reef-box { animation: reef-pulse 0.9s ease-out; }
+@keyframes reef-pulse { 0% { stroke-width: 9px; } 100% { stroke-width: 3.5px; } }
+
+/* Legend and hint */
+.reef-legend {
+    position: absolute;
+    left: 8px;
+    bottom: 6px;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--reef-muted);
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    padding: 2px 6px;
+    border-radius: 4px;
+    pointer-events: none;
+}
+.reef-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    margin-right: 5px;
+    vertical-align: -1px;
+    box-sizing: border-box;
+    border: 1.5px solid var(--reef-border);
+    background: var(--reef-box);
+}
+.reef-dot.s-done { background: var(--reef-done); border-color: #1b5e20; }
+.reef-dot.s-progress { border-color: var(--reef-progress); border-width: 2.5px; }
+.reef-dot.s-ready { border-color: var(--reef-ready); border-width: 2.5px; }
+.reef-dot.s-blocked { border-color: var(--reef-blocked); border-width: 2.5px; }
+.reef-dot.optional { border-style: dashed; }
+.reef-hint {
+    position: absolute;
+    left: 50%;
+    top: 12px;
+    transform: translateX(-50%);
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.75);
+    color: #fff;
+    font-size: 12px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms;
+}
+.reef-hint.on { opacity: 1; }
+
+/* Sidebar */
+.reef-side {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: var(--reef-side-w);
+    box-sizing: border-box;
+    overflow: auto;
+    padding: 12px 16px 24px;
+    background: var(--sidebar-bg, var(--bg));
+    color: var(--sidebar-fg, var(--fg));
+    border-left: 1px solid var(--sidebar-spacer, var(--reef-border));
+    box-shadow: -6px 0 18px rgba(0, 0, 0, 0.18);
+    font-size: 14px;
+    line-height: 1.5;
+}
+.reef-side[hidden] { display: none; }
+/* The sidebar's left edge: drag it to resize, double-click to reset. A sibling of the sidebar,
+   which is redrawn on every selection and scrolls; both read --reef-side-w so they line up. */
+.reef-side-grip {
+    display: none;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    right: var(--reef-side-w);
+    width: 9px;
+    transform: translateX(50%);
+    cursor: ew-resize;
+    touch-action: none;
+    z-index: 3;
+}
+.reef-has-side .reef-side-grip { display: block; }
+.reef-side-grip::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 3px;
+    width: 3px;
+    background: transparent;
+    transition: background 120ms;
+}
+.reef-side-grip:hover::after, .reef-side-grip:focus-visible::after, .reef-resizing .reef-side-grip::after { background: var(--links, #4183c4); }
+.reef-side-grip:focus { outline: none; }
+.reef-resizing, .reef-resizing * { cursor: ew-resize !important; user-select: none !important; }
+.reef-side a { color: var(--links); }
+.reef-side h2 { font-size: 1.15em; margin: 0.4em 0 0.3em; }
+.reef-side h3 { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em; margin: 1.2em 0 0.3em; color: var(--reef-muted); }
+.reef-side ul { margin: 0; padding-left: 0; list-style: none; }
+.reef-side li { margin: 2px 0; }
+.reef-side .reef-body { margin-top: 1.2em; border-top: 1px solid var(--sidebar-spacer, var(--reef-border)); padding-top: 0.6em; }
+.reef-side .reef-body h1 { font-size: 1.2em; }
+.reef-side .reef-body h2 { font-size: 1.1em; }
+.reef-side .reef-body pre { overflow: auto; }
+.reef-side .reef-body table { display: block; overflow: auto; }
+.reef-close {
+    position: sticky;
+    top: 0;
+    float: right;
+    font-size: 20px;
+    line-height: 1;
+    border: 0;
+    background: none;
+    color: inherit;
+    cursor: pointer;
+    padding: 2px 6px;
+    z-index: 2;
+}
+.reef-badges { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.reef-badge {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--reef-border);
+}
+.reef-badge.s-done { background: var(--reef-done); color: #fff; border-color: var(--reef-done); }
+.reef-badge.s-progress { border-color: var(--reef-progress); }
+.reef-badge.s-ready { border-color: var(--reef-ready); color: var(--reef-ready); }
+.reef-badge.s-blocked { border-color: var(--reef-blocked); color: var(--reef-blocked); }
+.reef-badge.optional { border-style: dashed; }
+.reef-id { font-size: 11px; opacity: 0.7; }
+.reef-crumbs { font-size: 12px; color: var(--reef-muted); }
+.reef-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0.6em 0; }
+.reef-note { font-size: 11px; color: var(--reef-muted); text-transform: none; letter-spacing: 0; }
+.reef-source { margin-top: 1.5em; font-size: 11px; color: var(--reef-muted); font-family: var(--mono-font, monospace); }
+/* A section: its header folds it, and sticks to the sidebar's top while the section is
+   scrolled through, so a long one can be folded from anywhere in it. */
+.reef-sec { margin-top: 0.9em; }
+.reef-sec > summary {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    list-style: none;
+    cursor: pointer;
+    position: sticky;
+    top: -12px; /* the sidebar's top padding: stick flush to its edge */
+    z-index: 1;
+    margin: 0 -16px;
+    padding: 5px 44px 4px 16px; /* room on the right for the close button */
+    background: var(--sidebar-bg, var(--bg));
+}
+.reef-sec[open] > summary { border-bottom: 1px solid var(--sidebar-spacer, var(--reef-border)); margin-bottom: 0.3em; }
+.reef-sec > summary::-webkit-details-marker { display: none; }
+.reef-sec > summary::before { content: "▸"; color: var(--reef-muted); font-size: 11px; flex: none; width: 10px; }
+.reef-sec[open] > summary::before { content: "▾"; }
+.reef-sec > summary > h3 { margin: 0; flex: none; }
+.reef-sec > summary:hover::before, .reef-sec > summary:hover > h3 { color: var(--reef-ready); }
+/* Description, documentation and design choices */
+.reef-ww { margin: 0.2em 0 0.4em; }
+.reef-ww dt {
+    margin: 0.6em 0 0.1em;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--reef-muted);
+}
+.reef-ww dt:first-child { margin-top: 0.2em; }
+.reef-ww dt .reef-note { text-transform: none; letter-spacing: normal; font-weight: normal; }
+.reef-ww dd { margin: 0; }
+.reef-ww dd p { margin: 0.15em 0; }
+.reef-ww dd ul { list-style: disc; padding-left: 1.2em; margin: 0.15em 0; }
+.reef-desc { margin-top: 0.5em; }
+.reef-desc p { margin: 0.3em 0; }
+.reef-doc { margin: 0.4em 0 0.7em; }
+.reef-doc-head { display: flex; gap: 8px; align-items: baseline; justify-content: space-between; }
+.reef-doc-head > a:first-child { font-weight: 600; text-decoration: none; }
+.reef-doc-head > a:first-child:hover { text-decoration: underline; }
+.reef-open { flex: none; }
+/* A doc's header is its toggle. */
+.reef-doc-read > summary { cursor: pointer; list-style: none; padding: 2px 0; }
+.reef-doc-read > summary::-webkit-details-marker { display: none; }
+.reef-doc-read > summary > a:first-child { margin-right: auto; }
+.reef-doc-read > summary::before { content: "▸"; color: var(--reef-muted); font-size: 11px; flex: none; width: 10px; }
+.reef-doc-read[open] > summary::before { content: "▾"; }
+.reef-doc-read > summary:hover::before { color: var(--reef-ready); }
+.reef-doc-ext > .reef-doc-head { padding-left: 18px; }
+.reef-design summary { cursor: pointer; color: var(--reef-muted); font-size: 12px; margin: 2px 0; }
+.reef-design summary:hover { color: var(--reef-ready); }
+.reef-doc-text {
+    margin: 4px 0 0;
+    padding: 2px 0 2px 10px;
+    border-left: 3px solid var(--sidebar-spacer, var(--reef-border));
+    font-size: 13px;
+}
+.reef-doc-text h2, .reef-doc-text h3, .reef-doc-text h4 {
+    font-size: 1em;
+    text-transform: none;
+    letter-spacing: 0;
+    color: inherit;
+    margin: 0.9em 0 0.3em;
+}
+.reef-doc-text pre, .reef-doc-text table { display: block; overflow: auto; max-width: 100%; }
+.reef-doc-text img { max-width: 100%; }
+.reef-doc-text a.header { color: inherit; text-decoration: none; }
+.reef-design { font-size: 13px; }
+.reef-design details { margin: 2px 0; padding: 3px 0 3px 8px; border-left: 3px solid var(--reef-done); }
+.reef-design details > summary { color: inherit; font-size: 13px; font-weight: 600; }
+.reef-design details[open] { padding-bottom: 6px; }
+.reef-design details p { margin: 0.35em 0; }
+.reef-choice { margin: 2px 0; padding-left: 11px; }
+/* Filling the page leaves room for a wider sidebar, where docs read better. */
+.reef-page .reef-stage { --reef-side-w: min(560px, 45%); }
+@media (max-width: 900px) { .reef-page .reef-stage { --reef-side-w: min(400px, 88%); } }
+
+.reef-side li a { text-decoration: none; }
+.reef-side li a:hover { text-decoration: underline; }
+
+@media (max-width: 600px) {
+    .reef-toolbar button[data-act="expand"], .reef-toolbar button[data-act="collapse"] { display: none; }
+    .reef-legend { display: none; }
+}
+
+/* The sidebar's Performance section. Before is orange and after blue, and a change that
+   improved is blue and one that regressed is red: pairs checked for colour-blind separation on
+   light and dark surfaces. Every change also says better or worse in words. */
+.reef {
+    --reef-perf-before: #eb6834;
+    --reef-perf-after: #2a78d6;
+    --reef-perf-better: #2a78d6;
+    --reef-perf-worse: #d03b3b;
+    --reef-perf-good-text: #006300;
+    --reef-perf-bad-text: #b3261e;
+    --reef-perf-grid: color-mix(in srgb, var(--fg, #333) 11%, var(--sidebar-bg, var(--bg, #fff)));
+    --reef-perf-axis: color-mix(in srgb, var(--fg, #333) 30%, var(--sidebar-bg, var(--bg, #fff)));
+}
+html.coal .reef, html.navy .reef, html.ayu .reef {
+    --reef-perf-before: #d95926;
+    --reef-perf-after: #3987e5;
+    --reef-perf-better: #3987e5;
+    --reef-perf-worse: #e05252;
+    --reef-perf-good-text: #3fbf3f;
+    --reef-perf-bad-text: #ff7b72;
+}
+.reef-perf-headline { font-size: 12px; font-weight: normal; text-transform: none; letter-spacing: 0; color: var(--sidebar-fg, var(--fg)); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reef-perf > summary > h3 { flex: 0 1 auto; min-width: 0; display: flex; gap: 8px; align-items: baseline; }
+.reef-perf-body { padding-bottom: 8px; font-size: 13px; }
+.reef-perf h4 { font-size: 12px; font-weight: 600; margin: 1em 0 0.3em; }
+.reef-perf-good { color: var(--reef-perf-good-text); font-weight: 600; white-space: nowrap; }
+.reef-perf-bad { color: var(--reef-perf-bad-text); font-weight: 600; white-space: nowrap; }
+.reef-perf-same { color: var(--reef-muted); white-space: nowrap; }
+.reef-perf-dir { display: block; font-size: 10px; color: var(--reef-muted); }
+.reef-perf-table { overflow-x: auto; margin: 0.4em 0; }
+.reef-perf-table table { border-collapse: collapse; font-size: 12px; width: 100%; }
+.reef-perf-table th, .reef-perf-table td {
+    padding: 3px 6px;
+    border-bottom: 1px solid var(--reef-perf-grid);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    vertical-align: top;
+}
+.reef-perf-table th:first-child, .reef-perf-table td:first-child { text-align: left; padding-left: 0; }
+.reef-perf-table th { font-weight: 600; color: var(--reef-muted); }
+.reef-perf-note { font-size: 12px; color: var(--reef-muted); }
+.reef-perf-note p { margin: 0.4em 0; }
+.reef-perf-caption { font-weight: 600; margin: 0.8em 0 0.2em; }
+.reef-perf-doc > summary { cursor: pointer; color: var(--reef-muted); font-size: 12px; margin: 8px 0 2px; }
+.reef-perf-doc > summary:hover { color: var(--reef-ready); }
+
+.reef-perf-chart { display: block; width: 100%; height: auto; margin: 0.2em 0 0.6em; overflow: visible; }
+.reef-perf-chart text { font-size: 11px; fill: var(--sidebar-fg, var(--fg)); font-variant-numeric: tabular-nums; }
+.reef-perf-chart .reef-perf-axis-text, .reef-perf-chart .reef-perf-side { fill: var(--reef-muted); font-size: 10px; }
+.reef-perf-chart .reef-perf-label { fill: var(--reef-muted); }
+.reef-perf-chart .reef-perf-legend { fill: var(--sidebar-fg, var(--fg)); }
+.reef-perf-before { fill: var(--reef-perf-before); }
+.reef-perf-after { fill: var(--reef-perf-after); }
+.reef-perf-better { fill: var(--reef-perf-better); }
+.reef-perf-worse { fill: var(--reef-perf-worse); }
+.reef-perf-before-line, .reef-perf-after-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.reef-perf-before-line { stroke: var(--reef-perf-before); }
+.reef-perf-after-line { stroke: var(--reef-perf-after); }
+.reef-perf-dot { stroke: var(--sidebar-bg, var(--bg, #fff)); stroke-width: 2; }
+.reef-perf-faint { opacity: 0.4; }
+.reef-perf-grid { stroke: var(--reef-perf-grid); stroke-width: 1; }
+.reef-perf-baseline, .reef-perf-tick { stroke: var(--reef-perf-axis); stroke-width: 1; }
+.reef-perf-whisker { stroke: var(--sidebar-fg, var(--fg)); stroke-width: 1.2; fill: none; opacity: 0.7; }
+.reef-perf-hit-area { fill: transparent; }
+
+/* Interaction: the charts answer the pointer the way a dashboard's do. */
+.reef-perf-chart { touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.reef-perf-plot { fill: transparent; }
+.reef-perf-zoomable .reef-perf-plot { cursor: crosshair; }
+.reef-perf-can-open, .reef-perf-can-open .reef-perf-plot { cursor: pointer; }
+.reef-perf-cross { stroke: var(--reef-perf-axis); stroke-width: 1; pointer-events: none; }
+.reef-perf-ring { stroke-width: 2.5; pointer-events: none; }
+.reef-perf-overlay { pointer-events: none; }
+.reef-perf-select { fill: color-mix(in srgb, var(--reef-perf-after) 14%, transparent); stroke: var(--reef-perf-after); stroke-width: 1; }
+.reef-perf-band { fill: transparent; }
+.reef-perf-row { cursor: default; }
+.reef-perf-row.reef-perf-hl .reef-perf-band { fill: color-mix(in srgb, var(--fg, #333) 7%, transparent); }
+.reef-perf-row.reef-perf-hl .reef-perf-label { fill: var(--sidebar-fg, var(--fg)); }
+.reef-perf-table tr.reef-perf-hl td { background: color-mix(in srgb, var(--fg, #333) 7%, transparent); }
+.reef-perf-legend-item { cursor: pointer; }
+.reef-perf-legend-item:hover .reef-perf-legend { text-decoration: underline; }
+.reef-perf-legend-item.off { opacity: 0.35; }
+.reef-perf-reset { cursor: pointer; }
+.reef-perf-reset rect { fill: var(--sidebar-bg, var(--bg)); stroke: var(--reef-perf-axis); }
+.reef-perf-reset text { font-size: 10px; fill: var(--sidebar-fg, var(--fg)); }
+.reef-perf-reset:hover rect { stroke: var(--reef-ready); }
+
+.reef-tip {
+    position: absolute;
+    z-index: 30;
+    pointer-events: none;
+    max-width: 260px;
+    padding: 6px 9px;
+    border-radius: 6px;
+    border: 1px solid var(--sidebar-spacer, var(--reef-border));
+    background: var(--bg, #fff);
+    color: var(--fg, #333);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+    font-size: 12px;
+    line-height: 1.45;
+}
+.reef-tip[hidden] { display: none; }
+.reef-tip-head { font-weight: 600; margin-bottom: 3px; }
+.reef-tip-head code { font-size: 11px; font-weight: 400; opacity: 0.7; }
+.reef-tip-row { display: flex; align-items: center; gap: 6px; }
+.reef-tip-name { color: var(--reef-muted); }
+.reef-tip-val { margin-left: auto; padding-left: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.reef-tip-note { color: var(--reef-muted); font-size: 11px; margin-top: 3px; }
+.reef-swatch { display: inline-block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.reef-swatch.reef-perf-before { background: var(--reef-perf-before); }
+.reef-swatch.reef-perf-after { background: var(--reef-perf-after); }
+
+/* Acceptance criteria: one hue a kind, apart from the status colours and the charts' orange and
+   blue. Every badge also names its kind, so colour never carries it alone. */
+.reef {
+    --reef-k-unit: #0e7c86;
+    --reef-k-integration: #7a4cc0;
+    --reef-k-perf: #9a6200;
+    --reef-k-feature: #b0306f;
+    --reef-k-fg: #ffffff;
+}
+html.coal .reef, html.navy .reef, html.ayu .reef {
+    --reef-k-unit: #3cb7c0;
+    --reef-k-integration: #a888e8;
+    --reef-k-perf: #d6a530;
+    --reef-k-feature: #e46ea8;
+    --reef-k-fg: #10141a;
+}
+.k-unit { --reef-k: var(--reef-k-unit); }
+.k-integration { --reef-k: var(--reef-k-integration); }
+.k-perf { --reef-k: var(--reef-k-perf); }
+.k-feature { --reef-k: var(--reef-k-feature); }
+
+/* Pills on a box */
+.reef-acc-pill rect { fill: var(--reef-box); stroke: var(--reef-k); stroke-width: 1.2px; }
+.reef-acc-pill text { fill: var(--reef-k); font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.reef-acc-pill.full rect { fill: var(--reef-k); }
+.reef-acc-pill.full text { fill: var(--reef-k-fg); }
+.reef-acc-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    margin-right: 5px;
+    vertical-align: -1px;
+    background: var(--reef-k);
+}
+
+/* Filter chips, in the toolbar and the sidebar */
+.reef-acc-filter { display: inline-flex; gap: 3px; flex-wrap: wrap; }
+.reef-toolbar .reef-acc-chip, .reef-acc-chip {
+    font: inherit;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    border: 1.5px solid var(--reef-k);
+    background: transparent;
+    color: var(--reef-k);
+    cursor: pointer;
+    opacity: 0.55;
+    text-decoration: line-through;
+}
+.reef-toolbar .reef-acc-chip.on, .reef-acc-chip.on {
+    background: var(--reef-k);
+    color: var(--reef-k-fg);
+    opacity: 1;
+    text-decoration: none;
+}
+.reef-toolbar .reef-acc-chip:hover, .reef-acc-chip:hover { border-color: var(--reef-k); opacity: 1; }
+.reef-acc-count { font-variant-numeric: tabular-nums; opacity: 0.85; }
+@media (max-width: 640px) { .reef-toolbar .reef-acc-filter { display: none; } }
+
+/* The sidebar's Acceptance section */
+.reef-acc-chips { display: flex; gap: 4px; flex-wrap: wrap; margin: 2px 0 8px; }
+.reef-acc-list { list-style: none; padding: 0; margin: 0; }
+.reef-acc-item { padding: 5px 0 5px 8px; border-left: 3px solid var(--reef-k); margin-bottom: 6px; }
+.reef-acc-line { display: flex; gap: 6px; align-items: baseline; }
+.reef-acc-text { flex: 1; min-width: 0; }
+.reef-acc-text p { margin: 0.2em 0; }
+.reef-acc-badge {
+    flex: none;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 6px;
+    border-radius: 8px;
+    background: var(--reef-k);
+    color: var(--reef-k-fg);
+    white-space: nowrap;
+}
+.reef-acc-state { flex: none; width: 1em; text-align: center; font-weight: 700; color: var(--reef-muted); }
+.reef-acc-met .reef-acc-state { color: var(--reef-done); }
+.reef-acc-unmet .reef-acc-state { color: var(--reef-blocked); }
+.reef-acc-meta { font-size: 11px; color: var(--reef-muted); margin: 2px 0 0 calc(1em + 6px); }
+.reef-acc-meta code { font-size: 11px; }
+.reef-acc-item .reef-perf-chart { margin-top: 4px; }
+.reef-acc-target { stroke: var(--reef-k-perf); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.reef-perf-chart .reef-acc-target-text { fill: var(--reef-k-perf); font-size: 10px; }
