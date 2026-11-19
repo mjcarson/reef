@@ -1,0 +1,34 @@
+# X6's scratch Dioxus fullstack app: reef-view linked into the app's wasm and drawn through
+# `mount`, with the plan's payload from a server function. It is a workspace of its own, which
+# reef's root workspace excludes.
+[workspace]
+
+[package]
+name = "x6-view"
+description = "X6's spike: reef-view mounted inside a Dioxus 0.7 app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+# No default: dx keeps default features on in both builds, and each side wants its own.
+default = []
+# the wasm client: Dioxus's web renderer and the viewer, linked into the app's own wasm
+web = ["dioxus/web", "dep:reef-view", "dep:web-sys", "dep:wasm-bindgen"]
+# the server: Dioxus's axum server, the book read the way mdbook-reef reads it, and its
+# rendered pages served for the viewer's *Read here*
+server = ["dioxus/server", "reef-model/parse", "dep:reef-render", "dep:tower-http", "dep:anyhow"]
+
+[dependencies]
+dioxus = { version = "=0.7.10", features = ["fullstack"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# the payload and view types both sides share, without frontmatter parsing on the client
+reef-model = { path = "../../crates/reef-model", default-features = false }
+# the viewer, without its page-load start, which would fight the app's own
+reef-view = { path = "../../crates/reef-view", default-features = false, optional = true }
+web-sys = { version = "0.3", features = ["HtmlElement"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+reef-render = { path = "../../crates/reef-render", optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
+anyhow = { version = "1", optional = true }

@@ -61,6 +61,8 @@ pub struct Viewer {
     seen: (f64, f64),
     /// Which kinds of acceptance criteria are shown, shared by every view in the book.
     acc: Filter,
+    /// What the view shows, kept to start it again when its plan is swapped
+    spec: ViewSpec,
 }
 
 /// The event every view on the page hears when the acceptance filter changes.
@@ -98,7 +100,15 @@ fn closest_item(target: &Option<Element>, sel: &str, attr: &str) -> Option<usize
 }
 
 impl Viewer {
-    pub fn mount(el: HtmlElement, plan: Rc<Plan>, spec: ViewSpec, index: usize) {
+    /// Draws a view of a plan into an element, and returns it
+    ///
+    /// # Arguments
+    ///
+    /// * `el` - The element to draw into, in place of whatever it holds
+    /// * `plan` - The plan to draw
+    /// * `spec` - What the view shows
+    /// * `index` - Which view on the page this is, for its storage key and its SVG ids
+    pub fn mount(el: HtmlElement, plan: Rc<Plan>, spec: ViewSpec, index: usize) -> Rc<RefCell<Viewer>> {
         let uid = format!("{index}-{}", (js_sys::Math::random() * 1e9) as u64);
         let _ = el.class_list().add_1("reef-mounted");
         let _ = el.set_attribute("tabindex", "0");
@@ -171,6 +181,7 @@ impl Viewer {
             page_mode,
             seen: (0.0, 0.0),
             acc,
+            spec,
         };
         let v = Rc::new(RefCell::new(v));
         {
@@ -182,6 +193,32 @@ impl Viewer {
             b.seen = b.stage_size();
         }
         Viewer::attach(&v);
+        v
+    }
+
+    /// Draws a new plan in this view, started again from its spec
+    ///
+    /// Open groups and the selection are not carried over, and the view is fitted afresh.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan to draw now
+    pub fn swap(&mut self, plan: Rc<Plan>) {
+        // take the new plan, and find the spec's root and open groups in it
+        self.plan = plan;
+        let plan = self.plan.clone();
+        let g = &plan.graph;
+        self.root = self.spec.root_id().and_then(|id| g.index_of(id));
+        self.expanded = self.spec.initial_expanded(g);
+        // indexes into the old plan mean nothing now: drop the selection and any search results
+        self.selected = None;
+        self.side.set_hidden(true);
+        let _ = self.el.class_list().remove_1("reef-has-side");
+        self.search.set_value("");
+        self.results.set_hidden(true);
+        // draw it, and fit it as a new view would be
+        self.render();
+        self.initial_view();
     }
 
     fn graph(&self) -> &reef_model::Graph {

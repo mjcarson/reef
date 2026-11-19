@@ -9,6 +9,12 @@ publish = false
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["autostart"]
+# Draw every `div.reef` on the page once it loads, as the static mode's `reef.js` does. An app
+# that links the viewer into its own wasm turns this off and calls `mount` itself.
+autostart = []
+
 [dependencies]
 reef-model.workspace = true
 reef-layout.workspace = true

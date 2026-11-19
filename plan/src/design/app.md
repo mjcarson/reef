@@ -23,8 +23,14 @@ wasm-bindgen, so it can live in a Dioxus app, with four changes:
 4. **A selection callback, and storage keyed per plan.** The app opens the selected node in its
    own panel, and each plan remembers its own open groups.
 
+X6 made the first two, and a swap that starts the view again from its spec. [C12](../milestones/m4.md)
+makes the rest.
+
 ### Design choices
 
+- **Linked into the app's wasm.** reef-app depends on reef-view with `default-features = false`
+  and calls `reef_view::mount` from Rust. Linked in, the viewer adds 174 KiB gzipped to the
+  app's wasm. `reef.js` beside it would add 306 KiB and a second runtime.
 - **Mount the viewer first; a native port is optional.** [C55](../milestones/m4.md) rebuilds
   the canvas and sidebar as Dioxus components over `reef-model` and `reef-layout`, but only once
   the app works with the mounted viewer.
@@ -34,16 +40,52 @@ wasm-bindgen, so it can live in a Dioxus app, with four changes:
 - **mdbook-reef keeps the viewer as it is.** The static mode builds with the auto-start feature,
   and its committed `reef.js` is unchanged in behaviour.
 
-### Open questions (X6)
+### What X6 found
 
-- **The wasm-bindgen pin.** `reef-view` pins `wasm-bindgen = "=0.2.130"`, and `cargo xtask
-  wasm` runs wasm-bindgen-cli 0.2.130. If Dioxus 0.7 needs a newer one, the pin and xtask move
-  together and `reef.js` is regenerated. The fallback is loading `reef.js` as a separate wasm
-  module beside the app, which needs no unifying but is a second runtime to download. X1's spike
-  (`spikes/x1-shoal`) resolved Dioxus 0.7.10 with wasm-bindgen 0.2.130, and dx bound its client
-  once no `RUSTFLAGS` was exported ([What X1 found](architecture.md#what-x1-found)).
-- Whether saved view state, *Read here* doc fetches and the sidebar behave the same inside the
-  app.
+Tried in `spikes/x6-view`, a scratch Dioxus 0.7.10 fullstack app. Its server reads a book into
+the viewer's payload and serves the book's rendered pages, and its client mounts reef-view and
+swaps payloads. `check.py` drives it in headless Chromium.
+
+- **One wasm-bindgen, and no pin moves.** Dioxus 0.7.10 resolves wasm-bindgen 0.2.130, the
+  version reef-view pins. dx takes its CLI's version from the lockfile and downloads its own
+  0.2.130. `cargo xtask wasm` runs the 0.2.130 on the PATH. A Dioxus that needs a newer one
+  won't resolve against the `=0.2.130` pin, so the pin, xtask's CLI and `reef.js` move together.
+- **The page-load start has to be off.** Linked in, reef-view's `#[wasm_bindgen(start)]` becomes
+  the module's start. dx's loader then never calls the app's `main`. It now sits behind the
+  default `autostart` feature.
+- **`mount(el: HtmlElement, payload: Payload, view: ViewSpec) -> Handle`**, a plain Rust call.
+  - The element is an empty `div.reef.reef-page` from Dioxus, reached through its `onmounted`
+    data's `try_as_web_event()`.
+  - A `use_effect` on the payload's resource mounts the viewer the first time and calls
+    `Handle::swap(payload)` after that.
+  - Dioxus leaves the div's children alone, since its rsx gives it none, and the classes the
+    viewer adds survive re-renders.
+- **A payload swaps live, but the view starts again.** A newer revision redraws with no reload,
+  and so does a different plan.
+  - The swap resets the view from its spec, so open groups and the selection are lost.
+  - The spec's `root` is kept: in a plan without that group, the whole plan is drawn.
+- **Saved view state works, keyed by the path.** Opened groups survive a reload, under
+  `reef:{pathname}:{index}`.
+  - Every plan drawn at one path shares that key.
+  - A second `mount_all` call starts its index at 0 again.
+- ***Read here* needs absolute links.** `docs.rs` resolves a link against the window's URL, so a
+  payload's `ROOT` becomes the path the service serves rendered pages from (`/book/example/`),
+  never a prefix relative to the page. The sidebar's why, what, acceptance and perf charts work
+  unchanged.
+- **reef.css needs `--fg`, `--bg` and `--links`,** which mdbook's themes define and it reads
+  with no fallback. Without `--bg` the sidebar is transparent. mdbook hashes its copy's name,
+  and `asset!` refuses a file outside the crate, so the spike's server serves mdbook-reef's
+  `assets/reef.css` itself.
+- **An unmounted viewer keeps listening.** Its element gone, it still drew it again on a filter
+  change. Its closures are forgotten, and its two observers and two `document` listeners stay, so
+  each remount leaks a viewer ([C58](../milestones/m4.md)).
+- **`reef.js` depends on the caller's `RUSTFLAGS`.** The committed bundle was built with
+  `-Ctarget-cpu=native` exported, which leaves wasm32 without reference types. Built without it,
+  as dx builds the app's copy, the glue uses an externref table instead
+  ([C59](../milestones/m4.md)).
+- **Head styles in a component with no props.** `document::Style` warns when its props change,
+  and a plain `style` element in rsx gets a hydration marker in its text that breaks its first
+  rule.
 
 ## The shell
 
@@ -65,7 +107,9 @@ A node's doc is a markdown file in its project's repo, or a page stored with the
 ### Design choices
 
 - **The service renders docs as pages.** It renders a linked file or plan page as HTML with a
-  `<main>` and mdbook's heading ids, so the viewer's `docs.rs` works unchanged.
+  `<main>` and mdbook's heading ids, so the viewer's `docs.rs` works unchanged. The payload's
+  links are absolute paths to them, since `docs.rs` resolves a link against the window's URL
+  ([X6](#what-x6-found)).
 - **The same section for Claude.** next_task returns the doc section as markdown, so Claude reads
   the same design the user sees.
 - **Links that leave the repo are refused.**

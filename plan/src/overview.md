@@ -110,15 +110,38 @@ nodes:
       - feature: The finding records which reef tools plan mode allows
   - id: X6
     title: "X6 reef-view inside Dioxus 0.7"
+    status: done
     docs: [design/app.md#the-viewer-inside-the-app]
     description:
       why: "reef pins wasm-bindgen 0.2.130 with its own wasm-bindgen-cli while dx brings its own, and reef-view starts itself from a script tag. Nobody knows if one app can hold both."
-      what: "The plan knows how reef-app loads the viewer (linked into its wasm, or `reef.js` beside it), what `mount` takes and returns, and whether a payload swaps live."
+      what: "reef-app links reef-view into its wasm, the page-load start off, and draws through `mount(element, payload, view)`. Its handle swaps payloads live. Both builds bind with wasm-bindgen 0.2.130."
+      details: "Tried in `spikes/x6-view`, a Dioxus 0.7.10 fullstack app. Its server reads a book into the viewer's payload and serves the book's rendered pages, and its client mounts reef-view and swaps payloads. `check.py` drives it in headless Chromium. reef-view gained `mount`, a `Handle` that swaps payloads, and the default `autostart` feature. The findings are in the app page's *What X6 found*."
     acceptance:
       - feature: "A minimal Dioxus 0.7 app draws the example book's plan through `mount`"
+        test: spikes/x6-view/check.py
+        status: met
       - feature: "Saved view state, *Read here* doc fetches and the sidebar all work inside it"
+        test: spikes/x6-view/check.py
+        status: met
       - feature: A second payload redraws without a reload
+        test: spikes/x6-view/check.py
+        status: met
       - integration: "`dx build` and `cargo xtask wasm` agree on one wasm-bindgen version, or the finding says which pin moves"
+        status: met
+    performance:
+      labels: [Without reef-view, With reef-view]
+      note: "The `_bg.wasm` of `spikes/x6-view`'s client from `dx build --release`, one build a side, with dx 0.7.10, its wasm-opt `-Oz` (binaryen 129) and nightly 1.100. *Without* is the same app with reef-view taken out and its `draw` stubbed. Gzipped with `gzip -9`. For comparison, `reef.js` loaded beside the app instead is 815.9 KiB, 305.6 KiB gzipped."
+      metrics:
+        - name: "The app's client wasm, KiB"
+          key: app-wasm-kib
+          unit: KiB
+          before: 2446.5
+          after: 2925.5
+        - name: "The same, gzipped, KiB"
+          key: app-wasm-gz-kib
+          unit: KiB
+          before: 657.5
+          after: 831.5
 ---
 # Centralized reef
 
@@ -164,8 +187,9 @@ Through it:
    ([M5](milestones/m5.md)).
 6. **The UI is a Dioxus 0.7 fullstack app.** `reef-app` runs on axum. The same server answers a
    plain JSON API for the CLI, the MCP server and the hook. Both go through one service layer,
-   the only code that touches shoal. The existing viewer is mounted inside the app until an
-   optional native port. mdbook-reef and its viewer stay, as the static mode.
+   the only code that touches shoal. The existing viewer is linked into the app's wasm and
+   mounted inside it ([X6](design/app.md#what-x6-found)) until an optional native port.
+   mdbook-reef and its viewer stay, as the static mode.
 7. **reef keeps each node's changes.** Git is read once, by a Claude Code hook when a node is
    completed, and never used to store them, since commits are squashed regularly. Nodes worked
    on at the same time each get their own worktree
