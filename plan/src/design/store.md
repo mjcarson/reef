@@ -26,28 +26,81 @@ Its limits there shape reef's rows:
 
 - **Listing partitions with known keys.** All projects sit in one constant partition, sorted by
   name. A project's plans sit in a partition of that project's, sorted by plan name. A plan's
-  nodes sit in a partition of that plan's revision, sorted by id.
-- **A node's spec as one serialized field.** The YAML (or JSON) of its `NodeSpec` sits beside the
-  few fields reef filters or sorts on: id, status, group and its written order. reef's keys can
-  then change without changing a shoal table.
+  nodes sit in a partition keyed by project, plan and revision, sorted by id.
+- **A node's spec as one JSON field.** The JSON of its `NodeSpec` sits beside the few fields reef
+  filters or sorts on: id, version, status, group and its written order. reef's keys can then
+  change without changing a shoal table. JSON decodes ten times faster than YAML and every spec
+  reads back equal. YAML stays the form the CLI prints and reads.
+- **A node a row.** A book keeps most nodes inline in a group's `nodes:` list. Each member gets a
+  row of its own, its `group` filled in as the group that listed it.
 - **A written `order` field.** Shoal sorts a partition by id, but ready work and layout fall
-  back to the order a plan was written in. Without it, an imported plan would reshuffle.
+  back to the order a plan was written in. Without it, an imported plan would reshuffle. A
+  member's order follows its group's, depth first.
 - **Versions by conditional write.** Each node row carries a version, and a put names the one it
-  read. A stale write is refused with `if_matches`.
-- **Revisions behind a pointer row.** A bulk write (an import, a whole-plan edit) writes a new
-  revision's rows, then makes it current with one conditional write to the plan's pointer row.
-  A write killed midway leaves the old revision whole.
+  read with `if_matches`. A new node is written `if_absent`. A stale write is refused as shoal's
+  `Refused { reason: RowMismatch }`.
+- **Writes to a plan serialized in the service.** reef-service is the only writer, so a lock per
+  plan in its process keeps a put from landing in a revision an import is about to retire. The
+  conditional writes still refuse a client's stale edit, and a second writer's change to the
+  plan's row.
+- **Revisions behind the plan's own row.** The plan's listing row is its pointer row, with
+  `current`, `pending` and `retired` revisions and a version. A bulk write (an import, a
+  whole-plan edit) works in these steps:
+  1. Name the new revision `pending`.
+  2. Write its rows.
+  3. Flip, in one conditional write: the new revision `current`, the old one `retired`.
+  4. Prune the old one.
+
+  The next write prunes whatever a killed write left named in either. An import moves every
+  node's version on, so an edit read before it is refused after it.
+- **Every write's answer checked.** Bulk writes go through shoal's `exec`, and single ones
+  through `send_one`. Draining a bundle's stream would accept a refused or failed write.
 - **Every row checked against its full key on read**, so a hash collision is caught instead of
   being served as the wrong row.
+- **Only the current revision is kept.** Pruning lists a revision's keys through a projection and
+  deletes each row in one bundle, since shoal can't delete a partition.
+
+### What X2 found
+
+Tried in `spikes/x2-rows`, which imports the example book's 202-node plan into an in-process
+pool, reads it back as the book's graph, and times it. Each command starts its own pool, so a
+run killed midway is followed by one that opens what it left on disk.
+
+- **A plan loads in 0.29 ms, eight times faster than from its markdown.** Loading means:
+  - the plan's row and the revision's partition (202 rows, 78 KB);
+  - every spec decoded;
+  - `Graph::build`.
+
+  That takes 0.29 ms warm, against 2.3 ms for mdbook-reef's walk and parse. A fresh process
+  loads it off the archive in 0.81 ms. With YAML specs a warm load takes 1.2 ms.
+- **A rewrite costs 2.2 ms, and pruning what it replaced 2.0 ms.** A rewrite is reading the old
+  versions, reserving the revision, one bundle of 202 rows and the flip. A put of one node takes
+  0.15 ms.
+- **A killed import leaves the old revision whole.** An import aborted after 100 of its 202 rows
+  left the old revision current, and every node read back. The next import found the 100 rows
+  by the plan's `pending` and pruned them.
+- **Without the lock, a put during an import is lost.** A put made between an import's rows and
+  its flip is written into the revision being retired, acknowledged, and gone once the import
+  is current. With the lock it waits for the flip and is refused as stale.
+- **Draining a bundle's stream hides refused and failed writes.** `next()` raises only frame
+  errors, so X1's drain loop would accept a refused conditional write.
+- **A sorted get that finds nothing is an error too** (shoal's known issue 55). A get sent as a
+  one-query bundle, with its `error()` checked, reads an empty partition as no rows.
+- **A projection must carry the row's partition key.** Shoal's docs say F27 lifted that, but the
+  derive on `ScanSupport` refuses a projection without one.
+- **A composite partition key of two `String`s and a `u64` works**, in gets, deletes and
+  conditional writes.
+- **Stopping a pool cleanly takes up to 3 s**, since its shards poll the shutdown flag every 3 s.
+  Starting one takes about 30 ms ([C57](../milestones/m2.md)).
+- **The first restart still finds rows resident** while it compacts the intent log into
+  archives. Later restarts read the partition off the archive.
 
 ### Open questions
 
-- What a 202-node plan costs to load and to rewrite as a revision, measured on the example book
-  (X2, `plan-load-ms`).
-- How old revisions are pruned, with no scans to find them: the pointer row can keep a list of
-  the revisions still kept.
 - Whether the listing partitions give way to scans once `ScanSupport`'s client side (M24 there)
   is built.
+- Whether a plan keeps older revisions, for undo or history. The plan's row would then list the
+  revisions kept, so pruning still needs no scan.
 
 ## The schema
 

@@ -1,0 +1,29 @@
+# X2's scratch crate: reef's rows in an in-process shoal pool, timed with the example book's plan.
+# It is a workspace of its own so reef's stable workspace never resolves shoal.
+[workspace]
+
+[package]
+name = "x2"
+description = "X2's spike: reef's projects, plans and nodes as shoal rows, priced"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# shoal's ScanSupport checkout with its engine, so this needs nightly, glommio and
+# target-cpu=native
+shoal = { path = "../../../shoal/shoal", features = ["server"] }
+# a schema writes these two derives itself, at the versions shoal's own workspace resolves
+rkyv = "0.8.10"
+deepsize2 = "0.1"
+# the nodes, their specs and the graph they build, with frontmatter parsing
+reef-model = { path = "../../crates/reef-model" }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# No debuginfo: a debug build of shoal's engine with it runs to several gigabytes.
+[profile.dev]
+debug = false

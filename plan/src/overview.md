@@ -37,14 +37,57 @@ nodes:
           after: 0.028
   - id: X2
     title: "X2 reef's rows in shoal, priced"
+    status: done
     docs: [design/store.md#rows-and-versions]
     description:
       why: "With no client scans or transactions on shoal's `ScanSupport` branch, nobody knows how reef lists plans, stops two writers clobbering a node, or imports a plan atomically."
-      what: "The row layout is chosen (constant listing partitions, the spec as one serialized field, versions by conditional write, revisions behind a pointer row) and a 202-node plan is timed through it."
+      what: "The layout is chosen and tried: listing partitions, each spec as one JSON field, versions by conditional write under a per-plan lock, revisions behind the plan's own row. The 202-node plan loads in 0.29 ms."
+      details: "Tried in `spikes/x2-rows`, which imports the example book into an in-process pool, reads it back as the book's graph, and times it. Each command starts its own pool, so a run killed midway is followed by one that opens what it left on disk. The findings are in the store page's *What X2 found*."
     acceptance:
       - feature: "A stale `if_matches` write is refused"
+        test: "spikes/x2-rows/tests/rows.rs::stale_put_is_refused"
+        status: met
       - feature: An import killed midway leaves the old revision readable
-      - perf: "The example book's 202-node plan is loaded and timed (plan-load-ms)"
+        test: "spikes/x2-rows/tests/rows.rs::killed_import_keeps_old_revision"
+        status: met
+      - feature: "A put made during an import waits on the plan's lock and is refused as stale, never written and lost"
+        test: "spikes/x2-rows/tests/rows.rs::put_during_import_is_refused_not_lost"
+        status: met
+      - integration: "The rows read back build the book's graph: the same nodes, order, groups and specs"
+        test: "spikes/x2-rows/tests/rows.rs::rows_build_the_books_graph"
+        status: met
+      - perf: "The example book's 202-node plan is loaded and timed"
+        metric: plan-load-ms
+        status: met
+    performance:
+      labels: [Book on disk, Shoal]
+      note: "`spikes/x2-rows` `bench --rounds 10`: ten timed rounds after three warm-up rounds, on a Ryzen 9 9950X with an NVMe disk (XFS), a two-shard in-process pool with 256 MiB, nightly 1.100, release build. A load from shoal is the plan row's get, the revision's get, decoding every spec and `Graph::build`. The book's is mdbook-reef's walk, parse and `Graph::build`, without rendering. A cold load is a fresh process's first, off the archive. A rewrite reads the old versions, reserves the revision, writes its 202 rows in one bundle and flips. A prune lists the old revision's keys, deletes its 202 rows and clears `retired`. A put reads the plan's row and writes one node over its version."
+      metrics:
+        - name: "Load the 202-node plan, ms"
+          key: plan-load-ms
+          unit: ms
+          before: [2.311, 2.240, 2.563]
+          after: [0.285, 0.265, 0.297]
+        - name: "Load it with its specs as YAML, ms"
+          key: plan-load-yaml-ms
+          unit: ms
+          after: [1.204, 1.177, 1.289]
+        - name: "Load it cold, in a fresh process, ms"
+          key: plan-load-cold-ms
+          unit: ms
+          after: [0.808, 0.777, 0.881]
+        - name: "Rewrite it as a revision, ms"
+          key: plan-rewrite-ms
+          unit: ms
+          after: [2.190, 1.948, 2.359]
+        - name: "Prune the revision it replaced, ms"
+          key: plan-prune-ms
+          unit: ms
+          after: [2.022, 1.709, 2.413]
+        - name: "Put one node, ms"
+          key: node-put-ms
+          unit: ms
+          after: [0.151, 0.117, 0.192]
   - id: X3
     title: "X3 Capturing a node's changes"
     docs: [design/code-and-comments.md#capturing-a-nodes-changes]

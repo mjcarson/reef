@@ -1,0 +1,4 @@
+# gxhash wants AES-NI inlined, as shoal's own `.cargo/config.toml` asks for. Scoped to the host,
+# as in X1, so an exported `RUSTFLAGS` is never needed.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Ctarget-cpu=native"]
