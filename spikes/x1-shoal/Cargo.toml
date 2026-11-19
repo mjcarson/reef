@@ -1,0 +1,21 @@
+# X1's scratch workspace: a Dioxus fullstack server that runs shoal in-process, or reaches an
+# external shoal node. It is its own workspace so reef's stable workspace never resolves shoal.
+[workspace]
+resolver = "3"
+members = ["app", "node"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+# shoal's ScanSupport checkout, used by path; its glommio comes from ../glommio beside it
+shoal = { path = "../../../shoal/shoal", default-features = false }
+# a schema writes these two derives itself, at the versions shoal's own workspace resolves
+rkyv = "0.8.10"
+deepsize2 = "0.1"
+
+# No debuginfo: a debug build of shoal's engine with it runs to several gigabytes.
+[profile.dev]
+debug = false

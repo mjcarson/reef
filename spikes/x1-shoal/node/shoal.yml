@@ -1,0 +1,20 @@
+# The external node X1's app reaches with `X1_SHOAL_ADDR=127.0.0.1:12100`, started by `node.sh`.
+#
+# Two shards and a small budget: this is a spike on a development machine, not a deployment.
+# `memory` must be set: with no `resources` the budget is 0 and eviction never stops.
+resources:
+  cores: 2
+  memory: "256MiB"
+networking:
+  interface: "127.0.0.1"
+  port: 12100
+storage:
+  default:
+    filesystem:
+      # `node.sh` fills in an absolute path: a relative one fails opening the directory with
+      # EBADF, and `SHOAL_*` variables can't reach a nested key. Never tmpfs, where glommio
+      # silently loses O_DIRECT.
+      latency_sensitive:
+        path: "@DATA@"
+      throughput_sensitive:
+        path: "@DATA@"

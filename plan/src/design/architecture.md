@@ -19,8 +19,9 @@ The crates, once this plan is done:
 | `mdbook-reef` | stable | the static mode, now over `reef-render`'s filesystem source |
 | `reef-api` | stable | the JSON API's request and response types |
 | `reef` | stable | the CLI, the MCP server and the hooks, all HTTP clients of the JSON API |
-| `reef-service` | nightly if shoal is in-process | the store and the model: the only code that touches shoal |
-| `reef-app` | nightly if shoal is in-process | the Dioxus fullstack app on axum, which also mounts the JSON API |
+| `reef-service` | nightly; stable built external-only | the store and the model: the only code that touches shoal, in-process or external ([C57](../milestones/m2.md)) |
+| `reef-app` | nightly; stable built external-only | the Dioxus fullstack app on axum, which also mounts the JSON API |
+| `reef-shoal` | nightly | the external node: shoal's node program over reef's schema ([C57](../milestones/m2.md)) |
 
 ## Shoal in the build
 
@@ -36,18 +37,66 @@ tree holds tokio, kanal and gxhash, but no glommio and no shoal-core.
 
 Shoal can run inside a tokio program (`ShoalPool::<Db>::start(conf)` then `pool.ready(timeout)`,
 as `shoal/examples/tmdb.rs` does), or as a node program, a three-line binary calling
-`shoal::server::node::main::<Db>()`, that clients reach over the network.
+`shoal::server::node::main::<Db>()`, that clients reach over the network. Either way the client
+is the same: an in-process pool is reached over loopback TCP too.
 
 ### Design choices
 
-- **Only `reef-service` and `reef-app` may depend on shoal.** Every other crate stays stable,
-  and `cargo tree` of the stable workspace and of the wasm build shows no shoal.
-- **In-process or a node program is X1's to decide.** In-process means one binary to run, but
-  every `dx serve` restart also restarts shoal, with its locked memory and its start-up time, and
-  `reef-service` and `reef-app` need nightly. A node program means a second process, but the app
-  restarts alone, and both can stay stable on the client half.
-- **A separate `central/` workspace if the server needs nightly.** It uses the stable crates by
-  path, so the stable workspace and the committed `reef.js` build stay as they are.
+- **Both: in-process unless an external node is configured.** With no node's address in its
+  config, reef-service starts a pool in its own process and connects to the address it binds.
+  With one, it connects to that node. Only start-up differs, so the rest of the service sees one
+  client. A restart costs the same either way ([What X1 found](#what-x1-found)).
+- **Only `reef-service`, `reef-app` and `reef-shoal` depend on shoal.** Every other crate stays
+  stable, and `cargo tree` of the stable workspace and of the wasm build shows no shoal.
+- **The engine is a feature, `embedded`, given to the server build alone.** It turns on
+  `shoal/server` and swaps `#[shoal::db(client)]` for `#[shoal::db]`. It can't be a Cargo
+  default, because dx keeps default features on in the wasm build too, so dx builds the server
+  with `@server --platform server --features embedded`. Without it, the service is external-only
+  and builds on stable.
+- **One tables file, two halves.** reef-service and reef-shoal both `include!` reef's tables and
+  write their own `#[shoal::db]` struct, so the client and the node agree on the schema
+  fingerprint.
+- **A separate `central/` workspace, on nightly.** It holds reef-service, reef-app and reef-shoal,
+  and uses the stable crates by path. A workspace with an `embedded` feature locks shoal-core and
+  glommio even while the feature is off, so it needs both checkouts beside it. The stable
+  workspace and the committed `reef.js` build stay as they are.
+- **`-Ctarget-cpu=native` for the host only.** It goes in `central/.cargo/config.toml` under
+  `[target.x86_64-unknown-linux-gnu]`, never in an exported `RUSTFLAGS`, which dx passes to the
+  wasm build too.
+
+### What X1 found
+
+Tried in `spikes/x1-shoal`, a scratch Dioxus 0.7.10 fullstack server that runs shoal either way
+and answers a round trip on a plain JSON route and through a server function.
+
+- **A restart costs the same in both modes.** A `dx serve` restart, from an edit to the first
+  round trip from the new build, took 1.76 s in both modes (five rounds each). An in-process
+  pool is ready 40 ms after it starts, which is lost in dx's rebuild and relaunch. Built on stable
+  without the engine, external-only took 1.49 s.
+- **Data survives the server being killed.** dx kills its server on every rebuild. A row written
+  before survives SIGKILL and SIGTERM alike, and an external node's stop and start. The data
+  directory's lock is a file lock, released with the process.
+- **Killing dx alone orphans its server.** The orphan keeps the data directory locked, and the
+  next start fails with `StorageDirectoryLocked`. Anything that runs `dx serve` stops its whole
+  process group.
+- **`dioxus::serve` runs its closure again after a hot-patch**, so the store opens once and
+  never starts a second pool. `--hot-patch` itself failed to build the wasm client under dx
+  0.7.10 ("exceptions proposal not enabled"), so it is untried with shoal.
+- **An exported `RUSTFLAGS=-Ctarget-cpu=native` breaks the wasm client.** wasm32 then reports no
+  target features. wasm-bindgen leaves its externref table out, and its CLI fails to find
+  `__externref_table_alloc`. dx keeps the host-only flag from `.cargo/config.toml`.
+- **The pool starts on a thread of its own.** `start` and `ready` block, and shoal's error can
+  carry a panic payload that isn't `Sync`. `cores` must be set, or a shard is pinned to every CPU
+  but cpu 0.
+- **Dioxus's logger wins.** `dioxus::serve` installs its subscriber before the closure runs, so
+  an in-process pool doesn't call shoal's `trace::setup`, and its spans go to Dioxus's logger.
+- **Shoal's data paths must be absolute.** A relative one fails to open with EBADF, and `SHOAL_*`
+  variables can't set a nested key, so an external node's config is written out with the path
+  filled in ([C10](../milestones/m2.md)).
+- **A get that finds nothing is an error.** `send_one` reports it as `QueryDidNotSucceed`
+  (shoal's known issue 55), which the store reads as no row ([C7](../milestones/m2.md)).
+- **The JSON API shares the app's port.** A plain axum route on `dioxus::server::router` answers
+  beside the server functions ([C13](../milestones/m4.md)).
 
 ### Open questions
 

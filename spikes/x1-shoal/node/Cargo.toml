@@ -1,0 +1,12 @@
+[package]
+name = "x1-node"
+description = "X1's external shoal node: shoal's node program over the spike's schema"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# the whole engine, so this needs nightly, glommio and target-cpu=native
+shoal = { workspace = true, features = ["server"] }
+rkyv.workspace = true
+deepsize2.workspace = true

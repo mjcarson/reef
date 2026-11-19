@@ -39,7 +39,9 @@ wasm-bindgen, so it can live in a Dioxus app, with four changes:
 - **The wasm-bindgen pin.** `reef-view` pins `wasm-bindgen = "=0.2.130"`, and `cargo xtask
   wasm` runs wasm-bindgen-cli 0.2.130. If Dioxus 0.7 needs a newer one, the pin and xtask move
   together and `reef.js` is regenerated. The fallback is loading `reef.js` as a separate wasm
-  module beside the app, which needs no unifying but is a second runtime to download.
+  module beside the app, which needs no unifying but is a second runtime to download. X1's spike
+  (`spikes/x1-shoal`) resolved Dioxus 0.7.10 with wasm-bindgen 0.2.130, and dx bound its client
+  once no `RUSTFLAGS` was exported ([What X1 found](architecture.md#what-x1-found)).
 - Whether saved view state, *Read here* doc fetches and the sidebar behave the same inside the
   app.
 

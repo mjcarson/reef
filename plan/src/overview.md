@@ -5,14 +5,36 @@ collapsed: false
 nodes:
   - id: X1
     title: "X1 Shoal in reef's build and processes"
+    status: done
     docs: [design/architecture.md#shoal-in-the-build]
     description:
       why: "Shoal's server needs nightly, a patched glommio, `target-cpu=native` and locked memory, while reef is stable and its server is a dx-built Dioxus fullstack binary."
-      what: "The plan knows whether the service runs shoal in-process in the app server or talks to a separate shoal node program, and that no stable or wasm crate pulls in shoal."
+      what: "reef runs shoal in-process by default and connects to an external node when one is configured, and no stable or wasm crate pulls in shoal."
+      details: "Tried in `spikes/x1-shoal`. One Dioxus 0.7.10 fullstack server, built with an `embedded` feature passed to dx's server build alone, picks the mode at start from whether a node's address is set. `node.sh` runs the external node, shoal's node program over the same tables. A restart costs the same in both modes, since shoal is ready in 40 ms. The findings are in the architecture page's *What X1 found*."
     acceptance:
       - feature: A scratch Dioxus fullstack server starts standalone shoal and round-trips a row
+        status: met
+      - feature: "The same build connects to an external node when one is configured, and starts shoal in-process when none is"
+        status: met
       - integration: "`cargo tree` of the stable workspace and of the wasm client shows no shoal"
-      - perf: "A `dx serve` restart with shoal inside is timed (dx-restart-s)"
+        status: met
+      - perf: "A `dx serve` restart with shoal inside is timed"
+        metric: dx-restart-s
+        status: met
+    performance:
+      labels: [In-process, External node]
+      note: "Five rounds of `spikes/x1-shoal/restart.sh` a side, on a 32-thread machine with dx 0.7.10 and nightly 1.100, in debug builds without debuginfo. Each round changes a constant in the server's code and is timed to the first round trip answered by the new build. Both sides are the same build with `embedded`; built on stable without it, external-only restarted in 1.49 s (1.29 to 1.52). Shoal's start is the pool's `start` and `ready` in-process, five rounds, and an external node's launch to `SHOAL_NODE_SERVING`, once; a restart of the app doesn't restart an external node."
+      metrics:
+        - name: "dx serve restart, edit to a round trip, s"
+          key: dx-restart-s
+          unit: s
+          before: [1.76, 1.74, 1.77]
+          after: [1.76, 1.73, 1.77]
+        - name: "shoal start to ready, s"
+          key: shoal-ready-s
+          unit: s
+          before: [0.040, 0.035, 0.045]
+          after: 0.028
   - id: X2
     title: "X2 reef's rows in shoal, priced"
     docs: [design/store.md#rows-and-versions]
@@ -105,6 +127,9 @@ Through it:
    completed, and never used to store them, since commits are squashed regularly. Nodes worked
    on at the same time each get their own worktree
    ([X3](design/code-and-comments.md#capturing-a-nodes-changes)).
+8. **Shoal in-process, unless an external node is configured.** The server starts shoal itself
+   by default, and connects to a separate shoal node when its config names one
+   ([X1](design/architecture.md#shoal-in-the-build)).
 
 The spikes below settle what the milestones can't decide alone: how shoal fits reef's build
 ([X1](design/architecture.md#shoal-in-the-build)), reef's rows in shoal

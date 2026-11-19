@@ -1,0 +1,4 @@
+# gxhash wants AES-NI inlined, as shoal's own `.cargo/config.toml` asks for. Scoped to the host so
+# the app's wasm client is built without it.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-Ctarget-cpu=native"]
