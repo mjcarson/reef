@@ -51,7 +51,8 @@ description: Some text.          # a plain string is `details` alone
 - Every node that is not a group needs a `why` and a `what`, written or taken from its first doc
   that has them: `why` from a section (or `| **Impact** |`-style table row) named Why, Context,
   Motivation, Problem, Symptom, Question, The question or Impact; `what` from What it does, What, Summary,
-  Overview or The fix. Never from a doc's opening paragraph. Write both anyway.
+  Overview or The fix. A section's first paragraph or list is taken, a list as its items' bold
+  leads. Never from a doc's opening paragraph. Write both anyway.
 - One or two plain sentences each. `why`: what is slow, wrong, missing or unknown without the
   work. `what`: what is true or possible once it is done, not how.
 - The only keys are `why`, `what` and `details`. Inline: `description: { why: ..., what: ... }`.

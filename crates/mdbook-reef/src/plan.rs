@@ -20,11 +20,11 @@ pub const ROOT: &str = "reef-root:/";
 pub struct Config {
     /// Directories under `src` to look for nodes in. Default: all of `src`.
     pub roots: Vec<String>,
-    /// The subsections of a doc whose first paragraph says why a node's work is needed, or the
-    /// first cells of a table row (`| **Impact** | ... |`) whose second cell does.
+    /// The subsections of a doc whose first paragraph or list says why a node's work is needed,
+    /// or the first cells of a table row (`| **Impact** | ... |`) whose second cell does.
     pub why_sections: Vec<String>,
-    /// The subsections of a doc whose first paragraph says what finishing a node's work will
-    /// do, or the first cells of a table row whose second cell does.
+    /// The subsections of a doc whose first paragraph or list says what finishing a node's
+    /// work will do, or the first cells of a table row whose second cell does.
     #[serde(alias = "description-sections")]
     pub what_sections: Vec<String>,
     /// The subsections of a doc that hold a node's design choices.

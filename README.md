@@ -122,8 +122,10 @@ description:
 A part that is not written is taken at build time from the node's first doc that has it, and
 the sidebar says where from (*from Context*):
 
-- **why:** the first paragraph of a subsection with one of the `why-sections` names, or the
-  second cell of a table row (`| **Impact** | ... |`) with one of them.
+- **why:** the first paragraph or list of a subsection with one of the `why-sections` names,
+  or the second cell of a table row (`| **Impact** | ... |`) with one of them. A list gives
+  each item's bold lead (`- **Probed once a second**, off the loop`), or the whole item where
+  it has none.
 - **what:** the same with the `what-sections` names.
 
 A doc's opening paragraph is never taken for either: it is more often a status line ("Reported

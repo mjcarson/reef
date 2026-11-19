@@ -1,11 +1,11 @@
 //! Brief forms of a node's docs for the sidebar: why the work is needed, what it does, and the
 //! design choices, taken from the doc sections a node's `docs` link to.
 //!
-//! A doc link points at a file or at one heading of it. The why is the first paragraph of a
-//! subsection named like "Context", or a table row named like "Impact". The what is the same
-//! from a subsection or row named like "What it does". The design choices are a subsection
-//! named like "Design choices". Struck-through text is left out, since a brief form says what is
-//! true now.
+//! A doc link points at a file or at one heading of it. The why is the first paragraph or list
+//! of a subsection named like "Context", or a table row named like "Impact". A list gives each
+//! item's bold lead, or the whole item where it has none. The what is the same from a
+//! subsection or row named like "What it does". The design choices are a subsection named like
+//! "Design choices". Struck-through text is left out, since a brief form says what is true now.
 
 use crate::plan::{heading_spans, md_options, render};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -35,21 +35,90 @@ pub fn subsection<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)
     Some((hs[k].text.trim().to_string(), &md[hs[k].end..end]))
 }
 
-/// The paragraphs of `md` that stand on their own: not in a list, quote, table or footnote.
-fn top_paragraphs(md: &str) -> Vec<&str> {
+/// A block of a doc section that stands on its own, which a brief part may be taken from.
+#[derive(Debug, PartialEq)]
+enum Block<'a> {
+    /// A paragraph that is not in a list, quote, table or footnote
+    Para(&'a str),
+    /// A list that is not in a quote, table or footnote, as the text of each of its own items
+    List(Vec<&'a str>),
+}
+
+/// The paragraphs and lists of `md` that stand on their own, in order: not in a quote, table
+/// or footnote, and no list nested in another's item.
+fn top_blocks(md: &str) -> Vec<Block<'_>> {
     let mut out = Vec::new();
+    // how deep in lists, quotes, tables and footnotes the parser is
     let mut depth = 0usize;
     for (ev, range) in Parser::new_ext(md, md_options()).into_offset_iter() {
         match ev {
+            // a list at the top opens a block of its own
+            Event::Start(Tag::List(_)) if depth == 0 => {
+                out.push(Block::List(Vec::new()));
+                depth += 1;
+            }
+            // an item of that list is kept whole, with any list nested in it
+            Event::Start(Tag::Item) if depth == 1 => {
+                if let Some(Block::List(items)) = out.last_mut() {
+                    items.push(&md[range]);
+                }
+            }
+            // anything else that holds blocks is gone into
             Event::Start(Tag::List(_) | Tag::BlockQuote(_) | Tag::Table(_) | Tag::FootnoteDefinition(_)) => depth += 1,
+            // and come back out of
             Event::End(TagEnd::List(_) | TagEnd::BlockQuote(_) | TagEnd::Table | TagEnd::FootnoteDefinition) => {
                 depth = depth.saturating_sub(1)
             }
-            Event::Start(Tag::Paragraph) if depth == 0 => out.push(&md[range]),
+            // a paragraph at the top is a block of its own
+            Event::Start(Tag::Paragraph) if depth == 0 => out.push(Block::Para(&md[range])),
             _ => {}
         }
     }
     out
+}
+
+/// A block's brief form, if any text is left once struck-through text is dropped: a paragraph
+/// whole, or a list of each item's brief form.
+///
+/// # Arguments
+///
+/// * `block` - The paragraph or list to brief
+/// * `source` - The doc's file, for its links
+fn brief_block(block: &Block<'_>, source: &str) -> Option<String> {
+    let html = match block {
+        // a paragraph is taken whole
+        Block::Para(p) => render(p, source, None, true),
+        // a list gives a line an item that has any text
+        Block::List(items) => {
+            let lines: String = items
+                .iter()
+                .filter_map(|item| item_brief(item, source))
+                .map(|line| format!("<li>{line}</li>"))
+                .collect();
+            if lines.is_empty() { lines } else { format!("<ul>{lines}</ul>") }
+        }
+    };
+    has_text(&html).then_some(html)
+}
+
+/// A list item's brief form: the bold lead it opens with, as in "- **Probed once a second**,
+/// off the loop", or the whole item where it opens with none. Struck-through text is dropped
+/// first, so a lead struck through gives way to the lead written after it.
+///
+/// # Arguments
+///
+/// * `item` - The list item, with its marker
+/// * `source` - The doc's file, for its links
+fn item_brief(item: &str, source: &str) -> Option<String> {
+    // render the item without its marker or its struck-through text
+    let html = render(&item_text(item), source, None, true);
+    // the bold text it opens with, if it opens with any
+    let open = html.trim_start();
+    let open = open.strip_prefix("<p>").unwrap_or(open).trim_start();
+    let lead = open.strip_prefix("<strong>").and_then(|rest| rest.find("</strong>").map(|end| &rest[..end]));
+    // else the whole item
+    let brief = lead.unwrap_or(&html).trim();
+    has_text(brief).then(|| brief.to_string())
 }
 
 /// Whether rendered html holds any text.
@@ -98,8 +167,9 @@ fn table_row<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
 }
 
 /// One part of a node's brief form in a doc section, such as its why or its what: the first
-/// paragraph with text left once struck-through text is dropped, from a subsection named in
-/// `names`, else a table row named in `names`.
+/// paragraph or list with text left once struck-through text is dropped, from a subsection
+/// named in `names`, else a table row named in `names`. A list gives each item's bold lead, or
+/// the whole item where it has none.
 ///
 /// A section's own opening is never taken, since it rarely says either plainly. Returns the
 /// subsection's title or the row's name it was found under, and the rendered html.
@@ -112,12 +182,8 @@ fn table_row<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
 pub fn brief_part(sec: &str, names: &[String], source: &str) -> Option<(String, String)> {
     // a subsection named for this part comes first
     if let Some((title, text)) = subsection(sec, names) {
-        // its first paragraph with text
-        return top_paragraphs(text)
-            .into_iter()
-            .map(|p| render(p, source, None, true))
-            .find(|h| has_text(h))
-            .map(|html| (title, html));
+        // its first paragraph or list with text
+        return top_blocks(text).iter().find_map(|b| brief_block(b, source)).map(|html| (title, html));
     }
     // then a register entry's table row
     let (name, cell) = table_row(sec, names)?;
@@ -314,6 +380,30 @@ mod tests {
         assert!(brief_part(sec, &names(&["Impact"]), "a.md").is_none());
         assert!(design(sec, &names(&["Design choices"]), "a.md").is_none());
         assert!(section(md, Some("nope")).is_none());
+    }
+
+    #[test]
+    fn a_section_written_as_a_list() {
+        let md = "# I1. A bug\n\n## Symptom\n\n~~Struck.~~\n\n- **Every run logged an ERROR** as its client went:\n  65 of them.\n- ~~**Old lead** gone~~ **New lead**, kept.\n- ~~Wholly struck.~~\n- A plain item, see [F2](f2.md).\n  - **Nested** in it.\n\nA coda.\n\n## The fix\n\nIt was fixed.\n\n- **Not this.**\n";
+        let sec = section(md, None).unwrap();
+        // a struck paragraph is passed over for the list after it, which comes before the coda
+        let (from, why) = brief_part(sec, &names(&["Symptom"]), "a/i1.md").unwrap();
+        assert_eq!(from, "Symptom");
+        assert!(!why.contains("coda"), "{why}");
+        // an item with a bold lead gives its lead alone
+        assert!(why.starts_with("<ul><li>Every run logged an ERROR</li>"), "{why}");
+        assert!(!why.contains("65 of them"), "{why}");
+        // a struck lead gives way to the one after it
+        assert!(why.contains("<li>New lead</li>") && !why.contains("Old lead"), "{why}");
+        // an item struck through whole is dropped
+        assert!(!why.contains("Wholly"), "{why}");
+        // an item with no lead is taken whole, with what is nested in it and its links rebased
+        assert!(why.contains("A plain item, see <a href=\"reef-root:/a/f2.html\">F2</a>"), "{why}");
+        assert!(why.contains("<strong>Nested</strong> in it"), "{why}");
+        assert_eq!(why.matches("<li>").count(), 4, "three items and the one nested: {why}");
+        // a paragraph before a list is the block taken
+        let (from, what) = brief_part(sec, &names(&["The fix"]), "a/i1.md").unwrap();
+        assert_eq!((from.as_str(), what.trim()), ("The fix", "<p>It was fixed.</p>"));
     }
 
     #[test]
