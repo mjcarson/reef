@@ -302,6 +302,7 @@ Opening and closing groups is remembered for each page in the browser.
 
 ```sh
 mdbook-reef check [book]     # the build's checks without building, for CI; exit 1 on problems
+mdbook-reef next [book]      # the work ready to start, in plan order, and what the rest waits on
 mdbook-reef skill [book]     # write the Claude skill to the repo's .claude/skills/reef (--print to show it)
 mdbook-reef import plan.md --out src/plans/scans [--fence N] [--root id]
 ```

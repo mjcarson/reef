@@ -599,17 +599,75 @@ impl Graph {
     /// The nodes under `i` in the order the work happens: a topological order over what each
     /// needs or is helped by, its enclosing groups' arrows included, ties broken by the order
     /// the nodes were written in.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The group whose members to order
     pub fn plan_order(&self, i: usize) -> Vec<usize> {
-        let mut set = self.descendants(i);
+        self.order_of(self.descendants(i), Some(i))
+    }
+
+    /// Every node in the order the work happens, as [`Graph::plan_order`] orders a group's
+    /// members.
+    pub fn whole_order(&self) -> Vec<usize> {
+        self.order_of((0..self.nodes.len()).collect(), None)
+    }
+
+    /// The work ready to start, in the order the work happens.
+    pub fn ready_in_order(&self) -> Vec<usize> {
+        self.whole_order().into_iter().filter(|&i| self.ready[i]).collect()
+    }
+
+    /// What holds node `i` back: each need of its own, then each of its groups', innermost
+    /// first, that is not done yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The node to look at
+    pub fn unmet_needs(&self, i: usize) -> Vec<Unmet> {
+        let mut out = Vec::new();
+        // the node's own needs, then each enclosing group's
+        let mut cur = Some(i);
+        while let Some(c) = cur {
+            for &need in &self.needs[c] {
+                if self.status[need] != Status::Done {
+                    out.push(Unmet { need, through: (c != i).then_some(c) });
+                }
+            }
+            cur = self.parent[c];
+        }
+        out
+    }
+
+    /// The work not started that waits on something, in the order the work happens, each
+    /// with what it waits on.
+    pub fn waiting_in_order(&self) -> Vec<(usize, Vec<Unmet>)> {
+        self.whole_order()
+            .into_iter()
+            // pieces of work not started and not ready, which always wait on something
+            .filter(|&i| self.children[i].is_empty() && self.status[i] == Status::Todo && !self.ready[i])
+            .map(|i| (i, self.unmet_needs(i)))
+            .collect()
+    }
+
+    /// Nodes in the order the work happens: a topological order over what each needs or is
+    /// helped by, its enclosing groups' arrows included up to `within`, ties broken by the
+    /// order the nodes were written in.
+    ///
+    /// # Arguments
+    ///
+    /// * `set` - The nodes to order
+    /// * `within` - The group the nodes are all under, whose own arrows don't order them
+    fn order_of(&self, mut set: Vec<usize>, within: Option<usize>) -> Vec<usize> {
         set.sort_unstable();
         let n = set.len();
-        // What each member waits for: its own arrows and its groups' up to `i`.
+        // What each member waits for: its own arrows and its groups' up to `within`.
         let waits: Vec<Vec<usize>> = set
             .iter()
             .map(|&v| {
                 let mut out = Vec::new();
                 let mut cur = Some(v);
-                while let Some(c) = cur.filter(|&c| c != i) {
+                while let Some(c) = cur.filter(|&c| Some(c) != within) {
                     out.extend(self.needs[c].iter().chain(&self.helps[c]).copied());
                     cur = self.parent[c];
                 }
@@ -644,6 +702,15 @@ impl Graph {
         }
         out
     }
+}
+
+/// A need that is not done yet, holding a node back
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unmet {
+    /// The node that is needed
+    pub need: usize,
+    /// The group whose need it is, when the node waits on it because a group holding it does
+    pub through: Option<usize>,
 }
 
 /// A problem found in a node, at where it was written
@@ -731,6 +798,50 @@ mod tests {
         let ids: Vec<&str> = g.plan_order(g.index_of("top").unwrap()).into_iter().map(|k| g.node(k).id.as_str()).collect();
         // b waits for a through its group; c waits for b; z waits for nothing.
         assert_eq!(ids, ["a", "sub", "b", "c", "z"]);
+    }
+
+    #[test]
+    fn why_work_waits() {
+        let (g, d) = Graph::build(vec![
+            node("x", None, &[], Some(Status::InProgress)),
+            node("a", None, &[], None),
+            node("grp", None, &["x"], None),
+            node("m", Some("grp"), &["a"], None),
+            node("n", Some("grp"), &[], None),
+            node("done", None, &[], Some(Status::Done)),
+            node("later", None, &["done"], None),
+        ]);
+        assert!(d.is_empty(), "{d:?}");
+        let i = |s| g.index_of(s).unwrap();
+        // a member under a group with an unmet need names that need, after its own
+        assert_eq!(g.unmet_needs(i("m")), [Unmet { need: i("a"), through: None }, Unmet { need: i("x"), through: Some(i("grp")) }]);
+        assert_eq!(g.unmet_needs(i("n")), [Unmet { need: i("x"), through: Some(i("grp")) }]);
+        // a need that is done holds nothing back
+        assert!(g.unmet_needs(i("later")).is_empty());
+        // the work not started that waits, in order, each with what it waits on
+        let waiting: Vec<(&str, usize)> = g.waiting_in_order().into_iter().map(|(k, u)| (g.node(k).id.as_str(), u.len())).collect();
+        assert_eq!(waiting, [("m", 2), ("n", 1)]);
+    }
+
+    #[test]
+    fn ready_work_in_plan_order() {
+        // `first` is written first, but `second` helps it, so `second` is taken first
+        let mut first = node("first", None, &[], None);
+        first.helps = vec!["second".into()];
+        let (g, d) = Graph::build(vec![
+            first,
+            node("busy", None, &[], Some(Status::InProgress)),
+            node("second", None, &[], None),
+            node("grp", None, &[], None),
+            node("member", Some("grp"), &[], None),
+            node("gated", None, &["busy"], None),
+        ]);
+        assert!(d.is_empty(), "{d:?}");
+        let ids: Vec<&str> = g.ready_in_order().into_iter().map(|k| g.node(k).id.as_str()).collect();
+        // only leaves not started with nothing to wait on, groups and busy work left out
+        assert_eq!(ids, ["second", "first", "member"]);
+        let order: Vec<&str> = g.whole_order().into_iter().map(|k| g.node(k).id.as_str()).collect();
+        assert_eq!(order, ["busy", "second", "first", "grp", "member", "gated"]);
     }
 
     #[test]

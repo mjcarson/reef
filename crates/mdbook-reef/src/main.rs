@@ -3,6 +3,7 @@
 mod check;
 mod import;
 mod install;
+mod next;
 mod plan;
 mod preprocess;
 
@@ -45,6 +46,11 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
+    /// Print the work that is ready to start, in plan order, and what the rest waits on.
+    Next {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
     /// Turn a mermaid flowchart into reef nodes.
     Import(import::Args),
 }
@@ -68,6 +74,7 @@ fn main() -> Result<()> {
             let n = check::check(&dir, quiet)?;
             std::process::exit(if n == 0 { 0 } else { 1 })
         }
+        Some(Command::Next { dir }) => next::next(&dir),
         Some(Command::Import(args)) => import::run(args),
     }
 }

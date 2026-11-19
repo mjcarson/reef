@@ -124,6 +124,7 @@ layout = "page"         # fill the page; at most one per page, no height
 
 ```sh
 mdbook-reef check [book]     # the build's checks, exit 1 on problems
+mdbook-reef next [book]      # ready work in plan order, then what each waiting item waits on
 mdbook-reef import plan.md --out src/plans/x [--fence N] [--root id]   # mermaid flowchart -> nodes
 mdbook-reef install [book]   # reef.js, reef.css, book.toml, and this skill
 mdbook-reef skill [book]     # rewrite this skill from the installed mdbook-reef

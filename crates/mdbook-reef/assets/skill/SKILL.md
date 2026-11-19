@@ -20,6 +20,9 @@ The full key reference is in [reference.md](reference.md). Read it before writin
 - A node is any markdown file whose frontmatter has an `id`, or an entry in some node's
   `nodes:` list. To find them: `grep -rn '^id:\|^  - id:' <book>/src`.
 - `mdbook-reef check <book>` prints the totals, including how many items are ready to start.
+- `mdbook-reef next <book>` lists the work ready to start, in plan order, and for each item
+  that waits, the needs (its own and its groups') that are not done yet. Take the next piece of
+  work from it rather than from grepping frontmatter.
 - Before starting work, find its node by id or title. Read its `needs`, its group, and its
   `docs` page: they say what the work is gated on and how it was meant to be done.
 
