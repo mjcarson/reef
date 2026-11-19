@@ -1,11 +1,11 @@
 //! The mdbook preprocessor.
 
-use crate::paths;
 use crate::plan::{self, Config, Plan};
 use anyhow::{Context, Result, bail};
 use mdbook_preprocessor::book::{Book, BookItem};
 use mdbook_preprocessor::{Preprocessor, PreprocessorContext};
 use reef_model::spec::frontmatter_is_yaml;
+use reef_render::paths;
 use std::collections::HashSet;
 
 pub struct Reef;

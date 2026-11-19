@@ -7,11 +7,16 @@
 //! subsection or row named like "What it does". The design choices are a subsection named like
 //! "Design choices". Struck-through text is left out, since a brief form says what is true now.
 
-use crate::plan::{heading_spans, md_options, render};
+use crate::markdown::{heading_spans, md_options, render};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
 /// The text below the heading `anchor` names, up to the next heading at its level or above.
 /// With no anchor, the whole file below its title.
+///
+/// # Arguments
+///
+/// * `md` - The doc to look in
+/// * `anchor` - The heading id the link names, if any
 pub fn section<'a>(md: &'a str, anchor: Option<&str>) -> Option<&'a str> {
     let hs = heading_spans(md);
     match anchor {
@@ -28,6 +33,11 @@ pub fn section<'a>(md: &'a str, anchor: Option<&str>) -> Option<&'a str> {
 }
 
 /// The first subsection of `md` titled one of `names` (ignoring case): its title and its text.
+///
+/// # Arguments
+///
+/// * `md` - The section to look in
+/// * `names` - The titles a subsection may have
 pub fn subsection<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
     let hs = heading_spans(md);
     let k = hs.iter().position(|h| names.iter().any(|n| n.trim().eq_ignore_ascii_case(h.text.trim())))?;
@@ -46,6 +56,10 @@ enum Block<'a> {
 
 /// The paragraphs and lists of `md` that stand on their own, in order: not in a quote, table
 /// or footnote, and no list nested in another's item.
+///
+/// # Arguments
+///
+/// * `md` - The section to look in
 fn top_blocks(md: &str) -> Vec<Block<'_>> {
     let mut out = Vec::new();
     // how deep in lists, quotes, tables and footnotes the parser is
@@ -122,6 +136,10 @@ fn item_brief(item: &str, source: &str) -> Option<String> {
 }
 
 /// Whether rendered html holds any text.
+///
+/// # Arguments
+///
+/// * `html` - The rendered html to look in
 pub fn has_text(html: &str) -> bool {
     let mut in_tag = false;
     html.chars().any(|c| match c {
@@ -140,6 +158,11 @@ pub fn has_text(html: &str) -> bool {
 /// The first table row of `md` whose first cell is one of `names`, as in `| **Impact** | ... |`,
 /// the way an entry in a register of optimizations or issues opens: the first cell's text and
 /// the second cell.
+///
+/// # Arguments
+///
+/// * `md` - The section to look in
+/// * `names` - The first cells a row may have
 fn table_row<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
     let mut cell = 0usize;
     let mut first = String::new();
@@ -193,6 +216,12 @@ pub fn brief_part(sec: &str, names: &[String], source: &str) -> Option<(String, 
 
 /// The design choices in a doc section: the subsection named in `names`, rendered, with the
 /// subsection's title.
+///
+/// # Arguments
+///
+/// * `sec` - The doc section to look in
+/// * `names` - The titles the design choices' subsection may have
+/// * `source` - The doc's file, for its links
 pub fn design(sec: &str, names: &[String], source: &str) -> Option<(String, String)> {
     let (title, text) = subsection(sec, names)?;
     let html = render_choices(text, source);
@@ -203,6 +232,10 @@ pub fn design(sec: &str, names: &[String], source: &str) -> Option<(String, Stri
 /// measurements are: a register entry's opening `| | |` table, whose header is empty, is left
 /// out. Each comes with its caption, the bold text that opens the paragraph before it, as in
 /// "**The cell alone** (2026-11-09). ...".
+///
+/// # Arguments
+///
+/// * `md` - The section to look in
 pub fn measured_tables(md: &str) -> Vec<Option<String>> {
     let mut out = Vec::new();
     let mut depth = 0usize;
@@ -247,6 +280,11 @@ pub fn measured_tables(md: &str) -> Vec<Option<String>> {
 /// Render design choices. A list whose items open with a bold lead, as in
 /// "- **Runs cut in disk order.** Because ...", becomes one `<details>` an item, its lead the
 /// summary, so a long list reads at a glance. Everything else renders as it is.
+///
+/// # Arguments
+///
+/// * `md` - The design choices as markdown
+/// * `source` - The doc's file, for its links
 pub fn render_choices(md: &str, source: &str) -> String {
     let mut out = String::new();
     let mut depth = 0usize;
@@ -286,6 +324,10 @@ pub fn render_choices(md: &str, source: &str) -> String {
 }
 
 /// One list item's text with its marker taken off and its lines brought back to the margin.
+///
+/// # Arguments
+///
+/// * `item` - The list item, with its marker
 fn item_text(item: &str) -> String {
     let t = item.trim_start();
     let marker = t
@@ -307,6 +349,10 @@ fn item_text(item: &str) -> String {
 }
 
 /// An item's bold lead and the rest, if it opens with one.
+///
+/// # Arguments
+///
+/// * `item` - The list item, with its marker
 fn bold_lead(item: &str) -> Option<(String, String)> {
     let text = item_text(item);
     let body = text.strip_prefix("**")?;
@@ -314,6 +360,14 @@ fn bold_lead(item: &str) -> Option<(String, String)> {
     Some((body[..end].to_string(), body[end + 2..].trim().to_string()))
 }
 
+/// One design choice: a `<details>` whose summary is its bold lead, or the item as it is
+/// where it has none. A choice struck through whole renders as nothing.
+///
+/// # Arguments
+///
+/// * `item` - The list item, with its marker
+/// * `lead` - The item's bold lead and the rest, if it opens with one
+/// * `source` - The doc's file, for its links
 fn choice(item: &str, lead: Option<(String, String)>, source: &str) -> String {
     let text = item_text(item);
     match lead {
@@ -338,6 +392,7 @@ fn choice(item: &str, lead: Option<(String, String)>, source: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Section names as the config holds them
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
     }

@@ -241,6 +241,7 @@ dependencies = [
  "mdbook-preprocessor",
  "pulldown-cmark",
  "reef-model",
+ "reef-render",
  "serde",
  "serde_json",
  "toml",
@@ -318,6 +319,16 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
+]
+
+[[package]]
+name = "reef-render"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+ "reef-model",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

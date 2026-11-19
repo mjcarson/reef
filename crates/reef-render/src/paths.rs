@@ -6,10 +6,20 @@ pub enum Target {
     /// Left as written: a URL, a mail link, an absolute path.
     External(String),
     /// A file in the book, relative to `src` with `/` separators, and the anchor after it.
-    Internal { path: String, anchor: Option<String> },
+    Internal {
+        /// The file, relative to `src`
+        path: String,
+        /// The heading id after the `#`, if any
+        anchor: Option<String>,
+    },
 }
 
 /// Resolve `link`, as written in `from` (relative to `src`).
+///
+/// # Arguments
+///
+/// * `from` - The path the link is written in
+/// * `link` - The link as written
 pub fn resolve(from: &str, link: &str) -> Target {
     let link = link.trim();
     if link.contains("://") || link.starts_with("mailto:") || link.starts_with('/') || link.starts_with("data:") {
@@ -26,11 +36,20 @@ pub fn resolve(from: &str, link: &str) -> Target {
 }
 
 /// The directory part of a `src`-relative path.
+///
+/// # Arguments
+///
+/// * `path` - The path to take the directory of
 pub fn parent(path: &str) -> &str {
     path.rfind('/').map_or("", |i| &path[..i])
 }
 
 /// Join and normalise `.` and `..` in `/`-separated paths. A `..` past the root stays.
+///
+/// # Arguments
+///
+/// * `base` - The directory to start from
+/// * `rel` - The path to join onto it
 pub fn join(base: &str, rel: &str) -> String {
     let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
     for seg in rel.split('/') {
@@ -50,6 +69,10 @@ pub fn join(base: &str, rel: &str) -> String {
 }
 
 /// The page mdbook writes for a markdown file.
+///
+/// # Arguments
+///
+/// * `path` - The markdown file's path
 pub fn html_of(path: &str) -> String {
     let (dir, file) = match path.rfind('/') {
         Some(i) => (&path[..=i], &path[i + 1..]),
@@ -66,11 +89,20 @@ pub fn html_of(path: &str) -> String {
 }
 
 /// `../` once for each directory a page is nested in.
+///
+/// # Arguments
+///
+/// * `page` - The page's path from the book's root
 pub fn prefix_for(page: &str) -> String {
     "../".repeat(page.matches('/').count())
 }
 
 /// A relative path from directory `from_dir` to `to`, both relative to the same root.
+///
+/// # Arguments
+///
+/// * `from_dir` - The directory the path starts from
+/// * `to` - The path it leads to
 pub fn relative(from_dir: &str, to: &str) -> String {
     let a: Vec<&str> = from_dir.split('/').filter(|s| !s.is_empty()).collect();
     let b: Vec<&str> = to.split('/').filter(|s| !s.is_empty()).collect();
@@ -82,6 +114,10 @@ pub fn relative(from_dir: &str, to: &str) -> String {
 
 /// The id mdbook gives a heading (`id_from_content` in mdbook-html): lowercase, alphanumerics,
 /// `_` and `-` kept, each whitespace character a `-`, everything else dropped.
+///
+/// # Arguments
+///
+/// * `text` - The heading's text
 pub fn heading_id(text: &str) -> String {
     text.trim()
         .to_lowercase()
@@ -99,6 +135,10 @@ pub fn heading_id(text: &str) -> String {
 }
 
 /// Escape text for HTML content and attribute values.
+///
+/// # Arguments
+///
+/// * `s` - The text to escape
 pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

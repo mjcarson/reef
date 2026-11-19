@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/reef-model", "crates/reef-layout", "crates/reef-view", "crates/mdbook-reef", "xtask"]
+members = ["crates/reef-model", "crates/reef-layout", "crates/reef-render", "crates/reef-view", "crates/mdbook-reef", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ repository = "https://github.com/mjcarson/reef"
 [workspace.dependencies]
 reef-model = { path = "crates/reef-model", default-features = false }
 reef-layout = { path = "crates/reef-layout" }
+reef-render = { path = "crates/reef-render" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

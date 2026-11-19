@@ -67,8 +67,8 @@ as `shoal/examples/tmdb.rs` does), or as a node program, a three-line binary cal
 ### Design choices
 
 - **`reef-render` gets the rendering and doc resolution**, over a `DocSource` trait that reads a
-  doc by path and lists its headings. mdbook-reef keeps a filesystem source, and the service
-  gets a repo and plan-pages source ([C14](app.md#docs-in-central-mode)).
+  doc by path and lists its headings. It has a filesystem source, which mdbook-reef uses, and an
+  in-memory one. The service gets a repo and plan-pages source ([C14](app.md#docs-in-central-mode)).
 - **The example book is the test.** Its payload JSON must be byte-identical before and after
   the move, and `mdbook-reef check` must print the same.
 - **Names, not just ids.** A node's full name is `project/plan/id` ([C2](../milestones/m1.md)).

@@ -1,10 +1,8 @@
 //! mdbook-reef: planning graphs for mdbook.
 
 mod check;
-mod extract;
 mod import;
 mod install;
-mod paths;
 mod plan;
 mod preprocess;
 

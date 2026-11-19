@@ -335,6 +335,7 @@ A group with no arrows among its members is packed in a grid.
 ```
 crates/reef-model    nodes, the checked graph, views (shared by both sides)
 crates/reef-layout   the layout, plain Rust, tested natively
+crates/reef-render   markdown rendering, doc links and why/what extraction over any DocSource
 crates/reef-view     the wasm viewer
 crates/mdbook-reef   the preprocessor and CLI; embeds assets/reef.js and assets/reef.css
 xtask                cargo xtask wasm: builds reef-view and bundles it into assets/reef.js

@@ -1,0 +1,15 @@
+[package]
+name = "reef-render"
+description = "Markdown rendering, doc links and brief forms for reef planning graphs, over any source of docs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+reef-model = { workspace = true, features = ["parse"] }
+serde.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+[dev-dependencies]
+serde_json.workspace = true

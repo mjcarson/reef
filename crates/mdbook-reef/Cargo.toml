@@ -10,6 +10,7 @@ categories = ["command-line-utilities", "visualization"]
 
 [dependencies]
 reef-model = { workspace = true, features = ["parse"] }
+reef-render.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

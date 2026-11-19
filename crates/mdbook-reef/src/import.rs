@@ -7,8 +7,8 @@
 //! means optional. A label that starts with an id the book has a heading for (F125, O147, X17,
 //! Item 346 and so on) gets that heading as its doc.
 
-use crate::paths;
-use crate::plan::{headings_of, markdown_files};
+use crate::plan::markdown_files;
+use reef_render::{headings_of, paths};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
