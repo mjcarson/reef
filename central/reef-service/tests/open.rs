@@ -1,6 +1,9 @@
 //! Opening the store: a pool in this process with no external node configured, and a refusal
 //! that says what to set in a build that can't start one
 
+// an in-process pool's open nests futures past the compiler's default depth
+#![recursion_limit = "256"]
+
 use reef_service::{Conf, Store};
 
 #[cfg(feature = "embedded")]

@@ -14,17 +14,19 @@
 //!   revision's partition, named `pending` on the plan's row first, and is made current by one
 //!   conditional write to that row. A write killed midway leaves the old revision current and
 //!   whole, and the next write prunes what it left.
-//!
-//! A process keeps one store over shoal. `Store::shared` opens it once however often a caller
-//! asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second pool
-//! would find the data directory locked.
+//! - **Checks under the plan's lock.** The store keeps rows; it doesn't judge what they make.
+//!   `put_checked` and `write_plan_checked` hand a caller's check the plan as it stands and as
+//!   the write would leave it, under the plan's write lock, and write only if it finds no
+//!   problem. [`Service`](crate::Service) checks every write this way; `put` and `write_plan`
+//!   are the unchecked layer under it.
 
-use reef_model::{NodeSpec, Origin, PlanName, Record};
+use reef_model::{Diagnostic, NodeSpec, Origin, PlanName, Record};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{OnceCell, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tracing::instrument;
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
@@ -33,9 +35,6 @@ use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::repo::{self, Located};
 use crate::schema::{NodeRow, PROJECTS, PlanRow, ProjectRow};
-
-/// The process's one store over shoal, opened on first use
-static SHARED: OnceCell<Store> = OnceCell::const_new();
 
 /// How many node rows a bulk write sends in one bundle
 const BUNDLE_ROWS: usize = 256;
@@ -83,6 +82,83 @@ impl NodeWrite {
     }
 }
 
+impl From<StoredNode> for NodeWrite {
+    /// The node as a writer would put it back, without the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node as it was read
+    fn from(node: StoredNode) -> NodeWrite {
+        NodeWrite {
+            spec: node.spec,
+            body: node.body,
+            order: node.order,
+        }
+    }
+}
+
+/// One put of a batch: a node, and the version its writer read it at
+#[derive(Debug, Clone, PartialEq)]
+pub struct NodePut {
+    /// The node as it should be written
+    pub node: NodeWrite,
+    /// The version it was read at, or `None` for a node that must not exist yet
+    pub read: Option<u64>,
+}
+
+impl NodePut {
+    /// A put of a node, over the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node as it should be written
+    /// * `read` - The version it was read at, or `None` for a new node
+    pub fn new(node: NodeWrite, read: Option<u64>) -> NodePut {
+        NodePut { node, read }
+    }
+}
+
+/// A put of a batch that found its node other than its writer read it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalePut {
+    /// The node's id
+    pub id: String,
+    /// How the node differs from what its writer read
+    pub refusal: Refusal,
+}
+
+/// A plan as it stands and as a write would leave it, for a check to judge
+#[derive(Debug, Clone)]
+pub struct Proposal {
+    /// The plan's nodes as they stand, in written order
+    pub before: Vec<Record>,
+    /// The plan's nodes as the write would leave them, in written order
+    pub after: Vec<Record>,
+}
+
+/// What came of a checked batch of puts
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// Every put was written
+    Applied {
+        /// Each put's new version, in the order the puts were given
+        versions: Vec<u64>,
+    },
+    /// Some puts found their nodes other than their writers read them, so nothing was written
+    Stale(Vec<StalePut>),
+    /// The check found problems the puts would add, so nothing was written
+    Refused(Vec<Diagnostic>),
+}
+
+/// What came of a checked whole-plan write
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rewrite {
+    /// The plan was written as a new revision, made current
+    Applied(Rewritten),
+    /// The check found problems the write would add, so nothing was written
+    Refused(Vec<Diagnostic>),
+}
+
 /// A plan's current revision, as a reader got it
 #[derive(Debug, Clone, PartialEq)]
 pub struct Listing {
@@ -100,18 +176,7 @@ impl Listing {
     /// * `plan` - The plan these nodes were read from
     pub fn records(self, plan: &PlanName) -> anyhow::Result<Vec<Record>> {
         // each node becomes a stored record, named by its plan and id
-        self.nodes
-            .into_iter()
-            .map(|node| {
-                let name = plan.node(node.spec.id.as_str())?;
-                Ok(Record {
-                    spec: node.spec,
-                    body: node.body,
-                    order: node.order,
-                    origin: Origin::Stored { name },
-                })
-            })
-            .collect()
+        records(plan, self.nodes.into_iter().map(NodeWrite::from).collect())
     }
 }
 
@@ -210,7 +275,7 @@ impl Store<ShoalBackend> {
     /// Opens a store: the external node reef's config names, else a pool in this process
     ///
     /// Only one process can open a data directory, so a process opens one store; most callers
-    /// want `shared`.
+    /// want [`Service::shared`](crate::Service::shared).
     ///
     /// # Arguments
     ///
@@ -220,19 +285,6 @@ impl Store<ShoalBackend> {
         // reach shoal however the config says to
         let backend = ShoalBackend::open(conf).await?;
         Ok(Store::new(backend))
-    }
-
-    /// Gets the process's store, opening it on first use
-    ///
-    /// Every later caller gets the store the first opened, whatever config it passes.
-    ///
-    /// # Arguments
-    ///
-    /// * `conf` - reef's config, used only by the first call
-    #[instrument(name = "Store::shared", skip_all, err(Debug))]
-    pub async fn shared(conf: &Conf) -> anyhow::Result<&'static Store> {
-        // open it once, and hand every later caller the same one
-        SHARED.get_or_try_init(|| Store::open(conf)).await
     }
 
     /// How this store reaches shoal
@@ -404,6 +456,18 @@ impl<B: Backend> Store<B> {
             .collect()
     }
 
+    /// Finds a registered project by name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The project's name
+    #[instrument(name = "Store::project", skip_all, err(Debug))]
+    pub async fn project(&self, name: &str) -> anyhow::Result<Option<Project>> {
+        // every project sits in the one listing partition, which is small
+        let projects = self.projects().await?;
+        Ok(projects.into_iter().find(|project| project.name == name))
+    }
+
     /// Lists a project's plans, by name
     ///
     /// # Arguments
@@ -514,7 +578,7 @@ impl<B: Backend> Store<B> {
         let row = self.plan_row(plan).await?;
         // every row of the current revision, put in written order
         let mut nodes = self.revision(plan, row.current, None).await?;
-        nodes.sort_by(|a, b| (a.order, &a.spec.id).cmp(&(b.order, &b.spec.id)));
+        listed_order(&mut nodes);
         Ok(Listing {
             revision: row.current,
             nodes,
@@ -559,6 +623,8 @@ impl<B: Backend> Store<B> {
     ///
     /// A put names the version it read the node at, or `None` for a node that must not exist
     /// yet. A node that has moved on, or isn't as expected, comes back as [`Put::Stale`].
+    ///
+    /// This doesn't check what the node does to its plan; `put_checked` does.
     ///
     /// # Arguments
     ///
@@ -607,6 +673,8 @@ impl<B: Backend> Store<B> {
     /// the new one named pending for the next write to prune. One that fails pruning after step
     /// 5 has still made its revision current, and says so with `left_retired`.
     ///
+    /// This doesn't check what the nodes make of the plan; `write_plan_checked` does.
+    ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
@@ -618,15 +686,7 @@ impl<B: Backend> Store<B> {
         nodes: Vec<NodeWrite>,
     ) -> anyhow::Result<Rewritten> {
         // every node must be one the store can keep, under an id no other node has
-        let mut ids = HashSet::with_capacity(nodes.len());
-        for node in &nodes {
-            check_node(plan, node)?;
-            anyhow::ensure!(
-                ids.insert(node.spec.id.as_str()),
-                "node `{}` is written twice",
-                node.spec.id
-            );
-        }
+        check_plan_nodes(plan, &nodes)?;
         // one write to this plan at a time
         let _write = self.writing(plan).await;
         let row = self.plan_row(plan).await?;
@@ -634,6 +694,87 @@ impl<B: Backend> Store<B> {
         let (row, recovered) = self.recover(plan, row).await?;
         // 2. carry each node's version on, so a put read before this write is refused after it
         let old: HashMap<String, u64> = self.keys(plan, row.current).await?.into_iter().collect();
+        // 3 to 6. write the new revision, make it current and prune the old one
+        self.rewrite(plan, row, old, recovered, nodes).await
+    }
+
+    /// Writes a whole plan as a new revision, if a check finds no problem it would add
+    ///
+    /// Under the plan's write lock, this prunes what a killed write left, reads the current
+    /// revision, and hands `check` the plan as it stands and as these nodes would make it. A
+    /// check that finds problems refuses the write before a revision is reserved, so nothing
+    /// is written. Otherwise the nodes are written as `write_plan` writes them.
+    ///
+    /// The check runs under the plan's write lock, so it must not read or write this plan
+    /// through the store, or it waits forever.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `nodes` - Every node of the plan, each a node of its own
+    /// * `check` - Finds the problems the write would add, or none
+    #[instrument(name = "Store::write_plan_checked", skip_all, err(Debug))]
+    pub async fn write_plan_checked<F, Fut>(
+        &self,
+        plan: &PlanName,
+        mut nodes: Vec<NodeWrite>,
+        check: F,
+    ) -> anyhow::Result<Rewrite>
+    where
+        F: FnOnce(Proposal) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
+    {
+        // every node must be one the store can keep, under an id no other node has
+        check_plan_nodes(plan, &nodes)?;
+        // one write to this plan at a time, so the check judges the plan this lands on
+        let _write = self.writing(plan).await;
+        let row = self.plan_row(plan).await?;
+        // prune whatever a killed write left behind
+        let (row, recovered) = self.recover(plan, row).await?;
+        // the revision as it stands, whose versions each node carries on
+        let mut current = self.revision(plan, row.current, None).await?;
+        listed_order(&mut current);
+        let old: HashMap<String, u64> = current
+            .iter()
+            .map(|node| (node.spec.id.clone(), node.version))
+            .collect();
+        // judge the plan as these nodes would make it, and write nothing if it adds a problem
+        in_written_order(&mut nodes);
+        let before = records(plan, current.into_iter().map(NodeWrite::from).collect())?;
+        let proposal = Proposal {
+            before,
+            after: records(plan, nodes.clone())?,
+        };
+        let problems = check(proposal).await?;
+        if !problems.is_empty() {
+            return Ok(Rewrite::Refused(problems));
+        }
+        // write the new revision, make it current and prune the old one
+        let rewritten = self.rewrite(plan, row, old, recovered, nodes).await?;
+        Ok(Rewrite::Applied(rewritten))
+    }
+
+    /// Writes a plan's nodes as a new revision, makes it current, and prunes the old one
+    ///
+    /// These are steps 3 to 6 of `write_plan`. The caller holds the plan's write lock, and has
+    /// pruned what a killed write left.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `row` - The plan's row as it now stands
+    /// * `old` - The version of each node of the current revision, by id
+    /// * `recovered` - How many rows a killed write had left, which the caller pruned
+    /// * `nodes` - Every node of the plan, each a node of its own
+    #[instrument(name = "Store::rewrite", skip_all, err(Debug))]
+    async fn rewrite(
+        &self,
+        plan: &PlanName,
+        row: PlanRow,
+        old: HashMap<String, u64>,
+        recovered: usize,
+        nodes: Vec<NodeWrite>,
+    ) -> anyhow::Result<Rewritten> {
         // 3. reserve the new revision, so a write killed from here on can be found
         let revision = fresh_revision();
         let reserve = Pointers {
@@ -679,6 +820,127 @@ impl<B: Backend> Store<B> {
             revision,
             recovered,
             left_retired,
+        })
+    }
+
+    /// Writes a batch of nodes into a plan's current revision, if each is as its writer read it
+    /// and a check finds no problem they would add
+    ///
+    /// The steps, under the plan's write lock:
+    ///
+    /// 1. Prune whatever a killed write left.
+    /// 2. Read the current revision whole.
+    /// 3. Refuse the batch as [`Checked::Stale`] if any put finds its node other than its
+    ///    writer read it, naming every such put.
+    /// 4. Hand `check` the plan as it stands and as the puts would leave it, each replacing
+    ///    its node in place or joining the plan, and refuse the batch as [`Checked::Refused`]
+    ///    if it finds problems.
+    /// 5. Write each put in the order given, each only over the version its writer read.
+    ///
+    /// A refused batch writes nothing. A batch isn't atomic, though: reef-service is shoal's
+    /// only writer, so a write refused in step 5 means another process wrote the plan, and a
+    /// write that fails there leaves the puts before it written. Either is an error that names
+    /// what was written.
+    ///
+    /// The check runs under the plan's write lock, so it must not read or write this plan
+    /// through the store, or it waits forever.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `puts` - The nodes to write, each with the version its writer read
+    /// * `check` - Finds the problems the puts would add, or none
+    #[instrument(name = "Store::put_checked", skip_all, err(Debug))]
+    pub async fn put_checked<F, Fut>(
+        &self,
+        plan: &PlanName,
+        puts: Vec<NodePut>,
+        check: F,
+    ) -> anyhow::Result<Checked>
+    where
+        F: FnOnce(Proposal) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
+    {
+        // every node must be one the store can keep, each put once
+        let mut ids = HashSet::with_capacity(puts.len());
+        for put in &puts {
+            check_node(plan, &put.node)?;
+            anyhow::ensure!(
+                ids.insert(put.node.spec.id.as_str()),
+                "node `{}` is put twice in one batch",
+                put.node.spec.id
+            );
+        }
+        // one write to this plan at a time, so the check judges the plan the puts land on
+        let _write = self.writing(plan).await;
+        let row = self.plan_row(plan).await?;
+        // 1. prune whatever a killed write left
+        let (row, _) = self.recover(plan, row).await?;
+        // 2. the revision as it stands, in written order
+        let mut current = self.revision(plan, row.current, None).await?;
+        listed_order(&mut current);
+        // 3. every put must find its node as its writer read it, before anything is judged
+        let stale = stale_puts(&current, &puts);
+        if !stale.is_empty() {
+            return Ok(Checked::Stale(stale));
+        }
+        // an empty batch changes nothing
+        if puts.is_empty() {
+            return Ok(Checked::Applied {
+                versions: Vec::new(),
+            });
+        }
+        // 4. the plan as the puts would leave it: each replaces its node in place, or joins it
+        let mut after: Vec<NodeWrite> = current.into_iter().map(NodeWrite::from).collect();
+        let before = records(plan, after.clone())?;
+        let at: HashMap<String, usize> = after
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.spec.id.clone(), i))
+            .collect();
+        for put in &puts {
+            match at.get(&put.node.spec.id) {
+                Some(&i) => after[i] = put.node.clone(),
+                None => after.push(put.node.clone()),
+            }
+        }
+        in_written_order(&mut after);
+        // judge it, and write nothing if it adds a problem
+        let proposal = Proposal {
+            before,
+            after: records(plan, after)?,
+        };
+        let problems = check(proposal).await?;
+        if !problems.is_empty() {
+            return Ok(Checked::Refused(problems));
+        }
+        // 5. write each put in the order given, each only over the version its writer read
+        let mut written: Vec<(String, u64)> = Vec::with_capacity(puts.len());
+        for put in puts {
+            let id = put.node.spec.id.clone();
+            let (version, expect) = match put.read {
+                Some(read) => (read + 1, Expect::Version(read)),
+                None => (1, Expect::Absent),
+            };
+            let new = node_row(plan, row.current, put.node, version)?;
+            match self.backend.write_node(new, expect).await {
+                Ok(Written::Applied) => written.push((id, version)),
+                // this process holds the plan's lock and saw the node as read, so another did
+                Ok(Written::Refused(refusal)) => anyhow::bail!(
+                    "node `{id}` of plan `{plan}` changed under this batch ({refusal}): another \
+                     process wrote the plan, after {} were written",
+                    names(&written)
+                ),
+                Err(error) => {
+                    return Err(error.context(format!(
+                        "writing node `{id}` of plan `{plan}`, after {} were written",
+                        names(&written)
+                    )));
+                }
+            }
+        }
+        Ok(Checked::Applied {
+            versions: written.into_iter().map(|(_, version)| version).collect(),
         })
     }
 
@@ -807,6 +1069,114 @@ impl<B: Backend> Store<B> {
         }
         Ok(count)
     }
+}
+
+/// Refuses a whole plan the store can't keep: a node it can't keep as one row, or an id twice
+///
+/// # Arguments
+///
+/// * `plan` - The plan it is written to
+/// * `nodes` - Every node of the plan
+fn check_plan_nodes(plan: &PlanName, nodes: &[NodeWrite]) -> anyhow::Result<()> {
+    // every node must be one the store can keep, under an id no other node has
+    let mut ids = HashSet::with_capacity(nodes.len());
+    for node in nodes {
+        check_node(plan, node)?;
+        anyhow::ensure!(
+            ids.insert(node.spec.id.as_str()),
+            "node `{}` is written twice",
+            node.spec.id
+        );
+    }
+    Ok(())
+}
+
+/// The puts of a batch that find their nodes other than their writers read them
+///
+/// # Arguments
+///
+/// * `current` - The plan's current revision, as read under its write lock
+/// * `puts` - The batch
+fn stale_puts(current: &[StoredNode], puts: &[NodePut]) -> Vec<StalePut> {
+    // each node's version as it stands, by id
+    let versions: HashMap<&str, u64> = current
+        .iter()
+        .map(|node| (node.spec.id.as_str(), node.version))
+        .collect();
+    puts.iter()
+        .filter_map(|put| {
+            // as a conditional write would judge it
+            let refusal = match (versions.get(put.node.spec.id.as_str()), put.read) {
+                (None, None) => return None,
+                (Some(stored), Some(read)) if *stored == read => return None,
+                (Some(_), None) => Refusal::Exists,
+                (None, Some(_)) => Refusal::Missing,
+                (Some(_), Some(_)) => Refusal::Moved,
+            };
+            Some(StalePut {
+                id: put.node.spec.id.clone(),
+                refusal,
+            })
+        })
+        .collect()
+}
+
+/// Puts stored nodes in the order a listing reads in: by written order, then by id
+///
+/// # Arguments
+///
+/// * `nodes` - The nodes to sort
+fn listed_order(nodes: &mut [StoredNode]) {
+    nodes.sort_by(|a, b| (a.order, &a.spec.id).cmp(&(b.order, &b.spec.id)));
+}
+
+/// Puts nodes to be written in the order a listing of them will read in: by written order,
+/// then by id
+///
+/// # Arguments
+///
+/// * `nodes` - The nodes to sort
+fn in_written_order(nodes: &mut [NodeWrite]) {
+    nodes.sort_by(|a, b| (a.order, &a.spec.id).cmp(&(b.order, &b.spec.id)));
+}
+
+/// The records nodes make, each named in its plan, for `Graph::build`
+///
+/// # Arguments
+///
+/// * `plan` - The plan the nodes are part of
+/// * `nodes` - The nodes, in written order
+fn records(plan: &PlanName, nodes: Vec<NodeWrite>) -> anyhow::Result<Vec<Record>> {
+    // each node becomes a stored record, named by its plan and id
+    nodes
+        .into_iter()
+        .map(|node| {
+            let name = plan.node(node.spec.id.as_str())?;
+            Ok(Record {
+                spec: node.spec,
+                body: node.body,
+                order: node.order,
+                origin: Origin::Stored { name },
+            })
+        })
+        .collect()
+}
+
+/// Names the nodes a batch wrote before it stopped, for its error
+///
+/// # Arguments
+///
+/// * `written` - Each node written, with its new version
+fn names(written: &[(String, u64)]) -> String {
+    // none, or each id in backticks
+    if written.is_empty() {
+        return "none".to_string();
+    }
+    written
+        .iter()
+        .map(|(id, _)| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Refuses a node the store can't keep as one row

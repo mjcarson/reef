@@ -5,7 +5,8 @@ for it is the book in `../plan`. This workspace is the only part of reef that de
 it is a workspace of its own, which reef's stable root workspace excludes.
 
 ```
-reef-service   the store: reef's shoal schema, and the only code that touches shoal
+reef-service   the service and its store: every write checked against the whole plan, reef's
+               shoal schema, and the only code that touches shoal
 reef-shoal     the external node: shoal's node program over reef's schema
 ```
 
@@ -37,7 +38,7 @@ cores = 2                     # the in-process pool's shards
 memory = "256MiB"             # each shard's memory budget
 ```
 
-Only one process can open a data directory. `Store::shared` opens the process's store once,
+Only one process can open a data directory. `Service::shared` opens the process's service once,
 however often it is asked, since `dioxus::serve` reruns its setup after every hot-patch. Stopping an
 in-process pool cleanly takes up to 3 s.
 
@@ -52,6 +53,36 @@ without registered io buffers (`ulimit -l unlimited` lifts it).
 ```sh
 cargo +nightly run --release -p reef-shoal -- serve --conf shoal.yml
 ```
+
+## The service
+
+`Service<B: Backend>` is what the front doors call: the JSON API, and the app's server functions.
+It reads and writes through a `Store`, and checks every write against the whole plan with
+`mdbook-reef check`'s rules.
+
+- **A write is refused if it adds a problem.** The plan is built as it stands and as the write
+  would leave it, and a problem found after that wasn't found before comes back as
+  `Checked::Refused`, with check's own message. A stored node's problems sit at its name
+  (``reef/central/C11: needs `X`, which is not a node``), so a fix gets through on a plan that
+  already has other problems.
+- **Puts come in batches** (`Service::put`), each put naming the version its writer read. A
+  group with no members yet is work that says neither why nor what, and a member alone names a
+  group that isn't a node, so a group goes in with its members. A stale put refuses the whole
+  batch as `Checked::Stale` before it is checked. A batch is written in place, not atomically:
+  a write refused partway, which only another process could cause, is an error naming what was
+  written.
+- **A whole plan is checked too** (`Service::write_plan`). An import into an empty plan is
+  refused if it has any problem, before a revision is reserved.
+- **Docs come from the project's working tree.** A stored node's links resolve from its repo's
+  root, so a link to a doc or heading that isn't there refuses the write, and a node can take
+  its why and what from a doc.
+- **The check runs under the plan's write lock**, through `Store::put_checked` and
+  `Store::write_plan_checked`, so two writes that are fine alone can't break the plan together.
+  It builds the plan off the async threads, since its docs are files.
+- **`check` and `payload`** give a plan's problems and the viewer's payload.
+
+The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
+writes through them.
 
 ## The store
 

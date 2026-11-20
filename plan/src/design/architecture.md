@@ -139,6 +139,17 @@ versions, validation, atomic writes and derived state would each be written seve
 - **One service layer.** `reef-service` is the only code that opens shoal. Each put is checked
   against the whole plan with `mdbook-reef check`'s rules, and a put that breaks the plan is
   refused with check's message.
+- **A write is refused only if it adds a problem.** The plan is built as it stands and as the
+  write would leave it, and only problems found after that weren't found before refuse it.
+  A stored node's problems sit at its name, with no line, so they hold still across writes,
+  and a fix gets through on a plan that already has other problems.
+- **Puts come in batches, checked as one change.** A group with no members is work that says
+  neither why nor what, and a member alone names a group that isn't a node, so neither could
+  go in first. Each put names the version its writer read. The check runs under the plan's
+  write lock, so two writes fine alone can't break the plan together.
+- **Docs come from the project's working tree.** A stored node's links resolve from its repo's
+  root, where import puts them ([C26](../milestones/m6.md)), so a link to a missing doc or
+  heading is refused, and a why or a what can still come from a doc.
 - **Two front doors onto it.** A plain JSON API on axum (typed in `reef-api`) for the CLI, the
   MCP server and the hooks; Dioxus server functions for the app. Both run in one axum server,
   and the CLI never depends on the app's wire format.

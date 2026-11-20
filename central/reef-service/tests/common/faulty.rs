@@ -6,17 +6,17 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
-use reef_service::{Backend, Expect, Pointers, RevisionKey, Written};
+use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// A point in a whole-plan write where it waits, so a test can act between its rows and its flip
+/// A point in a write where it waits, so a test can act while the write holds its plan's lock
 #[derive(Debug, Default)]
 pub struct Pause {
-    /// Notified when the write has its rows in and is about to flip
+    /// Notified when the write has reached the point: a flip with its rows in, or a node write
     pub reached: Notify,
-    /// Notified to let the write flip
+    /// Notified to let the write go on
     pub resume: Notify,
 }
 
@@ -29,6 +29,10 @@ pub struct Faults {
     fail_prune: AtomicBool,
     /// Wait here before the next write that makes a revision current
     pause: Mutex<Option<Arc<Pause>>>,
+    /// Wait here before the next write of one node row
+    node_pause: Mutex<Option<Arc<Pause>>>,
+    /// Let this many writes of one node row through, then refuse the next as moved
+    node_writes_left: Mutex<Option<usize>>,
 }
 
 impl Faults {
@@ -51,6 +55,41 @@ impl Faults {
         let pause = Arc::new(Pause::default());
         *self.pause.lock().unwrap() = Some(pause.clone());
         pause
+    }
+
+    /// Makes the next write of one node row wait, and returns where to hear it is waiting and
+    /// to let it go
+    pub fn pause_next_node_write(&self) -> Arc<Pause> {
+        let pause = Arc::new(Pause::default());
+        *self.node_pause.lock().unwrap() = Some(pause.clone());
+        pause
+    }
+
+    /// Lets `writes` writes of one node row through, then refuses the next as another process's
+    /// write would, without writing it
+    ///
+    /// # Arguments
+    ///
+    /// * `writes` - How many node writes to let through first
+    pub fn refuse_node_writes_after(&self, writes: usize) {
+        *self.node_writes_left.lock().unwrap() = Some(writes);
+    }
+
+    /// Whether the next write of one node row is refused, counting it against the fault armed
+    fn refuse_node_write(&self) -> bool {
+        // only an armed fault refuses, once its writes have been let through
+        let mut left = self.node_writes_left.lock().unwrap();
+        match left.as_mut() {
+            Some(0) => {
+                *left = None;
+                true
+            }
+            Some(writes) => {
+                *writes -= 1;
+                false
+            }
+            None => false,
+        }
     }
 }
 
@@ -131,13 +170,23 @@ impl<B: Backend> Backend for Faulty<B> {
         self.inner.nodes(key, id).await
     }
 
-    /// Writes one node row, if its condition holds
+    /// Writes one node row, if its condition holds, waiting or refusing first if asked to
     ///
     /// # Arguments
     ///
     /// * `row` - The row to write
     /// * `expect` - What must be stored under its key
     async fn write_node(&self, row: NodeRow, expect: Expect) -> anyhow::Result<Written> {
+        // say the write has come, and wait to be let go, with no lock held across the wait
+        let pause = self.faults.node_pause.lock().unwrap().take();
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
+        }
+        // a fault armed for this write refuses it, as another process having written would
+        if self.faults.refuse_node_write() {
+            return Ok(Written::Refused(Refusal::Moved));
+        }
         self.inner.write_node(row, expect).await
     }
 

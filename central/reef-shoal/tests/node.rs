@@ -3,6 +3,9 @@
 //! Each test runs the binary cargo built for these tests over a data directory of its own, under
 //! cargo's target dir rather than a tmpfs `/tmp`.
 
+// an in-process pool's open nests futures past the compiler's default depth
+#![recursion_limit = "256"]
+
 use reef_service::{Conf, Mode, Store};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

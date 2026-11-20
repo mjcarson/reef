@@ -10,9 +10,10 @@
 pub mod cases;
 pub mod faulty;
 pub mod git;
+pub mod service_cases;
 
-use reef_model::{NodeSpec, PlanName};
-use reef_service::{AddedProject, Backend, Conf, MemoryBackend, NodeWrite, Store};
+use reef_model::{Description, NodeSpec, PlanName};
+use reef_service::{AddedProject, Backend, Conf, MemoryBackend, NodeWrite, Service, Store};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,6 +73,21 @@ pub struct Fx<B> {
     pub dir: PathBuf,
     /// The config the store was opened with
     conf: Conf,
+}
+
+/// A service over a store, the faults its backend can be armed with, and the project and plan a
+/// case works in
+pub struct Sx<B> {
+    /// The service under test
+    pub service: Service<Faulty<B>>,
+    /// The faults its backend fails or waits on
+    pub faults: Arc<Faults>,
+    /// The plan the case works in, listed before the case starts
+    pub plan: PlanName,
+    /// The repo of the plan's project, `reef`, whose working tree holds the plan's docs
+    pub repo: PathBuf,
+    /// A directory of the case's own, under cargo's target dir, which holds the repo
+    pub dir: PathBuf,
 }
 
 /// A fresh directory for one case, under cargo's target dir rather than a tmpfs `/tmp`
@@ -159,6 +175,19 @@ impl<B: Backend> Fx<B> {
     }
 }
 
+impl<B: Backend> Fx<B> {
+    /// A service over this fixture's store, its project and plan kept
+    pub fn serve(self) -> Sx<B> {
+        Sx {
+            service: Service::new(self.store),
+            faults: self.faults,
+            plan: self.plan,
+            repo: self.repo,
+            dir: self.dir,
+        }
+    }
+}
+
 impl<B: Reopen> Fx<B> {
     /// Reopens the store over the rows it left, as a restarted process would
     pub async fn reopen(self) -> anyhow::Result<Fx<B>> {
@@ -207,3 +236,77 @@ pub async fn ids<B: Backend>(fx: &Fx<B>) -> anyhow::Result<Vec<String>> {
     let listing = fx.store.list(&fx.plan).await?;
     Ok(listing.nodes.into_iter().map(|node| node.spec.id).collect())
 }
+
+/// A piece of work that says why it is needed and what it does, with nothing it needs
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `order` - Where it falls in the order its plan was written in
+pub fn work(id: &str, order: u64) -> NodeWrite {
+    NodeWrite {
+        spec: NodeSpec {
+            id: id.to_string(),
+            title: Some(format!("{id} Some work")),
+            description: Some(Description {
+                why: Some(format!("Without {id}, something is missing.")),
+                what: Some(format!("With {id}, it is there.")),
+                details: None,
+            }),
+            ..NodeSpec::default()
+        },
+        body: format!("# {id}\n\nIts body.\n"),
+        order,
+    }
+}
+
+/// A group, which says neither why nor what, since a group's members do
+///
+/// # Arguments
+///
+/// * `id` - The group's id
+/// * `order` - Where it falls in the order its plan was written in
+pub fn group(id: &str, order: u64) -> NodeWrite {
+    NodeWrite {
+        spec: NodeSpec {
+            id: id.to_string(),
+            title: Some(format!("{id} A group")),
+            ..NodeSpec::default()
+        },
+        body: String::new(),
+        order,
+    }
+}
+
+/// A piece of work in a group
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `group` - The group it belongs to
+/// * `order` - Where it falls in the order its plan was written in
+pub fn member(id: &str, group: &str, order: u64) -> NodeWrite {
+    let mut node = work(id, order);
+    node.spec.group = Some(group.to_string());
+    node
+}
+
+/// Writes a doc into a repo's working tree, making its directories
+///
+/// # Arguments
+///
+/// * `repo` - The repo's root
+/// * `path` - The doc's path from the root
+/// * `text` - The doc's markdown
+pub fn doc(repo: &Path, path: &str, text: &str) -> anyhow::Result<()> {
+    // its directories first, then the doc itself
+    let file = repo.join(path);
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, text)?;
+    Ok(())
+}
+
+/// A design doc with a why, a what and design choices under one of its headings
+pub const DESIGN: &str = "# Design\n\n## Rows\n\n### Context\n\nRows are slow.\n\n### What it does\n\nRows go out together.\n\n### Design choices\n\n- **One write.** Atomic.\n";
