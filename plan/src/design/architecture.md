@@ -57,6 +57,10 @@ is the same: an in-process pool is reached over loopback TCP too.
   reef-service: the whole schema with `embedded`, the client half alone without it. reef-shoal
   depends on reef-service with `embedded`, for the schema and for the config checks
   ([C10](../milestones/m2.md)), so the client and the node can't disagree on the fingerprint.
+- **reef's config names shoal.** It is TOML at `$REEF_CONFIG`, else
+  `$XDG_CONFIG_HOME/reef/config.toml`. Under `[shoal]`, an `address` means an external node, and
+  `data`, `cores` and `memory` set the in-process pool's data directory, shards and per-shard
+  budget. An external node reads a shoal config of its own (`reef-shoal serve --conf shoal.yml`).
 - **A separate `central/` workspace, on nightly.** It holds reef-service, reef-app and reef-shoal,
   and uses the stable crates by path. A workspace with an `embedded` feature locks shoal-core and
   glommio even while the feature is off, so it needs both checkouts beside it. The stable

@@ -1,0 +1,159 @@
+//! A shoal pool started in this process, on a thread of its own
+//!
+//! Starting a pool and waiting for it to be ready both block, and shoal's start error can carry a
+//! thread's panic payload, which isn't `Sync`, so the pool lives on a thread that reports its
+//! address, or why it could not start, as a message.
+
+use shoal::server::conf::{DefaultStorageSettings, Networking, Resources, Storage};
+use shoal::server::tables::storage::fs::conf::{
+    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+};
+use shoal::{Conf, ShoalPool};
+use std::net::SocketAddr;
+use std::path::Path;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::time::Duration;
+use tracing::instrument;
+
+use crate::conf::ShoalSettings;
+use crate::schema::Reef;
+
+/// How long a pool may take to have every shard answer
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the pool's thread checks for a stop request or a dead shard
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// A pool running on a thread of its own, stopped when this is closed or dropped
+///
+/// Dropping it stops the pool in the background. Closing it waits for every shard to finish,
+/// which takes up to 3 s, since shoal's shards poll their shutdown flag that often.
+pub struct Pool {
+    /// Tells the pool's thread to stop the pool
+    stop: Sender<()>,
+    /// Hears how stopping the pool went
+    stopped: tokio::sync::oneshot::Receiver<anyhow::Result<()>>,
+    /// The address the pool bound
+    pub addr: SocketAddr,
+}
+
+impl Pool {
+    /// Starts a pool and waits for it to be ready
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The pool's config, its data paths absolute
+    #[instrument(name = "Pool::start", skip_all, err(Debug))]
+    pub async fn start(conf: Conf) -> anyhow::Result<Pool> {
+        // the pool reports its address, or why it could not start, through this
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        // and its thread hears when to stop through this, and says how stopping went
+        let (stop, stop_rx) = std::sync::mpsc::channel();
+        let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
+        std::thread::Builder::new()
+            .name("shoal-pool".to_string())
+            .spawn(move || hold(conf, ready_tx, stop_rx, stopped_tx))?;
+        // wait for the thread to say how starting went
+        let addr = ready_rx.await??;
+        Ok(Pool {
+            stop,
+            stopped,
+            addr,
+        })
+    }
+
+    /// Stops the pool and waits for every shard to finish
+    #[instrument(name = "Pool::close", skip_all, err(Debug))]
+    pub async fn close(self) -> anyhow::Result<()> {
+        // ask the thread to stop the pool; a thread already gone has nothing left to stop
+        if self.stop.send(()).is_err() {
+            return Ok(());
+        }
+        // and wait to hear that it did
+        self.stopped.await?
+    }
+}
+
+/// Starts a pool, reports its address, and holds it until told to stop or a shard dies
+///
+/// # Arguments
+///
+/// * `conf` - The pool's config
+/// * `ready` - Where to report the pool's address, or why it could not start
+/// * `stop` - Where a request to stop arrives
+/// * `stopped` - Where to report how stopping went
+fn hold(
+    conf: Conf,
+    ready: tokio::sync::oneshot::Sender<anyhow::Result<SocketAddr>>,
+    stop: Receiver<()>,
+    stopped: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
+) {
+    // start every shard, and wait for them all to answer
+    let started = ShoalPool::<Reef>::start(conf).and_then(|mut pool| {
+        let addr = pool.ready(READY_TIMEOUT)?;
+        Ok((pool, addr))
+    });
+    let pool = match started {
+        Ok((pool, addr)) => {
+            // tell the caller where to connect
+            let _ = ready.send(Ok(addr));
+            pool
+        }
+        Err(error) => {
+            // shoal's error can carry a thread's panic payload, which isn't `Sync`, so it goes
+            // as its message
+            let _ = ready.send(Err(anyhow::anyhow!("shoal failed to start: {error:?}")));
+            return;
+        }
+    };
+    // hold the pool up until told to stop, reporting a shard that dies
+    loop {
+        match stop.recv_timeout(POLL_INTERVAL) {
+            // a stop request, or the pool's owner gone: stop every shard
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            // nothing yet: check the shards are still running
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some((shard, error)) = pool.failure() {
+                    tracing::error!(shard, %error, "shoal: a shard died");
+                    return;
+                }
+            }
+        }
+    }
+    // stop the shards and say how it went
+    let result = pool
+        .exit()
+        .map_err(|error| anyhow::anyhow!("shoal failed to stop: {error:?}"));
+    let _ = stopped.send(result);
+}
+
+/// The in-process pool's config: reef's cores and budget, on an ephemeral loopback port
+///
+/// # Arguments
+///
+/// * `settings` - reef's shoal settings
+/// * `dir` - The absolute directory to keep the pool's data in
+pub fn shoal_conf(settings: &ShoalSettings, dir: &Path) -> anyhow::Result<Conf> {
+    // cores must be set, or a shard is pinned to every cpu but cpu 0; and a budget must be,
+    // since with no `resources` it is 0 and eviction never stops
+    let resources = Resources::default()
+        .cores(settings.cores)
+        .memory(settings.memory.as_str())
+        .map_err(|error| {
+            anyhow::anyhow!("shoal's memory budget `{}`: {error:?}", settings.memory)
+        })?;
+    // an ephemeral port on loopback, since only this process connects to it
+    let networking = Networking::default().interface("127.0.0.1").port(0);
+    // both writers in the one directory
+    let storage = Storage::default().default_settings(
+        DefaultStorageSettings::default().filesystem(
+            FileSystemTableConf::default()
+                .latency_sensitive(FileSystemLatencyWriterConf::default().path(dir))
+                .throughput_sensitive(FileSystemThroughputWriterConf::default().path(dir)),
+        ),
+    );
+    Ok(Conf::default()
+        .resources(resources)
+        .networking(networking)
+        .storage(storage))
+}

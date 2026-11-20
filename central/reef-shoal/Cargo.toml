@@ -1,0 +1,18 @@
+[package]
+name = "reef-shoal"
+description = "reef's external shoal node: shoal's node program over reef's schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# reef's schema, with shoal's engine, so this needs nightly, glommio and target-cpu=native
+reef-service = { path = "../reef-service", features = ["embedded"] }
+shoal = { workspace = true, features = ["server"] }
+
+[dev-dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+# stops the node the way a supervisor does, with SIGTERM
+libc = "0.2"

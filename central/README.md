@@ -6,6 +6,7 @@ it is a workspace of its own, which reef's stable root workspace excludes.
 
 ```
 reef-service   the store: reef's shoal schema, and the only code that touches shoal
+reef-shoal     the external node: shoal's node program over reef's schema
 ```
 
 ## Building
@@ -18,8 +19,33 @@ export it in `RUSTFLAGS`, where a wasm build would get it too.
 - **Without it**, reef-service is shoal's client half alone and builds on stable.
 
 ```sh
-cargo +nightly test -p reef-service --features embedded   # the whole schema, with the engine
-cargo +stable test -p reef-service                        # the client half alone
+cargo +nightly test --workspace         # everything, with the engine (reef-shoal turns `embedded` on)
+cargo +stable test -p reef-service      # the client half alone; a workspace-wide stable build fails
+```
+
+## Reaching shoal
+
+reef-service starts a shoal pool in its own process, unless reef's config names an external node.
+The config is TOML at `$REEF_CONFIG`, else `$XDG_CONFIG_HOME/reef/config.toml`, else
+`~/.config/reef/config.toml`. With no file there, every key takes its default.
+
+```toml
+[shoal]
+address = "127.0.0.1:12100"   # an external node; unset starts shoal in this process
+data = "/home/me/.local/share/reef/shoal"   # the in-process pool's data; default $XDG_DATA_HOME/reef/shoal
+cores = 2                     # the in-process pool's shards
+memory = "256MiB"             # each shard's memory budget
+```
+
+Only one process can open a data directory. `Store::shared` opens the process's store once,
+however often it is asked, since `dioxus::serve` reruns its setup after every hot-patch. Stopping an
+in-process pool cleanly takes up to 3 s.
+
+An external node is `reef-shoal`, over a shoal config of its own (`reef-shoal/shoal.example.yml`).
+Its data paths must be absolute, and never on tmpfs.
+
+```sh
+cargo +nightly run --release -p reef-shoal -- serve --conf shoal.yml
 ```
 
 ## The schema

@@ -1,0 +1,22 @@
+# An external node for reef, served by `reef-shoal serve --conf shoal.yml`. Point reef at it with
+# `address = "127.0.0.1:12100"` under `[shoal]` in reef's config.
+#
+# `memory` must be set: with no `resources` the budget is 0 and eviction never stops. `cores` must
+# be too, or a shard is pinned to every cpu but cpu 0.
+resources:
+  cores: 2
+  memory: "256MiB"
+networking:
+  # localhost only, until reef serves anyone else
+  interface: "127.0.0.1"
+  port: 12100
+storage:
+  default:
+    filesystem:
+      # Absolute paths only: a relative one fails opening the directory with EBADF, and
+      # `SHOAL_*` variables can't reach a nested key. Never tmpfs, where glommio silently loses
+      # O_DIRECT.
+      latency_sensitive:
+        path: "/home/me/.local/share/reef/shoal-node"
+      throughput_sensitive:
+        path: "/home/me/.local/share/reef/shoal-node"
