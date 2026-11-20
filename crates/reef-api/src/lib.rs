@@ -13,11 +13,13 @@
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
+//! - **Config** ([`config`]): where reef's config file is, which the service and its clients read.
 //!
 //! The service serves localhost only until users sign in (M10), at [`DEFAULT_ADDRESS`] unless
 //! reef's config names another.
 
 pub mod change;
+pub mod config;
 pub mod error;
 pub mod node;
 pub mod paths;

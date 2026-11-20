@@ -13,7 +13,9 @@ reef-shoal     the external node: shoal's node program over reef's schema
 
 The service's data types, and the JSON API's requests, answers, routes and changes, are
 `reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
-shoal nor this workspace.
+shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
+add|ls|show` and `reef plan new|ls`, which call the address `[api] address` names and say so when
+nothing answers there.
 
 ## Building
 
@@ -43,7 +45,7 @@ cores = 2                     # the in-process pool's shards
 memory = "256MiB"             # each shard's memory budget
 
 [api]
-address = "127.0.0.1:12180"   # where the JSON API listens: a loopback address only
+address = "127.0.0.1:12180"   # where the JSON API listens, and `reef` calls it: loopback only
 ```
 
 Only one process can open a data directory. `Service::shared` opens the process's service once,

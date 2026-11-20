@@ -339,6 +339,8 @@ crates/reef-layout   the layout, plain Rust, tested natively
 crates/reef-render   markdown rendering, doc links and why/what extraction over any DocSource
 crates/reef-view     the wasm viewer
 crates/mdbook-reef   the preprocessor and CLI; embeds assets/reef.js and assets/reef.css
+crates/reef-api      centralized reef's JSON API: the service's types, routes and config location
+crates/reef          centralized reef's terminal client, an HTTP client of the JSON API
 xtask                cargo xtask wasm: builds reef-view and bundles it into assets/reef.js
 example-book         shoal's scans plan, migrated: a proof of concept on a real 190-box plan
 central              centralized reef: the store and service over shoal, a workspace of its own

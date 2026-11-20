@@ -2201,6 +2201,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "reef-api",
+ "reef-model",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 1.2.1+spec-1.1.0",
+]
+
+[[package]]
 name = "reef-api"
 version = "0.1.0"
 dependencies = [
@@ -2234,6 +2249,7 @@ dependencies = [
  "axum",
  "deepsize2",
  "libc",
+ "reef",
  "reef-api",
  "reef-model",
  "reef-render",

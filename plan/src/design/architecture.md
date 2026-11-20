@@ -103,11 +103,6 @@ and answers a round trip on a plain JSON route and through a server function.
 - **The JSON API shares the app's port.** A plain axum route on `dioxus::server::router` answers
   beside the server functions ([C13](../milestones/m4.md)).
 
-### Open questions
-
-- Whether the CLI starts the server when it isn't running, or says so and stops. Only one
-  process can open shoal's data directory at a time.
-
 ## A model any source can feed
 
 `Graph::build(Vec<Node>)` in `reef-model` is already independent of where nodes come from, and
@@ -177,3 +172,11 @@ app.
 - **The working directory picks the project:** the registered project whose repo holds it. A
   linked worktree picks its main repo's project (`git rev-parse --git-common-dir`).
   `--project` and `--plan` override.
+- **It reads the service's own config, for `[api] address` alone.** `reef_api::config` finds the
+  file for both (`--conf`, else `$REEF_CONFIG`, else the XDG path), so they meet at the address
+  one file names. The CLI ignores every other key; the service checks them.
+- **It says so and stops when the service isn't running.** The message names the address, the
+  key that set it, and `reef-serve`. Only one process can open shoal's data directory, and a
+  CLI that started a nightly server from another workspace would own a process nobody stops.
+- **A library under a thin binary.** `reef::run` takes the command line, the working directory
+  and where to print, so the service's tests drive the real commands against a served twin.

@@ -1,0 +1,22 @@
+[package]
+name = "reef"
+description = "reef's terminal client: registers projects and lists plans through the service's JSON API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# the service's data types, and the JSON API's requests, answers, routes and config location
+reef-api = { path = "../reef-api" }
+# plan names; frontmatter parsing waits for `reef node put` (C17)
+reef-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+toml = "1"
+# plain HTTP to the service on localhost, at the version central's tests resolve
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# reqwest's runtime, which the MCP server (C19) runs on too
+tokio = { version = "1", features = ["rt", "macros"] }

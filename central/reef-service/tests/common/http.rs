@@ -10,6 +10,7 @@ use reef_service::{Backend, Conf, Service, api};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -143,6 +144,8 @@ impl Client {
 pub struct Ax<B: Backend + 'static> {
     /// The client, which knows only `reef-api`'s types
     pub client: Client,
+    /// The address the server listens on, for a config to name
+    pub address: SocketAddr,
     /// The service the server calls, for a case to end its change stream
     pub service: Arc<Service<Faulty<B>>>,
     /// The plan the case works in, listed before the case starts
@@ -172,7 +175,8 @@ impl<B: Backend + 'static> Fx<B> {
         let mut conf = Conf::default();
         conf.api.address = "127.0.0.1:0".parse()?;
         let listener = api::bind(&conf).await?;
-        let base = format!("http://{}", listener.local_addr()?);
+        let address = listener.local_addr()?;
+        let base = format!("http://{address}");
         // served until the fixture is dropped
         let server = tokio::spawn(api::serve(
             listener,
@@ -181,6 +185,7 @@ impl<B: Backend + 'static> Fx<B> {
         ));
         Ok(Ax {
             client: Client::new(base),
+            address,
             service,
             plan: sx.plan,
             repo: sx.repo,

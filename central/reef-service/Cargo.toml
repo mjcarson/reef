@@ -34,3 +34,5 @@ libc = { workspace = true, optional = true }
 [dev-dependencies]
 # a client of the JSON API that knows only reef-api's types
 reqwest.workspace = true
+# the CLI, driven in-process against a served service
+reef.workspace = true

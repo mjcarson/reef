@@ -2,7 +2,8 @@
 //!
 //! The config is a TOML file, read from `$REEF_CONFIG`, else `$XDG_CONFIG_HOME/reef/config.toml`,
 //! else `~/.config/reef/config.toml`. A default path with no file there means every default; a
-//! path named by `$REEF_CONFIG` or by a caller must exist.
+//! path named by `$REEF_CONFIG` or by a caller must exist. `reef_api::config` finds it, so the
+//! CLI, which reads `[api] address` alone, finds the same file.
 //!
 //! ```toml
 //! [shoal]
@@ -20,12 +21,13 @@
 //! address = "127.0.0.1:12180"
 //! ```
 
+use reef_api::config::env_dir;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// The environment variable naming reef's config file
-pub const CONFIG_VAR: &str = "REEF_CONFIG";
+/// The environment variable naming reef's config file, which `reef-api` shares with clients
+pub use reef_api::config::CONFIG_VAR;
 
 /// reef's config
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -92,24 +94,9 @@ impl Conf {
     ///
     /// * `path` - The file to read, or `None` for `$REEF_CONFIG` or the default path
     pub fn load(path: Option<&Path>) -> anyhow::Result<Conf> {
-        // a path the caller or the environment named must exist
-        let named = path
-            .map(Path::to_path_buf)
-            .or_else(|| std::env::var_os(CONFIG_VAR).map(PathBuf::from));
-        let path = match named {
-            Some(path) => {
-                anyhow::ensure!(
-                    path.is_file(),
-                    "reef's config {} is not a file",
-                    path.display()
-                );
-                path
-            }
-            // the default path may hold nothing, which means every default
-            None => match Self::default_path() {
-                Some(path) if path.is_file() => path,
-                _ => return Ok(Conf::default()),
-            },
+        // the file named, which must exist, else the default path's, if a file is there
+        let Some(path) = reef_api::config::locate(path)? else {
+            return Ok(Conf::default());
         };
         // read and parse it, saying which file was wrong
         let text = std::fs::read_to_string(&path)
@@ -125,10 +112,8 @@ impl Conf {
     /// `$XDG_CONFIG_HOME/reef/config.toml`, else `~/.config/reef/config.toml`, or `None` with
     /// neither variable set.
     pub fn default_path() -> Option<PathBuf> {
-        // XDG's config home, else its default under the home directory
-        let base = env_dir("XDG_CONFIG_HOME")
-            .or_else(|| env_dir("HOME").map(|home| home.join(".config")))?;
-        Some(base.join("reef").join("config.toml"))
+        // the one place reef's clients look too
+        reef_api::config::default_path()
     }
 
     /// The in-process pool's data directory: the one configured, else the default
@@ -163,17 +148,6 @@ impl Conf {
             None => format!("`{key}` in reef's config (`${CONFIG_VAR}`)"),
         }
     }
-}
-
-/// An environment variable holding an absolute directory, as XDG asks for
-///
-/// # Arguments
-///
-/// * `var` - The variable's name
-fn env_dir(var: &str) -> Option<PathBuf> {
-    // XDG says to ignore a variable that is empty or relative
-    let dir = PathBuf::from(std::env::var_os(var)?);
-    dir.is_absolute().then_some(dir)
 }
 
 #[cfg(test)]
