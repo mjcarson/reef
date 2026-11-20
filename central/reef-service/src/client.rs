@@ -13,8 +13,8 @@ use tracing::instrument;
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PlanRow, PlanRowFilter, PlanRowGet,
-    PlanRowUpdate, ReefClient, ReefQueryKinds,
+    NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PlanRow, PlanRowFilter,
+    PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, ReefClient, ReefQueryKinds,
 };
 
 #[cfg(feature = "embedded")]
@@ -243,6 +243,37 @@ fn written<T>(sent: Result<T, Errors>) -> anyhow::Result<Written> {
 }
 
 impl Backend for ShoalBackend {
+    /// Lists the project rows stored in the one partition every project is listed in
+    #[instrument(name = "ShoalBackend::projects", skip_all, err(Debug))]
+    async fn projects(&self) -> anyhow::Result<Vec<ProjectRow>> {
+        // every project sits in the one listing partition
+        let get = ProjectRowGet::new(vec![PROJECTS.to_string()]);
+        self.read::<_, ProjectRow>(get).await
+    }
+
+    /// Writes a project's row only if none is stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The project's row
+    #[instrument(name = "ShoalBackend::insert_project", skip_all, err(Debug))]
+    async fn insert_project(&self, row: ProjectRow) -> anyhow::Result<Written> {
+        // `if_absent` refuses it where a row is stored
+        written(self.client.send_one(row.if_absent()).await)
+    }
+
+    /// Lists the plan rows stored in a project's partition, in name order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "ShoalBackend::plans", skip_all, err(Debug))]
+    async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanRow>> {
+        // a project's plans sit in that project's partition
+        let get = PlanRowGet::new(vec![project.to_string()]);
+        self.read::<_, PlanRow>(get).await
+    }
+
     /// Gets the row stored under a plan's key, if one is
     ///
     /// # Arguments

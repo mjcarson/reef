@@ -3,6 +3,9 @@
 //! Shoal is the twin's oracle: a case that passes on one and fails on the other is a twin that
 //! doesn't answer as shoal does.
 
+// an in-process pool's open nests futures past the compiler's default depth
+#![recursion_limit = "256"]
+
 mod common;
 
 /// Expands each case into a test against the twin, and one against an in-process pool
@@ -13,8 +16,8 @@ macro_rules! suite {
             $(
                 #[tokio::test]
                 async fn $case() -> anyhow::Result<()> {
-                    // a fresh twin with the case's plan listed
-                    let fx = crate::common::Fx::memory().await?;
+                    // a fresh twin with the case's project registered and its plan listed
+                    let fx = crate::common::Fx::memory(stringify!($case)).await?;
                     crate::common::cases::$case(fx).await
                 }
             )*
@@ -56,4 +59,10 @@ suite!(
     killed_prune_is_finished_by_the_next_put,
     put_during_bulk_write_waits_and_is_refused,
     deleting_a_missing_row_deletes_nothing,
+    linked_worktree_finds_its_project,
+    subdirectory_finds_its_project,
+    unregistered_directory_finds_none,
+    projects_list_by_name,
+    plans_list_by_name,
+    plan_of_unknown_project_is_refused,
 );

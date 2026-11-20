@@ -29,7 +29,10 @@ fn fresh(name: &str) -> std::path::PathBuf {
 #[cfg(feature = "embedded")]
 async fn round_trip(store: &Store) -> anyhow::Result<()> {
     use reef_service::{NodeWrite, Put};
-    // a plan to put into
+    // a project, for the repo these tests are in, and a plan of it to put into
+    store
+        .add_project("reef", std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .await?;
     let plan = reef_model::PlanName::new("reef", "round-trip")?;
     anyhow::ensure!(
         store.add_plan(&plan).await?,

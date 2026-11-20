@@ -5,7 +5,7 @@
 //! so the next write must recover from both the same way.
 
 use reef_model::PlanName;
-use reef_service::schema::{NodeKey, NodeRow, PlanRow};
+use reef_service::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
 use reef_service::{Backend, Expect, Pointers, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,29 @@ impl<B> Faulty<B> {
 }
 
 impl<B: Backend> Backend for Faulty<B> {
+    /// Lists every project's row
+    async fn projects(&self) -> anyhow::Result<Vec<ProjectRow>> {
+        self.inner.projects().await
+    }
+
+    /// Writes a project's row only if none is stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The project's row
+    async fn insert_project(&self, row: ProjectRow) -> anyhow::Result<Written> {
+        self.inner.insert_project(row).await
+    }
+
+    /// Lists a project's plan rows
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanRow>> {
+        self.inner.plans(project).await
+    }
+
     /// Gets a plan's row
     ///
     /// # Arguments

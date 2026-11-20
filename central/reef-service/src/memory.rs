@@ -9,11 +9,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
-use crate::schema::{NodeKey, NodeRow, PlanRow};
+use crate::schema::PROJECTS;
+use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
 struct Tables {
+    /// Every project, by the partition it is listed in and then by name
+    projects: BTreeMap<String, BTreeMap<String, ProjectRow>>,
     /// Each project's plans, by plan name
     plans: BTreeMap<String, BTreeMap<String, PlanRow>>,
     /// Each revision's nodes, by id
@@ -85,6 +88,50 @@ fn holds(stored: Option<u64>, expect: Expect) -> Result<(), Refusal> {
 }
 
 impl Backend for MemoryBackend {
+    /// Lists the project rows stored in the one partition every project is listed in
+    async fn projects(&self) -> anyhow::Result<Vec<ProjectRow>> {
+        // the listing partition, in name order
+        Ok(self
+            .tables()
+            .projects
+            .get(PROJECTS)
+            .into_iter()
+            .flat_map(|partition| partition.values().cloned())
+            .collect())
+    }
+
+    /// Writes a project's row only if none is stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The project's row
+    async fn insert_project(&self, row: ProjectRow) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let partition = tables.projects.entry(row.list.clone()).or_default();
+        // refused if a row is stored under its key, as `if_absent` is
+        if partition.contains_key(&row.name) {
+            return Ok(Written::Refused(Refusal::Exists));
+        }
+        partition.insert(row.name.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Lists the plan rows stored in a project's partition, in name order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanRow>> {
+        // the project's partition, in name order
+        Ok(self
+            .tables()
+            .plans
+            .get(project)
+            .into_iter()
+            .flat_map(|partition| partition.values().cloned())
+            .collect())
+    }
+
     /// Gets the row stored under a plan's key, if one is
     ///
     /// # Arguments

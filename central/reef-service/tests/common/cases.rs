@@ -1,10 +1,10 @@
 //! The store suite's cases, each generic over the backend so it runs against shoal and the twin
 
 use reef_model::{NodeSpec, PlanName};
-use reef_service::{Backend, NotListed, Put, Refusal, RevisionKey};
+use reef_service::{AddedProject, Backend, NotListed, NotRegistered, Put, Refusal, RevisionKey};
 use std::time::Duration;
 
-use super::{Fx, Reopen, ids, node};
+use super::{Fx, Reopen, git, ids, node};
 
 /// A put of a new node is written at version 1, and a get reads back what was put
 ///
@@ -523,5 +523,133 @@ pub async fn deleting_a_missing_row_deletes_nothing<B: Reopen>(fx: Fx<B>) -> any
         .await?;
     // leave the node as it was
     assert_eq!(ids(&fx).await?, ["C1"]);
+    Ok(())
+}
+
+/// A linked worktree, and any directory in one, finds its main repo's project
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn linked_worktree_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a project for a repo of its own
+    let main = git::repo(&fx.dir.join("app"))?;
+    let AddedProject::Added(app) = fx.store.add_project("app", &main).await? else {
+        panic!("a project for a fresh repo was refused");
+    };
+    assert_eq!(app.repo, main);
+    // a linked worktree of it beside it, and a directory inside that
+    let linked = git::worktree(&main, &fx.dir.join("app-linked"))?;
+    let inside = linked.join("src").join("deep");
+    std::fs::create_dir_all(&inside)?;
+    // both find the main repo's project
+    assert_eq!(fx.store.find_project(&linked).await?, Some(app.clone()));
+    assert_eq!(fx.store.find_project(&inside).await?, Some(app));
+    // and registering the worktree is registering its main repo, which is taken
+    let again = fx.store.add_project("app-linked", &linked).await?;
+    assert_eq!(
+        again,
+        AddedProject::RepoTaken {
+            project: "app".to_string()
+        }
+    );
+    Ok(())
+}
+
+/// A directory deep in a project's repo finds that project
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn subdirectory_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a directory two levels into the fixture's repo
+    let inside = fx.repo.join("crates").join("model");
+    std::fs::create_dir_all(&inside)?;
+    // finds the project registered for the repo
+    let found = fx
+        .store
+        .find_project(&inside)
+        .await?
+        .expect("the repo's project is found");
+    assert_eq!((found.name.as_str(), &found.repo), ("reef", &fx.repo));
+    Ok(())
+}
+
+/// A directory in a repo no project is registered for finds none
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn unregistered_directory_finds_none<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a repo beside the registered one, never registered
+    let other = git::repo(&fx.dir.join("other"))?;
+    assert_eq!(fx.store.find_project(&other).await?, None);
+    // and the case's directory itself, which is in this checkout's repo, not the fixture's
+    assert_eq!(fx.store.find_project(&fx.dir).await?, None);
+    Ok(())
+}
+
+/// Projects list by name, each with its repo
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn projects_list_by_name<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // two more projects, registered out of name order
+    for name in ["zeta", "alpha"] {
+        let repo = git::repo(&fx.dir.join(name))?;
+        let added = fx.store.add_project(name, &repo).await?;
+        assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
+    }
+    // list in name order, each with the repo it was registered for
+    let projects = fx.store.projects().await?;
+    let names: Vec<&str> = projects
+        .iter()
+        .map(|project| project.name.as_str())
+        .collect();
+    assert_eq!(names, ["alpha", "reef", "zeta"]);
+    assert_eq!(projects[1].repo, fx.repo);
+    Ok(())
+}
+
+/// A project's plans list by name, each with a revision to load
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn plans_list_by_name<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // two more plans, listed out of name order
+    for name in ["zz", "aa"] {
+        assert!(fx.store.add_plan(&PlanName::new("reef", name)?).await?);
+    }
+    // list in name order, each named in its project and holding a current revision
+    let plans = fx.store.plans("reef").await?;
+    let names: Vec<String> = plans.iter().map(|plan| plan.name.to_string()).collect();
+    assert_eq!(names, ["reef/aa", "reef/central", "reef/zz"]);
+    assert!(plans.iter().all(|plan| plan.revision != 0), "{plans:?}");
+    // and a project with no plans lists none
+    assert!(fx.store.plans("nobody").await?.is_empty());
+    Ok(())
+}
+
+/// A plan of a project that isn't registered is refused, naming the project
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn plan_of_unknown_project_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // no project named `nobody` is registered
+    let orphan = PlanName::new("nobody", "central")?;
+    let error = fx
+        .store
+        .add_plan(&orphan)
+        .await
+        .expect_err("an orphan plan was listed");
+    let not_registered = error
+        .downcast_ref::<NotRegistered>()
+        .expect("the error is NotRegistered");
+    assert_eq!(not_registered.0, "nobody");
+    // and nothing was listed for it
+    assert!(fx.store.plans("nobody").await?.is_empty());
     Ok(())
 }

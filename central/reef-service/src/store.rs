@@ -22,6 +22,7 @@
 use reef_model::{NodeSpec, Origin, PlanName, Record};
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tracing::instrument;
@@ -30,7 +31,8 @@ use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
-use crate::schema::{NodeRow, PlanRow};
+use crate::repo::{self, Located};
+use crate::schema::{NodeRow, PROJECTS, PlanRow, ProjectRow};
 
 /// The process's one store over shoal, opened on first use
 static SHARED: OnceCell<Store> = OnceCell::const_new();
@@ -136,6 +138,51 @@ pub struct Rewritten {
     pub left_retired: bool,
 }
 
+/// A project: a name, and the repo its plans describe
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    /// The project's name
+    pub name: String,
+    /// The root of its repo's main worktree, or the directory it names outside git
+    pub repo: PathBuf,
+}
+
+/// What came of registering a project
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddedProject {
+    /// It was registered, its repo located
+    Added(Project),
+    /// A project of that name is registered
+    NameTaken,
+    /// Another project is registered for that repo
+    RepoTaken {
+        /// The project registered for it
+        project: String,
+    },
+}
+
+/// One of a project's plans, as its listing names it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanInfo {
+    /// The plan's full name
+    pub name: PlanName,
+    /// The revision readers load
+    pub revision: u64,
+}
+
+/// A project the store was asked about that isn't registered
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotRegistered(pub String);
+
+impl std::fmt::Display for NotRegistered {
+    /// Names the project
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "project `{}` is not registered", self.0)
+    }
+}
+
+impl std::error::Error for NotRegistered {}
+
 /// A plan the store was asked about that isn't listed
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotListed(pub PlanName);
@@ -155,6 +202,8 @@ pub struct Store<B = ShoalBackend> {
     backend: B,
     /// Each plan's lock: shared by reads, held alone by writes
     locks: Mutex<HashMap<PlanName, Arc<RwLock<()>>>>,
+    /// Held to register a project, so two can't take one repo between a check and a write
+    projects: tokio::sync::Mutex<()>,
 }
 
 impl Store<ShoalBackend> {
@@ -216,6 +265,7 @@ impl<B: Backend> Store<B> {
         Store {
             backend,
             locks: Mutex::new(HashMap::new()),
+            projects: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -285,15 +335,143 @@ impl<B: Backend> Store<B> {
         Ok(row)
     }
 
+    /// Registers a project for a repo, refusing a name or a repo another project has
+    ///
+    /// The repo is located first: a directory in a git repo, a linked worktree's too, names
+    /// its main worktree's root, so one repo is one path however it was reached. Shoal has no
+    /// secondary index, so the repo is checked by listing every project, under a lock this
+    /// process holds, since it is shoal's only writer.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The project's name
+    /// * `repo` - A directory in the repo its plans describe
+    #[instrument(name = "Store::add_project", skip_all, err(Debug))]
+    pub async fn add_project(&self, name: &str, repo: &Path) -> anyhow::Result<AddedProject> {
+        // a project's name keeps the rule every plan's full name holds it to
+        PlanName::new(name, "plan")?;
+        // find the repo's root, which asks git, off the async threads
+        let dir = repo.to_path_buf();
+        let repo = tokio::task::spawn_blocking(move || repo::locate(&dir))
+            .await??
+            .into_path();
+        let repo_text = repo
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("{} is not a utf-8 path", repo.display()))?
+            .to_string();
+        // one registration at a time, so the repo can't be taken between the check and the write
+        let _registering = self.projects.lock().await;
+        if let Some(taken) = self.projects().await?.into_iter().find(|p| p.repo == repo) {
+            return Ok(AddedProject::RepoTaken {
+                project: taken.name,
+            });
+        }
+        // written only if no project of that name is
+        let row = ProjectRow {
+            list: PROJECTS.to_string(),
+            name: name.to_string(),
+            repo: repo_text,
+        };
+        Ok(match self.backend.insert_project(row).await? {
+            Written::Applied => AddedProject::Added(Project {
+                name: name.to_string(),
+                repo,
+            }),
+            Written::Refused(_) => AddedProject::NameTaken,
+        })
+    }
+
+    /// Lists every project, by name
+    #[instrument(name = "Store::projects", skip_all, err(Debug))]
+    pub async fn projects(&self) -> anyhow::Result<Vec<Project>> {
+        // every project sits in the one listing partition
+        let rows = self.backend.projects().await?;
+        rows.into_iter()
+            .map(|row| {
+                // a row of another partition that hashed the same is a collision, not a project
+                anyhow::ensure!(
+                    row.list == PROJECTS,
+                    "project row `{}` from `{}` was stored where the projects are listed: their \
+                     partition keys' hashes collide",
+                    row.name,
+                    row.list
+                );
+                Ok(Project {
+                    name: row.name,
+                    repo: PathBuf::from(row.repo),
+                })
+            })
+            .collect()
+    }
+
+    /// Lists a project's plans, by name
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Store::plans", skip_all, err(Debug))]
+    pub async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanInfo>> {
+        // a project's plans sit in that project's partition
+        let rows = self.backend.plans(project).await?;
+        rows.into_iter()
+            .map(|row| {
+                // a row of another project whose key hashed the same is a collision
+                anyhow::ensure!(
+                    row.project == project,
+                    "plan row `{}/{}` was stored where `{project}`'s plans are listed: their \
+                     partition keys' hashes collide",
+                    row.project,
+                    row.name
+                );
+                Ok(PlanInfo {
+                    name: PlanName::new(row.project, row.name)?,
+                    revision: row.current,
+                })
+            })
+            .collect()
+    }
+
+    /// Finds the project a directory belongs to
+    ///
+    /// A directory in a git repo belongs to the project registered for that repo's main
+    /// worktree, so a linked worktree finds its main repo's project. One outside git belongs to
+    /// the project registered for its nearest registered ancestor.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory, such as the working directory
+    #[instrument(name = "Store::find_project", skip_all, err(Debug))]
+    pub async fn find_project(&self, dir: &Path) -> anyhow::Result<Option<Project>> {
+        // locate the directory, which asks git, off the async threads
+        let dir = dir.to_path_buf();
+        let located = tokio::task::spawn_blocking(move || repo::locate(&dir)).await??;
+        let projects = self.projects().await?;
+        Ok(match located {
+            // git draws a repo's bounds, so only the project for its root
+            Located::Repo(root) => projects.into_iter().find(|project| project.repo == root),
+            // outside git, the deepest project that holds the directory
+            Located::Dir(dir) => projects
+                .into_iter()
+                .filter(|project| dir.starts_with(&project.repo))
+                .max_by_key(|project| project.repo.components().count()),
+        })
+    }
+
     /// Lists a plan in its project, with an empty revision to put nodes into
     ///
-    /// Returns whether it was added; a plan already listed is left as it is.
+    /// Returns whether it was added; a plan already listed is left as it is. Its project must
+    /// be registered.
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     #[instrument(name = "Store::add_plan", skip_all, err(Debug))]
     pub async fn add_plan(&self, plan: &PlanName) -> anyhow::Result<bool> {
+        // a plan belongs to a project that is registered
+        let projects = self.projects().await?;
+        if !projects.iter().any(|project| project.name == plan.project) {
+            return Err(NotRegistered(plan.project.clone()).into());
+        }
         // its first revision is current and empty, so a put has somewhere to go
         let row = PlanRow {
             project: plan.project.clone(),
@@ -722,16 +900,57 @@ fn fresh_revision() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeWrite, Store};
+    use super::{AddedProject, NodeWrite, Store};
     use crate::backend::RevisionKey;
     use crate::schema::NodeRow;
     use reef_model::PlanName;
+    use std::path::Path;
+
+    /// A second project for a repo, however its path is spelled, or under a taken name, is refused
+    #[tokio::test]
+    async fn duplicate_name_or_repo_refused() -> anyhow::Result<()> {
+        // a project for the repo this crate is in, located at its root
+        let store = Store::memory();
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let AddedProject::Added(reef) = store.add_project("reef", here).await? else {
+            panic!("the first project for a repo was refused");
+        };
+        assert!(
+            reef.repo.join(".git").exists(),
+            "{} is no repo's root",
+            reef.repo.display()
+        );
+        // another for the same repo, spelled through a subdirectory and `..`, is refused
+        let respelled = here.join("src").join("..");
+        let taken = AddedProject::RepoTaken {
+            project: "reef".to_string(),
+        };
+        assert_eq!(store.add_project("again", &respelled).await?, taken);
+        // and so is the name, for another directory
+        assert_eq!(
+            store.add_project("reef", Path::new("/")).await?,
+            AddedProject::NameTaken
+        );
+        // a name that breaks the rule names keep is an error
+        assert!(
+            store
+                .add_project("no spaces", Path::new("/"))
+                .await
+                .is_err()
+        );
+        // and only the first is registered
+        assert_eq!(store.projects().await?, vec![reef]);
+        Ok(())
+    }
 
     /// A row stored in a plan's partition under another plan's key is an error, never a node
     #[tokio::test]
     async fn collided_row_is_an_error() -> anyhow::Result<()> {
         // a plan with one node of its own
         let store = Store::memory();
+        store
+            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")))
+            .await?;
         let plan = PlanName::new("reef", "central")?;
         store.add_plan(&plan).await?;
         store.put(&plan, NodeWrite::new("C7", 0), None).await?;

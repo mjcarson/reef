@@ -68,6 +68,10 @@ is the twin's oracle.
   only writer.
 - **Every row read is checked against its full key**, so a partition hash collision is an
   error, never the wrong row.
+- **A project names a repo** (`Store::add_project`), located at its main worktree's root, so a
+  linked worktree is its main repo. A name or a repo another project has is refused, and
+  `Store::find_project` finds the project a working directory belongs to. A plan's project must
+  be registered.
 - **A whole plan is written as a new revision** (`Store::write_plan`): named `pending` on the
   plan's row, its rows written, then made current by one conditional write, and the revision it
   replaced pruned. A write killed midway leaves the old revision current and whole, and the next

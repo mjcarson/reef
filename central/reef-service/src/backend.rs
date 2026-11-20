@@ -8,7 +8,7 @@
 use reef_model::PlanName;
 use std::future::Future;
 
-use crate::schema::{NodeKey, NodeRow, PlanRow};
+use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
 
 /// Why a conditional write was refused, as shoal says it
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +119,26 @@ impl RevisionKey {
 /// collides with another's can hold the other's rows, so the store checks every row against
 /// the full key it asked for. A read of a partition that holds nothing is empty, never an error.
 pub trait Backend: Send + Sync {
+    /// Lists the project rows stored in the one partition every project is listed in
+    fn projects(&self) -> impl Future<Output = anyhow::Result<Vec<ProjectRow>>> + Send;
+
+    /// Writes a project's row only if none is stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The project's row
+    fn insert_project(
+        &self,
+        row: ProjectRow,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Lists the plan rows stored in a project's partition, in name order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    fn plans(&self, project: &str) -> impl Future<Output = anyhow::Result<Vec<PlanRow>>> + Send;
+
     /// Gets the row stored under a plan's key, if one is
     ///
     /// # Arguments
