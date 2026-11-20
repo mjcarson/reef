@@ -18,8 +18,8 @@ pub mod pool;
 pub mod schema;
 pub mod store;
 
-pub use backend::{Backend, Expect, Refusal, RevisionKey, Written};
+pub use backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 pub use client::{Mode, ShoalBackend};
 pub use conf::{Conf, ShoalSettings};
 pub use memory::MemoryBackend;
-pub use store::{Listing, NodeWrite, NotListed, Put, Store, StoredNode};
+pub use store::{Listing, NodeWrite, NotListed, Put, Rewritten, Store, StoredNode};

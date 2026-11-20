@@ -10,19 +10,23 @@
 //!   the same lock shared, so a read never sees a revision part-pruned.
 //! - **Every row checked against its full key.** Shoal hashes partition keys to a `u64`, and a
 //!   collision is silent, so a row from another partition is caught rather than served.
+//! - **Whole-plan writes as revisions.** Shoal has no transactions, so a bulk write goes to a new
+//!   revision's partition, named `pending` on the plan's row first, and is made current by one
+//!   conditional write to that row. A write killed midway leaves the old revision current and
+//!   whole, and the next write prunes what it left.
 //!
 //! A process keeps one store over shoal. `Store::shared` opens it once however often a caller
 //! asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second pool
 //! would find the data directory locked.
 
 use reef_model::{NodeSpec, Origin, PlanName, Record};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, Hasher};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{OnceCell, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tracing::instrument;
 
-use crate::backend::{Backend, Expect, Refusal, RevisionKey, Written};
+use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
@@ -30,6 +34,9 @@ use crate::schema::{NodeRow, PlanRow};
 
 /// The process's one store over shoal, opened on first use
 static SHARED: OnceCell<Store> = OnceCell::const_new();
+
+/// How many node rows a bulk write sends in one bundle
+const BUNDLE_ROWS: usize = 256;
 
 /// A node as a reader got it from the store
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +123,17 @@ pub enum Put {
     },
     /// The node was not as the put expected, so nothing was written
     Stale(Refusal),
+}
+
+/// What a whole-plan write did
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rewritten {
+    /// The revision it made current
+    pub revision: u64,
+    /// How many rows a killed or failed write had left behind, which it pruned first
+    pub recovered: usize,
+    /// Whether pruning the revision it replaced failed, leaving that to the next write
+    pub left_retired: bool,
 }
 
 /// A plan the store was asked about that isn't listed
@@ -381,6 +399,8 @@ impl<B: Backend> Store<B> {
         // one write to this plan at a time, so this never lands in a revision being retired
         let _write = self.writing(plan).await;
         let row = self.plan_row(plan).await?;
+        // prune whatever a killed write left, so it never outlives the next write
+        let (row, _) = self.recover(plan, row).await?;
         // the row as it should be, one version on from the one read
         let (version, expect) = match read {
             Some(read) => (read + 1, Expect::Version(read)),
@@ -392,6 +412,222 @@ impl<B: Backend> Store<B> {
             Written::Applied => Put::Applied { version },
             Written::Refused(refusal) => Put::Stale(refusal),
         })
+    }
+
+    /// Writes a whole plan as a new revision, and makes it current in one write
+    ///
+    /// The steps, under the plan's lock:
+    ///
+    /// 1. Prune any revision a killed write left pending or retired.
+    /// 2. Read the current revision's versions, so each node's moves on.
+    /// 3. Reserve the new revision: name it `pending` on the plan's row.
+    /// 4. Write its rows, each bundle's answers checked.
+    /// 5. Flip: make it current and the old one retired, in one conditional write.
+    /// 6. Prune the old revision, and clear `retired`.
+    ///
+    /// A write killed or failed before step 5 leaves the old revision current and whole, with
+    /// the new one named pending for the next write to prune. One that fails pruning after step
+    /// 5 has still made its revision current, and says so with `left_retired`.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `nodes` - Every node of the plan, each a node of its own
+    #[instrument(name = "Store::write_plan", skip_all, err(Debug))]
+    pub async fn write_plan(
+        &self,
+        plan: &PlanName,
+        nodes: Vec<NodeWrite>,
+    ) -> anyhow::Result<Rewritten> {
+        // every node must be one the store can keep, under an id no other node has
+        let mut ids = HashSet::with_capacity(nodes.len());
+        for node in &nodes {
+            check_node(plan, node)?;
+            anyhow::ensure!(
+                ids.insert(node.spec.id.as_str()),
+                "node `{}` is written twice",
+                node.spec.id
+            );
+        }
+        // one write to this plan at a time
+        let _write = self.writing(plan).await;
+        let row = self.plan_row(plan).await?;
+        // 1. prune whatever a killed write left behind
+        let (row, recovered) = self.recover(plan, row).await?;
+        // 2. carry each node's version on, so a put read before this write is refused after it
+        let old: HashMap<String, u64> = self.keys(plan, row.current).await?.into_iter().collect();
+        // 3. reserve the new revision, so a write killed from here on can be found
+        let revision = fresh_revision();
+        let reserve = Pointers {
+            pending: Some(revision),
+            ..Pointers::default()
+        };
+        let version = self.update_plan(plan, row.version, reserve).await?;
+        // 4. write its rows, a bundle at a time
+        let mut rows = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let version = old.get(&node.spec.id).map_or(1, |version| version + 1);
+            rows.push(node_row(plan, revision, node, version)?);
+        }
+        while !rows.is_empty() {
+            let rest = rows.split_off(rows.len().min(BUNDLE_ROWS));
+            self.backend
+                .write_nodes(std::mem::replace(&mut rows, rest))
+                .await?;
+        }
+        // 5. flip: the new revision current, the old one retired, in one conditional write
+        let flip = Pointers {
+            current: Some(revision),
+            pending: Some(0),
+            retired: Some(row.current),
+        };
+        let version = self.update_plan(plan, version, flip).await?;
+        // 6. prune the old revision, then say there is nothing left to prune; the new revision
+        // is current either way, so a failure here is left for the next write
+        let left_retired = match self.prune(plan, row.current).await {
+            Ok(_) => {
+                let cleared = Pointers {
+                    retired: Some(0),
+                    ..Pointers::default()
+                };
+                self.update_plan(plan, version, cleared).await.is_err()
+            }
+            Err(error) => {
+                tracing::warn!(%plan, error = %format!("{error:#}"), "pruning a retired revision failed");
+                true
+            }
+        };
+        Ok(Rewritten {
+            revision,
+            recovered,
+            left_retired,
+        })
+    }
+
+    /// Prunes any revision a killed or failed write left named on a plan's row
+    ///
+    /// Returns the plan's row as it now stands, and how many rows were pruned. The caller holds
+    /// the plan's write lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `row` - The plan's row as it was read
+    #[instrument(name = "Store::recover", skip_all, err(Debug))]
+    async fn recover(&self, plan: &PlanName, row: PlanRow) -> anyhow::Result<(PlanRow, usize)> {
+        // only a revision that is named and isn't the current one is left over
+        let leftovers: Vec<u64> = [row.pending, row.retired]
+            .into_iter()
+            .filter(|revision| *revision != 0 && *revision != row.current)
+            .collect();
+        if leftovers.is_empty() && row.pending == 0 && row.retired == 0 {
+            return Ok((row, 0));
+        }
+        // prune each, then say there is nothing left to prune
+        let mut pruned = 0;
+        for revision in leftovers {
+            pruned += self.prune(plan, revision).await?;
+        }
+        let cleared = Pointers {
+            pending: Some(0),
+            retired: Some(0),
+            ..Pointers::default()
+        };
+        let version = self.update_plan(plan, row.version, cleared).await?;
+        tracing::info!(%plan, pruned, "pruned what a killed write left");
+        Ok((
+            PlanRow {
+                pending: 0,
+                retired: 0,
+                version,
+                ..row
+            },
+            pruned,
+        ))
+    }
+
+    /// Changes a plan's pointers, if its row is at the version read, and returns its new version
+    ///
+    /// The caller holds the plan's write lock, so a refusal means another process wrote it.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `read` - The version the row was read at
+    /// * `pointers` - The revisions that change
+    #[instrument(name = "Store::update_plan", skip_all, err(Debug))]
+    async fn update_plan(
+        &self,
+        plan: &PlanName,
+        read: u64,
+        pointers: Pointers,
+    ) -> anyhow::Result<u64> {
+        // written only over the version read
+        match self.backend.update_plan(plan, read, pointers).await? {
+            Written::Applied => Ok(read + 1),
+            Written::Refused(refusal) => anyhow::bail!(
+                "plan `{plan}` changed under this write, from version {read}: {refusal}"
+            ),
+        }
+    }
+
+    /// Lists a revision's node ids and versions, checking each against its full key
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `revision` - The revision to list
+    #[instrument(name = "Store::keys", skip_all, err(Debug))]
+    async fn keys(&self, plan: &PlanName, revision: u64) -> anyhow::Result<Vec<(String, u64)>> {
+        // the whole partition, projected to its keys
+        let key = RevisionKey::new(plan, revision);
+        let keys = self.backend.node_keys(&key).await?;
+        keys.into_iter()
+            .map(|node| {
+                // a key of another partition that hashed the same is never this revision's
+                anyhow::ensure!(
+                    key.holds_key(&node),
+                    "node key `{}/{}/{}` at revision {} was stored where `{plan}` at revision \
+                     {revision} is: their partition keys' hashes collide",
+                    node.project,
+                    node.plan,
+                    node.id,
+                    node.revision
+                );
+                Ok((node.id, node.version))
+            })
+            .collect()
+    }
+
+    /// Deletes every row of a revision, and returns how many there were
+    ///
+    /// Shoal can't delete a partition, so this lists the revision's keys and deletes each row,
+    /// a bundle at a time. A key of another partition is refused before anything is deleted,
+    /// since deleting by this revision's key would delete the other's row.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `revision` - The revision to delete
+    #[instrument(name = "Store::prune", skip_all, err(Debug))]
+    async fn prune(&self, plan: &PlanName, revision: u64) -> anyhow::Result<usize> {
+        // find the rows to delete
+        let key = RevisionKey::new(plan, revision);
+        let mut ids: Vec<String> = self
+            .keys(plan, revision)
+            .await?
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let count = ids.len();
+        // and delete them, each answer checked
+        while !ids.is_empty() {
+            let rest = ids.split_off(ids.len().min(BUNDLE_ROWS));
+            self.backend
+                .delete_nodes(&key, std::mem::replace(&mut ids, rest))
+                .await?;
+        }
+        Ok(count)
     }
 }
 

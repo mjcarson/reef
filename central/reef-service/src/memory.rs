@@ -8,8 +8,8 @@ use reef_model::PlanName;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::backend::{Backend, Expect, Refusal, RevisionKey, Written};
-use crate::schema::{NodeRow, PlanRow};
+use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
+use crate::schema::{NodeKey, NodeRow, PlanRow};
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -157,5 +157,111 @@ impl Backend for MemoryBackend {
         }
         partition.insert(row.id.clone(), row);
         Ok(Written::Applied)
+    }
+
+    /// Changes a plan's pointers, if its row is still at the version read
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `read` - The version the row was read at
+    /// * `pointers` - The revisions that change
+    async fn update_plan(
+        &self,
+        plan: &PlanName,
+        read: u64,
+        pointers: Pointers,
+    ) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let row = tables
+            .plans
+            .get_mut(&plan.project)
+            .and_then(|partition| partition.get_mut(&plan.plan));
+        // judge the condition against the row stored under the plan's key
+        if let Err(refusal) = holds(row.as_ref().map(|row| row.version), Expect::Version(read)) {
+            return Ok(Written::Refused(refusal));
+        }
+        let row = row.expect("a row holding the condition is stored");
+        // change only what the update names, and move the version on
+        if let Some(current) = pointers.current {
+            row.current = current;
+        }
+        if let Some(pending) = pointers.pending {
+            row.pending = pending;
+        }
+        if let Some(retired) = pointers.retired {
+            row.retired = retired;
+        }
+        row.version = read + 1;
+        Ok(Written::Applied)
+    }
+
+    /// Lists the keys and versions stored in a revision's partition, without their specs
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    async fn node_keys(&self, key: &RevisionKey) -> anyhow::Result<Vec<NodeKey>> {
+        // every row in the partition, projected as shoal projects it
+        let tables = self.tables();
+        Ok(tables
+            .nodes
+            .get(key)
+            .into_iter()
+            .flat_map(|partition| partition.values())
+            .map(|row| NodeKey {
+                project: row.project.clone(),
+                plan: row.plan.clone(),
+                revision: row.revision,
+                id: row.id.clone(),
+                version: row.version,
+            })
+            .collect())
+    }
+
+    /// Writes node rows over whatever is stored under their keys
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_nodes(&self, rows: Vec<NodeRow>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        // each into its own partition, as its keys hash
+        for row in rows {
+            let key = RevisionKey {
+                project: row.project.clone(),
+                plan: row.plan.clone(),
+                revision: row.revision,
+            };
+            tables
+                .nodes
+                .entry(key)
+                .or_default()
+                .insert(row.id.clone(), row);
+        }
+        Ok(())
+    }
+
+    /// Deletes nodes from a revision's partition
+    ///
+    /// A delete of a row that isn't stored deletes nothing, as shoal's does.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `ids` - The ids of the nodes to delete
+    async fn delete_nodes(&self, key: &RevisionKey, ids: Vec<String>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        if let Some(partition) = tables.nodes.get_mut(key) {
+            // each row by its sort key
+            for id in ids {
+                partition.remove(&id);
+            }
+            // and a partition left empty is gone, as it never existed
+            if partition.is_empty() {
+                tables.nodes.remove(key);
+            }
+        }
+        Ok(())
     }
 }

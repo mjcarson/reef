@@ -1,16 +1,17 @@
 //! The store suite's cases, each generic over the backend so it runs against shoal and the twin
 
 use reef_model::{NodeSpec, PlanName};
-use reef_service::{Backend, NotListed, Put, Refusal};
+use reef_service::{Backend, NotListed, Put, Refusal, RevisionKey};
+use std::time::Duration;
 
-use super::{Fx, node};
+use super::{Fx, Reopen, ids, node};
 
 /// A put of a new node is written at version 1, and a get reads back what was put
 ///
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn put_then_get<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn put_then_get<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a new node goes in at version 1
     let written = node("C7", 3);
     let put = fx.store.put(&fx.plan, written.clone(), None).await?;
@@ -33,7 +34,7 @@ pub async fn put_then_get<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn get_of_missing_node_is_none<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn get_of_missing_node_is_none<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // in an empty revision, and in one holding another node
     assert_eq!(fx.store.get(&fx.plan, "C7").await?, None);
     fx.store.put(&fx.plan, node("C6", 0), None).await?;
@@ -46,7 +47,7 @@ pub async fn get_of_missing_node_is_none<B: Backend>(fx: &Fx<B>) -> anyhow::Resu
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn list_of_new_plan_is_empty<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn list_of_new_plan_is_empty<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // its revision is current, and holds nothing yet
     let listing = fx.store.list(&fx.plan).await?;
     assert_ne!(listing.revision, 0);
@@ -59,7 +60,7 @@ pub async fn list_of_new_plan_is_empty<B: Backend>(fx: &Fx<B>) -> anyhow::Result
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn list_is_in_written_order<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn list_is_in_written_order<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // three nodes, whose ids sort the other way to their order
     for (id, order) in [("A1", 2), ("C3", 0), ("B2", 1)] {
         fx.store.put(&fx.plan, node(id, order), None).await?;
@@ -83,7 +84,7 @@ pub async fn list_is_in_written_order<B: Backend>(fx: &Fx<B>) -> anyhow::Result<
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn stale_put_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn stale_put_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a node at version 1, then edited from it to version 2
     fx.store.put(&fx.plan, node("C7", 0), None).await?;
     let mut first = node("C7", 0);
@@ -115,7 +116,7 @@ pub async fn stale_put_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> 
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn new_node_over_existing_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn new_node_over_existing_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // the first is written and the second, expecting no node, is refused
     fx.store.put(&fx.plan, node("C7", 0), None).await?;
     assert_eq!(
@@ -137,7 +138,7 @@ pub async fn new_node_over_existing_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn put_naming_missing_node_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn put_naming_missing_node_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // an edit of a node no one put
     let put = fx.store.put(&fx.plan, node("C7", 0), Some(1)).await?;
     assert_eq!(put, Put::Stale(Refusal::Missing));
@@ -150,9 +151,7 @@ pub async fn put_naming_missing_node_is_refused<B: Backend>(fx: &Fx<B>) -> anyho
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn concurrent_puts_from_one_version_one_wins<B: Backend>(
-    fx: &Fx<B>,
-) -> anyhow::Result<()> {
+pub async fn concurrent_puts_from_one_version_one_wins<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a node at version 1, and two writers who both read it there
     fx.store.put(&fx.plan, node("C7", 0), None).await?;
     let mut left = node("C7", 0);
@@ -195,7 +194,7 @@ pub async fn concurrent_puts_from_one_version_one_wins<B: Backend>(
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn put_to_unlisted_plan_is_an_error<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn put_to_unlisted_plan_is_an_error<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a plan in the same project that no one listed
     let unlisted = PlanName::new("reef", "unlisted")?;
     for error in [
@@ -223,7 +222,7 @@ pub async fn put_to_unlisted_plan_is_an_error<B: Backend>(fx: &Fx<B>) -> anyhow:
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn nested_members_are_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn nested_members_are_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a group with a member written inside it
     let mut group = node("M2", 0);
     group.spec.nodes = vec![NodeSpec {
@@ -246,7 +245,7 @@ pub async fn nested_members_are_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Resul
 /// # Arguments
 ///
 /// * `fx` - The store and its plan
-pub async fn duplicate_plan_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result<()> {
+pub async fn duplicate_plan_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a node in the plan the fixture listed
     fx.store.put(&fx.plan, node("C7", 0), None).await?;
     let before = fx.store.list(&fx.plan).await?;
@@ -254,5 +253,275 @@ pub async fn duplicate_plan_is_refused<B: Backend>(fx: &Fx<B>) -> anyhow::Result
     assert!(!fx.store.add_plan(&fx.plan).await?);
     // and its revision and nodes are untouched
     assert_eq!(fx.store.list(&fx.plan).await?, before);
+    Ok(())
+}
+
+/// A whole-plan write replaces the revision: its nodes alone, under a new revision, the old pruned
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn bulk_write_replaces_the_revision<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // two nodes put one at a time
+    fx.store.put(&fx.plan, node("C1", 0), None).await?;
+    fx.store.put(&fx.plan, node("C2", 1), None).await?;
+    let before = fx.store.list(&fx.plan).await?.revision;
+    // a whole plan that keeps one, drops one and adds one
+    let nodes = vec![node("C2", 0), node("C3", 1)];
+    let written = fx.store.write_plan(&fx.plan, nodes).await?;
+    assert_ne!(written.revision, before);
+    assert_eq!((written.recovered, written.left_retired), (0, false));
+    // lists as written, under the new revision
+    assert_eq!(fx.store.list(&fx.plan).await?.revision, written.revision);
+    assert_eq!(ids(&fx).await?, ["C2", "C3"]);
+    // the old revision is pruned, and the plan's row names nothing left to prune
+    let old = RevisionKey::new(&fx.plan, before);
+    assert!(fx.store.backend().nodes(&old, None).await?.is_empty());
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    assert_eq!(
+        (row.current, row.pending, row.retired),
+        (written.revision, 0, 0)
+    );
+    Ok(())
+}
+
+/// A whole-plan write moves each kept node's version on, so an edit read before it is refused
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn bulk_write_moves_versions_on<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a node at version 2, read there by an editor
+    fx.store.put(&fx.plan, node("C1", 0), None).await?;
+    fx.store.put(&fx.plan, node("C1", 0), Some(1)).await?;
+    // a whole plan that keeps it and adds another
+    fx.store
+        .write_plan(&fx.plan, vec![node("C1", 0), node("C2", 1)])
+        .await?;
+    // the kept node moved on a version, and the new one starts at 1
+    let listing = fx.store.list(&fx.plan).await?;
+    let versions: Vec<(&str, u64)> = listing
+        .nodes
+        .iter()
+        .map(|node| (node.spec.id.as_str(), node.version))
+        .collect();
+    assert_eq!(versions, [("C1", 3), ("C2", 1)]);
+    // so the editor's put, read at 2, is refused
+    let put = fx.store.put(&fx.plan, node("C1", 0), Some(2)).await?;
+    assert_eq!(put, Put::Stale(Refusal::Moved));
+    Ok(())
+}
+
+/// A whole-plan write naming a node twice, or nesting one, is refused before anything is written
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn bulk_write_refuses_what_it_cant_keep<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // the same id twice
+    let twice = vec![node("C1", 0), node("C1", 1)];
+    let error = fx
+        .store
+        .write_plan(&fx.plan, twice)
+        .await
+        .expect_err("C1 was written twice");
+    assert!(format!("{error:#}").contains("twice"), "{error:#}");
+    // a member inside its group
+    let mut group = node("M2", 0);
+    group.spec.nodes = vec![NodeSpec {
+        id: "C1".to_string(),
+        ..NodeSpec::default()
+    }];
+    assert!(fx.store.write_plan(&fx.plan, vec![group]).await.is_err());
+    // and the plan's row names no revision either left
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    assert_eq!((row.pending, row.retired, row.version), (0, 0, 1));
+    Ok(())
+}
+
+/// A write killed midway leaves the old revision current and whole
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn killed_write_leaves_old_revision_whole<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a first revision of three nodes
+    let first = vec![node("A1", 0), node("A2", 1), node("A3", 2)];
+    fx.store.write_plan(&fx.plan, first).await?;
+    let before = fx.store.list(&fx.plan).await?;
+    // a second, killed after one of its three rows
+    fx.faults.fail_rows_after(1);
+    let second = vec![node("B1", 0), node("B2", 1), node("B3", 2)];
+    let killed = fx.store.write_plan(&fx.plan, second).await;
+    let error = killed.expect_err("the killed write succeeded");
+    assert!(format!("{error:#}").contains("killed"), "{error:#}");
+    // the first is still current, every node as it was
+    assert_eq!(fx.store.list(&fx.plan).await?, before);
+    // and the killed one is named pending, holding the one row it wrote
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    assert_eq!(row.current, before.revision);
+    assert_ne!(row.pending, 0);
+    let dead = RevisionKey::new(&fx.plan, row.pending);
+    assert_eq!(fx.store.backend().nodes(&dead, None).await?.len(), 1);
+    Ok(())
+}
+
+/// The next write, in a restarted process, prunes the rows a killed write left
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn next_write_prunes_what_a_killed_write_left<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // a write killed after two of its three rows
+    fx.faults.fail_rows_after(2);
+    let killed = vec![node("B1", 0), node("B2", 1), node("B3", 2)];
+    assert!(fx.store.write_plan(&fx.plan, killed).await.is_err());
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    let dead = RevisionKey::new(&fx.plan, row.pending);
+    // the process restarts, and its next write finds them by the plan's pending revision
+    let fx = fx.reopen().await?;
+    let written = fx.store.write_plan(&fx.plan, vec![node("C1", 0)]).await?;
+    assert_eq!(written.recovered, 2);
+    // and prunes them, leaving the plan as that write wrote it
+    assert!(fx.store.backend().nodes(&dead, None).await?.is_empty());
+    assert_eq!(ids(&fx).await?, ["C1"]);
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    assert_eq!((row.pending, row.retired), (0, 0));
+    Ok(())
+}
+
+/// A write whose prune failed has still made its revision current, and the next put finishes it
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn killed_prune_is_finished_by_the_next_put<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a node in the plan's first revision
+    fx.store.put(&fx.plan, node("A1", 0), None).await?;
+    let first = fx.store.list(&fx.plan).await?.revision;
+    // a whole-plan write whose prune of that revision fails
+    fx.faults.fail_next_prune();
+    let written = fx.store.write_plan(&fx.plan, vec![node("B1", 0)]).await?;
+    assert!(written.left_retired);
+    // its revision is current, and the first is retired with its row still stored
+    assert_eq!(ids(&fx).await?, ["B1"]);
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    assert_eq!(row.retired, first);
+    let old = RevisionKey::new(&fx.plan, first);
+    assert_eq!(fx.store.backend().nodes(&old, None).await?.len(), 1);
+    // the next put prunes it, and names nothing left to prune
+    fx.store.put(&fx.plan, node("B2", 1), None).await?;
+    assert!(fx.store.backend().nodes(&old, None).await?.is_empty());
+    let row = fx
+        .store
+        .backend()
+        .plan(&fx.plan)
+        .await?
+        .expect("the plan is listed");
+    assert_eq!((row.pending, row.retired), (0, 0));
+    assert_eq!(ids(&fx).await?, ["B1", "B2"]);
+    Ok(())
+}
+
+/// A put made during a whole-plan write waits for its flip, and is then refused as stale
+///
+/// Without the plan's lock it would land in the revision the write is about to retire, be
+/// acknowledged, and be lost (X2).
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn put_during_bulk_write_waits_and_is_refused<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // a node at version 1, read there by an editor
+    fx.store.put(&fx.plan, node("C1", 0), None).await?;
+    let mut edit = node("C1", 0);
+    edit.spec.title = Some("An edit".to_string());
+    let mut import = node("C1", 0);
+    import.spec.title = Some("Imported".to_string());
+    // a whole-plan write that stops between its rows and its flip
+    let pause = fx.faults.pause_next_flip();
+    let write = fx.store.write_plan(&fx.plan, vec![import.clone()]);
+    let racer = async {
+        pause.reached.notified().await;
+        // the editor's put waits on the plan's lock, rather than writing into the old revision
+        let put = fx.store.put(&fx.plan, edit, Some(1));
+        tokio::pin!(put);
+        let waited = tokio::time::timeout(Duration::from_millis(200), &mut put)
+            .await
+            .is_err();
+        // let the write flip, and the put through after it
+        pause.resume.notify_one();
+        (waited, put.await)
+    };
+    let (written, (waited, put)) = tokio::join!(write, racer);
+    written?;
+    assert!(waited, "the put didn't wait for the write");
+    assert_eq!(put?, Put::Stale(Refusal::Moved));
+    // and the write's node stands, one version on
+    let got = fx
+        .store
+        .get(&fx.plan, "C1")
+        .await?
+        .expect("the node was written");
+    assert_eq!((got.version, got.spec), (2, import.spec));
+    Ok(())
+}
+
+/// A delete of a row that isn't stored deletes nothing and fails nothing, in shoal as in the twin
+///
+/// Shoal answers it as `QueryDidNotSucceed`, a query that worked and found nothing, which the
+/// store reads as done, so a prune tried again is harmless.
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn deleting_a_missing_row_deletes_nothing<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a node in the plan's current revision
+    fx.store.put(&fx.plan, node("C1", 0), None).await?;
+    let current = RevisionKey::new(&fx.plan, fx.store.list(&fx.plan).await?.revision);
+    // a delete of another id there, and one in a revision that never was
+    let backend = fx.store.backend();
+    backend
+        .delete_nodes(&current, vec!["C2".to_string()])
+        .await?;
+    backend
+        .delete_nodes(&RevisionKey::new(&fx.plan, 7), vec!["C1".to_string()])
+        .await?;
+    // leave the node as it was
+    assert_eq!(ids(&fx).await?, ["C1"]);
     Ok(())
 }

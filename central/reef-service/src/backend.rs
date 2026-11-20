@@ -8,7 +8,7 @@
 use reef_model::PlanName;
 use std::future::Future;
 
-use crate::schema::{NodeRow, PlanRow};
+use crate::schema::{NodeKey, NodeRow, PlanRow};
 
 /// Why a conditional write was refused, as shoal says it
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +57,17 @@ pub enum Expect {
     Version(u64),
 }
 
+/// The revisions a plan's row names that change in one write; `None` leaves one as it is
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Pointers {
+    /// The revision readers load
+    pub current: Option<u64>,
+    /// A revision being written and not yet current, or 0
+    pub pending: Option<u64>,
+    /// A revision replaced and not yet pruned, or 0
+    pub retired: Option<u64>,
+}
+
 /// The key of one revision of a plan: the partition its nodes sit in
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RevisionKey {
@@ -90,6 +101,15 @@ impl RevisionKey {
     /// * `row` - The row to check
     pub fn holds(&self, row: &NodeRow) -> bool {
         row.project == self.project && row.plan == self.plan && row.revision == self.revision
+    }
+
+    /// Whether a node's key is part of this revision
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    pub fn holds_key(&self, key: &NodeKey) -> bool {
+        key.project == self.project && key.plan == self.plan && key.revision == self.revision
     }
 }
 
@@ -137,4 +157,54 @@ pub trait Backend: Send + Sync {
         row: NodeRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Changes a plan's pointers, if its row is still at the version read
+    ///
+    /// The row moves on to version `read + 1`.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `read` - The version the row was read at
+    /// * `pointers` - The revisions that change
+    fn update_plan(
+        &self,
+        plan: &PlanName,
+        read: u64,
+        pointers: Pointers,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Lists the keys and versions stored in a revision's partition, without their specs
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    fn node_keys(
+        &self,
+        key: &RevisionKey,
+    ) -> impl Future<Output = anyhow::Result<Vec<NodeKey>>> + Send;
+
+    /// Writes node rows over whatever is stored under their keys, every answer checked
+    ///
+    /// The writes are not atomic: one that fails partway leaves the rows before it written.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    fn write_nodes(&self, rows: Vec<NodeRow>) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Deletes nodes from a revision's partition, every answer checked
+    ///
+    /// A delete of a row that isn't stored deletes nothing and is no failure, so a prune that is
+    /// tried again is harmless.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `ids` - The ids of the nodes to delete
+    fn delete_nodes(
+        &self,
+        key: &RevisionKey,
+        ids: Vec<String>,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }

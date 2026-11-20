@@ -58,7 +58,15 @@ Its limits there shape reef's rows:
 - **Every row checked against its full key on read**, so a hash collision is caught instead of
   being served as the wrong row.
 - **Only the current revision is kept.** Pruning lists a revision's keys through a projection and
-  deletes each row in one bundle, since shoal can't delete a partition.
+  deletes each row in one bundle, since shoal can't delete a partition. Shoal answers a delete
+  of a row that isn't stored as `QueryDidNotSucceed`, a query that found nothing, which the
+  store reads as done, so a prune that is tried again is harmless. A key from another partition
+  is refused before anything is deleted, since deleting by this revision's key would delete
+  the other's row.
+- **A failed write is left as a killed one would be.** The store cleans nothing up when a write
+  fails partway. The rows it left are named on the plan's row either way, and the next write,
+  a put or a bulk write, prunes them. A prune that fails after the flip leaves the new revision
+  current, and its old one retired for the next write.
 
 ### What X2 found
 

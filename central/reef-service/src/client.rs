@@ -10,10 +10,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::instrument;
 
-use crate::backend::{Backend, Expect, Refusal, RevisionKey, Written};
+use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    NodeRow, NodeRowFilter, NodeRowGet, PlanRow, PlanRowGet, ReefClient, ReefQueryKinds,
+    NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PlanRow, PlanRowFilter, PlanRowGet,
+    PlanRowUpdate, ReefClient, ReefQueryKinds,
 };
 
 #[cfg(feature = "embedded")]
@@ -303,6 +304,113 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Changes a plan's pointers, if its row is still at the version read
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `read` - The version the row was read at
+    /// * `pointers` - The revisions that change
+    #[instrument(name = "ShoalBackend::update_plan", skip_all, err(Debug))]
+    async fn update_plan(
+        &self,
+        plan: &PlanName,
+        read: u64,
+        pointers: Pointers,
+    ) -> anyhow::Result<Written> {
+        // write only the fields that change, and the next version
+        let update = PlanRowUpdate {
+            partition_key: plan.project.clone(),
+            sort_key: plan.plan.clone(),
+            current: pointers.current,
+            pending: pointers.pending,
+            retired: pointers.retired,
+            version: Some(read + 1),
+        };
+        // and only if no one changed the row since it was read
+        let filter = PlanRowFilter {
+            version: Some(vec![read]),
+        };
+        written(self.client.send_one(update.if_matches(filter)).await)
+    }
+
+    /// Lists the keys and versions stored in a revision's partition, without their specs
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    #[instrument(name = "ShoalBackend::node_keys", skip_all, err(Debug))]
+    async fn node_keys(&self, key: &RevisionKey) -> anyhow::Result<Vec<NodeKey>> {
+        // the whole partition, projected to its keys
+        let partition = (key.project.clone(), key.plan.clone(), key.revision);
+        let get = NodeRowGet::new(vec![partition]).projection::<NodeKey>();
+        self.read::<_, NodeKey>(get).await
+    }
+
+    /// Writes node rows over whatever is stored under their keys, every answer checked
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    #[instrument(name = "ShoalBackend::write_nodes", skip_all, err(Debug))]
+    async fn write_nodes(&self, rows: Vec<NodeRow>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // one bundle, whose every answer `exec` checks, which draining its stream would not
+        let mut bundle = self.client.query();
+        for row in rows {
+            bundle.add_mut(row);
+        }
+        self.client
+            .exec(bundle)
+            .await
+            .map_err(|error| anyhow::anyhow!("writing node rows failed: {error:?}"))?;
+        Ok(())
+    }
+
+    /// Deletes nodes from a revision's partition, every answer checked
+    ///
+    /// Shoal answers a delete of a row that isn't stored as `QueryDidNotSucceed`: it worked and
+    /// found nothing. That deletes nothing, so it is no failure here.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `ids` - The ids of the nodes to delete
+    #[instrument(name = "ShoalBackend::delete_nodes", skip_all, err(Debug))]
+    async fn delete_nodes(&self, key: &RevisionKey, ids: Vec<String>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // one bundle of deletes, shoal having no way to delete a partition
+        let mut bundle = self.client.query();
+        for id in ids {
+            bundle.add_mut(NodeRowDelete::new(
+                key.project.clone(),
+                key.plan.clone(),
+                key.revision,
+                id,
+            ));
+        }
+        match self.client.exec(bundle).await {
+            Ok(_) => Ok(()),
+            // a delete that found nothing to delete worked, as shoal's own docs read it, which
+            // makes a prune that is tried again harmless
+            Err(Errors::QueryDidNotSucceed { .. }) => Ok(()),
+            Err(Errors::BulkErrors(errors))
+                if errors
+                    .iter()
+                    .all(|error| matches!(error, Errors::QueryDidNotSucceed { .. })) =>
+            {
+                Ok(())
+            }
+            Err(error) => anyhow::bail!("deleting node rows failed: {error:?}"),
+        }
     }
 }
 
