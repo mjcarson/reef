@@ -3,13 +3,18 @@
 //! The client is the same either way. Only start-up differs: in-process starts a pool first and
 //! connects to the address it bound, while external connects to the address it was given.
 
-use shoal::Shoal;
+use reef_model::PlanName;
+use shoal::shared::queries::{ConditionRefusal, ConditionalInsert, ConditionalWrite};
+use shoal::{Errors, FromShoal, Shoal};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::instrument;
 
+use crate::backend::{Backend, Expect, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
-use crate::schema::ReefClient;
+use crate::schema::{
+    NodeRow, NodeRowFilter, NodeRowGet, PlanRow, PlanRowGet, ReefClient, ReefQueryKinds,
+};
 
 #[cfg(feature = "embedded")]
 use crate::checks::{self, Keys, Problem, Refused};
@@ -172,6 +177,132 @@ impl ShoalBackend {
             pool.close().await?;
         }
         Ok(())
+    }
+}
+
+impl ShoalBackend {
+    /// Sends one get and deserializes each row it found
+    ///
+    /// The get goes as a bundle of one, whose answer is read unjudged: a get that found nothing
+    /// is then an answer with no rows, never shoal's known issue 55 (`QueryDidNotSucceed`).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The get to send
+    async fn read<Q, T>(&self, query: Q) -> anyhow::Result<Vec<T>>
+    where
+        Q: Into<ReefQueryKinds>,
+        T: FromShoal<ReefClient> + rkyv::Archive,
+        T::Archived: rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    {
+        // send a bundle of this one get, so its answer is read unjudged
+        let mut bundle = self.client.query();
+        bundle.add_mut(query);
+        let mut stream = self.client.send(bundle).await?;
+        let response = stream
+            .next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("a get went unanswered"))?;
+        // a get the server could not run is a failure, but one that found nothing is not
+        if let Some(error) = response.error() {
+            anyhow::bail!("a get failed: {}", error.msg());
+        }
+        let Some(rows) = response.access::<T>()? else {
+            return Ok(Vec::new());
+        };
+        // deserialize each row out of the archive
+        rows.iter()
+            .map(|row| Ok(rkyv::deserialize::<T, rkyv::rancor::Error>(row)?))
+            .collect()
+    }
+}
+
+/// Reads a conditional write's answer: written, refused by its condition, or failed
+///
+/// # Arguments
+///
+/// * `sent` - The answer to the write
+fn written<T>(sent: Result<T, Errors>) -> anyhow::Result<Written> {
+    match sent {
+        // written
+        Ok(_) => Ok(Written::Applied),
+        // its condition did not hold, which is an answer rather than a failure
+        Err(Errors::Refused { reason, .. }) => Ok(Written::Refused(match reason {
+            ConditionRefusal::RowExists => Refusal::Exists,
+            ConditionRefusal::RowMissing => Refusal::Missing,
+            ConditionRefusal::RowMismatch => Refusal::Moved,
+            // reef keeps no objects, so a refusal of a stripe's placement is a failure
+            ConditionRefusal::Placement => {
+                anyhow::bail!("a row write was refused for a stripe's placement")
+            }
+        })),
+        // anything else is a failure
+        Err(error) => Err(error.into()),
+    }
+}
+
+impl Backend for ShoalBackend {
+    /// Gets the row stored under a plan's key, if one is
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "ShoalBackend::plan", skip_all, err(Debug))]
+    async fn plan(&self, plan: &PlanName) -> anyhow::Result<Option<PlanRow>> {
+        // the one row named by the plan's name, in its project's partition
+        let get = PlanRowGet::new(vec![plan.project.clone()]).sort_keys(vec![plan.plan.clone()]);
+        Ok(self.read::<_, PlanRow>(get).await?.into_iter().next())
+    }
+
+    /// Writes a plan's row only if none is stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The plan's row
+    #[instrument(name = "ShoalBackend::insert_plan", skip_all, err(Debug))]
+    async fn insert_plan(&self, row: PlanRow) -> anyhow::Result<Written> {
+        // `if_absent` refuses it where a row is stored
+        written(self.client.send_one(row.if_absent()).await)
+    }
+
+    /// Reads the node rows stored in a revision's partition, in id order, or the one under an id
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `id` - The one node to read, or `None` for all of them
+    #[instrument(name = "ShoalBackend::nodes", skip_all, err(Debug))]
+    async fn nodes(&self, key: &RevisionKey, id: Option<&str>) -> anyhow::Result<Vec<NodeRow>> {
+        // the revision's partition, whole or one row of it
+        let partition = (key.project.clone(), key.plan.clone(), key.revision);
+        let mut get = NodeRowGet::new(vec![partition]);
+        if let Some(id) = id {
+            get = get.sort_keys(vec![id.to_string()]);
+        }
+        self.read::<_, NodeRow>(get).await
+    }
+
+    /// Writes one node row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_node", skip_all, err(Debug))]
+    async fn write_node(&self, row: NodeRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = NodeRowFilter {
+                    version: Some(vec![read]),
+                    ..NodeRowFilter::default()
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
     }
 }
 

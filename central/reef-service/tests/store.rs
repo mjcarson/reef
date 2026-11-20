@@ -1,0 +1,51 @@
+//! The store's suite, every case run against the in-memory twin and, with `embedded`, shoal
+//!
+//! Shoal is the twin's oracle: a case that passes on one and fails on the other is a twin that
+//! doesn't answer as shoal does.
+
+mod common;
+
+/// Expands each case into a test against the twin, and one against an in-process pool
+macro_rules! suite {
+    ($($case:ident),* $(,)?) => {
+        /// Each case against the in-memory twin
+        mod memory {
+            $(
+                #[tokio::test]
+                async fn $case() -> anyhow::Result<()> {
+                    // a fresh twin with the case's plan listed
+                    let fx = crate::common::Fx::memory().await?;
+                    crate::common::cases::$case(&fx).await
+                }
+            )*
+        }
+
+        /// Each case against shoal, one pool at a time
+        #[cfg(feature = "embedded")]
+        mod shoal {
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                async fn $case() -> anyhow::Result<()> {
+                    // one pool at a time, over a fresh directory of the case's own
+                    let _serial = crate::common::SERIAL.lock().await;
+                    let fx = crate::common::Fx::shoal(stringify!($case)).await?;
+                    crate::common::cases::$case(&fx).await
+                }
+            )*
+        }
+    };
+}
+
+suite!(
+    put_then_get,
+    get_of_missing_node_is_none,
+    list_of_new_plan_is_empty,
+    list_is_in_written_order,
+    stale_put_is_refused,
+    new_node_over_existing_is_refused,
+    put_naming_missing_node_is_refused,
+    concurrent_puts_from_one_version_one_wins,
+    put_to_unlisted_plan_is_an_error,
+    nested_members_are_refused,
+    duplicate_plan_is_refused,
+);

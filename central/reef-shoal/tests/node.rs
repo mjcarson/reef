@@ -106,40 +106,36 @@ impl Node {
     }
 }
 
-/// Writes a project's row and reads it back through the store's client
+/// Lists a plan, puts a node in it, and gets the node back through the store
 ///
 /// # Arguments
 ///
 /// * `store` - The store to round-trip through
 async fn round_trip(store: &Store) -> anyhow::Result<()> {
-    use reef_service::schema::{PROJECTS, ProjectRow, ProjectRowGet};
-    let client = store.backend().client();
-    // write one row, its answer checked
-    let row = ProjectRow {
-        list: PROJECTS.to_string(),
-        name: "round-trip".to_string(),
-        repo: "/repos/round-trip".to_string(),
-    };
-    let mut bundle = client.query();
-    bundle.add_mut(row);
-    client.exec(bundle).await?;
-    // and read it back by its full key, as a one-query bundle whose answer is read unjudged
-    let get =
-        ProjectRowGet::new(vec![PROJECTS.to_string()]).sort_keys(vec!["round-trip".to_string()]);
-    let mut bundle = client.query();
-    bundle.add_mut(get);
-    let mut stream = client.send(bundle).await?;
-    let response = stream
-        .next()
+    use reef_service::{NodeWrite, Put};
+    // a plan to put into
+    let plan = reef_model::PlanName::new("reef", "round-trip")?;
+    anyhow::ensure!(
+        store.add_plan(&plan).await?,
+        "a fresh store already listed the plan"
+    );
+    // a new node goes in at version 1
+    let mut node = NodeWrite::new("C57", 0);
+    node.body = "Round-tripped.".to_string();
+    let put = store.put(&plan, node.clone(), None).await?;
+    anyhow::ensure!(
+        put == Put::Applied { version: 1 },
+        "the put came back {put:?}"
+    );
+    // and comes back as it was written
+    let got = store
+        .get(&plan, "C57")
         .await?
-        .ok_or_else(|| anyhow::anyhow!("the get went unanswered"))?;
-    anyhow::ensure!(response.error().is_none(), "the get failed");
-    let rows = response
-        .access::<ProjectRow>()?
-        .ok_or_else(|| anyhow::anyhow!("the get found no rows"))?;
-    // exactly the row written
-    let repos: Vec<&str> = rows.iter().map(|row| row.repo.as_str()).collect();
-    anyhow::ensure!(repos == ["/repos/round-trip"], "read back {repos:?}");
+        .ok_or_else(|| anyhow::anyhow!("the node put was not got"))?;
+    anyhow::ensure!(
+        got.spec == node.spec && got.body == node.body,
+        "read back {got:?}"
+    );
     Ok(())
 }
 

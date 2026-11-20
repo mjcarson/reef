@@ -53,6 +53,22 @@ without registered io buffers (`ulimit -l unlimited` lifts it).
 cargo +nightly run --release -p reef-shoal -- serve --conf shoal.yml
 ```
 
+## The store
+
+`Store<B: Backend>` reads and writes plans and their nodes by version. Its logic (each plan's lock,
+the versions, the full-key checks) is written once, over a backend that only reads rows and makes
+conditional writes the way shoal does: `ShoalBackend`, or `MemoryBackend`, its in-memory twin,
+which needs no shoal and builds on stable. `tests/store.rs` runs every case against both, so shoal
+is the twin's oracle.
+
+- **A put names the version it read**, or `None` for a new node. One that isn't as expected
+  comes back as `Put::Stale`, with whether the node exists, is missing or moved on.
+- **A plan is listed with an empty current revision**, so a put always has somewhere to go.
+- **Writes to a plan take its lock alone, and reads share it**, since reef-service is shoal's
+  only writer.
+- **Every row read is checked against its full key**, so a partition hash collision is an
+  error, never the wrong row.
+
 ## The schema
 
 | Table | Partition | Sort | Holds |

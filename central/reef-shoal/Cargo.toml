@@ -12,6 +12,7 @@ reef-service = { path = "../reef-service", features = ["embedded"] }
 shoal = { workspace = true, features = ["server"] }
 
 [dev-dependencies]
+reef-model.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 # stops the node the way a supervisor does, with SIGTERM
