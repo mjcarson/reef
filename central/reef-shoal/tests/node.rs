@@ -163,3 +163,43 @@ async fn external_round_trip() -> anyhow::Result<()> {
     assert!(node.stop(), "reef-shoal did not stop cleanly on SIGTERM");
     tripped
 }
+
+/// A tmpfs data dir is refused before shoal starts, and the node prints what to change
+#[test]
+fn tmpfs_data_dir_prints_what_to_change() {
+    // a data directory that doesn't exist, under the first tmpfs this host mounts
+    let uid = unsafe { libc::getuid() };
+    let tmpfs = [
+        PathBuf::from("/dev/shm"),
+        PathBuf::from("/tmp"),
+        PathBuf::from(format!("/run/user/{uid}")),
+    ]
+    .into_iter()
+    .find(|dir| matches!(reef_service::checks::in_memory_fs(dir), Ok(Some(_))))
+    .expect("this test needs a tmpfs at /dev/shm, /tmp or /run/user/$UID");
+    let data = tmpfs.join(format!("reef-shoal-test-{}", std::process::id()));
+    let conf = write_conf(&fresh("node-tmpfs"), &data);
+    // the node is started as a user would start it
+    let output = Command::new(env!("CARGO_BIN_EXE_reef-shoal"))
+        .arg("serve")
+        .arg("--conf")
+        .arg(&conf)
+        .output()
+        .expect("reef-shoal runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("{stderr}");
+    // it refuses, before shoal makes the directory
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "reef-shoal didn't refuse a tmpfs data dir"
+    );
+    assert!(!data.exists(), "the refused data directory was made");
+    // saying why, and naming the key to change in the file it is set in
+    assert!(stderr.contains("on tmpfs"), "{stderr}");
+    assert!(
+        stderr.contains("`storage.default.filesystem.latency_sensitive.path`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&conf.display().to_string()), "{stderr}");
+}

@@ -12,6 +12,8 @@ use crate::conf::Conf;
 use crate::schema::ReefClient;
 
 #[cfg(feature = "embedded")]
+use crate::checks::{self, Keys, Problem, Refused};
+#[cfg(feature = "embedded")]
 use crate::pool::Pool;
 
 /// How many times to try connecting to a server that just started
@@ -95,8 +97,21 @@ impl ShoalBackend {
     #[cfg(feature = "embedded")]
     #[instrument(name = "ShoalBackend::in_process", skip_all, err(Debug))]
     pub async fn in_process(conf: &Conf) -> anyhow::Result<ShoalBackend> {
-        // shoal's data paths must be absolute, so make the directory and resolve it first
+        // check the pool's config before anything is made, naming the fix for each problem
         let dir = conf.data_dir()?;
+        let problems = checks::check(
+            &crate::pool::shoal_conf(&conf.shoal, &dir)?,
+            Keys::Reef(conf),
+        );
+        let (fatal, warnings): (Vec<Problem>, Vec<Problem>) =
+            problems.into_iter().partition(|problem| problem.fatal);
+        for warning in warnings {
+            tracing::warn!(what = %warning.what, fix = %warning.fix, "shoal: a config problem");
+        }
+        if !fatal.is_empty() {
+            return Err(Refused(fatal).into());
+        }
+        // make the directory, and resolve it through any symlinks
         std::fs::create_dir_all(&dir)
             .map_err(|error| anyhow::anyhow!("creating {}: {error}", dir.display()))?;
         let dir = dir.canonicalize()?;

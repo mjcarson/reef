@@ -15,4 +15,4 @@ shoal = { workspace = true, features = ["server"] }
 anyhow.workspace = true
 tokio.workspace = true
 # stops the node the way a supervisor does, with SIGTERM
-libc = "0.2"
+libc.workspace = true

@@ -11,7 +11,7 @@ publish.workspace = true
 # into the client. Without `embedded` this is shoal's client half alone, and builds on stable.
 default = []
 # shoal's engine inside this process, which needs nightly, glommio and target-cpu=native
-embedded = ["shoal/server"]
+embedded = ["shoal/server", "dep:libc"]
 
 [dependencies]
 shoal.workspace = true
@@ -22,3 +22,5 @@ toml.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+# statfs and getrlimit, for the checks before an in-process pool starts
+libc = { workspace = true, optional = true }

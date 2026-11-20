@@ -44,6 +44,11 @@ in-process pool cleanly takes up to 3 s.
 An external node is `reef-shoal`, over a shoal config of its own (`reef-shoal/shoal.example.yml`).
 Its data paths must be absolute, and never on tmpfs.
 
+Before shoal starts, either way, reef checks its config and names the fix for each problem. It
+refuses a memory budget of 0, a relative or tmpfs data path, and a locked-memory limit under
+512 KiB. It warns on a limit under 30 MiB for each shard and 30 more, below which glommio runs
+without registered io buffers (`ulimit -l unlimited` lifts it).
+
 ```sh
 cargo +nightly run --release -p reef-shoal -- serve --conf shoal.yml
 ```

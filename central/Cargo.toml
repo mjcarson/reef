@@ -27,6 +27,7 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"
 toml = "1"
+libc = "0.2"
 
 # No debuginfo: a debug build of shoal's engine with it runs to several gigabytes.
 [profile.dev]
