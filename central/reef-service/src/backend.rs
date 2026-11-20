@@ -10,34 +10,8 @@ use std::future::Future;
 
 use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
 
-/// Why a conditional write was refused, as shoal says it
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    /// The write expected no row, and one is stored
-    Exists,
-    /// The write expected a row, and none is stored
-    Missing,
-    /// The write expected a row at a version, and the stored row is at another
-    Moved,
-}
-
-impl Refusal {
-    /// Name this refusal the way a person reads it
-    pub fn describe(self) -> &'static str {
-        match self {
-            Refusal::Exists => "it already exists",
-            Refusal::Missing => "it does not exist",
-            Refusal::Moved => "it changed since it was read",
-        }
-    }
-}
-
-impl std::fmt::Display for Refusal {
-    /// Shows the refusal as the phrase that describes it
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.describe())
-    }
-}
+/// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
+pub use reef_api::Refusal;
 
 /// What came of a conditional write
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,388 @@
+//! The JSON API suite's cases, each generic over the backend so it runs against shoal and the
+//! twin
+//!
+//! Each case talks to a served service through a client that knows only `reef-api`'s types and
+//! the reef-model types they are built on, as the CLI will. Its plan is `reef/central`, of a
+//! project registered for a fresh git repo.
+
+use reef_api::{
+    AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
+    NodePut, NodeWrite, PlanInfo, PlanWrite, Project, PutNode, Puts, Refusal, Rewrite, StalePut,
+    StoredNode, paths,
+};
+use reef_model::{Description, Diagnostic, NodeSpec, Payload, PlanName};
+use reef_service::Backend;
+use reqwest::StatusCode;
+
+use super::git;
+use super::http::{Ax, Events};
+
+/// A piece of work that says why it is needed and what it does, needing what it names
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `needs` - The ids it needs
+/// * `order` - Where it falls in the order its plan was written in
+fn work(id: &str, needs: &[&str], order: u64) -> NodeWrite {
+    NodeWrite {
+        spec: NodeSpec {
+            id: id.to_string(),
+            title: Some(format!("{id} Some work")),
+            needs: needs.iter().map(|need| need.to_string()).collect(),
+            description: Some(Description {
+                why: Some(format!("Without {id}, something is missing.")),
+                what: Some(format!("With {id}, it is there.")),
+                details: None,
+            }),
+            ..NodeSpec::default()
+        },
+        body: format!("# {id}\n\nIts body.\n"),
+        order,
+    }
+}
+
+/// A batch of one put
+///
+/// # Arguments
+///
+/// * `node` - The node to put
+/// * `read` - The version its writer read, or `None` for a new node
+fn one(node: NodeWrite, read: Option<u64>) -> Puts {
+    Puts {
+        puts: vec![NodePut::new(node, read)],
+    }
+}
+
+/// A client using only reef-api's types registers a project, lists a plan in it, puts a node,
+/// and lists plans and nodes back
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn client_puts_a_node_and_lists_plans<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a project of its own, for a fresh repo, registered through the API
+    let repo = git::repo(&ax.dir.join("api"))?;
+    let new = NewProject {
+        name: "api".to_string(),
+        repo: repo.clone(),
+    };
+    let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
+    let project = Project {
+        name: "api".to_string(),
+        repo: repo.clone(),
+    };
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(added, AddedProject::Added(project.clone()));
+    // the name again, for another repo, is a conflict
+    let other = NewProject {
+        name: "api".to_string(),
+        repo: git::repo(&ax.dir.join("other"))?,
+    };
+    let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &other).await?;
+    assert_eq!(
+        (status, taken),
+        (StatusCode::CONFLICT, AddedProject::NameTaken)
+    );
+    // and so is the repo again, under another name, naming the project that has it
+    let again = NewProject {
+        name: "again".to_string(),
+        repo: repo.clone(),
+    };
+    let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &again).await?;
+    let expected = AddedProject::RepoTaken {
+        project: "api".to_string(),
+    };
+    assert_eq!((status, taken), (StatusCode::CONFLICT, expected));
+    // both projects are listed, by name, and the repo finds its project
+    let (_, projects): (_, Vec<Project>) = ax.client.get(paths::PROJECTS).await?;
+    let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["api", "reef"]);
+    let dir = repo.to_str().expect("the repo is a utf-8 path");
+    let (status, found): (_, Project) = ax.client.get(&paths::find_project(dir)).await?;
+    assert_eq!((status, found), (StatusCode::OK, project));
+    // a plan listed in it is created once, and left as it is after that
+    let plan = PlanName::new("api", "main")?;
+    let request = NewPlan {
+        name: "main".to_string(),
+    };
+    let (status, added): (_, AddedPlan) = ax.client.post(&paths::plans("api"), &request).await?;
+    assert_eq!(
+        (status, added),
+        (StatusCode::CREATED, AddedPlan { added: true })
+    );
+    let (status, added): (_, AddedPlan) = ax.client.post(&paths::plans("api"), &request).await?;
+    assert_eq!(
+        (status, added),
+        (StatusCode::OK, AddedPlan { added: false })
+    );
+    // the project lists that plan, at a revision to put into
+    let (_, plans): (_, Vec<PlanInfo>) = ax.client.get(&paths::plans("api")).await?;
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].name, plan);
+    assert_ne!(plans[0].revision, 0);
+    // a node put into it is written at version 1
+    let node = work("C53", &[], 0);
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&plan), &one(node.clone(), None))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(checked, Checked::Applied { versions: vec![1] });
+    // and reads back as it was written, at that version
+    let (_, got): (_, StoredNode) = ax.client.get(&paths::node(&plan, "C53")).await?;
+    assert_eq!((got.spec, got.body, got.version), (node.spec, node.body, 1));
+    // the plan's listing holds it, at the revision the plan names
+    let (_, listing): (_, Listing) = ax.client.get(&paths::nodes(&plan)).await?;
+    let (_, info): (_, PlanInfo) = ax.client.get(&paths::plan(&plan)).await?;
+    assert_eq!(listing.revision, info.revision);
+    assert_eq!(listing.nodes.len(), 1);
+    // the plan builds into a payload of that node, with no problems
+    let (_, payload): (_, Payload) = ax.client.get(&paths::payload(&plan)).await?;
+    let ids: Vec<&str> = payload.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, ["C53"]);
+    assert_eq!(payload.nodes[0].origin.to_string(), "api/main/C53");
+    let (_, problems): (_, Vec<Diagnostic>) = ax.client.get(&paths::check(&plan)).await?;
+    assert!(problems.is_empty(), "{problems:?}");
+    Ok(())
+}
+
+/// A put that would add a problem is 422 with check's message, and a stale one is 409 naming
+/// the node and how it moved
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn refused_and_stale_puts_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    let nodes = paths::nodes(&ax.plan);
+    // a node needing one that isn't there is refused, with check's message
+    let (status, refused): (_, Checked) = ax
+        .client
+        .post(&nodes, &one(work("C11", &["X"], 0), None))
+        .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let problem = Diagnostic {
+        source: "reef/central/C11".to_string(),
+        line: None,
+        message: "needs `X`, which is not a node".to_string(),
+    };
+    assert_eq!(refused, Checked::Refused(vec![problem]));
+    // the same node needing nothing goes in
+    let (status, _): (_, Checked) = ax
+        .client
+        .post(&nodes, &one(work("C11", &[], 0), None))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    // a second put of it as new finds it there, and one over a version never read finds it moved
+    for (read, refusal) in [(None, Refusal::Exists), (Some(5), Refusal::Moved)] {
+        let (status, stale): (_, Checked) = ax
+            .client
+            .post(&nodes, &one(work("C11", &[], 0), read))
+            .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let expected = StalePut {
+            id: "C11".to_string(),
+            refusal,
+        };
+        assert_eq!(stale, Checked::Stale(vec![expected]));
+    }
+    // and a put over the version it was read at goes in, one version on
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(&nodes, &one(work("C11", &[], 0), Some(1)))
+        .await?;
+    assert_eq!(
+        (status, checked),
+        (StatusCode::OK, Checked::Applied { versions: vec![2] })
+    );
+    Ok(())
+}
+
+/// Each error a client can cause names its kind, with the status that kind takes
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn errors_say_what_is_missing<B: Backend + 'static>(ax: Ax<B>) -> anyhow::Result<()> {
+    // a project that isn't registered, a plan that isn't listed, and a node that isn't there
+    let unlisted = PlanName::new("reef", "missing")?;
+    let cases = [
+        (paths::plans("nobody"), ErrorCode::NotRegistered),
+        (
+            paths::payload(&PlanName::new("nobody", "central")?),
+            ErrorCode::NotRegistered,
+        ),
+        (paths::nodes(&unlisted), ErrorCode::NotListed),
+        (paths::plan(&unlisted), ErrorCode::NotListed),
+        (paths::node(&ax.plan, "nope"), ErrorCode::NotFound),
+        // a project name can't start with `-`
+        (
+            "/api/v1/projects/-bad/plans/central/nodes".to_string(),
+            ErrorCode::BadName,
+        ),
+        // a plan is followed within its project
+        (
+            "/api/v1/changes?plan=central".to_string(),
+            ErrorCode::BadRequest,
+        ),
+    ];
+    for (path, code) in cases {
+        let (status, error): (_, ApiError) = ax.client.get(&path).await?;
+        assert_eq!(error.code, code, "{path}: {error:?}");
+        assert_eq!(status.as_u16(), code.status(), "{path}");
+    }
+    // a directory no project's repo holds finds no project
+    let lonely = git::repo(&ax.dir.join("lonely"))?;
+    let lonely = lonely.to_str().expect("the repo is a utf-8 path");
+    let (status, error): (_, ApiError) = ax.client.get(&paths::find_project(lonely)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+    );
+    // a body that isn't JSON, and a node that lists its members inline, are bad requests
+    let nodes = paths::nodes(&ax.plan);
+    let (status, error) = ax.client.post_text(&nodes, "not json").await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    let mut group = work("M3", &[], 0);
+    group.spec.nodes = vec![NodeSpec {
+        id: "C11".to_string(),
+        ..NodeSpec::default()
+    }];
+    let (status, error): (_, ApiError) = ax.client.post(&nodes, &one(group, None)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    assert!(
+        error.message.contains("members inline"),
+        "{}",
+        error.message
+    );
+    // a repo named relative to wherever the service started is refused
+    let relative = NewProject {
+        name: "rel".to_string(),
+        repo: "some/repo".into(),
+    };
+    let (status, error): (_, ApiError) = ax.client.post(paths::PROJECTS, &relative).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    Ok(())
+}
+
+/// A whole plan written through the API becomes the revision the plan names, and one that
+/// would break it leaves the plan as it was
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn whole_plan_written_as_a_revision<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    let plan = paths::plan(&ax.plan);
+    let revision = paths::revision(&ax.plan);
+    // the revision the plan was listed with
+    let (_, before): (_, PlanInfo) = ax.client.get(&plan).await?;
+    // two nodes, one needing the other, written as a new revision
+    let write = PlanWrite {
+        nodes: vec![work("C11", &[], 0), work("C53", &["C11"], 1)],
+    };
+    let (status, rewrite): (_, Rewrite) = ax.client.put(&revision, &write).await?;
+    assert_eq!(status, StatusCode::OK);
+    let Rewrite::Applied(rewritten) = rewrite else {
+        anyhow::bail!("the write was refused: {rewrite:?}");
+    };
+    assert_ne!(rewritten.revision, before.revision);
+    // the plan now names it, and lists both nodes in it
+    let (_, after): (_, PlanInfo) = ax.client.get(&plan).await?;
+    assert_eq!(after.revision, rewritten.revision);
+    let (_, listing): (_, Listing) = ax.client.get(&paths::nodes(&ax.plan)).await?;
+    let ids: Vec<&str> = listing.nodes.iter().map(|n| n.spec.id.as_str()).collect();
+    assert_eq!(ids, ["C11", "C53"]);
+    // a plan that needs a node it doesn't have is refused, and the revision stays
+    let broken = PlanWrite {
+        nodes: vec![work("C53", &["C11"], 0)],
+    };
+    let (status, refused): (_, Rewrite) = ax.client.put(&revision, &broken).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(matches!(refused, Rewrite::Refused(_)), "{refused:?}");
+    let (_, kept): (_, PlanInfo) = ax.client.get(&plan).await?;
+    assert_eq!(kept.revision, rewritten.revision);
+    Ok(())
+}
+
+/// A follower of one plan's change stream is sent each write to it, and none to another plan,
+/// and its stream ends when the service ends the stream
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn change_stream_tells_of_each_write<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // follow reef/central alone, subscribed once the answer's head is in
+    let path = paths::changes(Some("reef"), Some("central"));
+    let response = ax.client.open(&path).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let kind = response.headers().get("content-type").cloned();
+    assert_eq!(
+        kind.as_ref().and_then(|k| k.to_str().ok()),
+        Some("text/event-stream")
+    );
+    let mut events = Events::new(response);
+    // a sibling plan listed and put into, which the follower doesn't follow
+    let other = PlanName::new("reef", "other")?;
+    let request = NewPlan {
+        name: "other".to_string(),
+    };
+    let (_, _): (_, AddedPlan) = ax.client.post(&paths::plans("reef"), &request).await?;
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&other), &one(work("A", &[], 0), None))
+        .await?;
+    // then a put and a whole-plan write to the plan it follows
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C11", &[], 0), None))
+        .await?;
+    let write = PlanWrite {
+        nodes: vec![work("C11", &[], 0), work("C53", &["C11"], 1)],
+    };
+    let (_, rewrite): (_, Rewrite) = ax.client.put(&paths::revision(&ax.plan), &write).await?;
+    let Rewrite::Applied(rewritten) = rewrite else {
+        anyhow::bail!("the write was refused: {rewrite:?}");
+    };
+    // the first event is the put, named by its kind, each node at its new version
+    let first = events.next().await?.expect("the stream sent the put");
+    assert_eq!(first.event, "nodes-put");
+    let put: Change = serde_json::from_str(&first.data)?;
+    let expected = Change::NodesPut {
+        plan: ax.plan.clone(),
+        nodes: vec![PutNode {
+            id: "C11".to_string(),
+            version: 1,
+        }],
+    };
+    assert_eq!(put, expected);
+    // then the revision the write made current
+    let second = events.next().await?.expect("the stream sent the write");
+    assert_eq!(second.event, "plan-written");
+    let written: Change = serde_json::from_str(&second.data)?;
+    let expected = Change::PlanWritten {
+        plan: ax.plan.clone(),
+        revision: rewritten.revision,
+    };
+    assert_eq!(written, expected);
+    // and once the service ends the stream, the follower's ends too
+    ax.service.end_changes();
+    assert_eq!(events.next().await?, None);
+    Ok(())
+}

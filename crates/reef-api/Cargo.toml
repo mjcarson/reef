@@ -1,0 +1,15 @@
+[package]
+name = "reef-api"
+description = "reef's JSON API: the service's data types, its requests and answers, its routes and its changes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# the nodes, their specs, the problems check finds and the viewer's payload, without YAML parsing
+reef-model.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

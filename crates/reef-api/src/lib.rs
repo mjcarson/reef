@@ -1,0 +1,35 @@
+//! reef's JSON API: the service's data types, and the requests, answers and changes its routes
+//! carry
+//!
+//! `reef-service` keeps plans in shoal and checks every write against the whole plan. Its JSON
+//! API is a plain axum router the CLI, the MCP server and the hooks call, so none of them depends
+//! on the app's server functions or on shoal. These are the types both sides speak, and they are
+//! the service's own: a [`NodeWrite`] given to the service is the one a client sends.
+//!
+//! - **Nodes** ([`node`]): a node as read, as written and as put, what came of a batch of puts
+//!   or a whole-plan write, and a plan's listing.
+//! - **Projects and plans** ([`project`]): a project and the repo its plans describe, a plan and
+//!   the revision readers load, and the requests that add them.
+//! - **Changes** ([`change`]): what the change stream tells of each write.
+//! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
+//! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
+//!
+//! The service serves localhost only until users sign in (M10), at [`DEFAULT_ADDRESS`] unless
+//! reef's config names another.
+
+pub mod change;
+pub mod error;
+pub mod node;
+pub mod paths;
+pub mod project;
+
+pub use change::{Change, PutNode};
+pub use error::{ApiError, ErrorCode};
+pub use node::{
+    Checked, Listing, NodePut, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten, StalePut,
+    StoredNode, records,
+};
+pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Project};
+
+/// Where the service listens when reef's config names no address: localhost only
+pub const DEFAULT_ADDRESS: &str = "127.0.0.1:12180";

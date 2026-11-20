@@ -17,9 +17,9 @@ The crates, once this plan is done:
 | `reef-render` | stable | markdown rendering, doc links, why/what extraction over a `DocSource` ([C1](#a-model-any-source-can-feed)) |
 | `reef-view` | stable, wasm | the viewer, plus a `mount` entry point ([C12](app.md#the-viewer-inside-the-app)) |
 | `mdbook-reef` | stable | the static mode, now over `reef-render`'s filesystem source |
-| `reef-api` | stable | the JSON API's request and response types |
+| `reef-api` | stable | the service's data types, and the JSON API's requests, answers, paths and changes ([C53](../milestones/m3.md)) |
 | `reef` | stable | the CLI, the MCP server and the hooks, all HTTP clients of the JSON API |
-| `reef-service` | nightly; stable built external-only | the store and the model: the only code that touches shoal, in-process or external ([C57](../milestones/m2.md)) |
+| `reef-service` | nightly; stable built external-only | the store and the model: the only code that touches shoal, in-process or external ([C57](../milestones/m2.md)); the JSON API's router, and `reef-serve`, which serves it alone |
 | `reef-app` | nightly; stable built external-only | the Dioxus fullstack app on axum, which also mounts the JSON API |
 | `reef-shoal` | nightly | the external node: shoal's node program over reef's schema ([C57](../milestones/m2.md)) |
 
@@ -153,6 +153,12 @@ versions, validation, atomic writes and derived state would each be written seve
 - **Two front doors onto it.** A plain JSON API on axum (typed in `reef-api`) for the CLI, the
   MCP server and the hooks; Dioxus server functions for the app. Both run in one axum server,
   and the CLI never depends on the app's wire format.
+- **The service's data types are the API's.** A node as read, written and put, the outcome of a
+  put or a whole-plan write, a project and a plan live in `reef-api` with serde, and reef-service
+  re-exports them, so the service, the JSON API and the app's server functions share one set.
+  A change to one of them changes the wire.
+- **Changes are server-sent events,** live only: a client reads what it needs, then follows the
+  stream, and one that falls behind is told how many changes it missed.
 - **Each new kind of data adds three things:** an operation on the service, a JSON route and a
   server function. This holds for the queue, work records, comments and the loop's state.
 - **Localhost only** until [M10](../milestones/m10.md).

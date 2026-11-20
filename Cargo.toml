@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/reef-model", "crates/reef-layout", "crates/reef-render", "crates/reef-view", "crates/mdbook-reef", "xtask"]
+members = ["crates/reef-model", "crates/reef-layout", "crates/reef-render", "crates/reef-view", "crates/mdbook-reef", "crates/reef-api", "xtask"]
 # Spikes are workspaces of their own, on whatever toolchain they need (X1's runs shoal on nightly),
 # and so is `central`, the service that keeps plans in shoal, so this workspace never resolves shoal.
 exclude = ["spikes", "central"]

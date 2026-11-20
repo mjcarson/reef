@@ -23,6 +23,14 @@ deepsize2 = "0.1"
 reef-model = { path = "../crates/reef-model", default-features = false }
 # markdown rendering, doc links and why/what taken from docs, as `mdbook-reef check` does them
 reef-render = { path = "../crates/reef-render" }
+# the service's data types, and the JSON API's requests, answers, routes and changes
+reef-api = { path = "../crates/reef-api" }
+# the JSON API's router, at the version Dioxus 0.7.10 resolves, so reef-app can mount it
+axum = "0.8"
+# the change stream's broadcast as a stream of server-sent events
+tokio-stream = { version = "0.1", features = ["sync"] }
+# a plain HTTP client, for the API's tests and its bench alone
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

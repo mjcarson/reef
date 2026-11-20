@@ -18,16 +18,22 @@
 //! - **Docs come from the project's working tree.** A stored node's links resolve from its
 //!   repo's root, as `mdbook-reef check` resolves a book's from its `src`. They are read off
 //!   the async threads.
+//! - **Each applied write is a change.** A project registered, a plan listed, a batch put or a
+//!   whole plan written is sent to every subscriber of [`Service::changes`], after the write's
+//!   lock is let go, so two writers' changes to one plan can arrive in either order. A refused
+//!   write sends nothing.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
 //! pool would find the data directory locked.
 
+use reef_api::{Change, PutNode};
 use reef_model::{Diagnostic, Graph, Payload, PlanName, Record, nodes_from_records};
 use reef_render::{DocSource, FsSource, Renderer, Sections};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::OnceCell;
+use std::sync::{Mutex, PoisonError};
+use tokio::sync::{OnceCell, broadcast};
 use tracing::instrument;
 
 use crate::backend::Backend;
@@ -42,12 +48,18 @@ use crate::store::{
 /// The process's one service over shoal, opened on first use
 static SHARED: OnceCell<Service> = OnceCell::const_new();
 
+/// How many changes a subscriber can fall behind by before it misses some
+const CHANGE_BACKLOG: usize = 256;
+
 /// reef's service: checked writes and built plans, over a store
 pub struct Service<B = ShoalBackend> {
     /// The store every read and write goes through
     store: Store<B>,
     /// The doc sections a node's why, what and design choices are taken from
     sections: Sections,
+    /// Where each applied write is sent, for every subscriber to the change stream, until the
+    /// stream is ended
+    changes: Mutex<Option<broadcast::Sender<Change>>>,
 }
 
 impl Service<ShoalBackend> {
@@ -107,9 +119,52 @@ impl<B: Backend> Service<B> {
     ///
     /// * `store` - The store every read and write goes through
     pub fn new(store: Store<B>) -> Service<B> {
+        // nobody subscribes until a client follows the change stream
+        let (changes, _) = broadcast::channel(CHANGE_BACKLOG);
         Service {
             store,
             sections: Sections::default(),
+            changes: Mutex::new(Some(changes)),
+        }
+    }
+
+    /// Subscribes to every change this service applies from now on
+    ///
+    /// A subscriber more than 256 changes behind misses the oldest, and its next receive says
+    /// how many it missed. Once the stream is ended, a new subscriber's receiver is closed.
+    pub fn changes(&self) -> broadcast::Receiver<Change> {
+        // a lock poisoned by a panic still holds a sender, which is all this reads
+        let changes = self.changes.lock().unwrap_or_else(PoisonError::into_inner);
+        match changes.as_ref() {
+            Some(sender) => sender.subscribe(),
+            // the stream has ended, so this subscriber's receiver is closed from the start
+            None => broadcast::channel(1).1,
+        }
+    }
+
+    /// Ends the change stream: every subscriber's receiver closes once it has read what was
+    /// sent, and changes made after this are sent nowhere
+    ///
+    /// A server ends it before it stops, since a follower's stream never ends of its own accord
+    /// and a graceful stop waits for every open request.
+    pub fn end_changes(&self) {
+        // dropping the only sender closes every receiver
+        self.changes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+    }
+
+    /// Sends a change to every subscriber, if any is listening
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The change a write applied
+    fn publish(&self, change: Change) {
+        // a change with no subscriber, or after the stream has ended, is no failure
+        let changes = self.changes.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(sender) = changes.as_ref() {
+            let _ = sender.send(change);
         }
     }
 
@@ -133,7 +188,14 @@ impl<B: Backend> Service<B> {
     /// * `repo` - A directory in the repo its plans describe
     #[instrument(name = "Service::add_project", skip_all, err(Debug))]
     pub async fn add_project(&self, name: &str, repo: &Path) -> anyhow::Result<AddedProject> {
-        self.store.add_project(name, repo).await
+        // register it, and tell the change stream if it was
+        let added = self.store.add_project(name, repo).await?;
+        if let AddedProject::Added(project) = &added {
+            self.publish(Change::ProjectAdded {
+                project: project.clone(),
+            });
+        }
+        Ok(added)
     }
 
     /// Lists every project, by name
@@ -159,16 +221,25 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::add_plan", skip_all, err(Debug))]
     pub async fn add_plan(&self, plan: &PlanName) -> anyhow::Result<bool> {
-        self.store.add_plan(plan).await
+        // list it, and tell the change stream if it wasn't listed already
+        let added = self.store.add_plan(plan).await?;
+        if added {
+            self.publish(Change::PlanAdded { plan: plan.clone() });
+        }
+        Ok(added)
     }
 
-    /// Lists a project's plans, by name
+    /// Lists a project's plans, by name, refusing a project that isn't registered
     ///
     /// # Arguments
     ///
     /// * `project` - The project's name
     #[instrument(name = "Service::plans", skip_all, err(Debug))]
     pub async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanInfo>> {
+        // a project that isn't registered has no plans to list, and says so
+        if self.store.project(project).await?.is_none() {
+            return Err(NotRegistered(project.to_string()).into());
+        }
         self.store.plans(project).await
     }
 
@@ -209,10 +280,26 @@ impl<B: Backend> Service<B> {
         // the plan's docs are its project's working tree
         let repo = self.repo(plan).await?;
         let sections = self.sections.clone();
+        // the ids put, for the change the batch makes if it is written
+        let ids: Vec<String> = puts.iter().map(|put| put.node.spec.id.clone()).collect();
         // judged under the plan's write lock, against the plan the puts land on
-        self.store
+        let checked = self
+            .store
             .put_checked(plan, puts, move |proposal| added(repo, sections, proposal))
-            .await
+            .await?;
+        // tell the change stream of each node written, at its new version
+        if let Checked::Applied { versions } = &checked {
+            let nodes = ids
+                .into_iter()
+                .zip(versions.iter().copied())
+                .map(|(id, version)| PutNode { id, version })
+                .collect();
+            self.publish(Change::NodesPut {
+                plan: plan.clone(),
+                nodes,
+            });
+        }
+        Ok(checked)
     }
 
     /// Writes a whole plan as a new revision, unless it would add a problem
@@ -233,9 +320,18 @@ impl<B: Backend> Service<B> {
         let repo = self.repo(plan).await?;
         let sections = self.sections.clone();
         // judged under the plan's write lock, against the plan it replaces
-        self.store
+        let rewrite = self
+            .store
             .write_plan_checked(plan, nodes, move |proposal| added(repo, sections, proposal))
-            .await
+            .await?;
+        // tell the change stream of the revision readers now load
+        if let Rewrite::Applied(rewritten) = &rewrite {
+            self.publish(Change::PlanWritten {
+                plan: plan.clone(),
+                revision: rewritten.revision,
+            });
+        }
+        Ok(rewrite)
     }
 
     /// Finds a plan's problems, as `mdbook-reef check` finds a book's
@@ -388,8 +484,10 @@ fn new_problems(before: &[Diagnostic], after: Vec<Diagnostic>) -> Vec<Diagnostic
 mod tests {
     use super::{Service, new_problems};
     use crate::store::{Checked, NodePut, NodeWrite};
+    use reef_api::{Change, PutNode};
     use reef_model::{Description, Diagnostic, NodeSpec, PlanName};
     use std::path::Path;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     /// A problem at a node's name, as a stored node's are
     ///
@@ -450,6 +548,56 @@ mod tests {
             .put(&plan, work("C11", &["X"]), None)
             .await?;
         assert_eq!(service.check(&plan).await?, expected);
+        Ok(())
+    }
+
+    /// An applied put tells the change stream of each node at its new version, and a refused
+    /// one tells it nothing
+    #[tokio::test]
+    async fn applied_put_is_a_change_and_refused_put_is_none() -> anyhow::Result<()> {
+        // a plan of a project for the repo this crate is in, followed from before it is listed
+        let service = Service::memory();
+        let mut changes = service.changes();
+        service
+            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")))
+            .await?;
+        let plan = PlanName::new("reef", "central")?;
+        service.add_plan(&plan).await?;
+        // registering the project and listing the plan are changes of their own
+        assert!(
+            matches!(changes.try_recv()?, Change::ProjectAdded { project } if project.name == "reef")
+        );
+        assert_eq!(
+            changes.try_recv()?,
+            Change::PlanAdded { plan: plan.clone() }
+        );
+        // a put that breaks the plan is refused, and nothing is sent
+        let refused = service
+            .put(&plan, vec![NodePut::new(work("C11", &["X"]), None)])
+            .await?;
+        assert!(matches!(refused, Checked::Refused(_)));
+        assert!(changes.try_recv().is_err());
+        // one that is written names each node at its new version
+        service
+            .put(&plan, vec![NodePut::new(work("C11", &[]), None)])
+            .await?;
+        let expected = Change::NodesPut {
+            plan: plan.clone(),
+            nodes: vec![PutNode {
+                id: "C11".to_string(),
+                version: 1,
+            }],
+        };
+        assert_eq!(changes.try_recv()?, expected);
+        // once the stream is ended, every receiver closes, and a new one is closed from the start
+        service.end_changes();
+        assert_eq!(changes.try_recv(), Err(TryRecvError::Closed));
+        assert_eq!(service.changes().try_recv(), Err(TryRecvError::Closed));
+        // and a write after it still goes in, sent nowhere
+        let after = service
+            .put(&plan, vec![NodePut::new(work("C53", &["C11"]), None)])
+            .await?;
+        assert!(matches!(after, Checked::Applied { .. }));
         Ok(())
     }
 

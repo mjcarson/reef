@@ -7,9 +7,11 @@
 
 #![allow(dead_code)]
 
+pub mod api_cases;
 pub mod cases;
 pub mod faulty;
 pub mod git;
+pub mod http;
 pub mod service_cases;
 
 use reef_model::{Description, NodeSpec, PlanName};

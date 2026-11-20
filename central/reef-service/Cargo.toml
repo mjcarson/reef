@@ -19,11 +19,18 @@ rkyv.workspace = true
 deepsize2.workspace = true
 reef-model.workspace = true
 reef-render.workspace = true
+reef-api.workspace = true
+axum.workspace = true
+tokio-stream.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 anyhow.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net", "signal", "fs"] }
 tracing.workspace = true
 # statfs and getrlimit, for the checks before an in-process pool starts
 libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+# a client of the JSON API that knows only reef-api's types
+reqwest.workspace = true

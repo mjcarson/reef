@@ -309,6 +309,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef-api"
+version = "0.1.0"
+dependencies = [
+ "reef-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "reef-layout"
 version = "0.1.0"
 

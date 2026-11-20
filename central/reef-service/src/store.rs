@@ -20,7 +20,12 @@
 //!   problem. [`Service`](crate::Service) checks every write this way; `put` and `write_plan`
 //!   are the unchecked layer under it.
 
-use reef_model::{Diagnostic, NodeSpec, Origin, PlanName, Record};
+// the store's data types are the JSON API's, so the service and its clients share them
+pub use reef_api::{
+    AddedProject, Checked, Listing, NodePut, NodeWrite, PlanInfo, Project, Rewrite, Rewritten,
+    StalePut, StoredNode, records,
+};
+use reef_model::{Diagnostic, PlanName, Record};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
@@ -39,94 +44,6 @@ use crate::schema::{NodeRow, PROJECTS, PlanRow, ProjectRow};
 /// How many node rows a bulk write sends in one bundle
 const BUNDLE_ROWS: usize = 256;
 
-/// A node as a reader got it from the store
-#[derive(Debug, Clone, PartialEq)]
-pub struct StoredNode {
-    /// Its spec, with no inline members
-    pub spec: NodeSpec,
-    /// Its body as markdown: a file node's page, empty for one that was listed inline
-    pub body: String,
-    /// Where it falls in the order its plan was written in
-    pub order: u64,
-    /// The version it was read at, which a put of it names
-    pub version: u64,
-}
-
-/// A node as a writer gives it to the store
-#[derive(Debug, Clone, PartialEq)]
-pub struct NodeWrite {
-    /// Its spec, with no inline members: each member is a node of its own
-    pub spec: NodeSpec,
-    /// Its body as markdown
-    pub body: String,
-    /// Where it falls in the order its plan was written in
-    pub order: u64,
-}
-
-impl NodeWrite {
-    /// A node with only an id, an empty body and an order
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - The node's id
-    /// * `order` - Where it falls in the order its plan was written in
-    pub fn new<T: Into<String>>(id: T, order: u64) -> NodeWrite {
-        NodeWrite {
-            spec: NodeSpec {
-                id: id.into(),
-                ..NodeSpec::default()
-            },
-            body: String::new(),
-            order,
-        }
-    }
-}
-
-impl From<StoredNode> for NodeWrite {
-    /// The node as a writer would put it back, without the version it was read at
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - The node as it was read
-    fn from(node: StoredNode) -> NodeWrite {
-        NodeWrite {
-            spec: node.spec,
-            body: node.body,
-            order: node.order,
-        }
-    }
-}
-
-/// One put of a batch: a node, and the version its writer read it at
-#[derive(Debug, Clone, PartialEq)]
-pub struct NodePut {
-    /// The node as it should be written
-    pub node: NodeWrite,
-    /// The version it was read at, or `None` for a node that must not exist yet
-    pub read: Option<u64>,
-}
-
-impl NodePut {
-    /// A put of a node, over the version it was read at
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - The node as it should be written
-    /// * `read` - The version it was read at, or `None` for a new node
-    pub fn new(node: NodeWrite, read: Option<u64>) -> NodePut {
-        NodePut { node, read }
-    }
-}
-
-/// A put of a batch that found its node other than its writer read it
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StalePut {
-    /// The node's id
-    pub id: String,
-    /// How the node differs from what its writer read
-    pub refusal: Refusal,
-}
-
 /// A plan as it stands and as a write would leave it, for a check to judge
 #[derive(Debug, Clone)]
 pub struct Proposal {
@@ -134,50 +51,6 @@ pub struct Proposal {
     pub before: Vec<Record>,
     /// The plan's nodes as the write would leave them, in written order
     pub after: Vec<Record>,
-}
-
-/// What came of a checked batch of puts
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Checked {
-    /// Every put was written
-    Applied {
-        /// Each put's new version, in the order the puts were given
-        versions: Vec<u64>,
-    },
-    /// Some puts found their nodes other than their writers read them, so nothing was written
-    Stale(Vec<StalePut>),
-    /// The check found problems the puts would add, so nothing was written
-    Refused(Vec<Diagnostic>),
-}
-
-/// What came of a checked whole-plan write
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Rewrite {
-    /// The plan was written as a new revision, made current
-    Applied(Rewritten),
-    /// The check found problems the write would add, so nothing was written
-    Refused(Vec<Diagnostic>),
-}
-
-/// A plan's current revision, as a reader got it
-#[derive(Debug, Clone, PartialEq)]
-pub struct Listing {
-    /// The revision that was current
-    pub revision: u64,
-    /// Its nodes, in the order the plan was written in
-    pub nodes: Vec<StoredNode>,
-}
-
-impl Listing {
-    /// The records these nodes make, each named in its plan, for `Graph::build`
-    ///
-    /// # Arguments
-    ///
-    /// * `plan` - The plan these nodes were read from
-    pub fn records(self, plan: &PlanName) -> anyhow::Result<Vec<Record>> {
-        // each node becomes a stored record, named by its plan and id
-        records(plan, self.nodes.into_iter().map(NodeWrite::from).collect())
-    }
 }
 
 /// What came of a put
@@ -190,49 +63,6 @@ pub enum Put {
     },
     /// The node was not as the put expected, so nothing was written
     Stale(Refusal),
-}
-
-/// What a whole-plan write did
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rewritten {
-    /// The revision it made current
-    pub revision: u64,
-    /// How many rows a killed or failed write had left behind, which it pruned first
-    pub recovered: usize,
-    /// Whether pruning the revision it replaced failed, leaving that to the next write
-    pub left_retired: bool,
-}
-
-/// A project: a name, and the repo its plans describe
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Project {
-    /// The project's name
-    pub name: String,
-    /// The root of its repo's main worktree, or the directory it names outside git
-    pub repo: PathBuf,
-}
-
-/// What came of registering a project
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AddedProject {
-    /// It was registered, its repo located
-    Added(Project),
-    /// A project of that name is registered
-    NameTaken,
-    /// Another project is registered for that repo
-    RepoTaken {
-        /// The project registered for it
-        project: String,
-    },
-}
-
-/// One of a project's plans, as its listing names it
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanInfo {
-    /// The plan's full name
-    pub name: PlanName,
-    /// The revision readers load
-    pub revision: u64,
 }
 
 /// A project the store was asked about that isn't registered
@@ -260,6 +90,19 @@ impl std::fmt::Display for NotListed {
 }
 
 impl std::error::Error for NotListed {}
+
+/// A write the store can't keep as it was given, such as a node with members inline
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unkeepable(pub String);
+
+impl std::fmt::Display for Unkeepable {
+    /// Says what the store can't keep, and how to write it instead
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unkeepable {}
 
 /// reef's store, over shoal or its in-memory twin
 pub struct Store<B = ShoalBackend> {
@@ -1082,11 +925,10 @@ fn check_plan_nodes(plan: &PlanName, nodes: &[NodeWrite]) -> anyhow::Result<()> 
     let mut ids = HashSet::with_capacity(nodes.len());
     for node in nodes {
         check_node(plan, node)?;
-        anyhow::ensure!(
-            ids.insert(node.spec.id.as_str()),
-            "node `{}` is written twice",
-            node.spec.id
-        );
+        if !ids.insert(node.spec.id.as_str()) {
+            let message = format!("node `{}` is written twice", node.spec.id);
+            return Err(Unkeepable(message).into());
+        }
     }
     Ok(())
 }
@@ -1140,28 +982,6 @@ fn in_written_order(nodes: &mut [NodeWrite]) {
     nodes.sort_by(|a, b| (a.order, &a.spec.id).cmp(&(b.order, &b.spec.id)));
 }
 
-/// The records nodes make, each named in its plan, for `Graph::build`
-///
-/// # Arguments
-///
-/// * `plan` - The plan the nodes are part of
-/// * `nodes` - The nodes, in written order
-fn records(plan: &PlanName, nodes: Vec<NodeWrite>) -> anyhow::Result<Vec<Record>> {
-    // each node becomes a stored record, named by its plan and id
-    nodes
-        .into_iter()
-        .map(|node| {
-            let name = plan.node(node.spec.id.as_str())?;
-            Ok(Record {
-                spec: node.spec,
-                body: node.body,
-                order: node.order,
-                origin: Origin::Stored { name },
-            })
-        })
-        .collect()
-}
-
 /// Names the nodes a batch wrote before it stopped, for its error
 ///
 /// # Arguments
@@ -1189,14 +1009,16 @@ fn check_node(plan: &PlanName, node: &NodeWrite) -> anyhow::Result<()> {
     // its id must name it within its plan
     plan.node(node.spec.id.as_str())?;
     // and each member is a node of its own, its `group` naming this one
-    anyhow::ensure!(
-        node.spec.nodes.is_empty(),
-        "node `{}` lists {} members inline: put each as a node of its own, its `group` naming \
-         `{}`",
-        node.spec.id,
-        node.spec.nodes.len(),
-        node.spec.id
-    );
+    if !node.spec.nodes.is_empty() {
+        let message = format!(
+            "node `{}` lists {} members inline: put each as a node of its own, its `group` \
+             naming `{}`",
+            node.spec.id,
+            node.spec.nodes.len(),
+            node.spec.id
+        );
+        return Err(Unkeepable(message).into());
+    }
     Ok(())
 }
 

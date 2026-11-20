@@ -14,9 +14,14 @@
 //! cores = 2
 //! # each shard's memory budget
 //! memory = "256MiB"
+//!
+//! [api]
+//! # where the JSON API listens: a loopback address until users sign in
+//! address = "127.0.0.1:12180"
 //! ```
 
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 /// The environment variable naming reef's config file
@@ -28,6 +33,8 @@ pub const CONFIG_VAR: &str = "REEF_CONFIG";
 pub struct Conf {
     /// How reef reaches shoal
     pub shoal: ShoalSettings,
+    /// Where the JSON API is served
+    pub api: ApiSettings,
     /// The file this was read from, if one was
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -55,6 +62,25 @@ impl Default for ShoalSettings {
             data: None,
             cores: 2,
             memory: "256MiB".to_string(),
+        }
+    }
+}
+
+/// Where the JSON API is served
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiSettings {
+    /// The address it listens on, which must be a loopback one until users sign in
+    pub address: SocketAddr,
+}
+
+impl Default for ApiSettings {
+    /// Localhost, at the port reef's clients look for it on
+    fn default() -> Self {
+        ApiSettings {
+            address: reef_api::DEFAULT_ADDRESS
+                .parse()
+                .expect("reef-api's default address is an address"),
         }
     }
 }
@@ -165,6 +191,20 @@ mod tests {
         assert_eq!(conf.shoal.cores, 4);
         assert_eq!(conf.shoal.memory, "256MiB");
         assert_eq!(conf.shoal.data, None);
+        // the API listens on localhost unless told otherwise
+        assert_eq!(conf.api.address.to_string(), reef_api::DEFAULT_ADDRESS);
+    }
+
+    /// The API's address is read as an address, and one that isn't is refused
+    #[test]
+    fn api_address_parses() {
+        // an IPv6 loopback address and port
+        let conf: Conf = toml::from_str("[api]\naddress = \"[::1]:9000\"\n").expect("it parses");
+        assert!(conf.api.address.ip().is_loopback());
+        assert_eq!(conf.api.address.port(), 9000);
+        // a host name is not an address
+        let parsed = toml::from_str::<Conf>("[api]\naddress = \"localhost:9000\"\n");
+        assert!(parsed.is_err(), "a host name was read as an address");
     }
 
     /// A misspelled key is refused rather than ignored

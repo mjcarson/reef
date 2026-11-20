@@ -171,10 +171,13 @@ impl Node {
 }
 
 /// A problem found in the plan, with where it was written.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
+    /// The file or node's full name the problem was found in
     pub source: String,
+    /// The line of that file, or `None` for a stored node
     pub line: Option<usize>,
+    /// What the problem is
     pub message: String,
 }
 

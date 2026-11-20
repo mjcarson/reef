@@ -6,9 +6,14 @@ it is a workspace of its own, which reef's stable root workspace excludes.
 
 ```
 reef-service   the service and its store: every write checked against the whole plan, reef's
-               shoal schema, and the only code that touches shoal
+               shoal schema, and the only code that touches shoal; the JSON API's router, and
+               `reef-serve`, which serves it alone
 reef-shoal     the external node: shoal's node program over reef's schema
 ```
+
+The service's data types, and the JSON API's requests, answers, routes and changes, are
+`reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
+shoal nor this workspace.
 
 ## Building
 
@@ -36,6 +41,9 @@ address = "127.0.0.1:12100"   # an external node; unset starts shoal in this pro
 data = "/home/me/.local/share/reef/shoal"   # the in-process pool's data; default $XDG_DATA_HOME/reef/shoal
 cores = 2                     # the in-process pool's shards
 memory = "256MiB"             # each shard's memory budget
+
+[api]
+address = "127.0.0.1:12180"   # where the JSON API listens: a loopback address only
 ```
 
 Only one process can open a data directory. `Service::shared` opens the process's service once,
@@ -80,9 +88,60 @@ It reads and writes through a `Store`, and checks every write against the whole 
   `Store::write_plan_checked`, so two writes that are fine alone can't break the plan together.
   It builds the plan off the async threads, since its docs are files.
 - **`check` and `payload`** give a plan's problems and the viewer's payload.
+- **Each applied write is a change.** A project registered, a plan listed, a batch put or a whole
+  plan written goes to every subscriber of `Service::changes`, after the write's lock is let go,
+  so two writers' changes to one plan can arrive in either order; each put names its node's new
+  version. `Service::end_changes` closes every subscriber, as a server does before it stops.
 
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
+
+## The JSON API
+
+`api::router(service)` is a plain axum 0.8 router, the version Dioxus 0.7.10 resolves, so reef-app
+can mount it beside its server functions. It takes an `Arc<Service<B>>`, or the `&'static Service`
+that `Service::shared` opens. Every route is one service call, and every body and answer is a
+`reef-api` type; `reef_api::paths` has every path, and builders that percent-encode ids.
+
+| Route | Answer |
+|---|---|
+| `GET /api/v1/projects` | every `Project` |
+| `POST /api/v1/projects` `NewProject` | `AddedProject`: 201, or 409 if the name or repo is taken |
+| `GET /api/v1/find-project?dir=` | the `Project` a directory belongs to, or 404 |
+| `GET /api/v1/projects/{project}/plans` | every `PlanInfo` |
+| `POST /api/v1/projects/{project}/plans` `NewPlan` | `AddedPlan`: 201, or 200 if it was listed |
+| `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load |
+| `GET …/plans/{plan}/nodes` | its `Listing` |
+| `POST …/plans/{plan}/nodes` `Puts` | `Checked`: 200, 409 if stale, 422 if it would add a problem |
+| `GET …/plans/{plan}/nodes/{id}` | the `StoredNode` |
+| `PUT …/plans/{plan}/revision` `PlanWrite` | `Rewrite`: 200, or 422 if it would add a problem |
+| `GET …/plans/{plan}/payload` | the viewer's `Payload` |
+| `GET …/plans/{plan}/check` | its problems, as check prints them |
+| `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
+
+- **A refusal is an answer**, its outcome the body whatever the status, such as
+  ``{"refused":[{"source":"reef/central/C11","line":null,"message":"needs `X`, which is not a node"}]}``.
+- **An error is an `ApiError`**, `{"code":…,"message":…}`: `not-registered`, `not-listed` and
+  `not-found` are 404, `bad-name` and `bad-request` 400, and `internal` 500. Paths a client sends
+  (`repo`, `dir`) must be absolute directories on the service's host.
+- **The change stream** sends each change as an event named by its kind (`project-added`,
+  `plan-added`, `nodes-put`, `plan-written`), its data the change as JSON. It is live only: a
+  client reads what it needs, then follows. One that falls behind by more than 256 changes is
+  sent `missed`, with how many, and should read again. `plan` narrows it within a `project`.
+- **Localhost only.** `api::bind` refuses any address but a loopback one until users sign in
+  (M10).
+
+`reef-serve` serves it alone, until reef-app mounts it. It listens before it opens shoal, so a
+taken port or an address that isn't local stops it first, and on SIGINT or SIGTERM it ends the
+change stream, waits for open requests and closes the service.
+
+```sh
+cargo +nightly run --release -p reef-service --features embedded --bin reef-serve   # in-process
+cargo +stable run -p reef-service --bin reef-serve -- --conf reef.toml               # external node
+```
+
+`examples/payload_bench.rs` times the example book's 202-node payload, built in process and fetched
+over loopback.
 
 ## The store
 
