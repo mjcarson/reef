@@ -53,9 +53,10 @@ is the same: an in-process pool is reached over loopback TCP too.
   default, because dx keeps default features on in the wasm build too, so dx builds the server
   with `@server --platform server --features embedded`. Without it, the service is external-only
   and builds on stable.
-- **One tables file, two halves.** reef-service and reef-shoal both `include!` reef's tables and
-  write their own `#[shoal::db]` struct, so the client and the node agree on the schema
-  fingerprint.
+- **One schema, two halves.** reef's tables and its one `#[shoal::db]` struct are a module of
+  reef-service: the whole schema with `embedded`, the client half alone without it. reef-shoal
+  depends on reef-service with `embedded`, for the schema and for the config checks
+  ([C10](../milestones/m2.md)), so the client and the node can't disagree on the fingerprint.
 - **A separate `central/` workspace, on nightly.** It holds reef-service, reef-app and reef-shoal,
   and uses the stable crates by path. A workspace with an `embedded` feature locks shoal-core and
   glommio even while the feature is off, so it needs both checkouts beside it. The stable

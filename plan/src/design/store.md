@@ -106,9 +106,10 @@ run killed midway is followed by one that opens what it left on disk.
 
 ### Design choices
 
-- **One `#[shoal::db]` for reef**, in a schema crate that both the service and any shoal node
-  program use. Client and server must agree on its fingerprint, and a test pins it so a change
-  is deliberate.
+- **One `#[shoal::db]` for reef**, in reef-service's `schema` module, which `reef-shoal` uses
+  too. Client and server must agree on its fingerprint, and a test pins it so a change is
+  deliberate. The pin is the schema's `SCHEMA_ID` and each table's fingerprint, which leave out
+  shoal's protocol version, so a shoal bump that keeps every row moves nothing.
 - **Each table arrives with the node that needs it.** The queue, work records, comments and
   loop state each add a table. While reef is in development a table may also change, at the
   cost of a fresh data directory, until shoal can migrate it.

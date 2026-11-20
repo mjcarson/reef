@@ -1,0 +1,19 @@
+[package]
+name = "reef-service"
+description = "reef's store and service: the only code that touches shoal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# No default: dx keeps default features on in the wasm build too, which would pull shoal's engine
+# into the client. Without `embedded` this is shoal's client half alone, and builds on stable.
+default = []
+# shoal's engine inside this process, which needs nightly, glommio and target-cpu=native
+embedded = ["shoal/server"]
+
+[dependencies]
+shoal.workspace = true
+rkyv.workspace = true
+deepsize2.workspace = true

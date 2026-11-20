@@ -341,6 +341,7 @@ crates/reef-view     the wasm viewer
 crates/mdbook-reef   the preprocessor and CLI; embeds assets/reef.js and assets/reef.css
 xtask                cargo xtask wasm: builds reef-view and bundles it into assets/reef.js
 example-book         shoal's scans plan, migrated: a proof of concept on a real 190-box plan
+central              centralized reef: the store and service over shoal, a workspace of its own
 ```
 
 ```sh

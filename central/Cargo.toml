@@ -1,0 +1,32 @@
+# reef's centralized half: the service that keeps plans in shoal, and the node program that serves
+# reef's schema. It is a workspace of its own, so reef's stable workspace never resolves shoal, and
+# it needs shoal's `ScanSupport` checkout at `../../shoal` and glommio at `../../glommio`, beside
+# reef. Only `embedded` builds and `reef-shoal` need nightly; `reef-service` alone builds on stable.
+[workspace]
+resolver = "3"
+members = ["reef-service"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mjcarson/reef"
+publish = false
+
+[workspace.dependencies]
+# shoal's ScanSupport checkout, used by path; its engine is the `embedded` feature's alone
+shoal = { path = "../../shoal/shoal", default-features = false }
+# a schema writes these two derives itself, at the versions shoal's own workspace resolves
+rkyv = "0.8.10"
+deepsize2 = "0.1"
+# the nodes, their specs and the graph they build, without frontmatter parsing
+reef-model = { path = "../crates/reef-model", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+
+# No debuginfo: a debug build of shoal's engine with it runs to several gigabytes.
+[profile.dev]
+debug = false
