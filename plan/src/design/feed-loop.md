@@ -13,38 +13,108 @@ the next.
 The loop runs in the user's own interactive Claude Code session, so questions and approvals stay
 where they are today:
 
-1. **next_task** (an MCP tool) returns the next node: its why, what, acceptance, docs and needs.
-   If open comments are waiting, it returns those first.
+1. **next_task** (an MCP tool) claims the next node, marking it in progress, and returns its why,
+   what, acceptance, docs and needs. If open comments are waiting, it returns those first.
 2. **Claude enters plan mode** itself, with its EnterPlanMode tool, and plans the node.
 3. **The user answers Claude's questions** (AskUserQuestion) and **approves the plan**
    (ExitPlanMode), in the terminal.
 4. **Claude implements the node**, sets its status and criteria, and commits. A hook captures
    the node's changes as soon as it is marked done, before anything can squash them
    ([C56](../milestones/m7.md)).
-5. **The Stop hook** (`reef hook stop`) starts the next round when the node is done. While
-   Claude waits on the user, the hook lets it stop.
+5. **The Stop hook** (`reef hook stop`) clears the context and starts the next node once the
+   node is done ([C61](../milestones/m8.md)). While Claude waits on the user, the hook lets it
+   stop.
 
 ### Design choices
 
 - **The terminal first.** Answering questions and approving plans in the app comes later, and
   is optional ([M9](../milestones/m9.md)).
-- **One loop per session.** It holds a project, an optional plan and the node it is on, so two
-  sessions never take the same node ([C39](../milestones/m8.md)).
+- **Each node starts with a cleared context.** The context is cleared after each node, or after
+  a group of parallel nodes in worktrees ([C60](../milestones/m8.md)), so a node never carries
+  the last one's.
+- **reef never owns the session.** It doesn't start Claude, wrap its terminal or hold its input.
+  It types only into the pane the session already runs in, and only from that session's own
+  hook.
+- **Cleared by typing into the pane.** No hook output, tool or command clears an interactive
+  session. Once a node is done, the Stop hook lets Claude stop and starts an injector in the
+  background. The injector waits until the session is idle, then types `/clear` and the
+  kickoff into the session's own zellij or tmux pane, found from the hook's
+  `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`, or `TMUX_PANE`.
+- **Without a multiplexer, the user types `/clear`.** The Stop hook's message says which node is
+  next, and SessionStart(clear) names it to Claude, so any short prompt after the clear starts
+  it.
+- **next_task marks the node in progress,** before plan mode, since plan mode stops writes.
+- **The hook acts once per finished node.** It records the node whose end it acted on, and never
+  acts on it again. `stop_hook_active` stays true across a whole chain, so it can't be the
+  guard.
+- **One loop per pane.** A clear gives the session a new id, so a loop follows its pane, and
+  SessionStart(clear) hands it to the new session ([C39](../milestones/m8.md)). Two loops never
+  take the same node.
 - **Sessions at once work in their own worktrees**, so two nodes' changes never mix on one branch
   ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)).
 - **Pausing stops the loop after the current node**, never in the middle of one.
 
-### Open questions (X4)
+### What X4 found
 
-- **Does a Stop hook reliably keep Claude going?** It must start the next node only once the
-  current one is done, and never block twice under `stop_hook_active`.
-- **Does Claude enter plan mode on its own** when told to, and do the reef MCP tools work there?
-- **When is a node marked in-progress?** Plan mode blocks writes. Either next_task marks the node
-  before Claude enters plan mode, or Claude marks it once the plan is approved.
-- **How fast does context grow?** A hook can't clear the context, so X4 measures how much each
-  node adds over several.
-- **If X4 fails:** fall back to a `/reef-next` command the user types, and consider moving M9
-  earlier.
+Tried in `spikes/x4-loop`: a stub reef MCP server, built with rmcp 3.11, and stub hooks fed
+eight nodes in three sessions of Claude Code 2.1.329, running Opus 5.5 in auto mode. One session
+ran inside zellij and two in plain tmux. A stand-in user answered and approved through tmux.
+
+- **Claude takes the loop's steps unprompted.** In all eight nodes it called next_task, then
+  EnterPlanMode, asked with AskUserQuestion, and called ExitPlanMode. Answers and approvals
+  worked in the terminal, in zellij and in tmux.
+- **Plan mode lets read-only MCP tools through, and not writes.**
+  - Tools marked `readOnlyHint` ran without a prompt, every time.
+  - A write tool asked for permission even though the allow list names it, or Claude held it
+    back on its own.
+  - Refusing the prompt interrupts the turn, and no Stop hook runs, so the loop waits on the
+    user.
+  - After approval, in auto mode, writes ran without a prompt.
+- **`stop_hook_active` stays true across a whole chain.** After a block, tool calls, an answer
+  and a plan approval, it was still true at the next node's end. Only a typed prompt or a clear
+  resets it. A hook that lets Claude stop whenever the flag is true would end the loop after two
+  nodes.
+- **A block reads as an error.** The terminal shows *Stop hook reported a problem* with the
+  reason. A `systemMessage` on a stop that is let through shows as *Stop says: …*.
+- **Typing into the pane clears the context.**
+  - zellij: `zellij --session S action write-chars --pane-id P`, then `write 13`. tmux:
+    `tmux send-keys -t P`.
+  - `claude agents --json` reported the session idle 0.1 s after the Stop, and `/clear` went in
+    0.5 s after it.
+  - The next node started at 44.1k to 44.2k, a fresh session's context, against 49.1k to 57.2k
+    without the clear.
+- **`initialUserMessage` doesn't start a turn after an interactive `/clear`.**
+  - SessionStart(clear)'s `additionalContext` reaches Claude: a bare "next" started the next
+    node.
+  - Its `initialUserMessage` started nothing within 8 s, so the injector types the kickoff
+    itself. With that wait, a Stop takes 13 s to 15 s to reach the next node's next_task.
+- **A clear gives the session a new id.**
+  - SessionEnd (`reason: clear`) is followed at once by SessionStart (`source: clear`), with a
+    new `session_id` and transcript.
+  - A plan approval's clear does the same.
+- **Plan approval's clear clears the planning, not the last node.**
+  - With `showClearContextOnPlanAccept`, the dialog's first option is *Yes, clear context and
+    use auto mode*.
+  - After it, the node is implemented with only the plan and SessionStart's
+    `additionalContext`. It ended 8k to 9k lower than the same node without the clear.
+  - The next node's planning still carries the last node.
+- **Setting a repo up:**
+  - The trust dialog lists the local allow rules and the hooks, and defaults to *No, exit*.
+  - `enabledMcpjsonServers` in `.claude/settings.local.json` skipped the MCP server's prompt.
+- **A node adds 7.5k to 21.7k of context**, with a median of 12.8k. A fresh session starts at
+  44.0k.
+- **Everything a Claude session starts inherits its pane's variables,** this session's hooks
+  included. An injector started with another session's environment types into that session.
+  The spike's test sessions scrub their environment for this reason.
+
+### Open questions
+
+- **A draft in the input box.** The injector types once the session is idle, and the user may be
+  typing a prompt by then. It should read the pane's input line first
+  ([C61](../milestones/m8.md)).
+- **Approval's clear as well?** It drops a node's planning before its implementation, 8k to 9k
+  for the stub's nodes. Whether `reef claude install` turns it on is
+  [C42](../milestones/m8.md)'s call.
 
 ## The MCP tools
 
@@ -53,8 +123,12 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
 ### Design choices
 
 - **`reef mcp` serves the same operations as the CLI** over stdio: get, put, status, check, next,
-  and later next_task, the queue and comments.
-- **Read-only tools are marked read-only**, so plan mode allows them.
+  and later next_task, the queue and comments. rmcp's `#[tool_router]` serves them, as in X4's
+  stub.
+- **Read-only tools are marked `readOnlyHint`**, so plan mode runs them without a prompt. Plan
+  mode asks for every other tool, or Claude holds it back, even when the allow list names it
+  ([X4](#what-x4-found)). So every tool Claude needs while planning only reads, and next_task,
+  which claims, is called before plan mode.
 - **Puts take a node's YAML**, the same keys as frontmatter, and a breaking put returns check's
   messages.
 

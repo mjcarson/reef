@@ -100,14 +100,44 @@ nodes:
       - feature: "The rule is tried on a scratch repo through amend and rebase before a capture"
   - id: X4
     title: "X4 The terminal feed loop, tried"
+    status: done
     docs: [design/feed-loop.md#the-terminal-loop]
     description:
-      why: "None of it is proven: a Stop hook keeping Claude going, Claude calling EnterPlanMode itself, MCP tools usable in plan mode, or how context grows across nodes."
-      what: "A stub hook and MCP server drive two nodes in one session, settling the hook's replies, the tools plan mode allows, pausing, and how much context grows."
+      why: "None of it was proven: a Stop hook keeping Claude going, Claude entering plan mode itself, MCP tools in plan mode, or clearing context between nodes when no hook can."
+      what: "Claude plans each node in plan mode by itself, and read-only tools work there. The hook acts once per finished node, and typing `/clear` into the session's own zellij or tmux pane starts each node fresh."
+      details: "Tried in `spikes/x4-loop`: a stub reef MCP server built with rmcp 3.11, and stub hooks, fed eight nodes in three sessions of Claude Code 2.1.329 (Opus 5.5, auto mode). One ran inside zellij and two in plain tmux, with a stand-in user answering and approving through tmux. The timelines are in `spikes/x4-loop/runs/`, and the findings are in the feed-loop page's *What X4 found*."
     acceptance:
       - feature: "Blocking starts the next node only after the current one is done, and never twice under `stop_hook_active`"
+        test: "spikes/x4-loop/src/hook.rs::tests::never_acts_twice_for_one_node"
+        status: met
       - feature: Plan mode, AskUserQuestion and ExitPlanMode approval all work in the terminal
+        status: met
       - feature: The finding records which reef tools plan mode allows
+        status: met
+      - feature: "Each node starts with a cleared context, reef typing `/clear` into the user's own zellij pane"
+        status: met
+      - feature: "A way with no multiplexer clears between nodes: the user types `/clear` and one word"
+        status: met
+      - perf: "A node starts with a fresh session's context (44.0k), not what the last node left"
+        metric: context-carried-ktok
+        at-most: 45
+    performance:
+      labels: [Not cleared, Cleared]
+      note: "From the status line's `current_usage` (input, cache writes and cache reads) in `spikes/x4-loop`'s runs, with Claude Code 2.1.329, Opus 5.5 at xhigh effort and a 1M window. A fresh session is at 44.0k before its first tool call. The next node's context covers three transitions: A's injected `/clear` in zellij, A's typed `/clear` and \"next\", and B's injected `/clear` in tmux. *Not cleared* is the node's end, which is what the next node starts from without a clear; in run C it started 0.5k above. *Cleared* is the first figure after the clear. A node's own context runs from the first figure after next_task to the last before the next node, over the six nodes with no clear mid-node. Stop to next_task is one transition in zellij and one in tmux. 8 s of it is the injector waiting for a turn that `initialUserMessage` never starts."
+      metrics:
+        - name: "Context the next node starts with, ktok"
+          key: context-carried-ktok
+          unit: ktok
+          before: [57.0, 49.1, 57.2]
+          after: [44.2, 44.1, 44.2]
+        - name: "Context a node adds, from its claim to its end, ktok"
+          key: context-per-node-ktok
+          unit: ktok
+          after: [12.8, 7.5, 21.7]
+        - name: "Stop to the next node's next_task, injected, s"
+          key: inject-next-s
+          unit: s
+          after: [14.2, 13.3, 15.1]
   - id: X6
     title: "X6 reef-view inside Dioxus 0.7"
     status: done
@@ -163,8 +193,9 @@ A local reef server, backed by shoal, holds many projects with several concurren
 Through it:
 
 - the user orders the ready work, and Claude takes it in that order;
-- a Claude session in the terminal is fed the next node: it plans in plan mode, the user answers
-  its questions and approves the plan, Claude implements it, then resolves any open comments;
+- a Claude session in the terminal is fed the next node, its context cleared: it plans in plan
+  mode, the user answers its questions and approves the plan, Claude implements it, then
+  resolves any open comments;
 - each node keeps the diff that did its work, captured when it is done, and the user comments
   on the changed lines.
 
@@ -177,8 +208,10 @@ Through it:
    take the same YAML keys as today's frontmatter, and through the app. mdbook plans import into
    it and export back.
 3. **Terminal first.** A reef MCP server and a Stop hook feed the user's normal Claude Code
-   session. Answering Claude's questions and approving its plans in the app comes later and
-   is optional ([M9](milestones/m9.md)).
+   session. reef never owns the session: it clears the context between nodes by typing `/clear`
+   into the session's own zellij or tmux pane, or asks the user to
+   ([X4](design/feed-loop.md#what-x4-found)). Answering Claude's questions and approving its
+   plans in the app comes later and is optional ([M9](milestones/m9.md)).
 4. **This plan lives in its own book.** It sits at `plan/`, apart from `docs/`.
    [C29](milestones/m6.md) imports it into centralized reef once that runs.
 5. **The user orders the work.** Whether a node is ready still comes from its `needs`. Among
