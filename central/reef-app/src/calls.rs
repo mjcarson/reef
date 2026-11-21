@@ -5,6 +5,7 @@
 
 use dioxus::prelude::*;
 use reef_api::{PlanInfo, Project};
+use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::PlanName;
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,27 @@ pub async fn plan_info(project: String, plan: String) -> Result<PlanInfo, Server
         .into_iter()
         .find(|info| info.name == name)
         .ok_or_else(|| ServerFnError::new(format!("`{name}` is not a plan of its project")))
+}
+
+/// A plan's payload for the viewer, its doc links absolute paths to the pages the service
+/// renders
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+#[get("/app/payload?project&plan")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::payload", skip_all, err(Debug))
+)]
+pub async fn payload(project: String, plan: String) -> Result<Payload, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .payload(&name)
+        .await
+        .map_err(failed)
 }
 
 /// A plan's full name from the route's two parts

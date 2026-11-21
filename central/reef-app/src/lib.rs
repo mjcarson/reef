@@ -16,7 +16,9 @@
 
 pub mod app;
 pub mod calls;
+pub mod panel;
 #[cfg(feature = "server")]
 pub mod server;
+pub mod view;
 
 pub use app::App;

@@ -10,8 +10,8 @@ publish.workspace = true
 [features]
 # No default: dx keeps default features on in the wasm build too, and each side wants its own.
 default = []
-# the wasm client: Dioxus's web renderer, and never shoal or the service
-web = ["dioxus/web"]
+# the wasm client: Dioxus's web renderer and the viewer, and never shoal or the service
+web = ["dioxus/web", "dep:reef-view", "dep:web-sys", "dep:wasm-bindgen"]
 # the server: Dioxus's axum server, the service and the JSON API's router over shoal's client half
 server = ["dioxus/server", "dep:reef-service", "dep:tokio", "dep:axum", "dep:anyhow", "dep:tracing"]
 # shoal's engine inside the server, which needs nightly, glommio and target-cpu=native
@@ -25,6 +25,10 @@ serde_json = { workspace = true }
 reef-api = { workspace = true }
 reef-model = { workspace = true }
 reef-service = { path = "../reef-service", optional = true }
+# the viewer, linked into the client's wasm, without the page-load start that would replace main
+reef-view = { path = "../../crates/reef-view", default-features = false, optional = true }
+web-sys = { version = "0.3", features = ["HtmlElement"], optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
 tokio = { workspace = true, features = ["net", "signal"], optional = true }
 axum = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }

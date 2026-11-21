@@ -1,6 +1,8 @@
 //! The app's pages: the picker, and a plan's own page
 
 use crate::calls::{self, ProjectPlans};
+use crate::panel::NodePanel;
+use crate::view::{Keyed, PlanGraph};
 use dioxus::prelude::*;
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
@@ -25,7 +27,12 @@ code { font-size: 0.92em; }
 .reef-app-error { color: #c0392b; }
 .reef-app-plan { display: flex; flex-direction: column; height: 100vh; }
 .reef-app-bar { display: flex; gap: 1rem; align-items: baseline; padding: 0.5rem 1rem; border-bottom: 1px solid var(--line); }
-.reef-app-stage { flex: 1; min-height: 0; display: flex; }
+.reef-app-stage { flex: 1; min-height: 0; display: flex; position: relative; }
+.reef-app-stage > .reef.reef-page { margin: 0; border: 0; border-radius: 0; min-width: 0; }
+.reef-app-over { position: absolute; top: 3rem; left: 0; right: 0; text-align: center; }
+.reef-app-panel { width: 22rem; flex: none; overflow: auto; border-left: 1px solid var(--line); background: var(--panel); padding: 0.8rem 1rem; box-sizing: border-box; }
+.reef-app-panel-id { margin: 0; }
+.reef-app-panel-title { margin: 0.3rem 0; font-size: 1.1rem; }
 "#;
 
 /// The app's pages, by path
@@ -138,8 +145,8 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
     }
 }
 
-/// A plan's page: a bar naming the plan, or saying why it can't be read, over the stage it is
-/// drawn on
+/// A plan's page: a bar naming the plan, or saying why it can't be read, over the plan's graph
+/// and the node panel beside it
 ///
 /// Its props are signals, so a route to another plan reads that plan again.
 ///
@@ -151,6 +158,20 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
 pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Element {
     // the plan, read again when the route names another plan, so a plan that isn't there says so
     let info = use_server_future(move || calls::plan_info(project(), plan()))?;
+    // its payload, read in the client alone, since only the client draws it, named for its plan
+    let payload = use_resource(move || async move {
+        let (project, plan) = (project(), plan());
+        let name = format!("{project}/{plan}");
+        calls::payload(project, plan)
+            .await
+            .map(|payload| -> Keyed { (name, payload) })
+    });
+    // the node the viewer selected, which the node panel shows
+    let selected = use_signal(|| None::<String>);
+    let drawn = match &*payload.read() {
+        Some(Ok((_, payload))) => Some(payload.clone()),
+        _ => None,
+    };
     rsx! {
         div { class: "reef-app-plan",
             header { class: "reef-app-bar",
@@ -160,7 +181,12 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                     span { class: "reef-app-error", "{error}" }
                 }
             }
-            div { class: "reef-app-stage" }
+            div { class: "reef-app-stage",
+                PlanGraph { payload, selected }
+                if let (Some(payload), Some(id)) = (drawn, selected()) {
+                    NodePanel { payload, id }
+                }
+            }
         }
     }
 }

@@ -3890,12 +3890,19 @@ dependencies = [
  "reef-api",
  "reef-model",
  "reef-service",
+ "reef-view",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "wasm-bindgen",
+ "web-sys",
 ]
+
+[[package]]
+name = "reef-layout"
+version = "0.1.0"
 
 [[package]]
 name = "reef-model"
@@ -3948,6 +3955,19 @@ dependencies = [
  "reef-service",
  "shoal",
  "tokio",
+]
+
+[[package]]
+name = "reef-view"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "reef-layout",
+ "reef-model",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

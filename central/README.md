@@ -158,9 +158,10 @@ over loopback.
 ## The app
 
 `reef-app` is a Dioxus 0.7.10 fullstack app. Its front page lists every project with its plans,
-and each plan opens at `/plans/{project}/{plan}`. Its server functions sit under `/app/`, each a
-call on the service, and its server mounts `api::router` beside them, so one port serves the
-pages and the JSON API alike.
+and each plan opens at `/plans/{project}/{plan}`, drawn by reef-view linked into the client's
+wasm, with the node the viewer selects in a panel beside it. Its server functions sit under
+`/app/`, each a call on the service, and its server mounts `api::router` beside them, so one port
+serves the pages and the JSON API alike.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under
