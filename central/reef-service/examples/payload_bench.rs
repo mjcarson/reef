@@ -14,14 +14,19 @@
 //! `Service::payload` called in process, and `GET …/payload` from a reqwest client on loopback,
 //! its body decoded into a `Payload`. It runs over the in-memory twin, and with `embedded` over
 //! an in-process pool of two shards too, its data under `central/target`.
+//!
+//! `Renderer::prepare` is timed alone too, the same way: the plan's stored nodes built into a
+//! graph, then checked for doc links and briefed from their docs by a fresh renderer over the
+//! repo, as each build of a payload or a check does.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
 use reef_api::{lift, paths};
 use reef_model::spec::parse_node_file;
-use reef_model::{Payload, PlanName};
+use reef_model::{Graph, Payload, PlanName, nodes_from_records};
 use reef_render::paths::{Target, resolve};
+use reef_render::{Renderer, RepoSource, Sections};
 use reef_service::{Backend, Conf, NodeWrite, Service, api};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -98,6 +103,20 @@ async fn bench<B: Backend + 'static>(
         service.clone(),
         std::future::pending(),
     ));
+    // the docs' part of a build alone: a fresh renderer checking links and briefing nodes
+    let records = service.list(&plan).await?.records(&plan)?;
+    let mut prepare = Vec::with_capacity(rounds);
+    for round in 0..WARMUP + rounds {
+        let (mut graph, _) = Graph::build(nodes_from_records(records.clone()));
+        let renderer = Renderer::new(RepoSource::new(docs.to_path_buf()), Sections::default());
+        let start = Instant::now();
+        let found = renderer.prepare(&mut graph);
+        let took = start.elapsed();
+        std::hint::black_box(found);
+        if round >= WARMUP {
+            prepare.push(took);
+        }
+    }
     // in process: the service's own build
     let mut local = Vec::with_capacity(rounds);
     for round in 0..WARMUP + rounds {
@@ -132,9 +151,10 @@ async fn bench<B: Backend + 'static>(
     }
     // the figures, as [median, lo, hi] in ms
     println!(
-        "{label}: {} problems; payload {:.1} KiB\n  in process: {}\n  over HTTP:  {}",
+        "{label}: {} problems; payload {:.1} KiB\n  prepare:    {}\n  in process: {}\n  over HTTP:  {}",
         problems.len(),
         bytes as f64 / 1024.0,
+        figures(&mut prepare),
         figures(&mut local),
         figures(&mut remote)
     );

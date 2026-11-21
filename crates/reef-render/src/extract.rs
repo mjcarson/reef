@@ -7,42 +7,95 @@
 //! subsection or row named like "What it does". The design choices are a subsection named like
 //! "Design choices". Struck-through text is left out, since a brief form says what is true now.
 
-use crate::markdown::{heading_spans, md_options, render};
+use crate::markdown::{md_options, render, HeadingSpan};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-/// The text below the heading `anchor` names, up to the next heading at its level or above.
-/// With no anchor, the whole file below its title.
-///
-/// # Arguments
-///
-/// * `md` - The doc to look in
-/// * `anchor` - The heading id the link names, if any
-pub fn section<'a>(md: &'a str, anchor: Option<&str>) -> Option<&'a str> {
-    let hs = heading_spans(md);
-    match anchor {
-        Some(a) => {
-            let k = hs.iter().position(|h| h.id == a)?;
-            let end = hs[k + 1..].iter().find(|h| h.level <= hs[k].level).map_or(md.len(), |h| h.start);
-            Some(&md[hs[k].end..end])
-        }
-        None => {
-            let start = hs.first().filter(|h| h.level == 1 && md[..h.start].trim().is_empty()).map_or(0, |h| h.end);
-            Some(&md[start..])
-        }
-    }
+/// A part of a doc, with the doc's headings that fall inside it, so a subsection is found
+/// without parsing the part again: the doc's headings are found once, however many of its
+/// sections are linked.
+#[derive(Debug, Clone, Copy)]
+pub struct Section<'a> {
+    /// The whole doc the part is cut from
+    doc: &'a str,
+    /// The doc's headings inside the part, in order, each where it lies in the doc
+    headings: &'a [HeadingSpan],
+    /// Where the part starts in the doc
+    start: usize,
+    /// Where the part ends in the doc
+    end: usize,
 }
 
-/// The first subsection of `md` titled one of `names` (ignoring case): its title and its text.
-///
-/// # Arguments
-///
-/// * `md` - The section to look in
-/// * `names` - The titles a subsection may have
-pub fn subsection<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
-    let hs = heading_spans(md);
-    let k = hs.iter().position(|h| names.iter().any(|n| n.trim().eq_ignore_ascii_case(h.text.trim())))?;
-    let end = hs[k + 1..].iter().find(|h| h.level <= hs[k].level).map_or(md.len(), |h| h.start);
-    Some((hs[k].text.trim().to_string(), &md[hs[k].end..end]))
+impl<'a> Section<'a> {
+    /// The text below the heading `anchor` names, up to the next heading at its level or above.
+    /// With no anchor, the whole doc below its title.
+    ///
+    /// # Arguments
+    ///
+    /// * `doc` - The doc to look in
+    /// * `headings` - Every heading of the doc, as [`crate::heading_spans`] finds them
+    /// * `anchor` - The heading id the link names, if any
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_render::extract::Section;
+    /// use reef_render::heading_spans;
+    ///
+    /// let doc = "# F\n\n## Rows\n\nSlow.\n\n## Next\n";
+    /// let headings = heading_spans(doc);
+    /// let rows = Section::find(doc, &headings, Some("rows")).unwrap();
+    /// assert_eq!(rows.text(), "\nSlow.\n\n");
+    /// ```
+    pub fn find(doc: &'a str, headings: &'a [HeadingSpan], anchor: Option<&str>) -> Option<Section<'a>> {
+        match anchor {
+            // the heading named, up to the next at its level or above
+            Some(a) => {
+                let k = headings.iter().position(|h| h.id == a)?;
+                Some(Section { doc, headings, start: 0, end: doc.len() }.below(k))
+            }
+            // the whole doc, less a title that opens it
+            None => {
+                let title = headings.first().filter(|h| h.level == 1 && doc[..h.start].trim().is_empty());
+                let (start, headings) = match title {
+                    Some(h) => (h.end, &headings[1..]),
+                    None => (0, headings),
+                };
+                Some(Section { doc, headings, start, end: doc.len() })
+            }
+        }
+    }
+
+    /// The part's text
+    pub fn text(&self) -> &'a str {
+        &self.doc[self.start..self.end]
+    }
+
+    /// The first subsection of this part titled one of `names` (ignoring case): its heading,
+    /// whose id is the one it has in the whole doc, and its text below the heading.
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The titles a subsection may have
+    pub fn subsection(&self, names: &[String]) -> Option<(&'a HeadingSpan, Section<'a>)> {
+        // the first heading titled one of the names
+        let k = self.headings.iter().position(|h| names.iter().any(|n| n.trim().eq_ignore_ascii_case(h.text.trim())))?;
+        Some((&self.headings[k], self.below(k)))
+    }
+
+    /// The text below one of this part's headings, up to its next heading at that level or
+    /// above, else to the part's end
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The heading's place among the part's headings
+    fn below(&self, k: usize) -> Section<'a> {
+        // the headings after it, until one at its level or above closes it
+        let head = &self.headings[k];
+        let after = &self.headings[k + 1..];
+        let inside = after.iter().position(|h| h.level <= head.level).unwrap_or(after.len());
+        let end = after.get(inside).map_or(self.end, |h| h.start);
+        Section { doc: self.doc, headings: &after[..inside], start: head.end, end }
+    }
 }
 
 /// A block of a doc section that stands on its own, which a brief part may be taken from.
@@ -202,14 +255,15 @@ fn table_row<'a>(md: &'a str, names: &[String]) -> Option<(String, &'a str)> {
 /// * `sec` - The doc section to look in
 /// * `names` - The subsection titles and table row names that hold this part
 /// * `source` - The doc's file, for its links
-pub fn brief_part(sec: &str, names: &[String], source: &str) -> Option<(String, String)> {
+pub fn brief_part(sec: Section<'_>, names: &[String], source: &str) -> Option<(String, String)> {
     // a subsection named for this part comes first
-    if let Some((title, text)) = subsection(sec, names) {
+    if let Some((head, sub)) = sec.subsection(names) {
         // its first paragraph or list with text
-        return top_blocks(text).iter().find_map(|b| brief_block(b, source)).map(|html| (title, html));
+        let title = head.text.trim().to_string();
+        return top_blocks(sub.text()).iter().find_map(|b| brief_block(b, source)).map(|html| (title, html));
     }
     // then a register entry's table row
-    let (name, cell) = table_row(sec, names)?;
+    let (name, cell) = table_row(sec.text(), names)?;
     let html = render(cell, source, None, true);
     has_text(&html).then_some((name, html))
 }
@@ -222,10 +276,11 @@ pub fn brief_part(sec: &str, names: &[String], source: &str) -> Option<(String, 
 /// * `sec` - The doc section to look in
 /// * `names` - The titles the design choices' subsection may have
 /// * `source` - The doc's file, for its links
-pub fn design(sec: &str, names: &[String], source: &str) -> Option<(String, String)> {
-    let (title, text) = subsection(sec, names)?;
-    let html = render_choices(text, source);
-    has_text(&html).then_some((title, html))
+pub fn design(sec: Section<'_>, names: &[String], source: &str) -> Option<(String, String)> {
+    // the subsection named for them, rendered as choices
+    let (head, sub) = sec.subsection(names)?;
+    let html = render_choices(sub.text(), source);
+    has_text(&html).then(|| (head.text.trim().to_string(), html))
 }
 
 /// The tables of `md` that stand on their own and have a header row, which is where a doc's
@@ -391,17 +446,53 @@ fn choice(item: &str, lead: Option<(String, String)>, source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::heading_spans;
 
     /// Section names as the config holds them
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
     }
 
+    /// The section of a doc a link names, the doc's headings found as a renderer finds them
+    ///
+    /// # Arguments
+    ///
+    /// * `md` - The doc
+    /// * `headings` - Its headings
+    /// * `anchor` - The heading id the link names, if any
+    fn section<'a>(md: &'a str, headings: &'a [HeadingSpan], anchor: Option<&str>) -> Option<Section<'a>> {
+        Section::find(md, headings, anchor)
+    }
+
+    #[test]
+    fn sections_and_subsections_from_the_docs_headings() {
+        let md = "# T\n\nIntro.\n\n## A\n\nA text.\n\n### Why\n\nA why.\n\n### Why\n\nAgain.\n\n## B\n\nB text.\n";
+        let hs = heading_spans(md);
+        // a whole doc goes from below its title, and an anchored section to its next peer
+        assert_eq!(section(md, &hs, None).unwrap().text(), &md[4..]);
+        let a = section(md, &hs, Some("a")).unwrap();
+        assert_eq!(a.text(), "\nA text.\n\n### Why\n\nA why.\n\n### Why\n\nAgain.\n\n");
+        // a subsection is found among the section's own headings, with its id in the whole doc
+        let (head, why) = a.subsection(&names(&["why"])).unwrap();
+        assert_eq!((head.id.as_str(), why.text()), ("why", "\nA why.\n\n"));
+        // the second of two headings alike has the id mdbook gives it, and holds no heading
+        let again = section(md, &hs, Some("why-1")).unwrap();
+        assert_eq!(again.text(), "\nAgain.\n\n");
+        assert!(again.subsection(&names(&["Why"])).is_none());
+        // a heading of another section is never one of this one's
+        assert!(section(md, &hs, Some("b")).unwrap().subsection(&names(&["Why"])).is_none());
+        // a doc that doesn't open with its title keeps all of it, and a missing anchor is none
+        let untitled = "Intro.\n\n# T\n";
+        assert_eq!(section(untitled, &heading_spans(untitled), None).unwrap().text(), untitled);
+        assert!(section(md, &hs, Some("nope")).is_none());
+    }
+
     const FEATURE: &str = "# F1. A thing\n\n## Context\n\nWhy it exists.\n\n## What it does\n\nIt does ~~that~~ this, see [F2](f2.md).\n\nMore.\n\n## Design choices\n\nIntro.\n\n- **Runs in disk order.** Because\n  the device likes it.\n- ~~**Old choice.** Gone.~~\n- **Waves drawn whole.** Once.\n\n## Tests\n\nNone.\n";
 
     #[test]
     fn a_feature_page() {
-        let sec = section(FEATURE, None).unwrap();
+        let hs = heading_spans(FEATURE);
+        let sec = section(FEATURE, &hs, None).unwrap();
         // the what comes from its subsection, which it names
         let (from, d) = brief_part(sec, &names(&["What it does"]), "features/f1.md").unwrap();
         assert_eq!(from, "What it does");
@@ -426,7 +517,8 @@ mod tests {
     #[test]
     fn an_anchored_entry_skips_its_table() {
         let md = "# Optimizations\n\n### O1. First\n\n| | |\n|---|---|\n| **Rank** | high |\n\nThe first entry.\n\n### O2. Second\n\nThe second.\n";
-        let sec = section(md, Some("o1-first")).unwrap();
+        let hs = heading_spans(md);
+        let sec = section(md, &hs, Some("o1-first")).unwrap();
         // the entry's own paragraph is never taken
         assert!(brief_part(sec, &names(&["What it does"]), "a.md").is_none());
         // a row of the register table, named
@@ -434,13 +526,14 @@ mod tests {
         assert_eq!((from.as_str(), html.trim()), ("Rank", "<p>high</p>"));
         assert!(brief_part(sec, &names(&["Impact"]), "a.md").is_none());
         assert!(design(sec, &names(&["Design choices"]), "a.md").is_none());
-        assert!(section(md, Some("nope")).is_none());
+        assert!(section(md, &hs, Some("nope")).is_none());
     }
 
     #[test]
     fn a_section_written_as_a_list() {
         let md = "# I1. A bug\n\n## Symptom\n\n~~Struck.~~\n\n- **Every run logged an ERROR** as its client went:\n  65 of them.\n- ~~**Old lead** gone~~ **New lead**, kept.\n- ~~Wholly struck.~~\n- A plain item, see [F2](f2.md).\n  - **Nested** in it.\n\nA coda.\n\n## The fix\n\nIt was fixed.\n\n- **Not this.**\n";
-        let sec = section(md, None).unwrap();
+        let hs = heading_spans(md);
+        let sec = section(md, &hs, None).unwrap();
         // a struck paragraph is passed over for the list after it, which comes before the coda
         let (from, why) = brief_part(sec, &names(&["Symptom"]), "a/i1.md").unwrap();
         assert_eq!(from, "Symptom");

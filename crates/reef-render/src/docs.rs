@@ -1,10 +1,10 @@
 //! Resolving a plan's doc links and filling in each node's brief form from them, over any
 //! source of docs, and rendering the plan for the viewer.
 
-use crate::extract::{self, has_text};
-use crate::markdown::{heading_spans, inline_html, render, render_body, ROOT};
+use crate::extract::{self, has_text, Section};
+use crate::markdown::{heading_spans, inline_html, render, render_body, HeadingSpan, ROOT};
 use crate::paths::{self, Target};
-use crate::source::{doc_body, DocSource, Headings};
+use crate::source::{doc_body, DocSource};
 use reef_model::{Diagnostic, Graph, Link, Node, Payload, PerfDoc};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -42,19 +42,25 @@ impl Default for Sections {
     }
 }
 
+/// A doc as a renderer reads it: its body, and the headings in it
+struct Doc {
+    /// The doc's body, without its frontmatter
+    text: String,
+    /// Each heading of the body, with the id mdbook gives it and where it lies in the body
+    headings: Vec<HeadingSpan>,
+}
+
 /// Renders a plan's nodes and resolves their doc links against one source of docs
 ///
-/// Each doc is read and its headings found at most once, so a renderer is made for one build
-/// of a plan and dropped after it.
+/// Each doc is read and its headings found at most once, however many links lead into it, so
+/// a renderer is made for one build of a plan and dropped after it.
 pub struct Renderer<S: DocSource> {
     /// Where the docs the nodes link to are read from
     source: S,
     /// The doc sections a node's brief form is taken from
     sections: Sections,
-    /// Each doc's body without its frontmatter, by path, or `None` where there is no such doc
-    texts: RefCell<HashMap<String, Option<Arc<str>>>>,
-    /// Each doc's headings, by path, or `None` where there is no such doc
-    headings: RefCell<HashMap<String, Option<Headings>>>,
+    /// Each doc read, by path, or `None` where there is no such doc
+    docs: RefCell<HashMap<String, Option<Arc<Doc>>>>,
 }
 
 impl<S: DocSource> Renderer<S> {
@@ -76,7 +82,7 @@ impl<S: DocSource> Renderer<S> {
     /// assert_eq!(link.href, "reef-root:/f.html#design");
     /// ```
     pub fn new(source: S, sections: Sections) -> Self {
-        Renderer { source, sections, texts: RefCell::default(), headings: RefCell::default() }
+        Renderer { source, sections, docs: RefCell::default() }
     }
 
     /// Where the docs are read from
@@ -89,34 +95,27 @@ impl<S: DocSource> Renderer<S> {
         &self.sections
     }
 
-    /// Headings of a doc, as `(id, text, level)`, or `None` if there is no such doc.
+    /// A doc's body without its frontmatter and the headings in it, or `None` if there is no
+    /// such doc
+    ///
+    /// The headings are found in the body this reads, as the source's own `headings` would
+    /// find them, so the doc is parsed once for both.
     ///
     /// # Arguments
     ///
     /// * `path` - The doc's path from the source's root
-    fn headings(&self, path: &str) -> Option<Headings> {
-        // a doc's headings are found once
-        if let Some(h) = self.headings.borrow().get(path) {
-            return h.clone();
+    fn doc(&self, path: &str) -> Option<Arc<Doc>> {
+        // a doc is read, and its headings found, once
+        if let Some(d) = self.docs.borrow().get(path) {
+            return d.clone();
         }
-        let h = self.source.headings(path);
-        self.headings.borrow_mut().insert(path.to_string(), h.clone());
-        h
-    }
-
-    /// A doc's body without its frontmatter, or `None` if there is no such doc
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The doc's path from the source's root
-    fn text(&self, path: &str) -> Option<Arc<str>> {
-        // a doc is read once
-        if let Some(t) = self.texts.borrow().get(path) {
-            return t.clone();
-        }
-        let t = self.source.read(path).map(|text| Arc::from(doc_body(&text)));
-        self.texts.borrow_mut().insert(path.to_string(), t.clone());
-        t
+        let d = self.source.read(path).map(|text| {
+            let text = doc_body(&text).to_string();
+            let headings = heading_spans(&text);
+            Arc::new(Doc { text, headings })
+        });
+        self.docs.borrow_mut().insert(path.to_string(), d.clone());
+        d
     }
 
     /// Resolve a doc link written in `from`, checking that its source can hold it and that its
@@ -135,15 +134,15 @@ impl<S: DocSource> Renderer<S> {
                 if !path.ends_with(".md") {
                     return Ok(Link { label: path.clone(), href: format!("{ROOT}{path}") });
                 }
-                let Some(heads) = self.headings(&path) else {
+                let Some(doc) = self.doc(&path) else {
                     return Err(format!("doc `{link}` not found (looked for {place})"));
                 };
                 let label = match &anchor {
-                    Some(a) => match heads.iter().find(|h| &h.0 == a) {
-                        Some(h) => h.1.clone(),
+                    Some(a) => match doc.headings.iter().find(|h| &h.id == a) {
+                        Some(h) => h.text.clone(),
                         None => return Err(format!("doc `{link}`: {place} has no heading with the id `{a}`")),
                     },
-                    None => heads.first().map_or_else(|| path.clone(), |h| h.1.clone()),
+                    None => doc.headings.first().map_or_else(|| path.clone(), |h| h.text.clone()),
                 };
                 let href = match anchor {
                     Some(a) => format!("{ROOT}{}#{a}", paths::html_of(&path)),
@@ -262,8 +261,8 @@ impl<S: DocSource> Renderer<S> {
             if !path.ends_with(".md") {
                 continue;
             }
-            let Some(text) = self.text(&path) else { continue };
-            let Some(sec) = extract::section(&text, anchor.as_deref()) else { continue };
+            let Some(doc) = self.doc(&path) else { continue };
+            let Some(sec) = Section::find(&doc.text, &doc.headings, anchor.as_deref()) else { continue };
             // the why from a section or table row named for it
             if !has_text(&n.why)
                 && let Some((from, html)) = extract::brief_part(sec, &self.sections.why_sections, &path)
@@ -287,7 +286,7 @@ impl<S: DocSource> Renderer<S> {
             }
             // where the measurements are, linked as the doc is
             if n.perf_doc.is_none() {
-                n.perf_doc = perf_doc(&text, sec, anchor.is_some(), &self.sections.performance_sections)
+                n.perf_doc = perf_doc(sec, anchor.is_some(), &self.sections.performance_sections)
                     .and_then(|pd| self.doc_link(&base, link).ok().map(|l| PerfDoc { href: l.href, label: l.label, ..pd }));
             }
         }
@@ -320,26 +319,25 @@ impl<S: DocSource> Renderer<S> {
 }
 
 /// Where a doc section keeps its measurements: a subsection named in `names`, or failing that,
-/// when the link names a heading, that section's tables. `sec` is a slice of `text`, so the
-/// subsection's heading id is the one it has in the whole file.
+/// when the link names a heading, that section's tables. The subsection's heading id is the one
+/// it has in the whole file.
 ///
 /// # Arguments
 ///
-/// * `text` - The whole doc
-/// * `sec` - The linked section of it
+/// * `sec` - The linked section of a doc
 /// * `anchored` - Whether the link names a heading
 /// * `names` - The subsection titles that hold measurements
-fn perf_doc(text: &str, sec: &str, anchored: bool, names: &[String]) -> Option<PerfDoc> {
-    let offset = sec.as_ptr() as usize - text.as_ptr() as usize;
-    if let Some((title, sub)) = extract::subsection(sec, names) {
-        let sub_at = sub.as_ptr() as usize - text.as_ptr() as usize;
-        let head = heading_spans(text).into_iter().rfind(|h| h.start >= offset && h.end <= sub_at)?;
-        return Some(PerfDoc { href: String::new(), label: String::new(), heading: Some(head.id), heading_text: Some(title), tables: 0 });
+fn perf_doc(sec: Section<'_>, anchored: bool, names: &[String]) -> Option<PerfDoc> {
+    // a subsection named for them, linked by its heading
+    if let Some((head, _)) = sec.subsection(names) {
+        let heading_text = head.text.trim().to_string();
+        return Some(PerfDoc { href: String::new(), label: String::new(), heading: Some(head.id.clone()), heading_text: Some(heading_text), tables: 0 });
     }
+    // else the tables of a heading the link names
     if !anchored {
         return None;
     }
-    let tables = extract::measured_tables(sec).len();
+    let tables = extract::measured_tables(sec.text()).len();
     (tables > 0).then(|| PerfDoc { href: String::new(), label: String::new(), heading: None, heading_text: None, tables })
 }
 
