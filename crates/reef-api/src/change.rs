@@ -34,7 +34,8 @@ pub enum Change {
         /// The plan's full name
         plan: PlanName,
     },
-    /// A batch of puts and removals was written into a plan's current revision
+    /// A batch of puts and removals was written to a plan as one change, every node it didn't
+    /// touch at the version it was at
     NodesPut {
         /// The plan's full name
         plan: PlanName,

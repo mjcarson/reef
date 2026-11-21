@@ -56,6 +56,8 @@ suite!(
     checked_import_refuses_a_broken_plan,
     payload_equals_graph_build_of_stored_nodes,
     put_to_unlisted_plan_is_an_error,
-    node_write_refused_midway_is_an_error,
+    node_write_refused_in_place_is_an_error,
+    killed_batch_leaves_the_plan_as_it_was,
+    untouched_nodes_keep_their_versions_through_a_batch,
     removes_are_checked_with_the_batch,
 );

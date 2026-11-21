@@ -53,6 +53,13 @@ Its limits there shape reef's rows:
 
   The next write prunes whatever a killed write left named in either. An import moves every
   node's version on, so an edit read before it is refused after it.
+- **A batch of several writes is a revision too** ([C62](../milestones/m3.md)). One put or one
+  removal is one row's conditional write, which lands whole. A batch of more (a group with its
+  members, or several removals) is written as a new revision by the same steps, so a batch
+  killed midway leaves the plan as it was. The revision carries each node the batch doesn't
+  touch at the version it was at, so another writer's edit read before the batch still gets in
+  after it. A batch then costs a revision's write and prune, 2.2 ms and 2.0 ms for 202 nodes in
+  X2, rather than 0.15 ms a put.
 - **Every write's answer checked.** Bulk writes go through shoal's `exec`, and single ones
   through `send_one`. Draining a bundle's stream would accept a refused or failed write.
 - **Every row checked against its full key on read**, so a hash collision is caught instead of

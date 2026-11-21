@@ -8,7 +8,7 @@ use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
 use reef_render::{ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
     Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, Puts, Refusal,
-    Rewrite, StalePut,
+    RevisionKey, Rewrite, StalePut,
 };
 use std::time::Duration;
 
@@ -659,28 +659,126 @@ pub async fn put_to_unlisted_plan_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::
     Ok(())
 }
 
-/// A node write refused partway through a batch is an error naming what was written
+/// A single put's write refused by the backend is an error, as another process having written
+/// the plan would make it
 ///
-/// A batch isn't atomic: only another process can refuse a write the batch was judged fit for,
-/// and the puts before it stay written.
+/// One write lands whole, so it is written in place, only over the version its writer read.
 ///
 /// # Arguments
 ///
 /// * `sx` - The service and its plan
-pub async fn node_write_refused_midway_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
-    // the second write of the batch is refused, as another process having written would
-    sx.faults.refuse_node_writes_after(1);
-    let batch = new(vec![work("A", 0), work("B", 1)]);
+pub async fn node_write_refused_in_place_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // the write is refused, as another process having written would refuse it
+    sx.faults.refuse_node_writes_after(0);
     let error = sx
         .service
-        .put(&sx.plan, batch)
+        .put(&sx.plan, new(vec![work("A", 0)]))
         .await
         .expect_err("a refused write was answered as written");
-    // it names the node refused and the one written before it
+    // it names the node and says another process wrote the plan
     let message = format!("{error:#}");
-    assert!(message.contains("node `B`"), "{message}");
-    assert!(message.contains("after `A` were written"), "{message}");
-    // which stays written
-    assert_eq!(ids(&sx).await?, ["A"]);
+    assert!(message.contains("node `A`"), "{message}");
+    assert!(message.contains("another process"), "{message}");
+    assert!(ids(&sx).await?.is_empty());
+    Ok(())
+}
+
+/// A batch killed partway leaves the plan as it was, and the next write prunes what it left
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn killed_batch_leaves_the_plan_as_it_was<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // a plan of two nodes, then a batch that changes one, adds one and removes the other
+    sx.service
+        .put(&sx.plan, new(vec![work("A", 0), work("B", 1)]))
+        .await?;
+    let before = sx.service.list(&sx.plan).await?;
+    let mut changed = work("A", 0);
+    changed.spec.title = Some("A Changed".to_string());
+    let batch = Puts {
+        puts: vec![
+            NodePut::new(changed, Some(1)),
+            NodePut::new(work("C", 2), None),
+        ],
+        removes: vec![NodeRemove::new("B", 1)],
+    };
+    // killed after one of its rows is written
+    sx.faults.fail_rows_after(1);
+    let error = sx
+        .service
+        .batch(&sx.plan, batch)
+        .await
+        .expect_err("the killed batch was answered as written");
+    assert!(format!("{error:#}").contains("killed"), "{error:#}");
+    // none of it shows: every node as it was, at the version it was
+    assert_eq!(sx.service.list(&sx.plan).await?, before);
+    // what it wrote is named pending, and the next write prunes it
+    let backend = sx.service.store().backend();
+    let row = backend.plan(&sx.plan).await?.expect("the plan is listed");
+    assert_ne!(row.pending, 0);
+    let dead = RevisionKey::new(&sx.plan, row.pending);
+    assert_eq!(backend.nodes(&dead, None).await?.len(), 1);
+    let answer = sx.service.put(&sx.plan, new(vec![work("D", 3)])).await?;
+    assert_eq!(answer, Checked::Applied { versions: vec![1] });
+    assert!(backend.nodes(&dead, None).await?.is_empty());
+    let row = backend.plan(&sx.plan).await?.expect("the plan is listed");
+    assert_eq!((row.pending, row.retired), (0, 0));
+    assert_eq!(ids(&sx).await?, ["A", "B", "D"]);
+    assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
+    Ok(())
+}
+
+/// A batch of several nodes moves only their versions on, so an edit read before it of a node
+/// it doesn't touch still gets in after it
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn untouched_nodes_keep_their_versions_through_a_batch<B: Backend>(
+    sx: Sx<B>,
+) -> anyhow::Result<()> {
+    // three nodes, and an edit of the last read at its version now
+    sx.service
+        .put(
+            &sx.plan,
+            new(vec![work("A", 0), work("B", 1), work("C", 2)]),
+        )
+        .await?;
+    let read = sx.service.get(&sx.plan, "C").await?.expect("C was put");
+    assert_eq!(read.version, 1);
+    // a batch elsewhere: A changed, D added and B removed, as one revision
+    let revision = sx.service.list(&sx.plan).await?.revision;
+    let batch = Puts {
+        puts: vec![
+            NodePut::new(work("A", 0), Some(1)),
+            NodePut::new(work("D", 3), None),
+        ],
+        removes: vec![NodeRemove::new("B", 1)],
+    };
+    let answer = sx.service.batch(&sx.plan, batch).await?;
+    assert_eq!(
+        answer,
+        Checked::Applied {
+            versions: vec![2, 1]
+        }
+    );
+    // it landed as a revision of its own, which C is in at the version it was read at
+    let listing = sx.service.list(&sx.plan).await?;
+    assert_ne!(listing.revision, revision);
+    let versions: Vec<(&str, u64)> = listing
+        .nodes
+        .iter()
+        .map(|node| (node.spec.id.as_str(), node.version))
+        .collect();
+    assert_eq!(versions, [("A", 2), ("C", 1), ("D", 1)]);
+    // so the edit of C read before the batch gets in after it
+    let mut edit = NodeWrite::from(read);
+    edit.spec.title = Some("C Edited".to_string());
+    let answer = sx
+        .service
+        .put(&sx.plan, vec![NodePut::new(edit, Some(1))])
+        .await?;
+    assert_eq!(answer, Checked::Applied { versions: vec![2] });
     Ok(())
 }
