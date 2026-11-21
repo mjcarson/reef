@@ -333,11 +333,14 @@ mod tests {
         )
         .unwrap();
         let plan = Plan::load(&dir, &Config::default());
-        // only the two members missing a part are problems, each at its own line
+        // only the two members missing a part are problems, a problem for each part, each at
+        // the member's own line
         let diags: Vec<String> = plan.diags.iter().map(|d| d.to_string()).collect();
-        assert_eq!(diags.len(), 2, "{diags:?}");
-        assert!(diags[0].starts_with("g.md:5: `o2` does not say why it is needed or what finishing it will do"), "{diags:?}");
-        assert!(diags[1].starts_with("g.md:7: `plain` does not say why it is needed or what finishing it will do"), "{diags:?}");
+        assert_eq!(diags.len(), 4, "{diags:?}");
+        assert!(diags[0].starts_with("g.md:5: `o2` does not say why it is needed: "), "{diags:?}");
+        assert!(diags[1].starts_with("g.md:5: `o2` does not say what finishing it will do: "), "{diags:?}");
+        assert!(diags[2].starts_with("g.md:7: `plain` does not say why it is needed: "), "{diags:?}");
+        assert!(diags[3].starts_with("g.md:7: `plain` does not say what finishing it will do: "), "{diags:?}");
         // the register entry's parts, labelled by the rows they came from, not its opening
         let o1 = plan.graph.node(plan.graph.index_of("o1").unwrap());
         assert_eq!((o1.why.trim(), o1.why_from.as_deref()), ("<p>Quadratic</p>", Some("Impact")));

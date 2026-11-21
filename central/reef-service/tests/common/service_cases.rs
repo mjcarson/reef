@@ -104,7 +104,7 @@ pub async fn fix_gets_through_on_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyhow:
     // the doc's removal breaks the plan: the link, and the why and the what it gave
     std::fs::remove_file(sx.repo.join("docs/a.md"))?;
     let broken = sx.service.check(&sx.plan).await?;
-    assert_eq!(broken.len(), 2, "{broken:?}");
+    assert_eq!(broken.len(), 3, "{broken:?}");
     assert!(
         broken
             .iter()
@@ -127,22 +127,56 @@ pub async fn fix_gets_through_on_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyhow:
     Ok(())
 }
 
+/// A put that gives work its what alone gets through, since the why it still lacks was a
+/// problem already, worded the same
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn half_brief_fix_gets_through<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // a plan holding work that says neither why nor what, written as an import would be
+    let mut bare = work("A", 0);
+    bare.spec.description = None;
+    sx.service.store().write_plan(&sx.plan, vec![bare]).await?;
+    let broken = sx.service.check(&sx.plan).await?;
+    assert_eq!(broken.len(), 2, "{broken:?}");
+    // a put that writes its what alone adds no problem, so it gets through
+    let mut half = work("A", 0);
+    if let Some(description) = &mut half.spec.description {
+        description.why = None;
+    }
+    let answer = sx
+        .service
+        .put(&sx.plan, vec![NodePut::new(half, Some(1))])
+        .await?;
+    assert_eq!(answer, Checked::Applied { versions: vec![2] });
+    // and the why's problem is left as it was, word for word
+    assert_eq!(sx.service.check(&sx.plan).await?, broken[..1]);
+    Ok(())
+}
+
 /// A group goes in with its members as one batch, where neither goes in alone
 ///
 /// # Arguments
 ///
 /// * `sx` - The service and its plan
 pub async fn batch_adds_a_group_with_its_members<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
-    // a group alone is a piece of work that says neither why nor what
+    // a group alone is a piece of work that says neither why nor what, a problem for each
     let alone = sx.service.put(&sx.plan, new(vec![group("G", 0)])).await?;
     let Checked::Refused(problems) = alone else {
         panic!("a group with no members was written: {alone:?}");
     };
-    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems.len(), 2, "{problems:?}");
     assert!(
         problems[0]
             .to_string()
-            .starts_with("reef/central/G: `G` does not say why it is needed or what"),
+            .starts_with("reef/central/G: `G` does not say why it is needed: "),
+        "{problems:?}"
+    );
+    assert!(
+        problems[1]
+            .to_string()
+            .starts_with("reef/central/G: `G` does not say what finishing it will do: "),
         "{problems:?}"
     );
     // a member alone names a group that isn't a node

@@ -45,6 +45,7 @@ macro_rules! suite {
 suite!(
     refused_batch_writes_none_of_it,
     fix_gets_through_on_a_broken_plan,
+    half_brief_fix_gets_through,
     batch_adds_a_group_with_its_members,
     missing_doc_is_refused_and_present_doc_accepted,
     link_leaving_the_repo_is_refused,

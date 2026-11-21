@@ -175,44 +175,47 @@ impl<S: DocSource> Renderer<S> {
         for n in &mut graph.nodes {
             self.brief(n);
         }
-        // every piece of work must say why it is needed and what finishing it will do
+        // every piece of work must say why it is needed and what finishing it will do, each
+        // part a problem of its own, so a fix of one part doesn't change the other's
         let missing = (0..graph.len())
             .filter(|&i| !graph.is_group(i))
-            .filter_map(|i| self.missing_brief(graph.node(i)));
+            .flat_map(|i| self.missing_brief(graph.node(i)));
         diags.extend(missing);
         diags
     }
 
-    /// A problem for a piece of work that does not say why it is needed or what finishing it
-    /// will do, once its docs have been looked in.
+    /// The problems of a piece of work that does not say why it is needed or what finishing it
+    /// will do, once its docs have been looked in: one for each part missing.
+    ///
+    /// Each part's problem reads the same whether or not the other part is missing, so a write
+    /// that fills in one part removes its problem and leaves the other's as it was.
     ///
     /// # Arguments
     ///
     /// * `n` - The briefed node to check
-    fn missing_brief(&self, n: &Node) -> Option<Diagnostic> {
-        // the parts with nothing written and nothing found
-        let why = !has_text(&n.why);
-        let what = !has_text(&n.what);
+    fn missing_brief(&self, n: &Node) -> Vec<Diagnostic> {
         // name the doc sections each missing part could have come from
         let sections = |names: &[String]| names.join(", ");
-        let message = match (why, what) {
-            (false, false) => return None,
-            (true, false) => format!(
+        let mut diags = Vec::new();
+        // a why with nothing written and nothing found
+        if !has_text(&n.why) {
+            let message = format!(
                 "`{}` does not say why it is needed: write `description: {{ why: ... }}`, or link a doc with a section named one of {}",
                 n.id,
                 sections(&self.sections.why_sections)
-            ),
-            (false, true) => format!(
+            );
+            diags.push(n.origin.diagnostic(message));
+        }
+        // and a what the same
+        if !has_text(&n.what) {
+            let message = format!(
                 "`{}` does not say what finishing it will do: write `description: {{ what: ... }}`, or link a doc with a section named one of {}",
                 n.id,
                 sections(&self.sections.what_sections)
-            ),
-            (true, true) => format!(
-                "`{}` does not say why it is needed or what finishing it will do: write `description: {{ why: ..., what: ... }}`",
-                n.id
-            ),
-        };
-        Some(n.origin.diagnostic(message))
+            );
+            diags.push(n.origin.diagnostic(message));
+        }
+        diags
     }
 
     /// Fill in a node's why, what, details and design choices: as written, or else from the
@@ -344,7 +347,7 @@ fn perf_doc(text: &str, sec: &str, anchored: bool, names: &[String]) -> Option<P
 mod tests {
     use super::*;
     use crate::source::MemSource;
-    use reef_model::{Node, NodeName, Origin};
+    use reef_model::{Description, Node, NodeName, Origin};
 
     /// A node written in `plan/a.md` that links to `docs`
     fn linked(id: &str, docs: &[&str]) -> Node {
@@ -390,10 +393,32 @@ mod tests {
         assert!(a.what.contains("href=\"reef-root:/other.html#x\""), "links rebased from the doc: {}", a.what);
         assert_eq!(a.what_from.as_deref(), Some("What it does"));
         assert!(a.design.contains("<summary>One write.</summary>"), "{}", a.design);
-        // a missing doc is a problem, and so is work that then says neither why nor what
-        assert_eq!(diags.len(), 2, "{diags:?}");
+        // a missing doc is a problem, and so is each part of the brief that work then lacks
+        assert_eq!(diags.len(), 3, "{diags:?}");
         assert_eq!(diags[0], "plan/a.md:3: doc `../gone.md` not found (looked for src/gone.md)");
-        assert!(diags[1].starts_with("plan/a.md:3: `b` does not say why it is needed or what"), "{diags:?}");
+        assert!(diags[1].starts_with("plan/a.md:3: `b` does not say why it is needed: "), "{diags:?}");
+        assert!(diags[2].starts_with("plan/a.md:3: `b` does not say what finishing it will do: "), "{diags:?}");
+    }
+
+    #[test]
+    fn missing_why_and_what_are_problems_apart() {
+        let r = Renderer::new(MemSource::new(), Sections::default());
+        // work that says neither has a problem for each part, worded as if it lacked that alone
+        let (mut g, _) = Graph::build(vec![linked("a", &[])]);
+        let neither: Vec<String> = r.prepare(&mut g).iter().map(|d| d.to_string()).collect();
+        assert_eq!(neither.len(), 2, "{neither:?}");
+        // a what written fixes its problem and leaves the why's word for word
+        let mut n = linked("a", &[]);
+        n.description_raw = Some(Description { what: Some("Rows are fast.".into()), ..Description::default() });
+        let (mut g, _) = Graph::build(vec![n]);
+        let why_only: Vec<String> = r.prepare(&mut g).iter().map(|d| d.to_string()).collect();
+        assert_eq!(why_only, neither[..1]);
+        // and a why written the same, the other way round
+        let mut n = linked("a", &[]);
+        n.description_raw = Some(Description { why: Some("Rows are slow.".into()), ..Description::default() });
+        let (mut g, _) = Graph::build(vec![n]);
+        let what_only: Vec<String> = r.prepare(&mut g).iter().map(|d| d.to_string()).collect();
+        assert_eq!(what_only, neither[1..]);
     }
 
     #[test]
