@@ -27,7 +27,7 @@ reef-model = { workspace = true }
 reef-service = { path = "../reef-service", optional = true }
 # the viewer, linked into the client's wasm, without the page-load start that would replace main
 reef-view = { path = "../../crates/reef-view", default-features = false, optional = true }
-web-sys = { version = "0.3", features = ["HtmlElement"], optional = true }
+web-sys = { version = "0.3", features = ["HtmlElement", "EventSource"], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 tokio = { workspace = true, features = ["net", "signal"], optional = true }
 axum = { workspace = true, optional = true }

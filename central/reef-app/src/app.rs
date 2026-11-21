@@ -1,6 +1,7 @@
 //! The app's pages: the picker, and a plan's own page
 
 use crate::calls::{self, ProjectPlans};
+use crate::live::use_changes;
 use crate::panel::NodePanel;
 use crate::view::{Keyed, PlanGraph};
 use dioxus::prelude::*;
@@ -158,8 +159,12 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
 pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Element {
     // the plan, read again when the route names another plan, so a plan that isn't there says so
     let info = use_server_future(move || calls::plan_info(project(), plan()))?;
-    // its payload, read in the client alone, since only the client draws it, named for its plan
+    // the plan's changes, which read its payload again
+    let changes = use_changes(project, plan);
+    // its payload, read in the client alone, since only the client draws it, named for its plan,
+    // and read again after each change
     let payload = use_resource(move || async move {
+        let _ = changes();
         let (project, plan) = (project(), plan());
         let name = format!("{project}/{plan}");
         calls::payload(project, plan)

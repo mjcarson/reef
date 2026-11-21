@@ -16,6 +16,7 @@
 
 pub mod app;
 pub mod calls;
+pub mod live;
 pub mod panel;
 #[cfg(feature = "server")]
 pub mod server;

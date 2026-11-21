@@ -275,6 +275,29 @@ def c54_one_viewer_listens(page):
            "no reload": drew[3]})
 
 
+def c15_a_put_shows_live(page):
+    """C15: a status set from the CLI shows up without a reload, keeping the groups and selection."""
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    page.locator(".reef-viewport .reef-node", has_text="W2 Build on it").click()
+    page.wait_for_selector(".reef-app-panel", timeout=5000)
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    badges = "() => [...document.querySelectorAll('.reef-side .reef-badge')].map(b => b.textContent)"
+    before = (page.get_attribute(".reef", "data-boxes"), page.evaluate(badges))
+    # Claude, or anyone, sets the status from the terminal
+    reef("status", "W2", "done", "--plan", "draws")
+    page.wait_for_function("() => [...document.querySelectorAll('.reef-side .reef-badge')]"
+                           ".some(b => b.textContent === 'done')", timeout=10000)
+    after = (page.get_attribute(".reef", "data-boxes"), page.evaluate(badges))
+    kept = page.evaluate("() => window.__kept")
+    panel = page.inner_text(".reef-app-panel-id") if page.locator(".reef-app-panel").count() else None
+    check("C15 a CLI put shows up without a reload", kept == "same page" and before[0] == after[0]
+          and "done" in after[1] and panel == "W2",
+          {"before": before, "after": after, "no reload": kept, "panel": panel})
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -311,6 +334,7 @@ def main():
             c54_draws_as_in_mdbook(page)
             c54_selecting_opens_the_panel(page)
             c54_one_viewer_listens(page)
+            c15_a_put_shows_live(page)
             browser.close()
     finally:
         stop(server)
