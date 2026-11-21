@@ -135,12 +135,80 @@ fn q(el: &Element, sel: &str) -> Element {
     el.query_selector(sel).ok().flatten().unwrap_or_else(|| panic!("reef: no {sel}"))
 }
 
-fn listen<E: wasm_bindgen::convert::FromWasmAbi + 'static>(target: &web_sys::EventTarget, kind: &str, passive: bool, f: impl FnMut(E) + 'static) {
-    let cb = Closure::<dyn FnMut(E)>::new(f);
-    let opts = web_sys::AddEventListenerOptions::new();
-    opts.set_passive(passive);
-    let _ = target.add_event_listener_with_callback_and_add_event_listener_options(kind, cb.as_ref().unchecked_ref(), &opts);
-    cb.forget();
+/// A listener a view added: what it listens on, for what, whether as the event goes down, and
+/// the closure it calls
+type Listener = (web_sys::EventTarget, &'static str, bool, Closure<dyn FnMut(JsValue)>);
+
+/// Everything a view hooked into the page: each listener with its closure, and its observers
+///
+/// The closures hold the view, so the view lives as long as they do. Disconnecting takes each
+/// listener off and each observer away, then drops the closures, which frees the view. Kept
+/// apart from the view, which they hold, so neither keeps the other alive.
+#[derive(Default)]
+pub struct Wiring {
+    /// Every listener the view and its charts added
+    listeners: Vec<Listener>,
+    /// The observers watching the view's element and its sidebar
+    observers: Vec<Observer>,
+    /// The observers' callbacks, kept while they observe
+    callbacks: Vec<Closure<dyn FnMut()>>,
+}
+
+/// An observer a view started
+pub enum Observer {
+    /// Watches the view's size
+    Resize(web_sys::ResizeObserver),
+    /// Watches the sidebar's contents
+    Mutation(web_sys::MutationObserver),
+}
+
+impl Wiring {
+    /// Adds a listener, keeping its closure until the view is torn down
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - What to listen on
+    /// * `kind` - The event's name
+    /// * `capture` - Whether to hear it as it goes down, before its target does
+    /// * `passive` - Whether the listener never prevents the default
+    /// * `f` - What to do with each event
+    pub fn listen<E: JsCast + 'static>(&mut self, target: &web_sys::EventTarget, kind: &'static str, capture: bool, passive: bool, mut f: impl FnMut(E) + 'static) {
+        // one closure type for every event, each cast to the type its listener expects
+        let cb = Closure::<dyn FnMut(JsValue)>::new(move |e: JsValue| f(e.unchecked_into::<E>()));
+        let opts = web_sys::AddEventListenerOptions::new();
+        opts.set_capture(capture);
+        opts.set_passive(passive);
+        let _ = target.add_event_listener_with_callback_and_add_event_listener_options(kind, cb.as_ref().unchecked_ref(), &opts);
+        self.listeners.push((target.clone(), kind, capture, cb));
+    }
+
+    /// Keeps an observer, and the callback it calls, until the view is torn down
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - The observer, already observing
+    /// * `callback` - What it calls
+    pub fn observe(&mut self, observer: Observer, callback: Closure<dyn FnMut()>) {
+        self.observers.push(observer);
+        self.callbacks.push(callback);
+    }
+
+    /// Takes every listener off and every observer away, then drops their closures
+    ///
+    /// A closure running now finishes first: wasm-bindgen frees it once it returns.
+    pub fn disconnect(self) {
+        // nothing calls into the view after this
+        for (target, kind, capture, cb) in &self.listeners {
+            let _ = target.remove_event_listener_with_callback_and_bool(kind, cb.as_ref().unchecked_ref(), *capture);
+        }
+        for observer in &self.observers {
+            match observer {
+                Observer::Resize(ro) => ro.disconnect(),
+                Observer::Mutation(mo) => mo.disconnect(),
+            }
+        }
+        // the closures, and the view each holds, go with self
+    }
 }
 
 /// Runs `f` on the viewer unless it is already busy (an event fired from inside a handler), then
@@ -175,7 +243,7 @@ fn closest_item(target: &Option<Element>, sel: &str, attr: &str) -> Option<usize
 }
 
 impl Viewer {
-    /// Draws a view of a plan into an element, and returns it
+    /// Draws a view of a plan into an element, and returns it with what it hooked into the page
     ///
     /// # Arguments
     ///
@@ -184,7 +252,7 @@ impl Viewer {
     /// * `spec` - What the view shows
     /// * `index` - Which view on the page this is, for its SVG ids
     /// * `storage_key` - Where the view's open groups are saved
-    pub fn mount(el: HtmlElement, plan: Rc<Plan>, spec: ViewSpec, index: usize, storage_key: String) -> Rc<RefCell<Viewer>> {
+    pub fn mount(el: HtmlElement, plan: Rc<Plan>, spec: ViewSpec, index: usize, storage_key: String) -> (Rc<RefCell<Viewer>>, Wiring) {
         let uid = format!("{index}-{}", (js_sys::Math::random() * 1e9) as u64);
         let _ = el.class_list().add_1("reef-mounted");
         let _ = el.set_attribute("tabindex", "0");
@@ -260,8 +328,30 @@ impl Viewer {
             b.initial_view();
             b.seen = b.stage_size();
         }
-        Viewer::attach(&v);
-        v
+        let wiring = Viewer::attach(&v);
+        (v, wiring)
+    }
+
+    /// Empties the view's element, once its wiring is gone, so the element can be drawn into
+    /// again
+    ///
+    /// The selection callback and the charts are let go too, since they may hold the caller's
+    /// state.
+    pub fn unmounted(&mut self) {
+        // a hint still showing would clear itself on a detached element
+        if let Some(t) = self.hint_timer.take() {
+            window().clear_timeout_with_handle(t);
+        }
+        // the element as it was before the view drew into it
+        self.el.set_inner_html("");
+        let classes = self.el.class_list();
+        let _ = classes.remove_3("reef-mounted", "reef-has-side", "reef-resizing");
+        for attr in ["tabindex", "data-boxes", "data-layout-ms"] {
+            let _ = self.el.remove_attribute(attr);
+        }
+        // nothing outside the view is told of it again
+        self.on_select = None;
+        self.charts = None;
     }
 
     /// Draws a newer revision of this view's plan where the old one was
@@ -864,7 +954,15 @@ impl Viewer {
         (x - r.left(), y - r.top())
     }
 
-    fn attach(v: &Rc<RefCell<Viewer>>) {
+    /// Hooks the view into the page: its listeners, its charts' and its observers, returned
+    /// so the caller can take them away again
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The view
+    fn attach(v: &Rc<RefCell<Viewer>>) -> Wiring {
+        // everything added here, to take off again when the view is torn down
+        let mut w = Wiring::default();
         let (el, svg, search): (web_sys::EventTarget, web_sys::EventTarget, web_sys::EventTarget) = {
             let b = v.borrow();
             (b.el.clone().into(), b.svg.clone().into(), b.search.clone().into())
@@ -872,7 +970,7 @@ impl Viewer {
 
         // Toolbar, sidebar and search results.
         let vc = v.clone();
-        listen(&el, "click", true, move |e: Event| {
+        w.listen(&el, "click", false, true, move |e: Event| {
             let t: Option<Element> = e.target().and_then(|t| t.dyn_into().ok());
             let Some(t) = t else { return };
             if let Ok(Some(a)) = t.closest("[data-act]") {
@@ -891,9 +989,9 @@ impl Viewer {
         });
 
         let vc = v.clone();
-        listen(&search, "input", true, move |_: Event| with(&vc, |v| v.update_results()));
+        w.listen(&search, "input", false, true, move |_: Event| with(&vc, |v| v.update_results()));
         let vc = v.clone();
-        listen(&search, "keydown", false, move |e: KeyboardEvent| {
+        w.listen(&search, "keydown", false, false, move |e: KeyboardEvent| {
             e.stop_propagation();
             match e.key().as_str() {
                 "Enter" => with(&vc, |v| {
@@ -913,7 +1011,7 @@ impl Viewer {
 
         // Pan, pinch and click on the diagram.
         let vc = v.clone();
-        listen(&svg, "pointerdown", true, move |e: PointerEvent| {
+        w.listen(&svg, "pointerdown", false, true, move |e: PointerEvent| {
             if e.button() != 0 && e.pointer_type() == "mouse" {
                 return;
             }
@@ -930,7 +1028,7 @@ impl Viewer {
             });
         });
         let vc = v.clone();
-        listen(&svg, "pointermove", true, move |e: PointerEvent| {
+        w.listen(&svg, "pointermove", false, true, move |e: PointerEvent| {
             with(&vc, |v| {
                 let (x, y) = (e.client_x() as f64, e.client_y() as f64);
                 let Some(idx) = v.pointers.iter().position(|p| p.0 == e.pointer_id()) else {
@@ -969,7 +1067,7 @@ impl Viewer {
         for kind in ["pointerup", "pointercancel"] {
             let vc = v.clone();
             let cancel = kind == "pointercancel";
-            listen(&svg, kind, true, move |e: PointerEvent| {
+            w.listen(&svg, kind, false, true, move |e: PointerEvent| {
                 with(&vc, |v| {
                     v.pointers.retain(|p| p.0 != e.pointer_id());
                     if v.pointers.len() < 2 {
@@ -993,9 +1091,9 @@ impl Viewer {
             });
         }
         let vc = v.clone();
-        listen(&svg, "pointerleave", true, move |_: PointerEvent| with(&vc, |v| v.light(None)));
+        w.listen(&svg, "pointerleave", false, true, move |_: PointerEvent| with(&vc, |v| v.light(None)));
         let vc = v.clone();
-        listen(&svg, "dblclick", true, move |e: Event| {
+        w.listen(&svg, "dblclick", false, true, move |e: Event| {
             let t: Option<Element> = e.target().and_then(|t| t.dyn_into().ok());
             if closest_item(&t, "[data-toggle]", "data-toggle").is_some() {
                 return;
@@ -1005,7 +1103,7 @@ impl Viewer {
             }
         });
         let vc = v.clone();
-        listen(&svg, "wheel", false, move |e: WheelEvent| {
+        w.listen(&svg, "wheel", false, false, move |e: WheelEvent| {
             with(&vc, |v| {
                 if !(e.ctrl_key() || e.meta_key() || v.page_mode || v.is_fullscreen()) {
                     v.flash_hint();
@@ -1025,7 +1123,7 @@ impl Viewer {
 
         // Keys, when the diagram has focus.
         let vc = v.clone();
-        listen(&el, "keydown", false, move |e: KeyboardEvent| {
+        w.listen(&el, "keydown", false, false, move |e: KeyboardEvent| {
             if e.ctrl_key() || e.meta_key() || e.alt_key() {
                 return;
             }
@@ -1047,7 +1145,7 @@ impl Viewer {
         // The sidebar's edge: drag to resize, double-click to reset, arrows when focused.
         let grip: web_sys::EventTarget = v.borrow().grip.clone().into();
         let vc = v.clone();
-        listen(&grip, "pointerdown", false, move |e: PointerEvent| {
+        w.listen(&grip, "pointerdown", false, false, move |e: PointerEvent| {
             if e.button() != 0 {
                 return;
             }
@@ -1060,7 +1158,7 @@ impl Viewer {
             });
         });
         let vc = v.clone();
-        listen(&grip, "pointermove", true, move |e: PointerEvent| {
+        w.listen(&grip, "pointermove", false, true, move |e: PointerEvent| {
             with(&vc, |v| {
                 if let Some((id, _)) = v.side_drag
                     && id == e.pointer_id()
@@ -1073,7 +1171,7 @@ impl Viewer {
         });
         for kind in ["pointerup", "pointercancel"] {
             let vc = v.clone();
-            listen(&grip, kind, true, move |e: PointerEvent| {
+            w.listen(&grip, kind, false, true, move |e: PointerEvent| {
                 with(&vc, |v| {
                     if let Some((id, moved)) = v.side_drag
                         && id == e.pointer_id()
@@ -1089,7 +1187,7 @@ impl Viewer {
             });
         }
         let vc = v.clone();
-        listen(&grip, "dblclick", true, move |_: Event| {
+        w.listen(&grip, "dblclick", false, true, move |_: Event| {
             with(&vc, |v| {
                 v.set_side_w(None);
                 if let Some(s) = storage() {
@@ -1098,7 +1196,7 @@ impl Viewer {
             });
         });
         let vc = v.clone();
-        listen(&grip, "keydown", false, move |e: KeyboardEvent| {
+        w.listen(&grip, "keydown", false, false, move |e: KeyboardEvent| {
             let step = match e.key().as_str() {
                 "ArrowLeft" => 32.0,
                 "ArrowRight" => -32.0,
@@ -1115,24 +1213,20 @@ impl Viewer {
         // The Performance section's charts, kept to tell them of a swapped plan.
         {
             let mut b = v.borrow_mut();
-            let charts = crate::chartui::attach(&b.el, &b.side, b.plan.clone());
+            let charts = crate::chartui::attach(&b.el, &b.side, b.plan.clone(), &mut w);
             b.charts = Some(charts);
         }
 
         // A doc's "Read here", or a Performance section's doc, opening. `toggle` does not bubble, so listen as it goes down.
         {
             let side: web_sys::EventTarget = v.borrow().side.clone().into();
-            let cb = Closure::<dyn FnMut(Event)>::new(move |e: Event| {
+            w.listen(&side, "toggle", true, false, move |e: Event| {
                 if let Some(d) = e.target().and_then(|t| t.dyn_into::<web_sys::HtmlDetailsElement>().ok())
                     && (d.class_list().contains("reef-doc-read") || d.class_list().contains("reef-perf-doc"))
                 {
                     crate::docs::open(d);
                 }
             });
-            let opts = web_sys::AddEventListenerOptions::new();
-            opts.set_capture(true);
-            let _ = side.add_event_listener_with_callback_and_add_event_listener_options("toggle", cb.as_ref().unchecked_ref(), &opts);
-            cb.forget();
         }
 
         // Size changes, including the book's sidebar sliding in or out, which is no window resize.
@@ -1140,21 +1234,22 @@ impl Viewer {
         let observer = Closure::<dyn FnMut()>::new(move || with(&vc, |v| v.resized()));
         if let Ok(ro) = web_sys::ResizeObserver::new(observer.as_ref().unchecked_ref()) {
             ro.observe(&v.borrow().el);
+            w.observe(Observer::Resize(ro), observer);
         }
-        observer.forget();
 
         let doc: web_sys::EventTarget = window().document().expect("a document").into();
         // Another view changed the acceptance filter.
         let vc = v.clone();
-        listen(&doc, ACC_EVENT, true, move |_: Event| with(&vc, |v| v.set_filter(load_filter())));
+        w.listen(&doc, ACC_EVENT, false, true, move |_: Event| with(&vc, |v| v.set_filter(load_filter())));
 
         let vc = v.clone();
-        listen(&doc, "fullscreenchange", true, move |_: Event| {
+        w.listen(&doc, "fullscreenchange", false, true, move |_: Event| {
             let vc = vc.clone();
             // Let the new size settle first.
             let cb = Closure::once_into_js(move || with(&vc, |v| v.fit()));
             let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), 60);
         });
+        w
     }
 }
 

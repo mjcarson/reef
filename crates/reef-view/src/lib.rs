@@ -65,7 +65,9 @@ pub fn mount_all() {
             }
             None => ViewSpec::default(),
         };
-        viewer::Viewer::mount(el, plan.clone(), spec, k as usize, format!("reef:{path}:{k}"));
+        // a book's views last as long as its page, so their wiring is never taken away
+        let (_, wiring) = viewer::Viewer::mount(el, plan.clone(), spec, k as usize, format!("reef:{path}:{k}"));
+        std::mem::forget(wiring);
     }
 }
 
@@ -127,16 +129,19 @@ fn plan_of(payload: Payload) -> Plan {
 pub fn mount(el: web_sys::HtmlElement, payload: Payload, view: ViewSpec, plan: &str) -> Handle {
     // build the plan, then draw it as the only view this caller tracks
     let built = Rc::new(plan_of(payload));
-    let viewer = viewer::Viewer::mount(el, built, view, 0, viewer::plan_key(plan));
-    Handle { viewer }
+    let (viewer, wiring) = viewer::Viewer::mount(el, built, view, 0, viewer::plan_key(plan));
+    Handle { viewer, wiring: Some(wiring) }
 }
 
 /// A view drawn by [`mount`], for swapping in new revisions of its plan, or another plan
 ///
-/// Dropping a handle leaves the view drawn and listening: nothing tears a view down yet.
+/// Dropping the handle, or [`Handle::unmount`], tears the view down: its listeners and
+/// observers are taken away, its element is emptied, and the view is freed.
 pub struct Handle {
     /// The drawn view
     viewer: Rc<RefCell<viewer::Viewer>>,
+    /// What the view hooked into the page, until it is torn down
+    wiring: Option<viewer::Wiring>,
 }
 
 impl Handle {
@@ -221,5 +226,35 @@ impl Handle {
     pub fn selected(&self) -> Option<String> {
         // a view busy with an event is asked again after it
         self.viewer.try_borrow().ok().and_then(|viewer| viewer.selected_id())
+    }
+
+    /// Tears the view down: its listeners and observers taken away, its element emptied, and the
+    /// view freed, as dropping the handle does
+    pub fn unmount(self) {
+        // dropping does it
+    }
+}
+
+impl Drop for Handle {
+    /// Takes the view's listeners and observers away, then empties its element
+    fn drop(&mut self) {
+        // nothing calls into the view once its wiring is gone, which drops the closures holding it
+        let Some(wiring) = self.wiring.take() else { return };
+        wiring.disconnect();
+        // a view busy with an event, which dropped its handle, is emptied once the event is done
+        match self.viewer.try_borrow_mut() {
+            Ok(mut viewer) => viewer.unmounted(),
+            Err(_) => {
+                let viewer = self.viewer.clone();
+                let later = Closure::once_into_js(move || {
+                    if let Ok(mut viewer) = viewer.try_borrow_mut() {
+                        viewer.unmounted();
+                    }
+                });
+                if let Some(window) = web_sys::window() {
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(later.unchecked_ref(), 0);
+                }
+            }
+        }
     }
 }

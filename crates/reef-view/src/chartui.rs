@@ -11,6 +11,7 @@
 //! nothing here outlives the sidebar's contents.
 
 use crate::Plan;
+use crate::viewer::{Observer, Wiring};
 use crate::perf::{self, ChartRef, ChartView};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -272,15 +273,6 @@ impl State {
     }
 }
 
-fn listen<E: wasm_bindgen::convert::FromWasmAbi + 'static>(target: &web_sys::EventTarget, kind: &str, capture: bool, passive: bool, f: impl FnMut(E) + 'static) {
-    let cb = Closure::<dyn FnMut(E)>::new(f);
-    let opts = web_sys::AddEventListenerOptions::new();
-    opts.set_capture(capture);
-    opts.set_passive(passive);
-    let _ = target.add_event_listener_with_callback_and_add_event_listener_options(kind, cb.as_ref().unchecked_ref(), &opts);
-    cb.forget();
-}
-
 /// The charts' state, held by the view so a swapped plan reaches their handlers
 pub struct Charts {
     /// What every chart handler reads and changes
@@ -304,7 +296,14 @@ impl Charts {
 
 /// Make the charts in `side` interactive. The tooltip goes in `container`, the viewer, so it
 /// can show past the sidebar's edge.
-pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Charts {
+///
+/// # Arguments
+///
+/// * `container` - The view's element
+/// * `side` - The view's sidebar, which draws the charts
+/// * `plan` - The plan the sidebar draws from
+/// * `wiring` - Where the charts' listeners and observer are kept, to take away with the view
+pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>, wiring: &mut Wiring) -> Charts {
     let doc = web_sys::window().and_then(|w| w.document()).expect("a document");
     let tip: HtmlElement = doc.create_element("div").expect("a div").dyn_into().expect("an HtmlElement");
     tip.set_class_name("reef-tip");
@@ -315,13 +314,13 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Ch
     let side: web_sys::EventTarget = side.clone().into();
 
     let s = st.clone();
-    listen(&side, "pointermove", false, true, move |e: PointerEvent| {
+    wiring.listen(&side, "pointermove", false, true, move |e: PointerEvent| {
         if let Ok(mut s) = s.try_borrow_mut() {
             s.moved(&e);
         }
     });
     let s = st.clone();
-    listen(&side, "pointerleave", false, true, move |_: PointerEvent| {
+    wiring.listen(&side, "pointerleave", false, true, move |_: PointerEvent| {
         if let Ok(mut s) = s.try_borrow_mut()
             && s.drag.is_none()
         {
@@ -329,14 +328,14 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Ch
         }
     });
     let s = st.clone();
-    listen(&side, "pointerdown", false, false, move |e: PointerEvent| {
+    wiring.listen(&side, "pointerdown", false, false, move |e: PointerEvent| {
         if let Ok(mut s) = s.try_borrow_mut() {
             s.pressed(&e);
         }
     });
     for kind in ["pointerup", "pointercancel"] {
         let s = st.clone();
-        listen(&side, kind, false, true, move |e: PointerEvent| {
+        wiring.listen(&side, kind, false, true, move |e: PointerEvent| {
             if let Ok(mut s) = s.try_borrow_mut() {
                 s.released(&e);
             }
@@ -345,7 +344,7 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Ch
     // Clicks are taken as they go down, before the viewer's own handler sees a trend's
     // `data-goto`: the click that ends a drag, and legend and reset clicks, stop here.
     let s = st.clone();
-    listen(&side, "click", true, false, move |e: MouseEvent| {
+    wiring.listen(&side, "click", true, false, move |e: MouseEvent| {
         let Ok(mut s) = s.try_borrow_mut() else { return };
         if std::mem::take(&mut s.eat_click) || s.clicked(&e) {
             e.stop_propagation();
@@ -353,7 +352,7 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Ch
         }
     });
     let s = st.clone();
-    listen(&side, "dblclick", false, false, move |e: MouseEvent| {
+    wiring.listen(&side, "dblclick", false, false, move |e: MouseEvent| {
         if let Ok(mut s) = s.try_borrow_mut() {
             s.double_clicked(&e);
         }
@@ -375,7 +374,7 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Ch
         let opts = web_sys::MutationObserverInit::new();
         opts.set_child_list(true);
         let _ = mo.observe_with_options(&side_el, &opts);
+        wiring.observe(Observer::Mutation(mo), cb);
     }
-    cb.forget();
     charts
 }

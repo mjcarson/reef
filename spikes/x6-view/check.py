@@ -156,11 +156,17 @@ with sync_playwright() as p:
     page.wait_for_timeout(500)
     print("5a shown again:", view(page), "old element in the page:", page.evaluate("() => window.__old.isConnected"))
     # a filter change reaches every view through a document event; a live view draws again
-    page.evaluate("() => window.__old.removeAttribute('data-layout-ms')")
+    page.evaluate("() => { window.__old.removeAttribute('data-layout-ms');"
+                  " document.querySelector('.reef').removeAttribute('data-layout-ms'); }")
     chip = page.locator(".reef-acc-filter button").first
     chip.click()
     page.wait_for_timeout(500)
-    print("5b the hidden view drew again:", page.evaluate("() => window.__old.getAttribute('data-layout-ms') !== null"))
+    drew = page.evaluate("() => [window.__old.getAttribute('data-layout-ms') !== null,"
+                         " document.querySelector('.reef').getAttribute('data-layout-ms') !== null]")
+    print("5b the hidden view drew again:", drew[0])
+    check("5c a view hidden and shown again leaves one viewer listening", drew == [False, True],
+          {"hidden view drew": drew[0], "shown view drew": drew[1],
+           "hidden element emptied": page.evaluate("() => window.__old.children.length === 0")})
     chip.click()
 
     # 6. a newer revision keeps the selection, the open groups, and the pan and zoom
