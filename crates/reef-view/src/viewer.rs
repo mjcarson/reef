@@ -63,6 +63,61 @@ pub struct Viewer {
     acc: Filter,
     /// What the view shows, kept to start it again when its plan is swapped
     spec: ViewSpec,
+    /// The sidebar's charts, told of each swapped plan
+    charts: Option<crate::chartui::Charts>,
+    /// Who hears when the selection changes, given the selected node's id
+    on_select: Option<OnSelect>,
+}
+
+/// A callback told the selected node's id, or `None`, each time the selection changes
+pub type OnSelect = Rc<RefCell<Box<dyn FnMut(Option<String>)>>>;
+
+/// Tells a selection callback what is selected now, unless it is running already
+///
+/// # Arguments
+///
+/// * `callback` - Who to tell
+/// * `id` - The id of the node selected now, or `None`
+pub fn tell(callback: &OnSelect, id: Option<String>) {
+    // a callback that changes the selection itself isn't told of that change again
+    if let Ok(mut callback) = callback.try_borrow_mut() {
+        callback(id);
+    }
+}
+
+/// The key a view's open groups are saved under, given the name of the plan it draws
+///
+/// # Arguments
+///
+/// * `plan` - The plan's name, such as `reef/central`
+pub fn plan_key(plan: &str) -> String {
+    format!("reef:plan:{plan}")
+}
+
+/// The groups a view opens with: those saved under its key, else its spec's
+///
+/// # Arguments
+///
+/// * `key` - Where the view's open groups are saved
+/// * `spec` - What the view shows
+/// * `g` - The plan it draws
+fn open_groups(key: &str, spec: &ViewSpec, g: &reef_model::Graph) -> HashSet<usize> {
+    // the groups opened last time, by id, as far as the plan still has them
+    let saved = storage()
+        .and_then(|s| s.get_item(key).ok().flatten())
+        .and_then(|saved| serde_json::from_str::<Vec<String>>(&saved).ok());
+    match saved {
+        Some(ids) => ids.iter().filter_map(|id| g.index_of(id)).collect(),
+        None => spec.initial_expanded(g),
+    }
+}
+
+/// The legend's dots for each kind of acceptance criterion
+fn acc_legend() -> String {
+    reef_model::Kind::ALL
+        .iter()
+        .map(|k| format!(r#"<span><i class="reef-acc-dot k-{}"></i>{}</span>"#, k.as_str(), k.label()))
+        .collect()
 }
 
 /// The event every view on the page hears when the acceptance filter changes.
@@ -88,10 +143,30 @@ fn listen<E: wasm_bindgen::convert::FromWasmAbi + 'static>(target: &web_sys::Eve
     cb.forget();
 }
 
-/// Run `f` on the viewer unless it is already busy (an event fired from inside a handler).
+/// Runs `f` on the viewer unless it is already busy (an event fired from inside a handler), then
+/// tells the selection callback if `f` changed what is selected
+///
+/// # Arguments
+///
+/// * `v` - The viewer
+/// * `f` - What to do with it
 fn with(v: &Rc<RefCell<Viewer>>, f: impl FnOnce(&mut Viewer)) {
-    if let Ok(mut v) = v.try_borrow_mut() {
-        f(&mut v);
+    // run it, noting what was selected before
+    let told = match v.try_borrow_mut() {
+        Ok(mut v) => {
+            let before = v.selected;
+            f(&mut v);
+            // the plan is the same, so its indexes compare
+            match (v.selected != before, &v.on_select) {
+                (true, Some(callback)) => Some((callback.clone(), v.selected_id())),
+                _ => None,
+            }
+        }
+        Err(_) => None,
+    };
+    // the callback runs with the viewer free, so it may call the view's handle
+    if let Some((callback, id)) = told {
+        tell(&callback, id);
     }
 }
 
@@ -107,8 +182,9 @@ impl Viewer {
     /// * `el` - The element to draw into, in place of whatever it holds
     /// * `plan` - The plan to draw
     /// * `spec` - What the view shows
-    /// * `index` - Which view on the page this is, for its storage key and its SVG ids
-    pub fn mount(el: HtmlElement, plan: Rc<Plan>, spec: ViewSpec, index: usize) -> Rc<RefCell<Viewer>> {
+    /// * `index` - Which view on the page this is, for its SVG ids
+    /// * `storage_key` - Where the view's open groups are saved
+    pub fn mount(el: HtmlElement, plan: Rc<Plan>, spec: ViewSpec, index: usize, storage_key: String) -> Rc<RefCell<Viewer>> {
         let uid = format!("{index}-{}", (js_sys::Math::random() * 1e9) as u64);
         let _ = el.class_list().add_1("reef-mounted");
         let _ = el.set_attribute("tabindex", "0");
@@ -119,11 +195,7 @@ impl Viewer {
         let acc = load_filter();
         let has_acc = plan.graph.has_acceptance();
         let acc_bar = if has_acc { accept::toolbar(&acc) } else { String::new() };
-        let acc_legend: String = if has_acc {
-            reef_model::Kind::ALL.iter().map(|k| format!(r#"<span><i class="reef-acc-dot k-{}"></i>{}</span>"#, k.as_str(), k.label())).collect()
-        } else {
-            String::new()
-        };
+        let acc_legend = if has_acc { acc_legend() } else { String::new() };
         let hint_text = if page_mode { "Scroll to zoom · drag to pan" } else { "Ctrl + scroll to zoom · drag to pan" };
         el.set_inner_html(&format!(
             r##"<div class="reef-toolbar"><div class="reef-searchbox"><input class="reef-search" type="search" placeholder="Search nodes ( / )" aria-label="Search nodes" autocomplete="off"><ul class="reef-results" hidden></ul></div><span class="reef-spacer"></span>{acc_bar}<button data-act="expand" title="Open every group">Expand all</button><button data-act="collapse" title="Close every group">Collapse all</button><button data-act="out" title="Zoom out ( - )">−</button><button data-act="in" title="Zoom in ( + )">+</button><button data-act="fit" title="Fit to view ( 0 )">Fit</button>{open_page}<button data-act="full" title="Full screen ( f )">⛶</button></div><div class="reef-stage"><svg class="reef-svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Plan diagram"><defs><marker id="reef-arrow-{uid}" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path class="reef-arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs><g class="reef-viewport"></g></svg><aside class="reef-side" hidden></aside><div class="reef-side-grip" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0" title="Drag to resize · double-click to reset"></div><div class="reef-legend"><span><i class="reef-dot s-done"></i>done</span><span><i class="reef-dot s-progress"></i>in progress</span><span><i class="reef-dot s-ready"></i>ready</span><span><i class="reef-dot s-todo"></i>to do</span><span><i class="reef-dot s-blocked"></i>blocked</span><span><i class="reef-dot optional"></i>optional</span>{acc_legend}</div><div class="reef-hint">{hint_text}</div></div>"##
@@ -139,13 +211,7 @@ impl Viewer {
         let g = &plan.graph;
         let root = spec.root_id().and_then(|id| g.index_of(id));
         let ghosts = spec.focus.is_some();
-        let path = window().location().pathname().unwrap_or_default();
-        let storage_key = format!("reef:{path}:{index}");
-        let mut expanded = spec.initial_expanded(g);
-        if let Some(saved) = storage().and_then(|s| s.get_item(&storage_key).ok().flatten())
-            && let Ok(ids) = serde_json::from_str::<Vec<String>>(&saved) {
-                expanded = ids.iter().filter_map(|id| g.index_of(id)).collect();
-            }
+        let expanded = open_groups(&storage_key, &spec, g);
         let ctx = measure_ctx(&el);
         let v = Viewer {
             el,
@@ -182,6 +248,8 @@ impl Viewer {
             seen: (0.0, 0.0),
             acc,
             spec,
+            charts: None,
+            on_select: None,
         };
         let v = Rc::new(RefCell::new(v));
         {
@@ -196,29 +264,146 @@ impl Viewer {
         v
     }
 
-    /// Draws a new plan in this view, started again from its spec
+    /// Draws a newer revision of this view's plan where the old one was
     ///
-    /// Open groups and the selection are not carried over, and the view is fitted afresh.
+    /// The open groups, the selection, the root and the search are found again by id, and the
+    /// pan, the zoom and the sidebar's scroll stay as they were. A selected node the new plan
+    /// lacks is let go, and its sidebar closed.
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan to draw now
     pub fn swap(&mut self, plan: Rc<Plan>) {
-        // take the new plan, and find the spec's root and open groups in it
+        // what is open and selected, by id, as the old plan knows it
+        let old = self.plan.clone();
+        let open: Vec<&str> = self.expanded.iter().map(|&i| old.graph.node(i).id.as_str()).collect();
+        let selected = self.selected_id();
+        // take the new plan, and find each of them in it
         self.plan = plan;
         let plan = self.plan.clone();
         let g = &plan.graph;
         self.root = self.spec.root_id().and_then(|id| g.index_of(id));
-        self.expanded = self.spec.initial_expanded(g);
+        self.expanded = open.iter().filter_map(|id| g.index_of(id)).collect();
+        self.selected = selected.and_then(|id| g.index_of(&id));
+        // the charts and the toolbar's criteria follow the new plan
+        self.replanned();
+        // draw it at the same pan and zoom
+        self.render();
+        // the sidebar shows the selected node as it is now, at the scroll it had, or closes
+        match self.selected {
+            Some(n) => {
+                let top = self.side.scroll_top();
+                self.show_side(n);
+                self.side.set_scroll_top(top);
+            }
+            None => {
+                self.side.set_hidden(true);
+                let _ = self.el.class_list().remove_1("reef-has-side");
+            }
+        }
+        self.refresh_selection();
+        // open search results are found again in the new plan
+        if !self.results.hidden() {
+            self.update_results();
+        }
+    }
+
+    /// Draws another plan in this view, started from its own view and its own saved groups
+    ///
+    /// Nothing is selected, the search is cleared, and the view is fitted afresh. The layout and
+    /// height stay as the element was mounted.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan to draw now
+    /// * `spec` - What the view shows of it
+    /// * `storage_key` - Where its open groups are saved
+    pub fn swap_plan(&mut self, plan: Rc<Plan>, spec: ViewSpec, storage_key: String) {
+        // take the plan and its view, and find the view's root and open groups in it
+        self.plan = plan;
+        let plan = self.plan.clone();
+        let g = &plan.graph;
+        self.root = spec.root_id().and_then(|id| g.index_of(id));
+        self.ghosts = spec.focus.is_some();
+        self.dir = if spec.direction == Direction::LR { Dir::LR } else { Dir::TB };
+        self.expanded = open_groups(&storage_key, &spec, g);
+        self.storage_key = storage_key;
+        self.spec = spec;
         // indexes into the old plan mean nothing now: drop the selection and any search results
         self.selected = None;
         self.side.set_hidden(true);
         let _ = self.el.class_list().remove_1("reef-has-side");
         self.search.set_value("");
         self.results.set_hidden(true);
+        // the charts and the toolbar's criteria follow the new plan
+        self.replanned();
         // draw it, and fit it as a new view would be
         self.render();
         self.initial_view();
+    }
+
+    /// The id of the node selected now, if one is
+    pub fn selected_id(&self) -> Option<String> {
+        self.selected.map(|i| self.graph().node(i).id.clone())
+    }
+
+    /// Sets who hears when the selection changes
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Told the selected node's id, or `None`
+    pub fn set_on_select(&mut self, callback: OnSelect) {
+        self.on_select = Some(callback);
+    }
+
+    /// The selection callback and what to tell it, if the selected node's id moved off `before`
+    ///
+    /// # Arguments
+    ///
+    /// * `before` - The id of the node that was selected
+    pub fn moved_from(&self, before: Option<String>) -> Option<(OnSelect, Option<String>)> {
+        // ids, since a swap's indexes are the new plan's
+        let now = self.selected_id();
+        match (now != before, &self.on_select) {
+            (true, Some(callback)) => Some((callback.clone(), now)),
+            _ => None,
+        }
+    }
+
+    /// Points what draws from the plan outside `render` at the plan just taken: the charts'
+    /// handlers, and the toolbar's criteria chips and legend dots, which only a plan with
+    /// acceptance criteria shows
+    fn replanned(&mut self) {
+        // the sidebar's charts redraw from the new plan
+        if let Some(charts) = &self.charts {
+            charts.set_plan(self.plan.clone());
+        }
+        // the chips and dots come and go with whether the plan has criteria
+        let has = self.graph().has_acceptance();
+        let bar = self.el.query_selector(".reef-toolbar .reef-acc-filter").ok().flatten();
+        match (has, bar) {
+            (true, None) => {
+                // the chips sit before the toolbar's buttons, the dots after the legend's statuses
+                if let Ok(Some(expand)) = self.el.query_selector(".reef-toolbar [data-act=expand]") {
+                    let _ = expand.insert_adjacent_html("beforebegin", &accept::toolbar(&self.acc));
+                }
+                if let Ok(Some(legend)) = self.el.query_selector(".reef-legend") {
+                    let _ = legend.insert_adjacent_html("beforeend", &acc_legend());
+                }
+            }
+            (false, Some(bar)) => {
+                // each dot is its legend entry's only mark, so the entry goes with it
+                bar.remove();
+                if let Ok(dots) = self.el.query_selector_all(".reef-legend .reef-acc-dot") {
+                    for k in 0..dots.length() {
+                        if let Some(entry) = dots.item(k).and_then(|dot| dot.parent_element()) {
+                            entry.remove();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn graph(&self) -> &reef_model::Graph {
@@ -927,10 +1112,11 @@ impl Viewer {
             });
         });
 
-        // The Performance section's charts.
+        // The Performance section's charts, kept to tell them of a swapped plan.
         {
-            let b = v.borrow();
-            crate::chartui::attach(&b.el, &b.side, b.plan.clone());
+            let mut b = v.borrow_mut();
+            let charts = crate::chartui::attach(&b.el, &b.side, b.plan.clone());
+            b.charts = Some(charts);
         }
 
         // A doc's "Read here", or a Performance section's doc, opening. `toggle` does not bubble, so listen as it goes down.

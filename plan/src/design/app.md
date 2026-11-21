@@ -24,7 +24,9 @@ wasm-bindgen, so it can live in a Dioxus app, with four changes:
    own panel, and each plan remembers its own open groups.
 
 X6 made the first two, and a swap that starts the view again from its spec. [C12](../milestones/m4.md)
-makes the rest.
+made the rest: `Handle::swap` draws a newer revision where the old one was, `Handle::swap_plan`
+draws another plan from its own view, `Handle::on_select` reports the selection, and `mount`
+takes the plan's name, which its saved groups are kept under.
 
 ### Design choices
 

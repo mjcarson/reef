@@ -281,9 +281,30 @@ fn listen<E: wasm_bindgen::convert::FromWasmAbi + 'static>(target: &web_sys::Eve
     cb.forget();
 }
 
+/// The charts' state, held by the view so a swapped plan reaches their handlers
+pub struct Charts {
+    /// What every chart handler reads and changes
+    state: Rc<RefCell<State>>,
+}
+
+impl Charts {
+    /// Points the charts' handlers at a new plan, as the sidebar draws its charts from it
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan the view draws now
+    pub fn set_plan(&self, plan: Rc<Plan>) {
+        // a handler running now keeps the plan it started with; the next one reads this
+        match self.state.try_borrow_mut() {
+            Ok(mut state) => state.plan = plan,
+            Err(_) => web_sys::console::warn_1(&"reef: the charts were busy, so they kept the plan they had".into()),
+        }
+    }
+}
+
 /// Make the charts in `side` interactive. The tooltip goes in `container`, the viewer, so it
 /// can show past the sidebar's edge.
-pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) {
+pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) -> Charts {
     let doc = web_sys::window().and_then(|w| w.document()).expect("a document");
     let tip: HtmlElement = doc.create_element("div").expect("a div").dyn_into().expect("an HtmlElement");
     tip.set_class_name("reef-tip");
@@ -338,6 +359,7 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) {
         }
     });
     // A new node in the sidebar replaces the charts: forget the old ones.
+    let charts = Charts { state: st.clone() };
     let s = st;
     let side_el: Element = side.clone().dyn_into().expect("an element");
     let cb = Closure::<dyn FnMut()>::new(move || {
@@ -355,4 +377,5 @@ pub fn attach(container: &HtmlElement, side: &HtmlElement, plan: Rc<Plan>) {
         let _ = mo.observe_with_options(&side_el, &opts);
     }
     cb.forget();
+    charts
 }

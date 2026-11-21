@@ -53,6 +53,8 @@ pub fn mount_all() {
             return;
         }
     };
+    // each view's open groups are kept under its page and its place on it
+    let path = web_sys::window().and_then(|w| w.location().pathname().ok()).unwrap_or_default();
     for k in 0..divs.length() {
         let Some(el) = divs.item(k).and_then(|n| n.dyn_into::<web_sys::HtmlElement>().ok()) else { continue };
         let spec: ViewSpec = match el.get_attribute("data-view").map(|v| serde_json::from_str(&v)) {
@@ -63,7 +65,7 @@ pub fn mount_all() {
             }
             None => ViewSpec::default(),
         };
-        viewer::Viewer::mount(el, plan.clone(), spec, k as usize);
+        viewer::Viewer::mount(el, plan.clone(), spec, k as usize, format!("reef:{path}:{k}"));
     }
 }
 
@@ -97,13 +99,14 @@ fn plan_of(payload: Payload) -> Plan {
 ///
 /// The element should be a `div` with the `reef` class (and `reef-page` for a view that fills
 /// the page), and a height, as the preprocessor writes a fence. The view's open groups are kept
-/// in local storage under the page's path, so two plans drawn on one path share them.
+/// in local storage under the plan's name, so each plan drawn on a page keeps its own.
 ///
 /// # Arguments
 ///
 /// * `el` - The element to draw into
 /// * `payload` - The plan's nodes, their doc links absolute or relative to the page
 /// * `view` - What the view shows: its root or focus, direction and which groups start open
+/// * `plan` - The plan's name, such as `reef/central`, which its saved open groups are kept under
 ///
 /// # Examples
 ///
@@ -113,18 +116,22 @@ fn plan_of(payload: Payload) -> Plan {
 ///
 /// let doc = web_sys::window().unwrap().document().unwrap();
 /// let el = doc.get_element_by_id("plan").unwrap().unchecked_into();
-/// let handle = reef_view::mount(el, Payload::default(), ViewSpec::default());
-/// // a newer revision of the plan, drawn without a reload
+/// let handle = reef_view::mount(el, Payload::default(), ViewSpec::default(), "reef/central");
+/// // hear which node is selected
+/// handle.on_select(|id| web_sys::console::log_1(&format!("{id:?}").into()));
+/// // a newer revision of the plan, drawn without a reload where the old one was
 /// handle.swap(Payload::default());
+/// // another plan, drawn from its own view
+/// handle.swap_plan(Payload::default(), ViewSpec::default(), "reef/app");
 /// ```
-pub fn mount(el: web_sys::HtmlElement, payload: Payload, view: ViewSpec) -> Handle {
+pub fn mount(el: web_sys::HtmlElement, payload: Payload, view: ViewSpec, plan: &str) -> Handle {
     // build the plan, then draw it as the only view this caller tracks
-    let plan = Rc::new(plan_of(payload));
-    let viewer = viewer::Viewer::mount(el, plan, view, 0);
+    let built = Rc::new(plan_of(payload));
+    let viewer = viewer::Viewer::mount(el, built, view, 0, viewer::plan_key(plan));
     Handle { viewer }
 }
 
-/// A view drawn by [`mount`], for swapping in new revisions of its plan
+/// A view drawn by [`mount`], for swapping in new revisions of its plan, or another plan
 ///
 /// Dropping a handle leaves the view drawn and listening: nothing tears a view down yet.
 pub struct Handle {
@@ -133,10 +140,10 @@ pub struct Handle {
 }
 
 impl Handle {
-    /// Draws a new payload in the same view, without a reload
+    /// Draws a newer revision of the plan where the old one was, without a reload
     ///
-    /// The view starts again from its spec: its open groups are the spec's, nothing is selected,
-    /// and it is fitted afresh.
+    /// Open groups, the selection, the search and the root are kept by id, and so are the pan,
+    /// the zoom and the sidebar's scroll. A selected node the new revision lacks is let go.
     ///
     /// # Arguments
     ///
@@ -145,9 +152,74 @@ impl Handle {
         // build the new plan before touching the view
         let plan = Rc::new(plan_of(payload));
         // a swap made from inside one of the view's own handlers waits for none, so it is dropped
-        match self.viewer.try_borrow_mut() {
-            Ok(mut viewer) => viewer.swap(plan),
-            Err(_) => web_sys::console::warn_1(&"reef: a swap made while the view was busy was dropped".into()),
+        let told = match self.viewer.try_borrow_mut() {
+            Ok(mut viewer) => {
+                let before = viewer.selected_id();
+                viewer.swap(plan);
+                viewer.moved_from(before)
+            }
+            Err(_) => {
+                web_sys::console::warn_1(&"reef: a swap made while the view was busy was dropped".into());
+                None
+            }
+        };
+        // a selected node the new revision lacks is let go, which the callback hears of
+        if let Some((callback, id)) = told {
+            viewer::tell(&callback, id);
         }
+    }
+
+    /// Draws another plan in the same view, from its own view and the groups saved for it
+    ///
+    /// Nothing is selected, and the view is fitted afresh. The layout and height stay as the
+    /// element was mounted.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - The other plan's nodes
+    /// * `view` - What the view shows of it
+    /// * `plan` - Its name, which its saved open groups are kept under
+    pub fn swap_plan(&self, payload: Payload, view: ViewSpec, plan: &str) {
+        // build the new plan before touching the view
+        let built = Rc::new(plan_of(payload));
+        // a swap made from inside one of the view's own handlers waits for none, so it is dropped
+        let told = match self.viewer.try_borrow_mut() {
+            Ok(mut viewer) => {
+                let before = viewer.selected_id();
+                viewer.swap_plan(built, view, viewer::plan_key(plan));
+                viewer.moved_from(before)
+            }
+            Err(_) => {
+                web_sys::console::warn_1(&"reef: a swap made while the view was busy was dropped".into());
+                None
+            }
+        };
+        // the selection is let go, which the callback hears of
+        if let Some((callback, id)) = told {
+            viewer::tell(&callback, id);
+        }
+    }
+
+    /// Calls `f` with the selected node's id, or `None`, each time the selection changes
+    ///
+    /// It is called once the view is done with the event, so it may call this handle. Setting
+    /// it again replaces the one set before.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Told the id of the node selected now
+    pub fn on_select(&self, f: impl FnMut(Option<String>) + 'static) {
+        // the view holds it, to call after each change to the selection
+        let callback: viewer::OnSelect = Rc::new(RefCell::new(Box::new(f)));
+        match self.viewer.try_borrow_mut() {
+            Ok(mut viewer) => viewer.set_on_select(callback),
+            Err(_) => web_sys::console::warn_1(&"reef: a selection callback set while the view was busy was dropped".into()),
+        }
+    }
+
+    /// The id of the node selected now, if one is
+    pub fn selected(&self) -> Option<String> {
+        // a view busy with an event is asked again after it
+        self.viewer.try_borrow().ok().and_then(|viewer| viewer.selected_id())
     }
 }

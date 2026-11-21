@@ -1,5 +1,8 @@
 """Drives X6's app in headless Chromium and prints what each check saw.
 
+Steps 1 to 5 print what they saw, as X6 ran them. Steps 6 to 8 check C12's handle, and step 5's
+last check C58's teardown: each prints `ok` or `FAILED`, and the script exits 1 if any failed.
+
 Run it against `dx serve` with Playwright installed (`pip install playwright` and
 `python -m playwright install chromium`):
 
@@ -16,6 +19,36 @@ URL = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8080/"
 SHOTS = sys.argv[2] if len(sys.argv) > 2 else "."
 # everything the page logged, failed or fetched from the books
 logs = []
+# the checks that failed
+failed = []
+
+
+def check(label, ok, seen):
+    """Prints whether a check held and what it saw, and remembers it if it didn't."""
+    print(f"{'ok' if ok else 'FAILED'} {label}: {seen}")
+    if not ok:
+        failed.append(label)
+
+
+def transform(page):
+    """The diagram's pan and zoom, as the viewport's transform."""
+    return page.evaluate("() => document.querySelector('.reef-viewport').getAttribute('transform')")
+
+
+def selected(page):
+    """The node the viewer told the app it selected, as the header shows it."""
+    return page.inner_text("#x6-selected")
+
+
+def drawn_text(page):
+    """Every label the diagram draws."""
+    return page.evaluate("() => document.querySelector('.reef-viewport').textContent")
+
+
+def pick(page, label):
+    """Picks a plan with the header's buttons, and waits for it to be drawn."""
+    page.click(f"text={label}")
+    page.wait_for_timeout(2000)
 
 
 def view(page):
@@ -130,9 +163,49 @@ with sync_playwright() as p:
     print("5b the hidden view drew again:", page.evaluate("() => window.__old.getAttribute('data-layout-ms') !== null"))
     chip.click()
 
+    # 6. a newer revision keeps the selection, the open groups, and the pan and zoom
+    pick(page, "Example book")
+    goto_node(page, "O171")
+    page.wait_for_timeout(500)
+    before = (view(page)[0], transform(page), side(page)["title"], selected(page))
+    pick(page, "Example, one more done")
+    after = (view(page)[0], transform(page), side(page)["title"], selected(page))
+    check("6a a swap keeps the boxes, the pan and zoom, and the sidebar's node", before[:3] == after[:3] and not side(page)["hidden"], [before, after])
+    check("6b the app heard the selection", "O171" in after[3], after[3])
+    # the sidebar's close button, since the key goes to whatever has focus, here a button
+    page.click(".reef-side [data-act=close]")
+    page.wait_for_timeout(300)
+    check("6c the app hears the selection let go", "None" in selected(page), selected(page))
+
+    # 7. another plan is drawn from its own view: `central`'s members, not the whole plan
+    pick(page, "This plan")
+    text = drawn_text(page)
+    check("7 this plan is drawn from its root, central", "M4 reef-app" in text and "Centralized reef" not in text, text[:120])
+
+    # 8. two plans drawn on one path keep their own open groups
+    pick(page, "Example book")
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    example_open = view(page)[0]
+    pick(page, "This plan")
+    page.click("button[data-act=collapse]")
+    page.wait_for_timeout(300)
+    plan_closed = view(page)[0]
+    pick(page, "Example book")
+    example_again = view(page)[0]
+    pick(page, "This plan")
+    plan_again = view(page)[0]
+    keys = page.evaluate("() => Object.keys(localStorage).filter(k => k.startsWith('reef:plan:')).sort()")
+    check("8a the example's groups come back", example_again == example_open, [example_open, example_again])
+    check("8b this plan's groups come back", plan_again == plan_closed, [plan_closed, plan_again])
+    check("8c each plan is saved under its own key", keys == ["reef:plan:example", "reef:plan:plan"], keys)
+
     # anything the page logged or failed to load
     print("--- console and errors")
     for line in logs:
         if not line.startswith("fetched"):
             print(line)
     browser.close()
+
+print("--- failed:", failed if failed else "none")
+sys.exit(1 if failed else 0)

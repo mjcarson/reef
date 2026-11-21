@@ -3,7 +3,8 @@
 //! The server reads a book's plan into the viewer's payload and serves the book's rendered pages
 //! under `/book/`, so *Read here* has pages to fetch. The client mounts reef-view into an element
 //! Dioxus made, through `reef_view::mount`, and swaps each payload after the first in through
-//! the handle it returned.
+//! the handle it returned: a newer revision of the plan drawn where the old one was, or another
+//! plan from its own view.
 
 use dioxus::prelude::*;
 use reef_model::Payload;
@@ -11,10 +12,6 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "server")]
 mod book;
-
-/// The view the app draws: the example book's own plan view, filling the page
-#[cfg(feature = "web")]
-const VIEW: &str = r#"{"root": "scans-plan", "layout": "page"}"#;
 
 /// The mdbook theme variables reef.css reads with no fallback, which a page outside mdbook lacks
 const THEME: &str = r#"
@@ -33,6 +30,28 @@ pub enum Which {
     ExampleOneDone,
     /// This plan's own book, a different plan altogether
     Plan,
+}
+
+impl Which {
+    /// The plan's name, which its saved open groups are kept under: both revisions of the
+    /// example book are one plan
+    pub fn key(self) -> &'static str {
+        match self {
+            Which::Example | Which::ExampleOneDone => "example",
+            Which::Plan => "plan",
+        }
+    }
+
+    /// The plan's own view, as its book's full-page fence draws it
+    #[cfg(feature = "web")]
+    fn view(self) -> reef_model::ViewSpec {
+        // each book's page-filling fence, from its plan.md
+        let view = match self {
+            Which::Example | Which::ExampleOneDone => r#"{"root": "scans-plan", "layout": "page"}"#,
+            Which::Plan => r#"{"root": "central", "layout": "page"}"#,
+        };
+        serde_json::from_str(view).expect("the view parses")
+    }
 }
 
 /// Starts the wasm client, or the server with the books' rendered pages beside the app
@@ -68,9 +87,10 @@ fn main() {
 /// The page: buttons that pick a plan or hide the view, and the view itself
 #[component]
 fn App() -> Element {
-    // the plan to draw, and whether the view is in the page at all
+    // the plan to draw, whether the view is in the page at all, and the node the viewer selected
     let mut which = use_signal(|| Which::Example);
     let mut shown = use_signal(|| true);
+    let selected = use_signal(|| None::<String>);
     rsx! {
         Head {}
         main {
@@ -84,9 +104,10 @@ fn App() -> Element {
                     if shown() { "Hide the view" } else { "Show the view" }
                 }
                 span { "Drawing: {which:?}" }
+                span { id: "x6-selected", "Selected: {selected:?}" }
             }
             if shown() {
-                PlanView { which }
+                PlanView { which, selected }
             }
         }
     }
@@ -106,9 +127,13 @@ fn Head() -> Element {
 
 /// The plan drawn by reef-view, mounted once and swapped after that
 #[component]
-fn PlanView(which: Signal<Which>) -> Element {
-    // the chosen plan's payload, fetched again whenever the choice changes
-    let payload = use_resource(move || async move { plan_payload(which()).await });
+fn PlanView(which: Signal<Which>, selected: Signal<Option<String>>) -> Element {
+    // the chosen plan's payload, fetched again whenever the choice changes, with the choice it
+    // was fetched for
+    let payload = use_resource(move || async move {
+        let chosen = which();
+        plan_payload(chosen).await.map(|payload| (chosen, payload))
+    });
     // the element Dioxus made for the view, once it is in the page
     let mut element = use_signal(|| None::<std::rc::Rc<MountedData>>);
     // the drawn view, once the first payload has come
@@ -120,8 +145,8 @@ fn PlanView(which: Signal<Which>) -> Element {
             return;
         };
         // a payload that failed or hasn't come yet leaves the view as it is
-        if let Some(Ok(payload)) = &*payload.read() {
-            draw(&mounted, payload.clone(), handle);
+        if let Some(Ok((chosen, payload))) = &*payload.read() {
+            draw(&mounted, *chosen, payload.clone(), handle, selected);
         }
     });
     rsx! {
@@ -137,9 +162,9 @@ fn PlanView(which: Signal<Which>) -> Element {
     }
 }
 
-/// A view reef-view drew, in the client
+/// A view reef-view drew, in the client, and the plan it draws now
 #[cfg(feature = "web")]
-type Drawn = reef_view::Handle;
+type Drawn = (reef_view::Handle, &'static str);
 
 /// Nothing is drawn on the server
 #[cfg(not(feature = "web"))]
@@ -150,32 +175,57 @@ type Drawn = ();
 /// # Arguments
 ///
 /// * `mounted` - The element Dioxus made for the view
+/// * `chosen` - The plan the payload is of
 /// * `payload` - The plan to draw
 /// * `handle` - The view drawn so far, if any
+/// * `selected` - Where the viewer's selection is shown
 #[cfg(feature = "web")]
-fn draw(mounted: &MountedData, payload: Payload, mut handle: Signal<Option<Drawn>>) {
+fn draw(
+    mounted: &MountedData,
+    chosen: Which,
+    payload: Payload,
+    mut handle: Signal<Option<Drawn>>,
+    mut selected: Signal<Option<String>>,
+) {
     use dioxus::web::WebEventExt;
     use wasm_bindgen::JsCast;
     // a view drawn already takes the new payload in place, with no reload
-    if let Some(drawn) = &*handle.peek() {
-        drawn.swap(payload);
+    if let Some((drawn, key)) = &mut *handle.write() {
+        if *key == chosen.key() {
+            // a newer revision of the plan it draws, where the old one was
+            drawn.swap(payload);
+        } else {
+            // another plan, from its own view and its own saved groups
+            drawn.swap_plan(payload, chosen.view(), chosen.key());
+            *key = chosen.key();
+        }
         return;
     }
     // the first payload mounts the viewer into Dioxus's element
     let Some(element) = mounted.try_as_web_event() else {
         return;
     };
-    let view: reef_model::ViewSpec = serde_json::from_str(VIEW).expect("the view parses");
-    handle.set(Some(reef_view::mount(
+    let drawn = reef_view::mount(
         element.unchecked_into(),
         payload,
-        view,
-    )));
+        chosen.view(),
+        chosen.key(),
+    );
+    // the header shows whatever the viewer selects
+    drawn.on_select(move |id| selected.set(id));
+    handle.set(Some((drawn, chosen.key())));
 }
 
 /// Nothing is drawn on the server, where effects never run
 #[cfg(not(feature = "web"))]
-fn draw(_mounted: &MountedData, _payload: Payload, _handle: Signal<Option<Drawn>>) {}
+fn draw(
+    _mounted: &MountedData,
+    _chosen: Which,
+    _payload: Payload,
+    _handle: Signal<Option<Drawn>>,
+    _selected: Signal<Option<String>>,
+) {
+}
 
 /// The chosen plan as the viewer's payload, its doc links under `/book/`
 ///
