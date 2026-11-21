@@ -98,6 +98,12 @@ swaps payloads. `check.py` drives it in headless Chromium.
   routes ([C53](../milestones/m3.md)), so one port serves both.
 - **Live refresh from the change stream.** When Claude puts a node, the app swaps the new
   revision in through the mount handle.
+- **The app listens where the CLI looks.** Its server is its own `axum::serve` on `[api] address`,
+  loopback only, rather than `dioxus::serve`, which listens on `PORT` or 8080. It takes
+  reef-serve's place: only one process can open shoal's data directory. Under `dx serve`, dx names
+  the address and proxies its own port to it.
+- **Plans at `/plans/{project}/{plan}`, server functions under `/app/`,** so neither meets the
+  JSON API's `/api/v1`. The server serves reef.css at `/reef.css` from mdbook-reef's assets.
 
 ## Docs in central mode
 

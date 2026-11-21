@@ -1,10 +1,11 @@
-# reef's centralized half: the service that keeps plans in shoal, and the node program that serves
-# reef's schema. It is a workspace of its own, so reef's stable workspace never resolves shoal, and
-# it needs shoal's `ScanSupport` checkout at `../../shoal` and glommio at `../../glommio`, beside
-# reef. Only `embedded` builds and `reef-shoal` need nightly; `reef-service` alone builds on stable.
+# reef's centralized half: the service that keeps plans in shoal, the node program that serves
+# reef's schema, and the app. It is a workspace of its own, so reef's stable workspace never
+# resolves shoal, and it needs shoal's `ScanSupport` checkout at `../../shoal` and glommio at
+# `../../glommio`, beside reef. Only `embedded` builds and `reef-shoal` need nightly;
+# `reef-service` alone builds on stable.
 [workspace]
 resolver = "3"
-members = ["reef-service", "reef-shoal"]
+members = ["reef-service", "reef-shoal", "reef-app"]
 
 [workspace.package]
 version = "0.1.0"

@@ -9,6 +9,8 @@ reef-service   the service and its store: every write checked against the whole 
                shoal schema, and the only code that touches shoal; the JSON API's router, and
                `reef-serve`, which serves it alone
 reef-shoal     the external node: shoal's node program over reef's schema
+reef-app       the UI, a Dioxus 0.7 fullstack app on axum, which serves the JSON API beside its
+               pages
 ```
 
 The service's data types, and the JSON API's requests, answers, routes and changes, are
@@ -29,6 +31,7 @@ export it in `RUSTFLAGS`, where a wasm build would get it too.
 
 ```sh
 cargo +nightly test --workspace         # everything, with the engine (reef-shoal turns `embedded` on)
+cargo +nightly test -p reef-app --features embedded   # and the app's suite, which needs it named
 cargo +stable test -p reef-service      # the client half alone; a workspace-wide stable build fails
 ```
 
@@ -151,6 +154,39 @@ cargo +stable run -p reef-service --bin reef-serve -- --conf reef.toml          
 
 `examples/payload_bench.rs` times the example book's 202-node payload, built in process and fetched
 over loopback.
+
+## The app
+
+`reef-app` is a Dioxus 0.7.10 fullstack app. Its front page lists every project with its plans,
+and each plan opens at `/plans/{project}/{plan}`. Its server functions sit under `/app/`, each a
+call on the service, and its server mounts `api::router` beside them, so one port serves the
+pages and the JSON API alike.
+
+- **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
+  place. Only one process can open shoal's data directory, so run one or the other. Under
+  `dx serve`, dx names the server's address and proxies its own port to it; point `[api] address`
+  at dx's port to reach it from the CLI.
+- **It is served by its own `axum::serve`, not `dioxus::serve`,** which would listen on `PORT`
+  or 8080. It stops on SIGINT or SIGTERM, ending the change stream first.
+- **`embedded` goes to the server build alone,** since dx keeps default features on in the wasm
+  build too: `@server --platform server --features embedded`. `tests/tree.rs` checks the wasm
+  client's tree holds no shoal, glommio or reef-service.
+- **dx passes an exported `RUSTFLAGS` to the wasm build,** where `-Ctarget-cpu=native` leaves
+  wasm32 without reference types, so unset it first.
+
+```sh
+cd reef-app
+env -u RUSTFLAGS dx serve @server --platform server --features embedded     # develop
+env -u RUSTFLAGS dx build @server --platform server --features embedded     # build
+REEF_CONFIG=reef.toml ../target/dx/reef-app/debug/web/server                 # serve the build
+cargo +nightly test -p reef-app --features embedded                          # the suite
+python check.py                                                              # the browser checks
+```
+
+`tests/app.rs` serves the app's router over shoal in-process and puts plans through the CLI.
+`check.py` drives the built server in headless Chromium with Playwright: it starts the server
+itself, on a config and data directory of its own under `target/tmp`, and stops its process
+group at the end.
 
 ## The store
 

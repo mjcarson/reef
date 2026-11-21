@@ -1,0 +1,43 @@
+[package]
+name = "reef-app"
+description = "reef's UI: a Dioxus fullstack app on axum that picks a plan, draws it and edits it, and serves the JSON API beside it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# No default: dx keeps default features on in the wasm build too, and each side wants its own.
+default = []
+# the wasm client: Dioxus's web renderer, and never shoal or the service
+web = ["dioxus/web"]
+# the server: Dioxus's axum server, the service and the JSON API's router over shoal's client half
+server = ["dioxus/server", "dep:reef-service", "dep:tokio", "dep:axum", "dep:anyhow", "dep:tracing"]
+# shoal's engine inside the server, which needs nightly, glommio and target-cpu=native
+embedded = ["server", "reef-service/embedded"]
+
+[dependencies]
+dioxus = { version = "=0.7.10", features = ["fullstack", "router"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# the service's data types, which the server functions answer with, and the API's paths
+reef-api = { workspace = true }
+reef-model = { workspace = true }
+reef-service = { path = "../reef-service", optional = true }
+tokio = { workspace = true, features = ["net", "signal"], optional = true }
+axum = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+# the terminal's client, to put plans through the CLI as a user would
+reef = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+
+# The suite opens shoal in-process, so it needs the engine: run it with `--features embedded`.
+[[test]]
+name = "app"
+required-features = ["embedded"]
