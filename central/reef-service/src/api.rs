@@ -19,6 +19,7 @@
 //! | `PUT …/plans/{plan}/revision` | `write_plan` | [`Rewrite`]: 200, or 422 if refused |
 //! | `GET …/plans/{plan}/payload` | `payload` | the viewer's [`Payload`] |
 //! | `GET …/plans/{plan}/check` | `check` | its problems |
+//! | `GET …/plans/{plan}/next` | `next` | its ready work, and what the rest waits on: [`Next`] |
 //! | `GET …/plans/{plan}/docs/{*path}` | `doc_page` | a doc rendered as its page, or 404 |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
@@ -46,7 +47,7 @@ use reef_api::{
     AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
     PlanInfo, PlanWrite, Project, Puts, Rewrite, StoredNode, paths,
 };
-use reef_model::{Diagnostic, NameError, Payload, PlanName};
+use reef_model::{Diagnostic, NameError, Next, Payload, PlanName};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::convert::Infallible;
@@ -121,6 +122,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::REVISION, axum::routing::put(write_plan::<S>))
         .route(paths::PAYLOAD, get(payload::<S>))
         .route(paths::CHECK, get(check::<S>))
+        .route(paths::NEXT, get(next::<S>))
         .route(paths::DOC, get(doc::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
@@ -664,6 +666,23 @@ async fn check<S: Serves>(
     // check's messages, the graph's first
     let problems = serves.service().check(&plan).await?;
     Ok(Json(problems))
+}
+
+/// Says what work in a plan is ready to start, and what the rest waits on
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+#[instrument(name = "api::next", skip_all, err(Debug))]
+async fn next<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+) -> Result<Json<Next>, Failure> {
+    let plan = segments.name()?;
+    // the ready work in plan order, then each piece that waits with its unmet needs
+    let next = serves.service().next(&plan).await?;
+    Ok(Json(next))
 }
 
 /// Serves one of a plan's docs as the page its links lead to, or 404 if no doc is written to it

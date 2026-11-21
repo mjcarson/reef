@@ -60,6 +60,28 @@ impl Cx {
         Ok(String::from_utf8(out)?)
     }
 
+    /// Runs one `reef` command that is to fail, returning what it printed before it did and its
+    /// error
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The working directory to run it from
+    /// * `args` - The command line after `reef --conf <config>`
+    async fn failing(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<(String, String)> {
+        // the command line as typed, with the case's config named
+        let conf = self.conf.to_str().expect("the config is a utf-8 path");
+        let line = ["reef", "--conf", conf]
+            .into_iter()
+            .chain(args.iter().copied());
+        let cli = reef::Cli::from_args(line)?;
+        // run it, keeping what it printed and how it failed
+        let mut out = Vec::new();
+        let error = reef::run(cli, cwd, &mut out)
+            .await
+            .expect_err("the command succeeded");
+        Ok((String::from_utf8(out)?, error.to_string()))
+    }
+
     /// Makes a fresh repo in the case's directory
     ///
     /// # Arguments
@@ -371,5 +393,168 @@ async fn node_commands_take_the_only_plan_or_the_one_named() -> anyhow::Result<(
         .await
         .unwrap_err();
     assert!(error.to_string().contains("not in its plan"), "{error}");
+    Ok(())
+}
+
+/// Marking a group's last member done makes the group done, and what needs it ready
+#[tokio::test]
+async fn group_done_when_its_last_member_is() -> anyhow::Result<()> {
+    let cx = Cx::new("group-done").await?;
+    let repo = cx.ax.repo.clone();
+    // a group of two members, and a node that needs the group
+    cx.put("g.yml", GROUP).await?;
+    cx.put("d.yml", &work("D", &["G"])).await?;
+    // the members are ready, and the node waits on the group
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert_eq!(
+        next,
+        "Ready to start (2), in plan order:\n  m1  m1 Some work\n  m2  m2 Some work\n\n\
+         Waiting (1):\n  D   D Some work\n        needs G (todo)\n"
+    );
+    // one member done leaves the group in progress, and the node waiting on it
+    let done = cx.reef(&repo, &["status", "m1", "done"]).await?;
+    assert_eq!(done, "`m1` is done, at version 2\n");
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert!(
+        next.starts_with("Ready to start (1), in plan order:\n  m2"),
+        "{next}"
+    );
+    assert!(next.contains("needs G (in-progress)"), "{next}");
+    // the last one done makes the group done, and the node ready
+    cx.reef(&repo, &["status", "m2", "done"]).await?;
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert_eq!(
+        next,
+        "Ready to start (1), in plan order:\n  D  D Some work\n\nWaiting (0):\n  nothing\n"
+    );
+    Ok(())
+}
+
+/// A group's status is never set, a status already set writes nothing, and a node not in the
+/// plan is named
+#[tokio::test]
+async fn status_is_set_on_work_alone() -> anyhow::Result<()> {
+    let cx = Cx::new("status").await?;
+    let repo = cx.ax.repo.clone();
+    cx.put("g.yml", GROUP).await?;
+    // a group is done when its members are, so its own is refused
+    let error = cx
+        .reef(&repo, &["status", "G", "done"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`G` is a group"), "{error}");
+    // a member's is set once, and setting it again says so and writes nothing
+    let started = cx.reef(&repo, &["status", "m1", "in-progress"]).await?;
+    assert_eq!(started, "`m1` is in-progress, at version 2\n");
+    let again = cx.reef(&repo, &["status", "m1", "wip"]).await?;
+    assert_eq!(again, "`m1` is already in-progress\n");
+    let got = cx.reef(&repo, &["node", "get", "m1"]).await?;
+    assert!(got.starts_with("# version: 2\n"), "{got}");
+    assert!(got.contains("status: in-progress\n"), "{got}");
+    // back to to do, which the canonical YAML leaves out
+    cx.reef(&repo, &["status", "m1", "todo"]).await?;
+    let got = cx.reef(&repo, &["node", "get", "m1"]).await?;
+    assert!(!got.contains("status:"), "{got}");
+    // and a node the plan doesn't have is named in it
+    let error = cx
+        .reef(&repo, &["status", "nope", "done"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("`reef/central/nope` is not in its plan"),
+        "{error}"
+    );
+    Ok(())
+}
+
+/// A node's criteria are listed by number, one is set met with its test, and one met by its
+/// metric, or one it doesn't have, is refused
+#[tokio::test]
+async fn accept_lists_and_sets_criteria() -> anyhow::Result<()> {
+    let cx = Cx::new("accept").await?;
+    let repo = cx.ax.repo.clone();
+    // a node with a unit criterion and a performance one met by its metric's figures
+    let yaml = format!(
+        "{}acceptance:\n  - unit: Rows round-trip\n  - kind: performance\n    text: Scans are \
+         fast\n    metric: scan-ms\n    at-most: 10\nperformance:\n  metrics:\n    - name: \
+         scan-ms\n      before: 20\n      after: 5\n",
+        work("C1", &[])
+    );
+    cx.put("c1.yml", &yaml).await?;
+    // listed by number, with whether each is met
+    let listed = cx.reef(&repo, &["accept", "C1"]).await?;
+    assert_eq!(
+        listed,
+        "1. todo  unit: Rows round-trip\n2. by its metric  perf: Scans are fast\n"
+    );
+    // the first set met, with the test that checks it
+    let set = [
+        "accept",
+        "C1",
+        "1",
+        "met",
+        "--test",
+        "tests/rows.rs::round_trip",
+    ];
+    let met = cx.reef(&repo, &set).await?;
+    assert_eq!(met, "criterion 1 of `C1` is met, at version 2\n");
+    let got = cx.reef(&repo, &["node", "get", "C1"]).await?;
+    assert!(
+        got.contains("- unit: Rows round-trip\n  status: met\n  test: tests/rows.rs::round_trip\n"),
+        "{got}"
+    );
+    let listed = cx.reef(&repo, &["accept", "C1"]).await?;
+    assert!(
+        listed.starts_with("1. met  unit: Rows round-trip\n   test: tests/rows.rs::round_trip\n"),
+        "{listed}"
+    );
+    // the second is met or not by its metric, so it isn't set by hand
+    let error = cx
+        .reef(&repo, &["accept", "C1", "2", "met"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("by its metric"), "{error}");
+    // and a third isn't there
+    let error = cx
+        .reef(&repo, &["accept", "C1", "3", "met"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`C1` has 2 acceptance criteria"), "{error}");
+    Ok(())
+}
+
+/// A plan with no problems says so, and one with a problem prints it and fails, and `next`
+/// warns of it
+#[tokio::test]
+async fn check_fails_on_a_plan_with_a_problem() -> anyhow::Result<()> {
+    let cx = Cx::new("check").await?;
+    let repo = cx.ax.repo.clone();
+    // a node whose doc is in the working tree, which leaves the plan whole
+    std::fs::create_dir_all(repo.join("docs"))?;
+    std::fs::write(repo.join("docs/a.md"), "# A\n\nThe design.\n")?;
+    let linked = format!("{}docs: [docs/a.md]\n", work("C1", &[]));
+    cx.put("c1.yml", &linked).await?;
+    let checked = cx.reef(&repo, &["check"]).await?;
+    assert_eq!(checked, "`reef/central` has no problems\n");
+    // the doc's removal breaks it: check prints the problem, then fails naming the count
+    std::fs::remove_file(repo.join("docs/a.md"))?;
+    let (printed, error) = cx.failing(&repo, &["check"]).await?;
+    assert_eq!(
+        printed,
+        "error: reef/central/C1: doc `docs/a.md` not found (looked for docs/a.md)\n"
+    );
+    assert_eq!(error, "`reef/central` has 1 problem");
+    // and next still says what is ready, after a warning that the plan has a problem
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert!(
+        next.starts_with(
+            "warning: `reef/central` has 1 problem; `reef check` lists them\nReady to start (1)"
+        ),
+        "{next}"
+    );
     Ok(())
 }

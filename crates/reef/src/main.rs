@@ -7,6 +7,10 @@
 //! reef node get C17 > c17.yml  # print a node's YAML, after the version it was read at
 //! reef node put c17.yml        # and put it back, refused if it is stale or breaks the plan
 //! reef node rm C62             # remove a node, refused if another needs it
+//! reef status C18 in-progress  # start a node's work, and finish it with `done`
+//! reef accept C18 1 met        # mark its first criterion met, `--test` naming the test
+//! reef check                   # the plan's problems, exiting 1 if it has any
+//! reef next                    # the work ready to start, and what the rest waits on
 //! ```
 
 use clap::Parser;

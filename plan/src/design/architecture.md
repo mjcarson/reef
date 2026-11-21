@@ -179,6 +179,14 @@ app.
   `nodes:` are lifted out and put as one batch with it, each a new node in its group. `rm`
   takes several ids as one checked batch, and never removes a node it wasn't given: a group's
   members are named with it, and a node another needs goes once nothing needs it.
+- **A status or a criterion is a put of its node.** `reef status` and `reef accept` read the
+  node, change the one key and put it back at the version read, so they are refused as any put
+  is, stale or breaking. A group's status is never set, since its members decide it, and nor is
+  a performance criterion's with a target, which its metric decides. Criteria are numbered
+  from 1, as check's messages number them.
+- **`check` and `next` print what `mdbook-reef` prints.** The service builds the plan as check
+  does, and `next`'s report is `reef_model::Next`, which both tools print, so the skill reads
+  the same words in either mode.
 - **The working directory picks the project:** the registered project whose repo holds it. A
   linked worktree picks its main repo's project (`git rev-parse --git-common-dir`).
   `--project` overrides. A node's plan is the project's only plan; with several, `--plan`

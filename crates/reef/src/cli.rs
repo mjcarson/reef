@@ -9,6 +9,10 @@
 //! reef [--conf PATH] node put [FILE] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node get <ID> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node rm <ID>... [--project NAME] [--plan NAME]
+//! reef [--conf PATH] status <ID> <STATUS> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] accept <ID> [<N> <STATUS> [--test TEST]] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] check [--project NAME] [--plan NAME]
+//! reef [--conf PATH] next [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -17,7 +21,7 @@
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
-use reef_model::PlanName;
+use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -25,6 +29,7 @@ use std::path::{Path, PathBuf};
 use crate::client::Client;
 use crate::conf::Conf;
 use crate::node;
+use crate::work;
 
 /// reef's terminal client: projects, plans and nodes, through the service's JSON API
 #[derive(Debug, Parser)]
@@ -74,6 +79,51 @@ pub enum Command {
     /// Put, get and remove a plan's nodes as YAML
     #[command(subcommand)]
     Node(NodeCommand),
+    /// Set where a node's work stands: todo, in-progress, done or blocked
+    ///
+    /// A group's status is derived from its members, so only a member's is set.
+    Status {
+        /// The node's id
+        id: String,
+        /// Where its work now stands
+        #[arg(value_name = "STATUS", value_parser = work::parse_status)]
+        status: Status,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// List a node's acceptance criteria, or set whether one is met: met, unmet or todo
+    ///
+    /// Criteria are numbered from 1, in the order written. A performance criterion with a
+    /// target is met or not by its metric's figures, so its status isn't set here.
+    Accept {
+        /// The node's id
+        id: String,
+        /// The criterion's number, from the list this prints without one
+        #[arg(value_name = "N", requires = "met")]
+        criterion: Option<usize>,
+        /// Whether it is met
+        #[arg(value_name = "STATUS", value_parser = work::parse_met)]
+        met: Option<Met>,
+        /// The test that checks it, such as `tests/scan.rs::dropped_client`
+        #[arg(long, value_name = "TEST", requires = "criterion")]
+        test: Option<String>,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Print the plan's problems, as `mdbook-reef check` prints a book's, failing if it has any
+    Check {
+        /// The plan to check, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Print the work ready to start, in plan order, and what the rest waits on
+    Next {
+        /// The plan to look in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
 }
 
 /// What can be done with projects
@@ -221,6 +271,36 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Node(NodeCommand::Rm { ids, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             node::rm(&client, &plan, &ids, out).await
+        }
+        Command::Status { id, status, pick } => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            work::status(&client, &plan, &id, status, out).await
+        }
+        Command::Accept {
+            id,
+            criterion,
+            met,
+            test,
+            pick,
+        } => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            // a criterion named comes with whether it is met, which clap requires
+            let set = criterion.zip(met);
+            work::accept(&client, &plan, &id, set, test.as_deref(), out).await
+        }
+        Command::Check { pick } => {
+            // each problem, then a plan with any fails, as `mdbook-reef check` does
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            let count = work::check(&client, &plan, out).await?;
+            if count > 0 {
+                anyhow::bail!("{}", work::problems(&plan, count));
+            }
+            writeln!(out, "{}", work::problems(&plan, 0))?;
+            Ok(())
+        }
+        Command::Next { pick } => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            work::next(&client, &plan, out).await
         }
     }
 }
@@ -388,7 +468,7 @@ async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::Result<Proj
 /// * `client` - The service's client
 /// * `cwd` - The working directory
 /// * `pick` - The project and plan named, if they were
-async fn picked_plan(client: &Client, cwd: &Path, pick: &PlanPick) -> anyhow::Result<PlanName> {
+pub async fn picked_plan(client: &Client, cwd: &Path, pick: &PlanPick) -> anyhow::Result<PlanName> {
     // the plan is in the project named, else the working directory's
     let project = picked(client, cwd, &pick.project).await?;
     // a plan named keeps the rule names share, and the service says if it isn't listed
@@ -442,6 +522,7 @@ fn columns<W: Write>(
 mod tests {
     use super::{Cli, Command, NodeCommand, PlanCommand, ProjectCommand, columns};
     use clap::{CommandFactory, Parser};
+    use reef_model::{Met, Status};
     use std::path::PathBuf;
 
     /// clap's own checks of the command line's shape
@@ -499,6 +580,54 @@ mod tests {
         ));
         // and `--plan` means nothing where no plan is picked
         assert!(Cli::try_parse_from(["reef", "plan", "ls", "--plan", "x"]).is_err());
+    }
+
+    /// A status and a criterion's status take the frontmatter's names, and a criterion named
+    /// needs one
+    #[test]
+    fn work_commands_take_what_frontmatter_does() {
+        // a status by its name or an alias, and a name that isn't one refused
+        let status = Cli::try_parse_from(["reef", "status", "C18", "wip", "--plan", "central"]);
+        match status.unwrap().command {
+            Command::Status { id, status, pick } => {
+                assert_eq!((id.as_str(), status), ("C18", Status::InProgress));
+                assert_eq!(pick.plan.as_deref(), Some("central"));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["reef", "status", "C18", "nearly"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "status", "C18"]).is_err());
+        // a node's criteria listed, or one set with its test
+        let list = Cli::try_parse_from(["reef", "accept", "C18"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Command::Accept {
+                criterion: None,
+                met: None,
+                ..
+            }
+        ));
+        let set = ["reef", "accept", "C18", "2", "met", "--test", "t.rs::a"];
+        match Cli::try_parse_from(set).unwrap().command {
+            Command::Accept {
+                criterion,
+                met,
+                test,
+                ..
+            } => {
+                assert_eq!((criterion, met), (Some(2), Some(Met::Met)));
+                assert_eq!(test.as_deref(), Some("t.rs::a"));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // a criterion needs whether it is met, and a test needs its criterion
+        assert!(Cli::try_parse_from(["reef", "accept", "C18", "2"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "accept", "C18", "--test", "t.rs"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "accept", "C18", "x", "met"]).is_err());
+        // check and next pick a plan, and take nothing else
+        let check = Cli::try_parse_from(["reef", "check", "--project", "reef"]).unwrap();
+        assert!(matches!(check.command, Command::Check { .. }));
+        assert!(Cli::try_parse_from(["reef", "next", "C18"]).is_err());
     }
 
     /// The first column is padded to its widest cell

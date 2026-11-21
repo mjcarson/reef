@@ -10,7 +10,7 @@ use reef_api::{
     NodePut, NodeWrite, PlanInfo, PlanWrite, Project, PutNode, Puts, Refusal, Rewrite, StalePut,
     StoredNode, paths,
 };
-use reef_model::{Description, Diagnostic, NodeSpec, Payload, PlanName};
+use reef_model::{Description, Diagnostic, Next, NodeSpec, Payload, PlanName, Status, WaitsOn};
 use reef_service::Backend;
 use reqwest::StatusCode;
 
@@ -497,5 +497,49 @@ pub async fn anchored_doc_link_opens_its_section<B: Backend + 'static>(
             "{path}"
         );
     }
+    Ok(())
+}
+
+/// The plan's ready work and what the rest waits on come back as `mdbook-reef next` says them
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn next_says_what_is_ready_and_what_waits<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // two pieces of work, the second needing the first
+    let batch = Puts::new(vec![
+        NodePut::new(work("C1", &[], 0), None),
+        NodePut::new(work("C2", &["C1"], 1), None),
+    ]);
+    let (_, checked): (_, Checked) = ax.client.post(&paths::nodes(&ax.plan), &batch).await?;
+    assert_eq!(
+        checked,
+        Checked::Applied {
+            versions: vec![1, 1]
+        }
+    );
+    // the first is ready, and the second waits on it
+    let (status, next): (_, Next) = ax.client.get(&paths::next(&ax.plan)).await?;
+    assert_eq!(status, StatusCode::OK);
+    let ready: Vec<&str> = next.ready.iter().map(|ready| ready.id.as_str()).collect();
+    assert_eq!(ready, ["C1"]);
+    assert_eq!(next.waiting.len(), 1);
+    assert_eq!(next.waiting[0].id, "C2");
+    let needs = vec![WaitsOn {
+        id: "C1".to_string(),
+        status: Status::Todo,
+        through: None,
+    }];
+    assert_eq!(next.waiting[0].needs, needs);
+    assert_eq!(next.problems, 0);
+    // a plan that isn't listed is an error naming it
+    let unlisted = PlanName::new("reef", "nope")?;
+    let (status, error): (_, ApiError) = ax.client.get(&paths::next(&unlisted)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
     Ok(())
 }

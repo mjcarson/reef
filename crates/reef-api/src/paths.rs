@@ -15,6 +15,7 @@
 //! | `PUT` | [`REVISION`] |
 //! | `GET` | [`PAYLOAD`] |
 //! | `GET` | [`CHECK`] |
+//! | `GET` | [`NEXT`] |
 //! | `GET` | [`DOC`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
@@ -49,6 +50,9 @@ pub const PAYLOAD: &str = "/api/v1/projects/{project}/plans/{plan}/payload";
 
 /// A plan's problems, as `mdbook-reef check` finds a book's
 pub const CHECK: &str = "/api/v1/projects/{project}/plans/{plan}/check";
+
+/// The work ready to start in a plan, and what the rest waits on, as `mdbook-reef next` says
+pub const NEXT: &str = "/api/v1/projects/{project}/plans/{plan}/next";
 
 /// One of a plan's docs, rendered as the page its links lead to
 ///
@@ -173,6 +177,15 @@ pub fn check(plan: &PlanName) -> String {
     format!("{}/check", self::plan(plan))
 }
 
+/// The path of the work ready to start in a plan, and what the rest waits on
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn next(plan: &PlanName) -> String {
+    format!("{}/next", self::plan(plan))
+}
+
 /// The path every page of a plan's docs is under, ending in `/`
 ///
 /// A payload's links start from it, as a book's start from its root.
@@ -238,6 +251,7 @@ mod tests {
         assert_eq!(super::revision(&plan), format!("{filled}/revision"));
         assert_eq!(super::payload(&plan), format!("{filled}/payload"));
         assert_eq!(super::check(&plan), format!("{filled}/check"));
+        assert_eq!(super::next(&plan), format!("{filled}/next"));
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

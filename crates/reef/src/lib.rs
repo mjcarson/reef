@@ -10,6 +10,8 @@
 //! - **Nodes** ([`node`]): put, get and remove a plan's nodes as the YAML a book's frontmatter
 //!   holds. `get` prints the version a node was read at as a comment, which `put` reads back, so
 //!   a put made after another writer's is refused as stale.
+//! - **Work** ([`work`]): set a node's status and whether each criterion is met, check the plan,
+//!   and say what is ready to start and what the rest waits on.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
 //! - **Config** ([`conf`]): `[api] address` alone, from the file the service reads.
@@ -21,6 +23,7 @@ pub mod cli;
 pub mod client;
 pub mod conf;
 pub mod node;
+pub mod work;
 
 pub use cli::{Cli, run};
 pub use client::Client;

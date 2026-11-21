@@ -284,7 +284,7 @@ pub fn puts_for(listing: &Listing, specs: Vec<NodeSpec>, read: Option<u64>) -> V
 /// * `checked` - What came of the batch
 /// * `plan` - The plan it was written to
 /// * `action` - What the batch was, such as `put`, for the message
-fn settled(checked: Checked, plan: &PlanName, action: &str) -> anyhow::Result<Vec<u64>> {
+pub(crate) fn settled(checked: Checked, plan: &PlanName, action: &str) -> anyhow::Result<Vec<u64>> {
     match checked {
         Checked::Applied { versions } => Ok(versions),
         // each node that wasn't as its writer read it, and what reads it again

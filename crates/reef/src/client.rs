@@ -10,7 +10,7 @@ use reef_api::{
     AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PlanInfo,
     Project, Puts, StoredNode, paths,
 };
-use reef_model::PlanName;
+use reef_model::{Diagnostic, Next, PlanName};
 use serde::de::DeserializeOwned;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -165,6 +165,26 @@ impl Client {
         let path = paths::nodes(plan);
         let request = self.http.post(self.url(&path)).json(batch);
         self.send(request, &path).await
+    }
+
+    /// Finds a plan's problems, as `mdbook-reef check` finds a book's
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn check(&self, plan: &PlanName) -> anyhow::Result<Vec<Diagnostic>> {
+        let path = paths::check(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Says what work in a plan is ready to start, in plan order, and what the rest waits on
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn next(&self, plan: &PlanName) -> anyhow::Result<Next> {
+        let path = paths::next(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
     }
 
     /// The full URL of a route's path

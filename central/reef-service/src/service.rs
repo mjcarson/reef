@@ -31,7 +31,7 @@
 //! pool would find the data directory locked.
 
 use reef_api::{Change, PutNode, paths};
-use reef_model::{Diagnostic, Graph, Payload, PlanName, Record, nodes_from_records};
+use reef_model::{Diagnostic, Graph, Next, Payload, PlanName, Record, nodes_from_records};
 use reef_render::{DocSource, ROOT, Renderer, RepoSource, Sections, doc_body, render_page};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -380,6 +380,30 @@ impl<B: Backend> Service<B> {
         })
         .await?;
         Ok(problems)
+    }
+
+    /// Says what work in a plan is ready to start, in plan order, and what the rest waits on,
+    /// as `mdbook-reef next` says it of a book
+    ///
+    /// The plan is built as check builds it, so the answer counts its problems too; a plan with
+    /// problems still has an order.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Service::next", skip_all, err(Debug))]
+    pub async fn next(&self, plan: &PlanName) -> anyhow::Result<Next> {
+        // the plan as it stands, and the working tree its docs are read from
+        let (records, repo) = self.records(plan).await?;
+        let sections = self.sections.clone();
+        // build it off the async threads, since its docs are files
+        let next = tokio::task::spawn_blocking(move || {
+            let renderer = Renderer::new(RepoSource::new(repo), sections);
+            let (graph, problems) = build(&renderer, records);
+            Next::of(&graph, problems.len())
+        })
+        .await?;
+        Ok(next)
     }
 
     /// Builds a plan into the viewer's payload: every node, its body rendered, its links

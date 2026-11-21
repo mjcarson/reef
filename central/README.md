@@ -14,8 +14,9 @@ reef-shoal     the external node: shoal's node program over reef's schema
 The service's data types, and the JSON API's requests, answers, routes and changes, are
 `reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
-add|ls|show` and `reef plan new|ls`, which call the address `[api] address` names and say so when
-nothing answers there.
+add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef status`, `reef accept`, `reef
+check` and `reef next`, which call the address `[api] address` names and say so when nothing
+answers there.
 
 ## Building
 
