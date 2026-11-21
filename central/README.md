@@ -159,9 +159,14 @@ over loopback.
 
 `reef-app` is a Dioxus 0.7.10 fullstack app. Its front page lists every project with its plans,
 and each plan opens at `/plans/{project}/{plan}`, drawn by reef-view linked into the client's
-wasm, with the node the viewer selects in a panel beside it. Its server functions sit under
-`/app/`, each a call on the service, and its server mounts `api::router` beside them, so one port
-serves the pages and the JSON API alike.
+wasm, with the node the viewer selects in a panel beside it that edits its YAML. A plan's page
+follows the change stream, so each put shows up live. Its server functions sit under `/app/`,
+each a call on the service, and its server mounts `api::router` beside them, so one port serves
+the pages and the JSON API alike.
+
+- **The editor saves as `reef node put` does,** through `reef_api::puts_for`, at the version it
+  read: another writer's change since comes back stale with the newer version, and a save that
+  would add a problem comes back with check's messages.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under

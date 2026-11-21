@@ -13,7 +13,8 @@ default = []
 # the wasm client: Dioxus's web renderer and the viewer, and never shoal or the service
 web = ["dioxus/web", "dep:reef-view", "dep:web-sys", "dep:wasm-bindgen"]
 # the server: Dioxus's axum server, the service and the JSON API's router over shoal's client half
-server = ["dioxus/server", "dep:reef-service", "dep:tokio", "dep:axum", "dep:anyhow", "dep:tracing"]
+# (reef-model's YAML, for the editor's server functions)
+server = ["dioxus/server", "dep:reef-service", "dep:tokio", "dep:axum", "dep:anyhow", "dep:tracing", "reef-model/parse"]
 # shoal's engine inside the server, which needs nightly, glommio and target-cpu=native
 embedded = ["server", "reef-service/embedded"]
 

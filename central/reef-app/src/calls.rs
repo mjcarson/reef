@@ -4,10 +4,12 @@
 //! the hooks depend on. Their answers are the service's own types, from `reef-api`.
 
 use dioxus::prelude::*;
+#[cfg(feature = "server")]
+use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{PlanInfo, Project};
 use reef_model::Payload;
 #[cfg(feature = "server")]
-use reef_model::PlanName;
+use reef_model::{NodeSpec, PlanName};
 use serde::{Deserialize, Serialize};
 
 /// A project and its plans, as the picker lists them
@@ -81,6 +83,165 @@ pub async fn payload(project: String, plan: String) -> Result<Payload, ServerFnE
         .payload(&name)
         .await
         .map_err(failed)
+}
+
+/// A node as the editor shows it
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NodeText {
+    /// The node's id
+    pub id: String,
+    /// Its spec, as frontmatter
+    pub yaml: String,
+    /// The version it was read at, which a save names
+    pub version: u64,
+    /// Each problem the plan has at this node, as check says it
+    pub problems: Vec<String>,
+}
+
+/// What came of saving a node's YAML
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Saved {
+    /// Written, at this new version
+    Applied {
+        /// The node's version now
+        version: u64,
+    },
+    /// The node changed after the editor read it, so nothing was written
+    Stale {
+        /// The node as it is now, or `None` if it was removed
+        now: Option<NodeText>,
+    },
+    /// The plan would have problems it hadn't, so nothing was written
+    Refused {
+        /// Each problem it would add, as check says it
+        problems: Vec<String>,
+    },
+    /// The YAML isn't this node's spec, so nothing was written
+    Invalid {
+        /// What is wrong with it
+        message: String,
+    },
+}
+
+/// A node's YAML, at the version it is at, with the problems the plan has at it
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+#[get("/app/node?project&plan&id")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::node_text", skip_all, err(Debug))
+)]
+pub async fn node_text(
+    project: String,
+    plan: String,
+    id: String,
+) -> Result<NodeText, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    text_of(&name, &id)
+        .await?
+        .ok_or_else(|| ServerFnError::new(format!("`{name}/{id}` is not in its plan")))
+}
+
+/// Saves a node's YAML over the version the editor read, unless the node moved on since or the
+/// plan would have a problem it hadn't
+///
+/// The YAML goes in as `reef node put` puts it: the node keeps its place and body, and members
+/// listed inline go in as new nodes with it, all checked as one change.
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node being edited, which the YAML must keep
+/// * `yaml` - The node's spec, as frontmatter
+/// * `read` - The version the editor read
+#[post("/app/save")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::save_node", skip_all, err(Debug))
+)]
+pub async fn save_node(
+    project: String,
+    plan: String,
+    id: String,
+    yaml: String,
+    read: u64,
+) -> Result<Saved, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    // the YAML must be this node's spec
+    let spec = match NodeSpec::from_yaml(&yaml) {
+        Ok(spec) => spec,
+        Err(error) => {
+            return Ok(Saved::Invalid {
+                message: error.message,
+            });
+        }
+    };
+    if spec.id != id {
+        return Ok(Saved::Invalid {
+            message: format!(
+                "the YAML is of `{}`, not `{id}`: a node's id can't change here",
+                spec.id
+            ),
+        });
+    }
+    // the node at the version read, its members lifted out, placed as the CLI places them
+    let service = crate::server::service();
+    let listing = service.list(&name).await.map_err(failed)?;
+    let puts = puts_for(&listing, lift(spec), Some(read));
+    // checked against the whole plan as one change
+    match service
+        .batch(&name, Puts::new(puts))
+        .await
+        .map_err(failed)?
+    {
+        Checked::Applied { versions } => Ok(Saved::Applied {
+            version: versions.first().copied().unwrap_or(read),
+        }),
+        Checked::Stale(_) => Ok(Saved::Stale {
+            now: text_of(&name, &id).await?,
+        }),
+        Checked::Refused(problems) => Ok(Saved::Refused {
+            problems: problems.iter().map(ToString::to_string).collect(),
+        }),
+    }
+}
+
+/// A node as the editor shows it, if its plan has it
+///
+/// # Arguments
+///
+/// * `name` - The plan
+/// * `id` - The node's id
+#[cfg(feature = "server")]
+async fn text_of(name: &PlanName, id: &str) -> Result<Option<NodeText>, ServerFnError> {
+    // the node as stored, if it is
+    let service = crate::server::service();
+    let Some(stored) = service.get(name, id).await.map_err(failed)? else {
+        return Ok(None);
+    };
+    // the problems check finds at this node, which a stored node's are named for
+    let at = format!("{name}/{id}");
+    let problems = service
+        .check(name)
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .filter(|problem| problem.source == at)
+        .map(|problem| problem.message)
+        .collect();
+    Ok(Some(NodeText {
+        id: id.to_string(),
+        yaml: stored.spec.to_yaml(),
+        version: stored.version,
+        problems,
+    }))
 }
 
 /// A plan's full name from the route's two parts

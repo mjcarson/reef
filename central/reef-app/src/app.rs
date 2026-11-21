@@ -33,7 +33,11 @@ code { font-size: 0.92em; }
 .reef-app-over { position: absolute; top: 3rem; left: 0; right: 0; text-align: center; }
 .reef-app-panel { width: 22rem; flex: none; overflow: auto; border-left: 1px solid var(--line); background: var(--panel); padding: 0.8rem 1rem; box-sizing: border-box; }
 .reef-app-panel-id { margin: 0; }
-.reef-app-panel-title { margin: 0.3rem 0; font-size: 1.1rem; }
+.reef-app-panel-title { margin: 0.3rem 0 0.6rem; font-size: 1.1rem; }
+.reef-app-yaml { width: 100%; box-sizing: border-box; min-height: 24rem; resize: vertical; font-family: monospace; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem; }
+.reef-app-actions { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
+.reef-app-problems { margin: 0.3rem 0 0.6rem; padding-left: 1.2rem; color: #c0392b; font-size: 0.9rem; }
+.reef-app-newer { white-space: pre-wrap; font-size: 0.8rem; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem; }
 "#;
 
 /// The app's pages, by path
@@ -189,7 +193,13 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
             div { class: "reef-app-stage",
                 PlanGraph { payload, selected }
                 if let (Some(payload), Some(id)) = (drawn, selected()) {
-                    NodePanel { payload, id }
+                    NodePanel {
+                        payload,
+                        project,
+                        plan,
+                        id,
+                        changes,
+                    }
                 }
             }
         }

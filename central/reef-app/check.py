@@ -298,6 +298,44 @@ def c15_a_put_shows_live(page):
           {"before": before, "after": after, "no reload": kept, "panel": panel})
 
 
+def c20_a_stale_save_shows_the_newer(page):
+    """C20: the panel saves a node's YAML, and a save after another writer's shows the newer version."""
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    page.locator(".reef-viewport .reef-node", has_text="W3 Look after it").click()
+    page.wait_for_function("() => (document.querySelector('.reef-app-yaml') || {}).value?.includes('id: W3')",
+                           timeout=10000)
+    # a plain edit saves, and the diagram redraws with it
+    yaml = page.input_value(".reef-app-yaml")
+    page.fill(".reef-app-yaml", yaml.replace("W3 Look after it", "W3 Look after it well"))
+    page.click(".reef-app-save")
+    page.wait_for_selector(".reef-app-saved", timeout=10000)
+    page.wait_for_function("() => document.querySelector('.reef-viewport').textContent.includes('Look after it well')",
+                           timeout=10000)
+    page.wait_for_timeout(1000)
+    redrawn = "Look after it well" in page.evaluate("() => document.querySelector('.reef-viewport').textContent")
+    # an edit made while another writer moves the node on
+    page.fill(".reef-app-yaml", page.input_value(".reef-app-yaml").replace("It lasts.", "It lasts for years."))
+    reef("status", "W3", "done", "--plan", "draws")
+    page.wait_for_timeout(1500)
+    kept = "It lasts for years." in page.input_value(".reef-app-yaml")
+    page.click(".reef-app-save")
+    page.wait_for_selector(".reef-app-stale", timeout=10000)
+    newer = page.inner_text(".reef-app-newer")
+    page.screenshot(path=str(SHOTS / "reef-app-stale.png"))
+    # starting again from the newer version
+    page.click(".reef-app-take")
+    page.wait_for_timeout(300)
+    taken = page.input_value(".reef-app-yaml")
+    check("C20 a stale save shows the newer version",
+          redrawn and kept and "status: done" in newer and "status: done" in taken
+          and page.locator(".reef-app-stale").count() == 0,
+          {"saved and redrawn": redrawn, "draft kept through the change": kept, "newer shown": newer[:120],
+           "newer taken": "status: done" in taken})
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -335,6 +373,7 @@ def main():
             c54_selecting_opens_the_panel(page)
             c54_one_viewer_listens(page)
             c15_a_put_shows_live(page)
+            c20_a_stale_save_shows_the_newer(page)
             browser.close()
     finally:
         stop(server)

@@ -22,9 +22,8 @@
 //! A put or removal that is stale, or that would add a problem to the plan, writes nothing and
 //! fails with what was wrong: each stale node, or check's messages.
 
-use reef_api::{
-    Checked, Listing, NodePut, NodeRemove, NodeWrite, Puts, Refusal, StalePut, StoredNode, lift,
-};
+pub use reef_api::puts_for;
+use reef_api::{Checked, NodeRemove, Puts, Refusal, StalePut, StoredNode, lift};
 use reef_model::{NodeSpec, PlanName};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -219,62 +218,6 @@ pub fn read_version(text: &str) -> anyhow::Result<Option<u64>> {
         }
     }
     Ok(version)
-}
-
-/// The puts a node's YAML makes: the node, at the version its writer read, then each member
-/// lifted out of it, each a new node
-///
-/// A node the plan has keeps its place in the written order and its body. A new node goes after
-/// the plan's last, each member after the node before it, with an empty body.
-///
-/// # Arguments
-///
-/// * `listing` - The plan as it stands
-/// * `specs` - The node's spec, then each member lifted out of it
-/// * `read` - The version the node was got at, or `None` for a new node
-///
-/// # Examples
-///
-/// ```
-/// use reef::node::puts_for;
-/// use reef_api::Listing;
-/// use reef_model::NodeSpec;
-///
-/// let listing = Listing { revision: 1, nodes: Vec::new() };
-/// let spec = NodeSpec { id: "C17".into(), ..NodeSpec::default() };
-/// let puts = puts_for(&listing, vec![spec], None);
-/// assert_eq!((puts[0].node.order, puts[0].read), (0, None));
-/// ```
-pub fn puts_for(listing: &Listing, specs: Vec<NodeSpec>, read: Option<u64>) -> Vec<NodePut> {
-    // the nodes the plan has, by id, and the first place after its last
-    let stored: HashMap<&str, &StoredNode> = listing
-        .nodes
-        .iter()
-        .map(|node| (node.spec.id.as_str(), node))
-        .collect();
-    let mut next = listing
-        .nodes
-        .iter()
-        .map(|node| node.order + 1)
-        .max()
-        .unwrap_or(0);
-    specs
-        .into_iter()
-        .enumerate()
-        .map(|(i, spec)| {
-            // the node the YAML is of names the version it was got at, and its members are new
-            let read = if i == 0 { read } else { None };
-            // a stored node keeps its place and body, and a new one goes after the last
-            let (order, body) = match stored.get(spec.id.as_str()) {
-                Some(node) => (node.order, node.body.clone()),
-                None => {
-                    next += 1;
-                    (next - 1, String::new())
-                }
-            };
-            NodePut::new(NodeWrite { spec, body, order }, read)
-        })
-        .collect()
 }
 
 /// The versions an applied batch wrote, or an error saying why it wrote nothing

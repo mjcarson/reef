@@ -29,7 +29,7 @@ pub use change::{Change, PutNode};
 pub use error::{ApiError, ErrorCode};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
-    StalePut, StoredNode, lift, records,
+    StalePut, StoredNode, lift, puts_for, records,
 };
 pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Project};
 

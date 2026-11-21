@@ -255,3 +255,66 @@ fn a_plans_page_names_its_plan() -> anyhow::Result<()> {
         anyhow::Ok(())
     })
 }
+
+/// The editor's save writes a node over the version it read, and writes nothing for a stale
+/// save, one that would add a problem, or YAML that isn't the node's
+#[test]
+fn the_editor_saves_over_the_version_it_read() -> anyhow::Result<()> {
+    use reef_app::calls::{Saved, node_text, save_node};
+    let fx = fx();
+    fx.runtime.block_on(async {
+        let repo = fx.project("editor", &["central"]).await?;
+        // the server functions as the panel calls them, on the server's side
+        let read = || node_text("editor".into(), "central".into(), "A1".into());
+        let save = |yaml: String, version: u64| {
+            save_node(
+                "editor".into(),
+                "central".into(),
+                "A1".into(),
+                yaml,
+                version,
+            )
+        };
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        // a new title, over the version read, is written
+        let text = read().await.map_err(failed)?;
+        let renamed = text
+            .yaml
+            .replace("The first of central", "The first, renamed");
+        let saved = save(renamed, text.version).await.map_err(failed)?;
+        assert!(
+            matches!(saved, Saved::Applied { version } if version > text.version),
+            "{saved:?}"
+        );
+        let text = read().await.map_err(failed)?;
+        assert!(text.yaml.contains("The first, renamed"), "{}", text.yaml);
+        // the CLI moves it on, so a save from the older reading is stale and shows the newer
+        fx.reef(&repo, &["status", "A1", "done"]).await?;
+        let saved = save(text.yaml.clone(), text.version)
+            .await
+            .map_err(failed)?;
+        match saved {
+            Saved::Stale { now: Some(now) } => {
+                assert!(now.version > text.version);
+                assert!(now.yaml.contains("status: done"), "{}", now.yaml);
+            }
+            other => panic!("a save from an older reading was {other:?}"),
+        }
+        // a need the plan lacks would add a problem, so it is refused with check's message
+        let text = read().await.map_err(failed)?;
+        let broken = format!("{}needs: [NOPE]\n", text.yaml);
+        match save(broken, text.version).await.map_err(failed)? {
+            Saved::Refused { problems } => {
+                assert!(problems.iter().any(|p| p.contains("NOPE")), "{problems:?}")
+            }
+            other => panic!("a need the plan lacks was {other:?}"),
+        }
+        // YAML that isn't a spec, and another node's, write nothing
+        for yaml in ["id: [".to_string(), text.yaml.replace("id: A1", "id: A2")] {
+            let saved = save(yaml.clone(), text.version).await.map_err(failed)?;
+            assert!(matches!(saved, Saved::Invalid { .. }), "{yaml}: {saved:?}");
+        }
+        assert_eq!(read().await.map_err(failed)?, text);
+        anyhow::Ok(())
+    })
+}

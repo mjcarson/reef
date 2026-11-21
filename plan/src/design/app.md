@@ -37,8 +37,8 @@ takes the plan's name, which its saved groups are kept under.
   the canvas and sidebar as Dioxus components over `reef-model` and `reef-layout`, but only once
   the app works with the mounted viewer.
 - **Two sidebars until then.** The viewer's sidebar keeps the why, the what, acceptance and
-  performance. The Dioxus node panel beside it holds the editor, the Changes tab and the Comments
-  tab.
+  performance. The Dioxus node panel beside it holds the editor, and gains a Changes tab and a
+  Comments tab with M7 ([C33](../milestones/m7.md), [C35](../milestones/m7.md)).
 - **mdbook-reef keeps the viewer as it is.** The static mode builds with the auto-start feature,
   and its committed `reef.js` is unchanged in behaviour.
 
