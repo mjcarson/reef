@@ -88,6 +88,36 @@ pub fn html_of(path: &str) -> String {
     format!("{dir}{file}")
 }
 
+/// The markdown files mdbook writes a page from, as [`html_of`] names it, the likeliest first:
+/// `a/b.html` is written from `a/b.md`, and `a/index.html` from `a/index.md` or a `README.md`.
+///
+/// # Arguments
+///
+/// * `page` - The page's path
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::paths::md_of;
+///
+/// assert_eq!(md_of("design/app.html"), ["design/app.md"]);
+/// assert!(md_of("design/app.png").is_empty());
+/// ```
+pub fn md_of(page: &str) -> Vec<String> {
+    let (dir, file) = match page.rfind('/') {
+        Some(i) => (&page[..=i], &page[i + 1..]),
+        None => ("", page),
+    };
+    // only a page is written from markdown
+    let Some(stem) = file.strip_suffix(".html") else { return Vec::new() };
+    let mut out = vec![format!("{dir}{stem}.md")];
+    // and a directory's index from its README too, however its name is cased
+    if stem == "index" {
+        out.extend(["README.md", "readme.md"].map(|readme| format!("{dir}{readme}")));
+    }
+    out
+}
+
 /// `../` once for each directory a page is nested in.
 ///
 /// # Arguments
@@ -172,6 +202,11 @@ mod tests {
     fn pages() {
         assert_eq!(html_of("a/README.md"), "a/index.html");
         assert_eq!(html_of("a/b.md"), "a/b.html");
+        // each page leads back to the markdown it is written from
+        for md in ["a/b.md", "a/README.md", "index.md"] {
+            assert!(md_of(&html_of(md)).contains(&md.to_string()), "{md}");
+        }
+        assert_eq!(md_of("a/index.html"), ["a/index.md", "a/README.md", "a/readme.md"]);
         assert_eq!(prefix_for("a/b/c.md"), "../../");
         assert_eq!(relative("future-work/scans/plan", "features/f.md"), "../../../features/f.md");
         assert_eq!(heading_id("M23. The walk, rebuilt"), "m23-the-walk-rebuilt");

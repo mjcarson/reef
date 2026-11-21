@@ -110,8 +110,14 @@ A node's doc is a markdown file in its project's repo, or a page stored with the
   `<main>` and mdbook's heading ids, so the viewer's `docs.rs` works unchanged. The payload's
   links are absolute paths to them, since `docs.rs` resolves a link against the window's URL
   ([X6](#what-x6-found)).
+- **Pages sit under their plan.** A plan's docs are served at
+  `/api/v1/projects/{project}/plans/{plan}/docs/`, each at the page mdbook would write for it
+  (`docs/design.html` for `docs/design.md`), so a plan's own pages can sit beside its repo's
+  ([C28](../milestones/m6.md)).
 - **The same section for Claude.** next_task returns the doc section as markdown, so Claude reads
   the same design the user sees.
-- **Links that leave the repo are refused.**
+- **Links that leave the repo are refused.** Check refuses a link that climbs out with `..`, and
+  no doc is read or served through a symlink that leads out of the repo.
+- **Only markdown is served.** An image or other file a doc links to doesn't load in its page.
 - **Docs come from the working tree.** The docs shown are those of the checked-out branch, which
   can differ from the commit a node was done on.

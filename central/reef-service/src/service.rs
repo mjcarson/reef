@@ -16,8 +16,11 @@
 //! - **Checked under the plan's write lock**, so two writes that are fine alone can't break the
 //!   plan together.
 //! - **Docs come from the project's working tree.** A stored node's links resolve from its
-//!   repo's root, as `mdbook-reef check` resolves a book's from its `src`. They are read off
-//!   the async threads.
+//!   repo's root, as `mdbook-reef check` resolves a book's from its `src`, and a link that
+//!   leaves the repo is refused. They are read off the async threads.
+//! - **Docs are served as pages.** A payload's links lead under [`paths::docs`], where
+//!   [`Service::doc_page`] renders each doc as the page mdbook would write for it, so the
+//!   viewer's *Read here* cuts a section out of it as out of a book's page.
 //! - **Each applied write is a change.** A project registered, a plan listed, a batch put or a
 //!   whole plan written is sent to every subscriber of [`Service::changes`], after the write's
 //!   lock is let go, so two writers' changes to one plan can arrive in either order. A refused
@@ -27,9 +30,9 @@
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
 //! pool would find the data directory locked.
 
-use reef_api::{Change, PutNode};
+use reef_api::{Change, PutNode, paths};
 use reef_model::{Diagnostic, Graph, Payload, PlanName, Record, nodes_from_records};
-use reef_render::{DocSource, FsSource, Renderer, Sections};
+use reef_render::{DocSource, ROOT, Renderer, RepoSource, Sections, doc_body, render_page};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -41,8 +44,8 @@ use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::store::{
-    AddedProject, Checked, Listing, NodePut, NodeWrite, NotRegistered, PlanInfo, Project, Proposal,
-    Rewrite, Store, StoredNode,
+    AddedProject, Checked, Listing, NodePut, NodeWrite, NotListed, NotRegistered, PlanInfo,
+    Project, Proposal, Rewrite, Store, StoredNode,
 };
 
 /// The process's one service over shoal, opened on first use
@@ -346,7 +349,7 @@ impl<B: Backend> Service<B> {
         let sections = self.sections.clone();
         // build it off the async threads, since its docs are files
         let problems = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(FsSource::new(repo), sections);
+            let renderer = Renderer::new(RepoSource::new(repo), sections);
             build(&renderer, records).1
         })
         .await?;
@@ -357,8 +360,8 @@ impl<B: Backend> Service<B> {
     /// resolved
     ///
     /// A plan with problems still has a payload, built without the parts that broke. Its links
-    /// start with `reef-root:/`, as a book's do before a page's way back to its root is filled
-    /// in.
+    /// to its docs are absolute paths under [`paths::docs`], where [`Service::doc_page`] serves
+    /// them, since the viewer resolves a link against the window's URL.
     ///
     /// # Arguments
     ///
@@ -370,13 +373,45 @@ impl<B: Backend> Service<B> {
         let sections = self.sections.clone();
         // build and render it off the async threads, since its docs are files
         let payload = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(FsSource::new(repo), sections);
+            let renderer = Renderer::new(RepoSource::new(repo), sections);
             let (graph, _) = build(&renderer, records);
             // a stored node has no page of its own
             renderer.payload(&graph, |_| None)
         })
         .await?;
-        Ok(payload)
+        // its links lead to the pages this service renders its docs as
+        rooted(payload, &paths::docs(plan))
+    }
+
+    /// Renders one of a plan's docs as the page its links lead to, or `None` if no doc of the
+    /// plan's is written to that page
+    ///
+    /// The page is the one mdbook would write for the doc: `docs/design.html` for the repo's
+    /// `docs/design.md`, its `<main>` holding the doc with each heading under the id mdbook
+    /// gives it. Its links lead under [`paths::docs`], as the payload's do. A page whose path
+    /// leaves the repo, or whose doc a symlink leads out of it to, is not found.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `page` - The page's path from the root of the plan's docs
+    #[instrument(name = "Service::doc_page", skip_all, err(Debug))]
+    pub async fn doc_page(&self, plan: &PlanName, page: &str) -> anyhow::Result<Option<String>> {
+        // the docs of a plan its project lists, read from that project's working tree
+        let repo = self.repo(plan).await?;
+        let plans = self.store.plans(&plan.project).await?;
+        if !plans.iter().any(|info| info.name == *plan) {
+            return Err(NotListed(plan.clone()).into());
+        }
+        let docs = paths::docs(plan);
+        let page = page.to_string();
+        // read and render it off the async threads, since its doc is a file
+        let html = tokio::task::spawn_blocking(move || {
+            let source = RepoSource::new(repo);
+            page_of(&source, &page).map(|html| html.replace(ROOT, &docs))
+        })
+        .await?;
+        Ok(html)
     }
 
     /// Reads a plan's records as it stands, and the repo its docs are read from
@@ -443,13 +478,45 @@ async fn added(
 ) -> anyhow::Result<Vec<Diagnostic>> {
     // its docs are files, so build both sides off the async threads
     let added = tokio::task::spawn_blocking(move || {
-        let renderer = Renderer::new(FsSource::new(repo), sections);
+        let renderer = Renderer::new(RepoSource::new(repo), sections);
         let (_, before) = build(&renderer, proposal.before);
         let (_, after) = build(&renderer, proposal.after);
         new_problems(&before, after)
     })
     .await?;
     Ok(added)
+}
+
+/// A payload with its links put under the path its plan's docs are served from
+///
+/// Every link a payload holds starts with `ROOT`, wherever in it the link sits, so the root is
+/// swapped in its JSON, as mdbook-reef fills in each page's way back to a book's root.
+///
+/// # Arguments
+///
+/// * `payload` - The payload, its links starting with `ROOT`
+/// * `docs` - The path its plan's docs are served from, ending in `/`
+fn rooted(payload: Payload, docs: &str) -> anyhow::Result<Payload> {
+    // the docs' path is percent-encoded, so it needs no escaping in JSON
+    let json = serde_json::to_string(&payload)?.replace(ROOT, docs);
+    Ok(serde_json::from_str(&json)?)
+}
+
+/// A doc rendered as the page at a path, its links starting with `ROOT`, or `None` if no doc
+/// of the source's is written to that page
+///
+/// # Arguments
+///
+/// * `source` - Where the plan's docs are read from
+/// * `page` - The page's path from the root of the docs
+fn page_of<S: DocSource>(source: &S, page: &str) -> Option<String> {
+    // a page is named as a link to it would be, with `.` and `..` worked out
+    let page = reef_render::paths::join("", page);
+    // the first markdown file the page could be written from that the source has
+    reef_render::paths::md_of(&page).into_iter().find_map(|md| {
+        let text = source.read(&md)?;
+        Some(render_page(doc_body(&text), &md))
+    })
 }
 
 /// The problems found after a write that weren't found before it, in the order found after
@@ -641,5 +708,6 @@ mod tests {
         send(service.write_plan(&plan, Vec::new()));
         send(service.check(&plan));
         send(service.payload(&plan));
+        send(service.doc_page(&plan, "design.html"));
     }
 }

@@ -3,8 +3,9 @@
 //! Each case's plan is `reef/central`, of a project registered for a fresh git repo whose working
 //! tree holds the plan's docs.
 
+use reef_api::paths;
 use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
-use reef_render::{FsSource, Renderer, Sections};
+use reef_render::{ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
     Backend, Checked, NodePut, NodeWrite, NotListed, NotRegistered, Refusal, Rewrite, StalePut,
 };
@@ -194,7 +195,7 @@ pub async fn missing_doc_is_refused_and_present_doc_accepted<B: Backend>(
     let answer = sx.service.put(&sx.plan, new(vec![gone_written])).await?;
     let expected = vec![problem(
         "B",
-        "doc `docs/gone.md` not found (looked for src/docs/gone.md)",
+        "doc `docs/gone.md` not found (looked for docs/gone.md)",
     )];
     assert_eq!(answer, Checked::Refused(expected));
     // and so is a link to a heading the doc doesn't have
@@ -203,11 +204,39 @@ pub async fn missing_doc_is_refused_and_present_doc_accepted<B: Backend>(
     let answer = sx.service.put(&sx.plan, new(vec![nope])).await?;
     let expected = vec![problem(
         "C",
-        "doc `docs/design.md#nope`: src/docs/design.md has no heading with the id `nope`",
+        "doc `docs/design.md#nope`: docs/design.md has no heading with the id `nope`",
     )];
     assert_eq!(answer, Checked::Refused(expected));
     // with only the node that links what is there written
     assert_eq!(ids(&sx).await?, ["A"]);
+    Ok(())
+}
+
+/// A link that leaves the repo is refused, though the file it names is there
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn link_leaving_the_repo_is_refused<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // a doc beside the repo, which a link from the repo's root can climb out to
+    doc(&sx.dir, "outside.md", DESIGN)?;
+    let out = linking(work("A", 0), &["../outside.md#rows"]);
+    // refused with check's message, as a link that leaves the repo, and not briefed from it
+    let answer = sx.service.put(&sx.plan, new(vec![out])).await?;
+    let Checked::Refused(problems) = answer else {
+        panic!("a link that leaves the repo was written: {answer:?}");
+    };
+    assert_eq!(
+        problems[0],
+        problem("A", "doc `../outside.md#rows` leaves the repo")
+    );
+    assert!(
+        problems[1]
+            .message
+            .contains("does not say why it is needed"),
+        "{problems:?}"
+    );
+    assert!(ids(&sx).await?.is_empty());
     Ok(())
 }
 
@@ -430,15 +459,17 @@ pub async fn payload_equals_graph_build_of_stored_nodes<B: Backend>(
     // the oracle: the graph their records build, briefed from the working tree and rendered
     let records = listing.records(&sx.plan)?;
     let (mut graph, mut problems) = Graph::build(nodes_from_records(records));
-    let renderer = Renderer::new(FsSource::new(&sx.repo), Sections::default());
+    let renderer = Renderer::new(RepoSource::new(&sx.repo), Sections::default());
     problems.extend(renderer.prepare(&mut graph));
     assert_eq!(problems, Vec::<Diagnostic>::new());
     let oracle = renderer.payload(&graph, |_| None);
-    // the service's payload is that, field for field
+    // the service's payload is that, field for field, its links under the plan's docs
+    let docs = paths::docs(&sx.plan);
+    let oracle = serde_json::to_string(&oracle)?.replace(ROOT, &docs);
     let payload = sx.service.payload(&sx.plan).await?;
     assert_eq!(
         serde_json::to_value(&payload)?,
-        serde_json::to_value(&oracle)?
+        serde_json::from_str::<serde_json::Value>(&oracle)?
     );
     // in written order, each member under its group
     let ids: Vec<&str> = payload.nodes.iter().map(|node| node.id.as_str()).collect();
@@ -448,13 +479,14 @@ pub async fn payload_equals_graph_build_of_stored_nodes<B: Backend>(
     // named in its plan, its brief form taken from the doc, and its links resolved
     assert_eq!(c11.origin.to_string(), "reef/central/C11");
     assert_eq!(c11.why_from.as_deref(), Some("Context"));
-    assert_eq!(c11.docs[0].href, "reef-root:/docs/design.html#rows");
+    let page = format!("{docs}docs/design.html#rows");
+    assert_eq!(c11.docs[0].href, page);
     assert!(
-        c11.html
-            .contains("href=\"reef-root:/docs/design.html#rows\""),
+        c11.html.contains(&format!("href=\"{page}\"")),
         "{}",
         c11.html
     );
+    assert!(!c11.html.contains(ROOT), "{}", c11.html);
     Ok(())
 }
 

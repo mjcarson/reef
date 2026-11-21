@@ -85,11 +85,16 @@ It reads and writes through a `Store`, and checks every write against the whole 
   refused if it has any problem, before a revision is reserved.
 - **Docs come from the project's working tree.** A stored node's links resolve from its repo's
   root, so a link to a doc or heading that isn't there refuses the write, and a node can take
-  its why and what from a doc.
+  its why and what from a doc. A link that leaves the repo (``doc `../x.md` leaves the repo``)
+  refuses it too, and no doc is read through a symlink that leads out of the repo.
 - **The check runs under the plan's write lock**, through `Store::put_checked` and
   `Store::write_plan_checked`, so two writes that are fine alone can't break the plan together.
   It builds the plan off the async threads, since its docs are files.
-- **`check` and `payload`** give a plan's problems and the viewer's payload.
+- **`check` and `payload`** give a plan's problems and the viewer's payload. The payload's doc
+  links are absolute paths under the plan's `docs/` (`reef_api::paths::docs`), where `doc_page`
+  renders each doc as the page mdbook would write for it: a `<main>` holding the doc, each
+  heading under mdbook's id, so the viewer's *Read here* cuts its section out unchanged. Only
+  markdown is served, so an image a doc shows doesn't load there.
 - **Each applied write is a change.** A project registered, a plan listed, a batch put or a whole
   plan written goes to every subscriber of `Service::changes`, after the write's lock is let go,
   so two writers' changes to one plan can arrive in either order; each put names its node's new
@@ -119,6 +124,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `PUT …/plans/{plan}/revision` `PlanWrite` | `Rewrite`: 200, or 422 if it would add a problem |
 | `GET …/plans/{plan}/payload` | the viewer's `Payload` |
 | `GET …/plans/{plan}/check` | its problems, as check prints them |
+| `GET …/plans/{plan}/docs/{*path}` | a doc as its HTML page (`docs/design.html` for `docs/design.md`), or 404 |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as

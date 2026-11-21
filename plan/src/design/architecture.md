@@ -117,7 +117,8 @@ and answers a round trip on a plain JSON route and through a server function.
 
 - **`reef-render` gets the rendering and doc resolution**, over a `DocSource` trait that reads a
   doc by path and lists its headings. It has a filesystem source, which mdbook-reef uses, and an
-  in-memory one. The service gets a repo and plan-pages source ([C14](app.md#docs-in-central-mode)).
+  in-memory one. The service reads a project's repo through `RepoSource`, which no link may
+  leave ([C14](app.md#docs-in-central-mode)); a plan's own pages are [C28](../milestones/m6.md)'s.
 - **The example book is the test.** Its payload JSON must be byte-identical before and after
   the move, and `mdbook-reef check` must print the same.
 - **Names, not just ids.** A node's full name is `project/plan/id` ([C2](../milestones/m1.md)).

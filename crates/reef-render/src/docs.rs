@@ -119,7 +119,8 @@ impl<S: DocSource> Renderer<S> {
         t
     }
 
-    /// Resolve a doc link written in `from`, checking that its file and anchor exist.
+    /// Resolve a doc link written in `from`, checking that its source can hold it and that its
+    /// file and anchor exist.
     ///
     /// # Arguments
     ///
@@ -129,16 +130,18 @@ impl<S: DocSource> Renderer<S> {
         match paths::resolve(from, link) {
             Target::External(url) => Ok(Link { label: url.clone(), href: url }),
             Target::Internal { path, anchor } => {
+                // the source names where it looks, or refuses a path it can't hold, whatever it names
+                let place = self.source.place(&path).map_err(|why| format!("doc `{link}` {why}"))?;
                 if !path.ends_with(".md") {
                     return Ok(Link { label: path.clone(), href: format!("{ROOT}{path}") });
                 }
                 let Some(heads) = self.headings(&path) else {
-                    return Err(format!("doc `{link}` not found (looked for src/{path})"));
+                    return Err(format!("doc `{link}` not found (looked for {place})"));
                 };
                 let label = match &anchor {
                     Some(a) => match heads.iter().find(|h| &h.0 == a) {
                         Some(h) => h.1.clone(),
-                        None => return Err(format!("doc `{link}`: src/{path} has no heading with the id `{a}`")),
+                        None => return Err(format!("doc `{link}`: {place} has no heading with the id `{a}`")),
                     },
                     None => heads.first().map_or_else(|| path.clone(), |h| h.1.clone()),
                 };

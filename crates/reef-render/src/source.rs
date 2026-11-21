@@ -28,6 +28,19 @@ pub trait DocSource {
         // read the doc and find the headings in its body
         self.read(path).map(|text| headings_of(doc_body(&text)))
     }
+
+    /// Where a doc at a path is looked for, as check's messages name it, or why this source
+    /// can't hold a doc there
+    ///
+    /// A book's docs are under its `src`, so that is where a source says it looks unless it says
+    /// otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from this source's root
+    fn place(&self, path: &str) -> Result<String, String> {
+        Ok(format!("src/{path}"))
+    }
 }
 
 impl<T: DocSource + ?Sized> DocSource for &T {
@@ -48,6 +61,15 @@ impl<T: DocSource + ?Sized> DocSource for &T {
     fn headings(&self, path: &str) -> Option<Headings> {
         (**self).headings(path)
     }
+
+    /// Where the source this refers to looks for a doc
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from the source's root
+    fn place(&self, path: &str) -> Result<String, String> {
+        (**self).place(path)
+    }
 }
 
 impl<T: DocSource + ?Sized> DocSource for Box<T> {
@@ -67,6 +89,15 @@ impl<T: DocSource + ?Sized> DocSource for Box<T> {
     /// * `path` - The doc's path from the source's root
     fn headings(&self, path: &str) -> Option<Headings> {
         (**self).headings(path)
+    }
+
+    /// Where the boxed source looks for a doc
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from the source's root
+    fn place(&self, path: &str) -> Result<String, String> {
+        (**self).place(path)
     }
 }
 
@@ -111,6 +142,96 @@ impl DocSource for FsSource {
     fn read(&self, path: &str) -> Option<String> {
         std::fs::read_to_string(self.root.join(path)).ok()
     }
+}
+
+/// Docs read from a repo's working tree, which no link may leave
+///
+/// A path with a `..` in it, or an absolute one, is no doc of the repo's, and neither is a file a
+/// symlink in the repo leads out of it to. Check names a doc by its path from the repo's root.
+#[derive(Debug, Clone)]
+pub struct RepoSource {
+    /// The repo's root, canonical, so a path read under it can be told to stay there
+    root: PathBuf,
+}
+
+impl RepoSource {
+    /// Read docs from a repo's working tree
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The repo's root
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_render::{DocSource, RepoSource};
+    ///
+    /// let docs = RepoSource::new("/src/reef");
+    /// assert!(docs.read("../secrets.md").is_none());
+    /// assert_eq!(docs.place("../secrets.md").unwrap_err(), "leaves the repo");
+    /// ```
+    pub fn new<P: Into<PathBuf>>(root: P) -> Self {
+        // a root that can't be resolved is kept as given, and reads nothing
+        let root = root.into();
+        let root = root.canonicalize().unwrap_or(root);
+        RepoSource { root }
+    }
+
+    /// The repo's root, canonical when it could be resolved
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The file a doc's path names, if it stays in the repo once symlinks are followed
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from the repo's root
+    fn file(&self, path: &str) -> Option<PathBuf> {
+        // a path that climbs out, or starts from somewhere else, is refused as written
+        if leaves(path) {
+            return None;
+        }
+        // and so is one a symlink takes out of the repo
+        let file = self.root.join(path).canonicalize().ok()?;
+        file.starts_with(&self.root).then_some(file)
+    }
+}
+
+impl DocSource for RepoSource {
+    /// Read a doc from its file in the repo, unless its path leaves the repo
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from the repo's root
+    fn read(&self, path: &str) -> Option<String> {
+        // only a file that stays in the repo is read
+        let file = self.file(path)?;
+        std::fs::read_to_string(file).ok()
+    }
+
+    /// A doc's path from the repo's root, or a refusal of one that leaves the repo as written
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from the repo's root
+    fn place(&self, path: &str) -> Result<String, String> {
+        // a symlink out is found when it is read, and so is just not found
+        match leaves(path) {
+            true => Err("leaves the repo".to_string()),
+            false => Ok(path.to_string()),
+        }
+    }
+}
+
+/// Whether a `/`-separated path leaves the directory it starts from as written: it is absolute,
+/// or one of its parts is `..`
+///
+/// # Arguments
+///
+/// * `path` - The path to judge
+fn leaves(path: &str) -> bool {
+    path.starts_with('/') || path.split('/').any(|part| part == "..")
 }
 
 /// Docs kept in memory by path, such as pages loaded from a store or written by a test
@@ -218,6 +339,35 @@ mod tests {
         assert_eq!(docs.read("a/b.md").as_deref(), Some("# B\n"));
         assert!(docs.read("a/c.md").is_none());
         assert_eq!(docs.root(), dir.as_path());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A repo's source reads no doc outside the repo, and check refuses a link that leaves it
+    #[test]
+    fn link_leaving_the_repo_is_refused() {
+        use crate::docs::{Renderer, Sections};
+        // a repo with a doc in it, a doc beside it, and a symlink in it to the one beside it
+        let dir = std::env::temp_dir().join(format!("reef-repo-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/in.md"), "# In\n\n## Rows\n").unwrap();
+        std::fs::write(dir.join("outside.md"), "# Outside\n\n## Rows\n").unwrap();
+        std::os::unix::fs::symlink(dir.join("outside.md"), repo.join("docs/out.md")).unwrap();
+        let docs = RepoSource::new(&repo);
+        // a doc in the repo is read, and named by its path from the root
+        assert_eq!(docs.read("docs/in.md").as_deref(), Some("# In\n\n## Rows\n"));
+        assert_eq!(docs.place("docs/in.md").as_deref(), Ok("docs/in.md"));
+        // one beside it is not, however its path climbs out, nor is one a symlink leads out to
+        for path in ["../outside.md", "docs/../../outside.md", "/etc/hostname", "docs/out.md"] {
+            assert!(docs.read(path).is_none(), "{path} was read");
+        }
+        // check refuses a link that leaves the repo as written, and finds no doc behind a symlink out
+        let renderer = Renderer::new(&docs, Sections::default());
+        assert_eq!(renderer.doc_link("", "../outside.md#rows").unwrap_err(), "doc `../outside.md#rows` leaves the repo");
+        assert_eq!(renderer.doc_link("docs/in.md", "../../outside.png").unwrap_err(), "doc `../../outside.png` leaves the repo");
+        assert_eq!(renderer.doc_link("", "docs/out.md").unwrap_err(), "doc `docs/out.md` not found (looked for docs/out.md)");
+        assert_eq!(renderer.doc_link("", "docs/in.md#rows").unwrap().href, "reef-root:/docs/in.html#rows");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

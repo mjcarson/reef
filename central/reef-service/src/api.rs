@@ -19,6 +19,7 @@
 //! | `PUT …/plans/{plan}/revision` | `write_plan` | [`Rewrite`]: 200, or 422 if refused |
 //! | `GET …/plans/{plan}/payload` | `payload` | the viewer's [`Payload`] |
 //! | `GET …/plans/{plan}/check` | `check` | its problems |
+//! | `GET …/plans/{plan}/docs/{*path}` | `doc_page` | a doc rendered as its page, or 404 |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -26,16 +27,19 @@
 //! - **An error names its kind.** A project that isn't registered, a plan that isn't listed, a
 //!   name that breaks the rule, a body that can't be read: each is an [`ApiError`] with a code
 //!   and check's or the service's own message.
+//! - **A doc is a page.** The payload's doc links lead under a plan's `docs/`, where each doc is
+//!   served as the HTML page mdbook would write for it, so the viewer's *Read here* works as it
+//!   does in a book. A page opened on its own runs no script a doc holds.
 //! - **The change stream is server-sent events,** one a change, its event named by its kind and
 //!   its data the change as JSON. It is live only, and narrowed by `project` and `plan`.
 //! - **Localhost only.** [`bind`] refuses any address but a loopback one until users sign in
 //!   (M10).
 
 use axum::extract::{FromRequest, FromRequestParts, Path as Segment, Query, Request, State};
-use axum::http::StatusCode;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
@@ -117,6 +121,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::REVISION, axum::routing::put(write_plan::<S>))
         .route(paths::PAYLOAD, get(payload::<S>))
         .route(paths::CHECK, get(check::<S>))
+        .route(paths::DOC, get(doc::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -333,6 +338,17 @@ struct NodeSegments {
     plan: String,
     /// The node's id
     id: String,
+}
+
+/// The segments of a route to one of a plan's docs
+#[derive(Deserialize)]
+struct DocSegments {
+    /// The project the plan belongs to
+    project: String,
+    /// The plan's name within its project
+    plan: String,
+    /// The doc's page, from the root of the plan's docs
+    path: String,
 }
 
 /// The query of the route that finds a directory's project
@@ -648,6 +664,33 @@ async fn check<S: Serves>(
     // check's messages, the graph's first
     let problems = serves.service().check(&plan).await?;
     Ok(Json(problems))
+}
+
+/// Serves one of a plan's docs as the page its links lead to, or 404 if no doc is written to it
+///
+/// The page runs no script, so a doc's own can't act as this origin when the page is opened.
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the page's path
+#[instrument(name = "api::doc", skip_all, err(Debug))]
+async fn doc<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<DocSegments>,
+) -> Result<Response, Failure> {
+    let plan = PlanName::new(segments.project, segments.plan)?;
+    // the doc rendered as its page, or a 404 naming the page
+    match serves.service().doc_page(&plan, &segments.path).await? {
+        Some(html) => {
+            let policy = HeaderValue::from_static("script-src 'none'");
+            Ok(([(header::CONTENT_SECURITY_POLICY, policy)], Html(html)).into_response())
+        }
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("no doc of `{plan}` is written to `{}`", segments.path),
+        )),
+    }
 }
 
 /// Follows the change stream: one server-sent event a change, from now on

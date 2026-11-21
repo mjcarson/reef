@@ -47,6 +47,7 @@ suite!(
     fix_gets_through_on_a_broken_plan,
     batch_adds_a_group_with_its_members,
     missing_doc_is_refused_and_present_doc_accepted,
+    link_leaving_the_repo_is_refused,
     stale_put_in_a_batch_writes_nothing,
     batch_it_cant_keep_is_an_error,
     concurrent_puts_that_together_cycle_one_is_refused,

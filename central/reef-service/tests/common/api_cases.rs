@@ -14,8 +14,8 @@ use reef_model::{Description, Diagnostic, NodeSpec, Payload, PlanName};
 use reef_service::Backend;
 use reqwest::StatusCode;
 
-use super::git;
 use super::http::{Ax, Events};
+use super::{doc, git};
 
 /// A piece of work that says why it is needed and what it does, needing what it names
 ///
@@ -384,5 +384,119 @@ pub async fn change_stream_tells_of_each_write<B: Backend + 'static>(
     // and once the service ends the stream, the follower's ends too
     ax.service.end_changes();
     assert_eq!(events.next().await?, None);
+    Ok(())
+}
+
+/// A design doc, written as a node file is, whose `rows` section links within it and out of it,
+/// with a section after it
+const SECTIONED: &str = "---\nid: D1\n---\n# Design\n\n## Rows\n\n### Context\n\nRows are slow: see [columns](#columns) and [the other](other.md#x).\n\n## Columns\n\nColumns are fast.\n";
+
+/// A payload's anchored doc link leads to a page holding its section where the viewer's *Read
+/// here* cuts it: the heading with the anchor's id in the page's `<main>`, and what follows it up
+/// to the next heading at its level
+///
+/// No browser drives the viewer here, so the link is followed as `docs.rs` follows it: its
+/// anchor taken off, the page fetched, the section found by the anchor's id.
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn anchored_doc_link_opens_its_section<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a node linking a section of a doc in the repo
+    doc(&ax.repo, "docs/design.md", SECTIONED)?;
+    let mut node = work("C14", &[], 0);
+    node.spec.docs = vec!["docs/design.md#rows".to_string()];
+    let (status, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(node, None))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    // the payload links it by an absolute path under the plan's docs, titled by its heading
+    let docs = paths::docs(&ax.plan);
+    let (_, payload): (_, Payload) = ax.client.get(&paths::payload(&ax.plan)).await?;
+    let link = &payload.nodes[0].docs[0];
+    assert_eq!(link.label, "Rows");
+    assert_eq!(link.href, format!("{docs}docs/design.html#rows"));
+    // the page, without the anchor, is HTML that runs no script
+    let (page, anchor) = link.href.split_once('#').expect("the link names a heading");
+    let response = ax.client.open(page).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    assert!(
+        header("content-type").is_some_and(|kind| kind.starts_with("text/html")),
+        "{:?}",
+        header("content-type")
+    );
+    assert_eq!(
+        header("content-security-policy").as_deref(),
+        Some("script-src 'none'")
+    );
+    let html = response.text().await?;
+    // its `<main>` holds the doc without its frontmatter, the anchor's heading in it
+    let main = html
+        .split_once("<main>")
+        .and_then(|(_, rest)| rest.split_once("</main>"))
+        .map(|(main, _)| main)
+        .expect("the page has a <main>");
+    assert!(!main.contains("id: D1"), "{main}");
+    let heading = format!("<h2 id=\"{anchor}\">Rows</h2>");
+    let (_, after) = main
+        .split_once(&heading)
+        .unwrap_or_else(|| panic!("no {heading} in {main}"));
+    // its section runs to the next heading at its level, its own subsections in it
+    let section = after.split("<h2").next().unwrap_or(after);
+    assert!(
+        section.contains("<h3 id=\"context\">Context</h3>"),
+        "{section}"
+    );
+    assert!(section.contains("Rows are slow"), "{section}");
+    assert!(!section.contains("Columns are fast"), "{section}");
+    // and its links lead where they did from the doc, under the plan's docs
+    for href in ["docs/design.html#columns", "docs/other.html#x"] {
+        assert!(
+            section.contains(&format!("href=\"{docs}{href}\"")),
+            "{href}: {section}"
+        );
+    }
+    // a page no doc is written to is not found, and neither is a doc of an unlisted plan
+    let unlisted = PlanName::new("reef", "missing")?;
+    let cases = [
+        (format!("{docs}docs/gone.html"), ErrorCode::NotFound),
+        (
+            format!("{}docs/design.html", paths::docs(&unlisted)),
+            ErrorCode::NotListed,
+        ),
+    ];
+    for (path, code) in cases {
+        let (status, error): (_, ApiError) = ax.client.get(&path).await?;
+        assert_eq!(
+            (status.as_u16(), error.code),
+            (code.status(), code),
+            "{path}"
+        );
+    }
+    // nor is a doc beside the repo, reached by a path that climbs out or a symlink that leads out
+    doc(&ax.dir, "outside.md", SECTIONED)?;
+    std::os::unix::fs::symlink(ax.dir.join("outside.md"), ax.repo.join("docs/out.md"))?;
+    for path in [
+        format!("{docs}..%2Foutside.html"),
+        format!("{docs}docs%2F..%2F..%2Foutside.html"),
+        format!("{docs}docs/out.html"),
+    ] {
+        let (status, error): (_, ApiError) = ax.client.get(&path).await?;
+        assert_eq!(
+            (status, error.code),
+            (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            "{path}"
+        );
+    }
     Ok(())
 }

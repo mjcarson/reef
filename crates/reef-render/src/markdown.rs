@@ -125,18 +125,6 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
     let mut skip_fence = false;
     let mut first_heading: Option<Vec<Event<'_>>> = None;
     let mut seen_block = false;
-    let rewrite = |dest: CowStr<'_>| -> CowStr<'static> {
-        match paths::resolve(source, &dest) {
-            Target::External(u) => CowStr::from(u),
-            Target::Internal { path, anchor } => {
-                let base = format!("{ROOT}{}", paths::html_of(&path));
-                CowStr::from(match anchor {
-                    Some(a) => format!("{base}#{a}"),
-                    None => base,
-                })
-            }
-        }
-    };
     for ev in Parser::new_ext(md, md_options()) {
         match &ev {
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if is_reef(info) => {
@@ -180,10 +168,10 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
         }
         let ev = match ev {
             Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Link { link_type, dest_url: rewrite(dest_url), title, id })
+                Event::Start(Tag::Link { link_type, dest_url: rebase(source, &dest_url), title, id })
             }
             Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Image { link_type, dest_url: rewrite(dest_url), title, id })
+                Event::Start(Tag::Image { link_type, dest_url: rebase(source, &dest_url), title, id })
             }
             e => e.into_static(),
         };
@@ -192,6 +180,86 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, events.into_iter());
     html
+}
+
+/// A link written in `source`, made to start from [`ROOT`] if it names a file of the book, with a
+/// markdown file's name changed to the page mdbook writes for it
+///
+/// # Arguments
+///
+/// * `source` - The path the link is written relative to
+/// * `dest` - The link as written
+fn rebase(source: &str, dest: &str) -> CowStr<'static> {
+    match paths::resolve(source, dest) {
+        Target::External(u) => CowStr::from(u),
+        Target::Internal { path, anchor } => {
+            let base = format!("{ROOT}{}", paths::html_of(&path));
+            CowStr::from(match anchor {
+                Some(a) => format!("{base}#{a}"),
+                None => base,
+            })
+        }
+    }
+}
+
+/// Render a doc as the page mdbook writes for it: a whole HTML document whose `<main>` holds
+/// the doc, each heading with the id mdbook gives it, so a section is cut out of it as out of a
+/// book's page. Its links start with [`ROOT`], and its `reef` fences are left out.
+///
+/// # Arguments
+///
+/// * `md` - The doc's markdown, without its frontmatter
+/// * `source` - The doc's path, which its links are written relative to
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::render_page;
+///
+/// let page = render_page("# Design\n\n## Rows\n\nSee [f](f.md#x).\n", "docs/design.md");
+/// assert!(page.contains("<h2 id=\"rows\">Rows</h2>"));
+/// assert!(page.contains("href=\"reef-root:/docs/f.html#x\""));
+/// ```
+pub fn render_page(md: &str, source: &str) -> String {
+    // the ids mdbook gives the headings, in the order they come
+    let spans = heading_spans(md);
+    let mut ids = spans.iter().map(|h| CowStr::from(h.id.clone()));
+    // the page is titled by its first heading, or else by its path
+    let title = spans.first().map_or(source, |h| h.text.as_str());
+    let mut events = Vec::new();
+    let mut skip_fence = false;
+    for ev in Parser::new_ext(md, md_options()) {
+        let ev = match ev {
+            // a plan drawn on the doc's page isn't drawn here
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if is_reef(&info) => {
+                skip_fence = true;
+                continue;
+            }
+            Event::End(TagEnd::CodeBlock) if skip_fence => {
+                skip_fence = false;
+                continue;
+            }
+            _ if skip_fence => continue,
+            // each heading gets its id, so a link's anchor finds it
+            Event::Start(Tag::Heading { level, classes, attrs, .. }) => Event::Start(Tag::Heading { level, id: ids.next(), classes, attrs }),
+            // and each link leads where it did from the doc
+            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
+                Event::Start(Tag::Link { link_type, dest_url: rebase(source, &dest_url), title, id })
+            }
+            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
+                Event::Start(Tag::Image { link_type, dest_url: rebase(source, &dest_url), title, id })
+            }
+            e => e,
+        };
+        events.push(ev);
+    }
+    // the doc inside a page's `<main>`, as mdbook lays its pages out
+    let mut main = String::new();
+    pulldown_cmark::html::push_html(&mut main, events.into_iter());
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n</head>\n<body>\n<main>\n{main}</main>\n</body>\n</html>\n",
+        paths::escape(title)
+    )
 }
 
 /// Whether a fenced code block's info string makes it a ```` ```reef ```` fence
@@ -221,6 +289,26 @@ mod tests {
         assert_eq!(h[0].0, "a-b");
         assert_eq!(h[1].0, "a-b-1");
         assert_eq!(h[2].0, "custom");
+    }
+
+    /// A doc's page holds it in a `<main>`, each heading with the id check finds it by
+    #[test]
+    fn page_has_main_and_mdbooks_heading_ids() {
+        let md = "# A & b\n\n## Rows\n\nSee [o](other.md#x).\n\n```reef\nfocus = \"M3\"\n```\n\n## Rows\n\n### Mine {#custom}\n\n~~Was.~~\n";
+        let page = render_page(md, "docs/a.md");
+        // titled by its first heading, the doc inside its `<main>`
+        assert!(page.starts_with("<!doctype html>"), "{page}");
+        assert!(page.contains("<title>A &amp; b</title>"), "{page}");
+        assert!(page.contains("<main>\n<h1 id=\"a--b\">"), "{page}");
+        // every heading has the id the doc's headings are found by, a repeat's and a written one too
+        for (id, _, _) in headings_of(md) {
+            assert!(page.contains(&format!(" id=\"{id}\"")), "no heading `{id}`: {page}");
+        }
+        assert!(page.contains("<h2 id=\"rows-1\">") && page.contains("<h3 id=\"custom\">"), "{page}");
+        // its links start from the root, its plan isn't drawn, and struck text stays for the viewer to drop
+        assert!(page.contains("href=\"reef-root:/docs/other.html#x\""), "{page}");
+        assert!(!page.contains("focus"), "{page}");
+        assert!(page.contains("<del>Was.</del>"), "{page}");
     }
 
     #[test]

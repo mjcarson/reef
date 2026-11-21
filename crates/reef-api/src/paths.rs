@@ -15,6 +15,7 @@
 //! | `PUT` | [`REVISION`] |
 //! | `GET` | [`PAYLOAD`] |
 //! | `GET` | [`CHECK`] |
+//! | `GET` | [`DOC`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
 use reef_model::PlanName;
@@ -48,6 +49,12 @@ pub const PAYLOAD: &str = "/api/v1/projects/{project}/plans/{plan}/payload";
 
 /// A plan's problems, as `mdbook-reef check` finds a book's
 pub const CHECK: &str = "/api/v1/projects/{project}/plans/{plan}/check";
+
+/// One of a plan's docs, rendered as the page its links lead to
+///
+/// `path` is the page mdbook would write for the doc, from the root of the plan's docs:
+/// `docs/design.html` for the repo's `docs/design.md`.
+pub const DOC: &str = "/api/v1/projects/{project}/plans/{plan}/docs/{*path}";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
@@ -166,6 +173,30 @@ pub fn check(plan: &PlanName) -> String {
     format!("{}/check", self::plan(plan))
 }
 
+/// The path every page of a plan's docs is under, ending in `/`
+///
+/// A payload's links start from it, as a book's start from its root.
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::paths;
+/// use reef_model::PlanName;
+///
+/// let plan = PlanName::new("reef", "central").unwrap();
+/// assert_eq!(
+///     format!("{}design/app.html", paths::docs(&plan)),
+///     "/api/v1/projects/reef/plans/central/docs/design/app.html"
+/// );
+/// ```
+pub fn docs(plan: &PlanName) -> String {
+    format!("{}/docs/", self::plan(plan))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -207,6 +238,12 @@ mod tests {
         assert_eq!(super::revision(&plan), format!("{filled}/revision"));
         assert_eq!(super::payload(&plan), format!("{filled}/payload"));
         assert_eq!(super::check(&plan), format!("{filled}/check"));
+        // and a doc's page fills in the rest of the docs' template
+        let page = super::DOC
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{*path}", "design/app.html");
+        assert_eq!(format!("{}design/app.html", super::docs(&plan)), page);
     }
 
     /// Anything a segment can't hold is escaped, and nothing else
