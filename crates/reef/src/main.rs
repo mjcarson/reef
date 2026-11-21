@@ -11,6 +11,7 @@
 //! reef accept C18 1 met        # mark its first criterion met, `--test` naming the test
 //! reef check                   # the plan's problems, exiting 1 if it has any
 //! reef next                    # the work ready to start, and what the rest waits on
+//! reef mcp                     # serve these as MCP tools over stdio, for Claude Code
 //! ```
 
 use clap::Parser;
@@ -41,5 +42,6 @@ fn execute(cli: Cli) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     let cwd = std::env::current_dir()?;
-    runtime.block_on(reef::run(cli, &cwd, &mut std::io::stdout().lock()))
+    // standard output is locked a write at a time, since the MCP server writes it from tokio
+    runtime.block_on(reef::run(cli, &cwd, &mut std::io::stdout()))
 }

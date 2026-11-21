@@ -122,15 +122,21 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
 
 ### Design choices
 
-- **`reef mcp` serves the same operations as the CLI** over stdio: get, put, status, check, next,
-  and later next_task, the queue and comments. rmcp's `#[tool_router]` serves them, as in X4's
-  stub.
+- **`reef mcp` serves the same operations as the CLI** over stdio: get, put, status, accept,
+  check and next, and later next_task, the queue and comments. rmcp's `#[tool_router]` serves
+  them, as in X4's stub. Each tool runs its command's own function, so its text is what the
+  command prints, and the working directory Claude Code starts it in picks the project.
 - **Read-only tools are marked `readOnlyHint`**, so plan mode runs them without a prompt. Plan
   mode asks for every other tool, or Claude holds it back, even when the allow list names it
   ([X4](#what-x4-found)). So every tool Claude needs while planning only reads, and next_task,
   which claims, is called before plan mode.
 - **Puts take a node's YAML**, the same keys as frontmatter, and a breaking put returns check's
   messages.
+- **A failed write is a tool error, not a protocol error.** A stale or refused write, or a
+  service that isn't running, comes back as the tool's result marked `isError`, carrying the
+  message. Claude Code shows a protocol error opaquely, so Claude couldn't read what to fix.
+- **No removal tool.** Nothing in the loop removes a node, and `reef node rm` stays on the
+  terminal, where the user runs it.
 
 ## The user's order
 

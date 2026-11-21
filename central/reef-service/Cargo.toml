@@ -34,5 +34,7 @@ libc = { workspace = true, optional = true }
 [dev-dependencies]
 # a client of the JSON API that knows only reef-api's types
 reqwest.workspace = true
-# the CLI, driven in-process against a served service
+# the CLI and the MCP server, driven in-process against a served service
 reef.workspace = true
+# the pipe the MCP server's suite speaks JSON-RPC over
+tokio = { workspace = true, features = ["io-util"] }

@@ -13,6 +13,7 @@
 //! reef [--conf PATH] accept <ID> [<N> <STATUS> [--test TEST]] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] check [--project NAME] [--plan NAME]
 //! reef [--conf PATH] next [--project NAME] [--plan NAME]
+//! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -28,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use crate::client::Client;
 use crate::conf::Conf;
+use crate::mcp::{self, Tools};
 use crate::node;
 use crate::work;
 
@@ -121,6 +123,16 @@ pub enum Command {
     /// Print the work ready to start, in plan order, and what the rest waits on
     Next {
         /// The plan to look in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Serve get, check, next, put, status and accept as MCP tools over standard input and
+    /// output, for Claude Code
+    ///
+    /// get, check and next only read, and say so, so plan mode runs them without a prompt.
+    Mcp {
+        /// The project and plan the tools work in, if not the working directory's and its
+        /// only plan
         #[command(flatten)]
         pick: PlanPick,
     },
@@ -301,6 +313,11 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Next { pick } => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             work::next(&client, &plan, out).await
+        }
+        Command::Mcp { pick } => {
+            // the protocol owns standard output, so nothing is printed to `out`
+            let tools = Tools::new(client, cwd.to_path_buf(), pick);
+            mcp::serve(tools, tokio::io::stdin(), tokio::io::stdout()).await
         }
     }
 }
@@ -628,6 +645,12 @@ mod tests {
         let check = Cli::try_parse_from(["reef", "check", "--project", "reef"]).unwrap();
         assert!(matches!(check.command, Command::Check { .. }));
         assert!(Cli::try_parse_from(["reef", "next", "C18"]).is_err());
+        // and the MCP server picks its project and plan the same way
+        let mcp = Cli::try_parse_from(["reef", "mcp", "--plan", "central"]).unwrap();
+        assert!(matches!(
+            mcp.command,
+            Command::Mcp { pick } if pick.plan.as_deref() == Some("central")
+        ));
     }
 
     /// The first column is padded to its widest cell
