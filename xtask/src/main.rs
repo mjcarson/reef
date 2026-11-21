@@ -29,10 +29,30 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+/// The wasm features the viewer is built for: rustc's defaults for wasm32-unknown-unknown, which
+/// dx builds the app's copy with too, given to wasm-opt so it keeps them
+const WASM_FEATURES: [&str; 6] = [
+    "--enable-bulk-memory",
+    "--enable-multivalue",
+    "--enable-mutable-globals",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--enable-sign-ext",
+];
+
+/// Builds the viewer, binds it, and writes the bundle the books load
+///
+/// The build ignores the caller's `RUSTFLAGS`, so `reef.js` is the same from any shell. An
+/// exported `-Ctarget-cpu=native` would leave wasm32 with no target features at all, and the glue
+/// without its externref table.
 fn wasm() -> Result<()> {
     let root = root();
+    // no flags but rustc's defaults: the encoded variable wins over `RUSTFLAGS` and every config's
+    // `rustflags`, and an empty one means none
     run(Command::new(env!("CARGO"))
         .current_dir(&root)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", "")
         .args(["build", "--profile", "wasm", "-p", "reef-view", "--target", "wasm32-unknown-unknown"]))?;
     let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
     let wasm = target_dir.join("wasm32-unknown-unknown/wasm/reef_view.wasm");
@@ -48,7 +68,7 @@ fn wasm() -> Result<()> {
     // Shrink it if wasm-opt is around; it is optional.
     let opt = out.join("reef_opt.wasm");
     if Command::new("wasm-opt").arg("--version").output().is_ok() {
-        run(Command::new("wasm-opt").args(["-Os", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]).arg(&bg).arg("-o").arg(&opt))?;
+        run(Command::new("wasm-opt").arg("-Os").args(WASM_FEATURES).arg(&bg).arg("-o").arg(&opt))?;
         bg = opt;
     }
     let glue = std::fs::read_to_string(out.join("reef.js"))?;
