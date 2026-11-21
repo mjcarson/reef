@@ -18,9 +18,9 @@
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
-use reef_api::paths;
+use reef_api::{lift, paths};
 use reef_model::spec::parse_node_file;
-use reef_model::{NodeSpec, Payload, PlanName};
+use reef_model::{Payload, PlanName};
 use reef_render::paths::{Target, resolve};
 use reef_service::{Backend, Conf, NodeWrite, Service, api};
 use std::path::{Path, PathBuf};
@@ -279,35 +279,20 @@ fn flatten(src: &Path) -> anyhow::Result<Vec<NodeWrite>> {
         else {
             continue;
         };
-        lift(spec, fm.body.to_string(), &rel, &mut out);
+        // the node and each of its members, its own body on the node alone
+        let mut body = fm.body.to_string();
+        for mut spec in lift(spec) {
+            // its docs as a stored node's: from the repo's root, not from its file
+            spec.docs = spec.docs.iter().map(|link| rebase(&rel, link)).collect();
+            let order = out.len() as u64;
+            out.push(NodeWrite {
+                spec,
+                body: std::mem::take(&mut body),
+                order,
+            });
+        }
     }
     Ok(out)
-}
-
-/// Pushes a spec, then each of its members after it, its links rebased onto the root
-///
-/// # Arguments
-///
-/// * `spec` - The spec to push, members and all
-/// * `body` - Its body: a file node's page, or empty for a member
-/// * `file` - The file it was written in, relative to `src`
-/// * `out` - The flattened nodes so far
-fn lift(mut spec: NodeSpec, body: String, file: &str, out: &mut Vec<NodeWrite>) {
-    // take its members out of it, so the store holds it alone
-    let members = std::mem::take(&mut spec.nodes);
-    let id = spec.id.clone();
-    // its docs as a stored node's: from the repo's root, not from its file
-    spec.docs = spec.docs.iter().map(|link| rebase(file, link)).collect();
-    let order = out.len() as u64;
-    out.push(NodeWrite { spec, body, order });
-    for mut member in members {
-        // a member belongs to the node that lists it unless it names a group
-        if member.group.is_none() {
-            member.group = Some(id.clone());
-        }
-        // its body stays in its spec, as it was written
-        lift(member, String::new(), file, out);
-    }
 }
 
 /// A link written in a file, as a link from the repo's root

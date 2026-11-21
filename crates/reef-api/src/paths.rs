@@ -35,7 +35,7 @@ pub const PLANS: &str = "/api/v1/projects/{project}/plans";
 /// One plan, and the revision readers load
 pub const PLAN: &str = "/api/v1/projects/{project}/plans/{plan}";
 
-/// A plan's nodes: listed by `GET`, put in batches by `POST`
+/// A plan's nodes: listed by `GET`, put and removed in batches by `POST`
 pub const NODES: &str = "/api/v1/projects/{project}/plans/{plan}/nodes";
 
 /// One node of a plan

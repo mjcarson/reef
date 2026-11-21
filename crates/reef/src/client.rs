@@ -7,7 +7,8 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddedPlan, AddedProject, ApiError, ErrorCode, NewPlan, NewProject, PlanInfo, Project, paths,
+    AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PlanInfo,
+    Project, Puts, StoredNode, paths,
 };
 use reef_model::PlanName;
 use serde::de::DeserializeOwned;
@@ -126,6 +127,43 @@ impl Client {
             name: plan.plan.clone(),
         };
         let request = self.http.post(self.url(&path)).json(&new);
+        self.send(request, &path).await
+    }
+
+    /// Lists a plan's current revision, each node at the version a put of it names
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn list(&self, plan: &PlanName) -> anyhow::Result<Listing> {
+        let path = paths::nodes(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Gets one node of a plan, at the version a put of it names
+    ///
+    /// A node that isn't in its plan comes back as a `not-found` error naming it.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `id` - The node's id
+    pub async fn node(&self, plan: &PlanName, id: &str) -> anyhow::Result<StoredNode> {
+        let path = paths::node(plan, id);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Puts and removes a batch of nodes in a plan, checked against the whole plan as one change
+    ///
+    /// A stale or refused batch is an answer, not an error, and writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `batch` - The nodes to write and to remove, each with the version its writer read
+    pub async fn batch(&self, plan: &PlanName, batch: &Puts) -> anyhow::Result<Checked> {
+        let path = paths::nodes(plan);
+        let request = self.http.post(self.url(&path)).json(batch);
         self.send(request, &path).await
     }
 

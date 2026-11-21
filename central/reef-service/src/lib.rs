@@ -34,6 +34,7 @@ pub use conf::{ApiSettings, Conf, ShoalSettings};
 pub use memory::MemoryBackend;
 pub use service::Service;
 pub use store::{
-    AddedProject, Checked, Listing, NodePut, NodeWrite, NotListed, NotRegistered, PlanInfo,
-    Project, Proposal, Put, Rewrite, Rewritten, StalePut, Store, StoredNode, Unkeepable,
+    AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
+    PlanInfo, Project, Proposal, Put, Puts, Rewrite, Rewritten, StalePut, Store, StoredNode,
+    Unkeepable,
 };

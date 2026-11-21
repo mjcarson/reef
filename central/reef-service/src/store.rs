@@ -15,15 +15,15 @@
 //!   conditional write to that row. A write killed midway leaves the old revision current and
 //!   whole, and the next write prunes what it left.
 //! - **Checks under the plan's lock.** The store keeps rows; it doesn't judge what they make.
-//!   `put_checked` and `write_plan_checked` hand a caller's check the plan as it stands and as
+//!   `batch_checked` and `write_plan_checked` hand a caller's check the plan as it stands and as
 //!   the write would leave it, under the plan's write lock, and write only if it finds no
-//!   problem. [`Service`](crate::Service) checks every write this way; `put` and `write_plan`
+//!   problem. A batch puts and removes nodes as one change. [`Service`](crate::Service) checks every write this way; `put` and `write_plan`
 //!   are the unchecked layer under it.
 
 // the store's data types are the JSON API's, so the service and its clients share them
 pub use reef_api::{
-    AddedProject, Checked, Listing, NodePut, NodeWrite, PlanInfo, Project, Rewrite, Rewritten,
-    StalePut, StoredNode, records,
+    AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanInfo, Project, Puts,
+    Rewrite, Rewritten, StalePut, StoredNode, records,
 };
 use reef_model::{Diagnostic, PlanName, Record};
 use std::collections::{HashMap, HashSet};
@@ -669,24 +669,7 @@ impl<B: Backend> Store<B> {
     /// Writes a batch of nodes into a plan's current revision, if each is as its writer read it
     /// and a check finds no problem they would add
     ///
-    /// The steps, under the plan's write lock:
-    ///
-    /// 1. Prune whatever a killed write left.
-    /// 2. Read the current revision whole.
-    /// 3. Refuse the batch as [`Checked::Stale`] if any put finds its node other than its
-    ///    writer read it, naming every such put.
-    /// 4. Hand `check` the plan as it stands and as the puts would leave it, each replacing
-    ///    its node in place or joining the plan, and refuse the batch as [`Checked::Refused`]
-    ///    if it finds problems.
-    /// 5. Write each put in the order given, each only over the version its writer read.
-    ///
-    /// A refused batch writes nothing. A batch isn't atomic, though: reef-service is shoal's
-    /// only writer, so a write refused in step 5 means another process wrote the plan, and a
-    /// write that fails there leaves the puts before it written. Either is an error that names
-    /// what was written.
-    ///
-    /// The check runs under the plan's write lock, so it must not read or write this plan
-    /// through the store, or it waits forever.
+    /// This is [`Store::batch_checked`] with no removals.
     ///
     /// # Arguments
     ///
@@ -704,17 +687,54 @@ impl<B: Backend> Store<B> {
         F: FnOnce(Proposal) -> Fut + Send,
         Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
     {
-        // every node must be one the store can keep, each put once
-        let mut ids = HashSet::with_capacity(puts.len());
-        for put in &puts {
-            check_node(plan, &put.node)?;
-            anyhow::ensure!(
-                ids.insert(put.node.spec.id.as_str()),
-                "node `{}` is put twice in one batch",
-                put.node.spec.id
-            );
-        }
-        // one write to this plan at a time, so the check judges the plan the puts land on
+        // a batch of puts alone
+        self.batch_checked(plan, Puts::new(puts), check).await
+    }
+
+    /// Writes a batch of puts and removals into a plan's current revision, if each node is as
+    /// its writer read it and a check finds no problem the batch would add
+    ///
+    /// The steps, under the plan's write lock:
+    ///
+    /// 1. Prune whatever a killed write left.
+    /// 2. Read the current revision whole.
+    /// 3. Refuse the batch as [`Checked::Stale`] if any put or removal finds its node other than
+    ///    its writer read it, naming every such node.
+    /// 4. Hand `check` the plan as it stands and as the batch would leave it, each removed node
+    ///    gone and each put replacing its node in place or joining the plan, and refuse the
+    ///    batch as [`Checked::Refused`] if it finds problems.
+    /// 5. Write each put in the order given, each only over the version its writer read, then
+    ///    delete each removed node.
+    ///
+    /// A refused batch writes nothing. A batch isn't atomic, though: reef-service is shoal's
+    /// only writer, so a write refused in step 5 means another process wrote the plan, and a
+    /// write that fails there leaves the puts before it written. Either is an error that names
+    /// what was written. Removals are deleted outright, since their versions were checked under
+    /// the plan's write lock.
+    ///
+    /// The check runs under the plan's write lock, so it must not read or write this plan
+    /// through the store, or it waits forever.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `batch` - The nodes to write and to remove, each with the version its writer read
+    /// * `check` - Finds the problems the batch would add, or none
+    #[instrument(name = "Store::batch_checked", skip_all, err(Debug))]
+    pub async fn batch_checked<F, Fut>(
+        &self,
+        plan: &PlanName,
+        batch: Puts,
+        check: F,
+    ) -> anyhow::Result<Checked>
+    where
+        F: FnOnce(Proposal) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
+    {
+        let Puts { puts, removes } = batch;
+        // every node must be one the store can keep, each put or removed once
+        check_batch(plan, &puts, &removes)?;
+        // one write to this plan at a time, so the check judges the plan the batch lands on
         let _write = self.writing(plan).await;
         let row = self.plan_row(plan).await?;
         // 1. prune whatever a killed write left
@@ -722,20 +742,26 @@ impl<B: Backend> Store<B> {
         // 2. the revision as it stands, in written order
         let mut current = self.revision(plan, row.current, None).await?;
         listed_order(&mut current);
-        // 3. every put must find its node as its writer read it, before anything is judged
-        let stale = stale_puts(&current, &puts);
+        // 3. every node must be as its writer read it, before anything is judged
+        let stale = stale_batch(&current, &puts, &removes);
         if !stale.is_empty() {
             return Ok(Checked::Stale(stale));
         }
         // an empty batch changes nothing
-        if puts.is_empty() {
+        if puts.is_empty() && removes.is_empty() {
             return Ok(Checked::Applied {
                 versions: Vec::new(),
             });
         }
-        // 4. the plan as the puts would leave it: each replaces its node in place, or joins it
-        let mut after: Vec<NodeWrite> = current.into_iter().map(NodeWrite::from).collect();
-        let before = records(plan, after.clone())?;
+        // 4. the plan as the batch would leave it: each removal gone, and each put replacing its
+        // node in place or joining it
+        let before = records(plan, current.iter().cloned().map(NodeWrite::from).collect())?;
+        let removed: HashSet<&str> = removes.iter().map(|remove| remove.id.as_str()).collect();
+        let mut after: Vec<NodeWrite> = current
+            .into_iter()
+            .filter(|node| !removed.contains(node.spec.id.as_str()))
+            .map(NodeWrite::from)
+            .collect();
         let at: HashMap<String, usize> = after
             .iter()
             .enumerate()
@@ -780,6 +806,19 @@ impl<B: Backend> Store<B> {
                         names(&written)
                     )));
                 }
+            }
+        }
+        // then delete each removed node, a bundle at a time
+        let key = RevisionKey::new(plan, row.current);
+        let mut ids: Vec<String> = removes.into_iter().map(|remove| remove.id).collect();
+        while !ids.is_empty() {
+            let rest = ids.split_off(ids.len().min(BUNDLE_ROWS));
+            let bundle = std::mem::replace(&mut ids, rest);
+            if let Err(error) = self.backend.delete_nodes(&key, bundle).await {
+                return Err(error.context(format!(
+                    "removing nodes of plan `{plan}`, after {} were written",
+                    names(&written)
+                )));
             }
         }
         Ok(Checked::Applied {
@@ -933,22 +972,67 @@ fn check_plan_nodes(plan: &PlanName, nodes: &[NodeWrite]) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// The puts of a batch that find their nodes other than their writers read them
+/// Refuses a batch the store can't keep: a node it can't keep as one row, an id put or removed
+/// twice, or an id both put and removed
+///
+/// # Arguments
+///
+/// * `plan` - The plan it is written to
+/// * `puts` - The nodes to write
+/// * `removes` - The nodes to remove
+fn check_batch(plan: &PlanName, puts: &[NodePut], removes: &[NodeRemove]) -> anyhow::Result<()> {
+    // every node put must be one the store can keep, each put once
+    let mut ids = HashSet::with_capacity(puts.len());
+    for put in puts {
+        check_node(plan, &put.node)?;
+        anyhow::ensure!(
+            ids.insert(put.node.spec.id.as_str()),
+            "node `{}` is put twice in one batch",
+            put.node.spec.id
+        );
+    }
+    // and every node removed must be named in its plan, removed once, and not put as well
+    let mut gone = HashSet::with_capacity(removes.len());
+    for remove in removes {
+        plan.node(remove.id.as_str())?;
+        if ids.contains(remove.id.as_str()) {
+            let message = format!("node `{}` is put and removed in one batch", remove.id);
+            return Err(Unkeepable(message).into());
+        }
+        if !gone.insert(remove.id.as_str()) {
+            let message = format!("node `{}` is removed twice in one batch", remove.id);
+            return Err(Unkeepable(message).into());
+        }
+    }
+    Ok(())
+}
+
+/// The puts and removals of a batch that find their nodes other than their writers read them
 ///
 /// # Arguments
 ///
 /// * `current` - The plan's current revision, as read under its write lock
-/// * `puts` - The batch
-fn stale_puts(current: &[StoredNode], puts: &[NodePut]) -> Vec<StalePut> {
+/// * `puts` - The batch's puts
+/// * `removes` - The batch's removals
+fn stale_batch(current: &[StoredNode], puts: &[NodePut], removes: &[NodeRemove]) -> Vec<StalePut> {
     // each node's version as it stands, by id
     let versions: HashMap<&str, u64> = current
         .iter()
         .map(|node| (node.spec.id.as_str(), node.version))
         .collect();
-    puts.iter()
-        .filter_map(|put| {
-            // as a conditional write would judge it
-            let refusal = match (versions.get(put.node.spec.id.as_str()), put.read) {
+    // each put, as a conditional write would judge it
+    let reads = puts
+        .iter()
+        .map(|put| (put.node.spec.id.as_str(), put.read))
+        // and each removal, which must find its node at the version read
+        .chain(
+            removes
+                .iter()
+                .map(|remove| (remove.id.as_str(), Some(remove.read))),
+        );
+    reads
+        .filter_map(|(id, read)| {
+            let refusal = match (versions.get(id), read) {
                 (None, None) => return None,
                 (Some(stored), Some(read)) if *stored == read => return None,
                 (Some(_), None) => Refusal::Exists,
@@ -956,7 +1040,7 @@ fn stale_puts(current: &[StoredNode], puts: &[NodePut]) -> Vec<StalePut> {
                 (Some(_), Some(_)) => Refusal::Moved,
             };
             Some(StalePut {
-                id: put.node.spec.id.clone(),
+                id: id.to_string(),
                 refusal,
             })
         })

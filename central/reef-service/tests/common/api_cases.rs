@@ -49,9 +49,7 @@ fn work(id: &str, needs: &[&str], order: u64) -> NodeWrite {
 /// * `node` - The node to put
 /// * `read` - The version its writer read, or `None` for a new node
 fn one(node: NodeWrite, read: Option<u64>) -> Puts {
-    Puts {
-        puts: vec![NodePut::new(node, read)],
-    }
+    Puts::new(vec![NodePut::new(node, read)])
 }
 
 /// A client using only reef-api's types registers a project, lists a plan in it, puts a node,
@@ -370,6 +368,7 @@ pub async fn change_stream_tells_of_each_write<B: Backend + 'static>(
             id: "C11".to_string(),
             version: 1,
         }],
+        removed: Vec::new(),
     };
     assert_eq!(put, expected);
     // then the revision the write made current

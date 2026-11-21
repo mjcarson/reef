@@ -3,11 +3,12 @@
 //! Each case's plan is `reef/central`, of a project registered for a fresh git repo whose working
 //! tree holds the plan's docs.
 
-use reef_api::paths;
+use reef_api::{Change, PutNode, paths};
 use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
 use reef_render::{ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
-    Backend, Checked, NodePut, NodeWrite, NotListed, NotRegistered, Refusal, Rewrite, StalePut,
+    Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, Puts, Refusal,
+    Rewrite, StalePut,
 };
 use std::time::Duration;
 
@@ -309,6 +310,99 @@ pub async fn batch_it_cant_keep_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::Re
     assert!(format!("{error:#}").contains("inline"), "{error:#}");
     // and nothing was written
     assert!(ids(&sx).await?.is_empty());
+    Ok(())
+}
+
+/// Removals are judged with their batch: a node another needs can't go alone, nor a group
+/// without its members, a stale removal writes nothing, and the batch's change names each node
+/// removed
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn removes_are_checked_with_the_batch<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // a group of two, and work that needs one of them
+    let batch = new(vec![
+        group("G", 0),
+        member("m1", "G", 1),
+        member("m2", "G", 2),
+        needing(work("W", 3), &["m1"]),
+    ]);
+    let applied = sx.service.put(&sx.plan, batch).await?;
+    assert_eq!(
+        applied,
+        Checked::Applied {
+            versions: vec![1, 1, 1, 1]
+        }
+    );
+    let mut changes = sx.service.changes();
+    // a node another needs can't be removed alone
+    let needed = Puts::removing(vec![NodeRemove::new("m1", 1)]);
+    let refused = sx.service.batch(&sx.plan, needed).await?;
+    let expected = vec![problem("W", "needs `m1`, which is not a node")];
+    assert_eq!(refused, Checked::Refused(expected));
+    // nor a group without its members
+    let alone = Puts::removing(vec![NodeRemove::new("G", 1)]);
+    let refused = sx.service.batch(&sx.plan, alone).await?;
+    let expected = vec![
+        problem("m1", "group `G` is not a node"),
+        problem("m2", "group `G` is not a node"),
+    ];
+    assert_eq!(refused, Checked::Refused(expected));
+    // a removal of a node that has moved on is stale, and so is one of a node that isn't there
+    let stale = Puts::removing(vec![NodeRemove::new("m2", 7), NodeRemove::new("nope", 1)]);
+    let refused = sx.service.batch(&sx.plan, stale).await?;
+    let expected = vec![
+        StalePut {
+            id: "m2".to_string(),
+            refusal: Refusal::Moved,
+        },
+        StalePut {
+            id: "nope".to_string(),
+            refusal: Refusal::Missing,
+        },
+    ];
+    assert_eq!(refused, Checked::Stale(expected));
+    // a node put and removed in one batch is one the store can't keep
+    let both = Puts {
+        puts: new(vec![work("X", 4)]),
+        removes: vec![NodeRemove::new("X", 1)],
+    };
+    let error = sx
+        .service
+        .batch(&sx.plan, both)
+        .await
+        .expect_err("a node put and removed was written");
+    assert!(
+        format!("{error:#}").contains("put and removed in one batch"),
+        "{error:#}"
+    );
+    // nothing refused was removed, and nothing was sent
+    assert_eq!(ids(&sx).await?, ["G", "m1", "m2", "W"]);
+    assert!(changes.try_recv().is_err());
+    // the need moved off in the same batch as the group and its members go
+    let together = Puts {
+        puts: vec![NodePut::new(work("W", 3), Some(1))],
+        removes: vec![
+            NodeRemove::new("G", 1),
+            NodeRemove::new("m1", 1),
+            NodeRemove::new("m2", 1),
+        ],
+    };
+    let applied = sx.service.batch(&sx.plan, together).await?;
+    assert_eq!(applied, Checked::Applied { versions: vec![2] });
+    assert_eq!(ids(&sx).await?, ["W"]);
+    assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
+    // and its one change names the node written and each node removed
+    let expected = Change::NodesPut {
+        plan: sx.plan.clone(),
+        nodes: vec![PutNode {
+            id: "W".to_string(),
+            version: 2,
+        }],
+        removed: vec!["G".to_string(), "m1".to_string(), "m2".to_string()],
+    };
+    assert_eq!(changes.try_recv()?, expected);
     Ok(())
 }
 

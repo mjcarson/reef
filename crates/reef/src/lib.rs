@@ -7,6 +7,9 @@
 //! - **Commands** ([`cli`]): register and list projects, list a plan in a project and list a
 //!   project's plans. The working directory picks the project, its main repo's in a linked
 //!   worktree, and `--project` names one instead.
+//! - **Nodes** ([`node`]): put, get and remove a plan's nodes as the YAML a book's frontmatter
+//!   holds. `get` prints the version a node was read at as a comment, which `put` reads back, so
+//!   a put made after another writer's is refused as stale.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
 //! - **Config** ([`conf`]): `[api] address` alone, from the file the service reads.
@@ -17,6 +20,7 @@
 pub mod cli;
 pub mod client;
 pub mod conf;
+pub mod node;
 
 pub use cli::{Cli, run};
 pub use client::Client;

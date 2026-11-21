@@ -34,12 +34,15 @@ pub enum Change {
         /// The plan's full name
         plan: PlanName,
     },
-    /// A batch of puts was written into a plan's current revision
+    /// A batch of puts and removals was written into a plan's current revision
     NodesPut {
         /// The plan's full name
         plan: PlanName,
         /// Each node written, in the order the puts were given
         nodes: Vec<PutNode>,
+        /// The id of each node removed, in the order the removals were given
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
     },
     /// A whole plan was written as a new revision, made current
     PlanWritten {
@@ -105,6 +108,7 @@ mod tests {
                 id: "C53".to_string(),
                 version: 2,
             }],
+            removed: Vec::new(),
         };
         let value = serde_json::to_value(&change).unwrap();
         assert_eq!(
@@ -114,6 +118,15 @@ mod tests {
         assert_eq!(value["kind"], change.kind());
         // and it reads back as itself
         assert_eq!(serde_json::from_value::<Change>(value).unwrap(), change);
+        // a batch that removed nodes names them, and one that removed none leaves the key out
+        let removed = Change::NodesPut {
+            plan: PlanName::new("reef", "central").unwrap(),
+            nodes: Vec::new(),
+            removed: vec!["C62".to_string()],
+        };
+        let value = serde_json::to_value(&removed).unwrap();
+        assert_eq!(value["removed"], json!(["C62"]));
+        assert_eq!(serde_json::from_value::<Change>(value).unwrap(), removed);
     }
 
     /// Each change's kind is the tag serde writes for it
@@ -132,6 +145,7 @@ mod tests {
             Change::NodesPut {
                 plan: plan.clone(),
                 nodes: Vec::new(),
+                removed: Vec::new(),
             },
             Change::PlanWritten { plan, revision: 4 },
             Change::Missed { count: 3 },

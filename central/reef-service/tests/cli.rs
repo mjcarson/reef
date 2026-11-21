@@ -68,7 +68,61 @@ impl Cx {
     fn repo(&self, name: &str) -> anyhow::Result<PathBuf> {
         git::repo(&self.ax.dir.join(name))
     }
+
+    /// Writes YAML to a file in the case's directory, returning its path for a command line
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The file's name
+    /// * `text` - The YAML
+    fn yaml(&self, name: &str, text: &str) -> anyhow::Result<String> {
+        let path = self.ax.dir.join(name);
+        std::fs::write(&path, text)?;
+        Ok(path.to_str().expect("the case's dir is utf-8").to_string())
+    }
+
+    /// Puts YAML from a file, from the `reef` project's repo, returning what it printed
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The file to write the YAML to
+    /// * `text` - The YAML
+    async fn put(&self, name: &str, text: &str) -> anyhow::Result<String> {
+        let file = self.yaml(name, text)?;
+        self.reef(&self.ax.repo, &["node", "put", &file]).await
+    }
 }
+
+/// A piece of work's YAML that says why and what, with the needs given
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `needs` - The ids it needs
+fn work(id: &str, needs: &[&str]) -> String {
+    format!(
+        "id: {id}\ntitle: {id} Some work\nneeds: [{}]\ndescription:\n  why: Without {id}, \
+         something is missing.\n  what: With {id}, it is there.\n",
+        needs.join(", ")
+    )
+}
+
+/// A group's YAML, with two members inline that say why and what
+const GROUP: &str = "\
+id: G
+title: G A group
+nodes:
+  - id: m1
+    title: m1 Some work
+    description:
+      why: Without m1, something is missing.
+      what: With m1, it is there.
+  - id: m2
+    title: m2 Some work
+    description:
+      why: Without m2, something is missing.
+      what: With m2, it is there.
+";
 
 /// The first word of each line a command printed: the names it listed
 ///
@@ -179,5 +233,143 @@ async fn taken_name_and_repo_are_refused() -> anyhow::Result<()> {
         error.to_string().contains("already registered as `cli`"),
         "{error}"
     );
+    Ok(())
+}
+
+/// A put naming a need that isn't a node gets check's message, and writes nothing
+#[tokio::test]
+async fn put_naming_an_unknown_need_gets_checks_message() -> anyhow::Result<()> {
+    let cx = Cx::new("unknown-need").await?;
+    // a node that needs one the plan doesn't have
+    let error = cx
+        .put("c99.yml", &work("C99", &["nope"]))
+        .await
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(message.starts_with("the put was refused"), "{message}");
+    assert!(
+        message.contains("reef/central/C99: needs `nope`, which is not a node"),
+        "{message}"
+    );
+    // and nothing was written
+    let error = cx
+        .reef(&cx.ax.repo, &["node", "get", "C99"])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not in its plan"), "{error}");
+    Ok(())
+}
+
+/// A node got, edited and put back is written, and a put over a version since moved on, or a
+/// new node over one that exists, is stale
+#[tokio::test]
+async fn got_node_put_back_and_stale_put_refused() -> anyhow::Result<()> {
+    let cx = Cx::new("round-trip").await?;
+    let repo = cx.ax.repo.clone();
+    // a new node, written by hand with no version line
+    let new = work("C1", &[]);
+    assert_eq!(cx.put("c1.yml", &new).await?, "put `C1` at version 1\n");
+    // got after the version it was read at, and the YAML it was put as
+    let got = cx.reef(&repo, &["node", "get", "C1"]).await?;
+    assert!(got.starts_with("# version: 1\nid: C1\n"), "{got}");
+    assert!(got.contains("title: C1 Some work\n"), "{got}");
+    // edited and put back, it moves on a version
+    let edited = got.replace("title: C1 Some work", "title: C1 Edited work");
+    assert_eq!(cx.put("c1.yml", &edited).await?, "put `C1` at version 2\n");
+    let again = cx.reef(&repo, &["node", "get", "C1"]).await?;
+    assert!(again.starts_with("# version: 2\n"), "{again}");
+    assert!(again.contains("title: C1 Edited work\n"), "{again}");
+    // what was got before that is stale now, and says what reads it again
+    let error = cx.put("c1.yml", &got).await.unwrap_err().to_string();
+    assert!(
+        error.contains("`C1`: it changed since it was read"),
+        "{error}"
+    );
+    assert!(error.contains("`reef node get C1`"), "{error}");
+    // and a new node over one that exists says to keep the version line
+    let error = cx.put("c1.yml", &new).await.unwrap_err().to_string();
+    assert!(error.contains("`C1`: it already exists"), "{error}");
+    assert!(error.contains("`# version:`"), "{error}");
+    // a group goes in with its members inline, each a node of its own in it
+    let put = cx.put("g.yml", GROUP).await?;
+    assert_eq!(
+        put,
+        "put `G` at version 1\nput `m1` at version 1\nput `m2` at version 1\n"
+    );
+    let member = cx.reef(&repo, &["node", "get", "m1"]).await?;
+    assert!(member.contains("group: G\n"), "{member}");
+    let group = cx.reef(&repo, &["node", "get", "G"]).await?;
+    assert!(!group.contains("nodes:"), "{group}");
+    Ok(())
+}
+
+/// A node another needs can't be removed, nor a group without its members, and the nodes named
+/// together go
+#[tokio::test]
+async fn rm_names_every_node_it_removes() -> anyhow::Result<()> {
+    let cx = Cx::new("rm").await?;
+    let repo = cx.ax.repo.clone();
+    // a group of two, and work that needs one of them
+    cx.put("g.yml", GROUP).await?;
+    cx.put("w.yml", &work("W", &["m1"])).await?;
+    // a node another needs is kept, with check's message
+    let error = cx.reef(&repo, &["node", "rm", "m1"]).await.unwrap_err();
+    let message = error.to_string();
+    assert!(message.starts_with("the removal was refused"), "{message}");
+    assert!(
+        message.contains("reef/central/W: needs `m1`, which is not a node"),
+        "{message}"
+    );
+    // a group alone is kept, since its members would name a group that isn't a node
+    let error = cx.reef(&repo, &["node", "rm", "G"]).await.unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("reef/central/m1: group `G` is not a node"),
+        "{message}"
+    );
+    // a node the plan doesn't have is named, and nothing is sent
+    let error = cx
+        .reef(&repo, &["node", "rm", "W", "nope"])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "node `reef/central/nope` is not in its plan"
+    );
+    // what needs the member goes first, then the group with its members named
+    assert_eq!(cx.reef(&repo, &["node", "rm", "W"]).await?, "removed `W`\n");
+    let removed = cx.reef(&repo, &["node", "rm", "G", "m1", "m2"]).await?;
+    assert_eq!(removed, "removed `G`\nremoved `m1`\nremoved `m2`\n");
+    let error = cx.reef(&repo, &["node", "get", "G"]).await.unwrap_err();
+    assert!(error.to_string().contains("not in its plan"), "{error}");
+    Ok(())
+}
+
+/// A node's plan is the project's only plan, and with several, the one `--plan` names
+#[tokio::test]
+async fn node_commands_take_the_only_plan_or_the_one_named() -> anyhow::Result<()> {
+    let cx = Cx::new("pick-plan").await?;
+    let repo = cx.ax.repo.clone();
+    // with one plan, it is the one put to
+    cx.put("a.yml", &work("A", &[])).await?;
+    // with two, a command says which there are and how to name one
+    cx.reef(&repo, &["plan", "new", "other"]).await?;
+    let error = cx
+        .reef(&repo, &["node", "get", "A"])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("`reef/central`, `reef/other`"), "{error}");
+    assert!(error.contains("`--plan`"), "{error}");
+    // and each plan named is its own
+    let got = cx
+        .reef(&repo, &["node", "get", "A", "--plan", "central"])
+        .await?;
+    assert!(got.starts_with("# version: 1\nid: A\n"), "{got}");
+    let error = cx
+        .reef(&repo, &["node", "get", "A", "--plan", "other"])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not in its plan"), "{error}");
     Ok(())
 }

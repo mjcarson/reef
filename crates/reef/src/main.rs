@@ -1,9 +1,12 @@
-//! reef: projects and plans from the terminal, through the service's JSON API
+//! reef: projects, plans and nodes from the terminal, through the service's JSON API
 //!
 //! ```sh
 //! reef project add reef        # register this repo as `reef`
 //! reef plan new central        # list a plan in it
 //! reef plan ls                 # and list its plans
+//! reef node get C17 > c17.yml  # print a node's YAML, after the version it was read at
+//! reef node put c17.yml        # and put it back, refused if it is stale or breaks the plan
+//! reef node rm C62             # remove a node, refused if another needs it
 //! ```
 
 use clap::Parser;

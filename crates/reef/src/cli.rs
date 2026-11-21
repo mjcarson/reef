@@ -1,4 +1,4 @@
-//! reef's commands: projects and plans, each one or two calls to the JSON API
+//! reef's commands: projects, plans and nodes, each a few calls to the JSON API
 //!
 //! ```text
 //! reef [--conf PATH] project add <NAME> [--repo DIR]
@@ -6,10 +6,14 @@
 //! reef [--conf PATH] project show [--project NAME]
 //! reef [--conf PATH] plan new <NAME> [--project NAME]
 //! reef [--conf PATH] plan ls [--project NAME]
+//! reef [--conf PATH] node put [FILE] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] node get <ID> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] node rm <ID>... [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
-//! repo's for a linked worktree. `--project` names one instead.
+//! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
+//! only plan, unless `--plan` names one.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -20,8 +24,9 @@ use std::path::{Path, PathBuf};
 
 use crate::client::Client;
 use crate::conf::Conf;
+use crate::node;
 
-/// reef's terminal client: projects and plans, through the service's JSON API
+/// reef's terminal client: projects, plans and nodes, through the service's JSON API
 #[derive(Debug, Parser)]
 #[command(name = "reef", version, about)]
 pub struct Cli {
@@ -66,6 +71,9 @@ pub enum Command {
     /// List a plan in a project, and list a project's plans
     #[command(subcommand)]
     Plan(PlanCommand),
+    /// Put, get and remove a plan's nodes as YAML
+    #[command(subcommand)]
+    Node(NodeCommand),
 }
 
 /// What can be done with projects
@@ -108,12 +116,60 @@ pub enum PlanCommand {
     },
 }
 
+/// What can be done with a plan's nodes
+#[derive(Debug, Subcommand)]
+pub enum NodeCommand {
+    /// Put a node's YAML and its inline members, unless it is stale or breaks the plan
+    ///
+    /// YAML that starts with the `# version:` line `get` printed changes the node got; YAML
+    /// without one is a new node.
+    Put {
+        /// The YAML to put, else standard input, which `-` names too
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// The plan to put it in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Print a node's YAML, after the `# version:` line a put of it keeps
+    Get {
+        /// The node's id
+        id: String,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Remove the nodes named as one change, unless it breaks the plan
+    ///
+    /// A group goes only with its members named too, and a node another needs only once
+    /// nothing needs it.
+    Rm {
+        /// The ids of the nodes to remove
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<String>,
+        /// The plan they are in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+}
+
 /// A project named on the command line, else the working directory's
 #[derive(Debug, Clone, Default, Args)]
 pub struct Pick {
     /// The project to use, instead of the one the working directory belongs to
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
+}
+
+/// A plan named on the command line, else the picked project's only plan
+#[derive(Debug, Clone, Default, Args)]
+pub struct PlanPick {
+    /// The project the plan is in
+    #[command(flatten)]
+    pub project: Pick,
+    /// The plan to use within the project, instead of its only plan
+    #[arg(long, value_name = "NAME")]
+    pub plan: Option<String>,
 }
 
 /// Runs a command against the service reef's config names
@@ -152,6 +208,20 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             plan_new(&client, cwd, &name, &pick, out).await
         }
         Command::Plan(PlanCommand::Ls { pick }) => plan_ls(&client, cwd, &pick, out).await,
+        Command::Node(NodeCommand::Put { file, pick }) => {
+            // the YAML first, so a file that can't be read asks nothing of the service
+            let text = node::read_input(cwd, file.as_deref())?;
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            node::put(&client, &plan, &text, out).await
+        }
+        Command::Node(NodeCommand::Get { id, pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            node::get(&client, &plan, &id, out).await
+        }
+        Command::Node(NodeCommand::Rm { ids, pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            node::rm(&client, &plan, &ids, out).await
+        }
     }
 }
 
@@ -311,6 +381,40 @@ async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::Result<Proj
     })
 }
 
+/// The plan a node command works in: the one named in the picked project, else its only plan
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `pick` - The project and plan named, if they were
+async fn picked_plan(client: &Client, cwd: &Path, pick: &PlanPick) -> anyhow::Result<PlanName> {
+    // the plan is in the project named, else the working directory's
+    let project = picked(client, cwd, &pick.project).await?;
+    // a plan named keeps the rule names share, and the service says if it isn't listed
+    if let Some(plan) = &pick.plan {
+        return Ok(PlanName::new(project.name, plan)?);
+    }
+    // else the project's only plan
+    let plans = client.plans(&project.name).await?;
+    match plans.as_slice() {
+        [only] => Ok(only.name.clone()),
+        [] => anyhow::bail!(
+            "project `{}` lists no plans: list one with `reef plan new <name>`",
+            project.name
+        ),
+        many => {
+            let names: Vec<String> = many.iter().map(|info| format!("`{}`", info.name)).collect();
+            anyhow::bail!(
+                "project `{}` lists {} plans, {}: name one with `--plan`",
+                project.name,
+                many.len(),
+                names.join(", ")
+            )
+        }
+    }
+}
+
 /// Prints rows of two columns, the first padded to its widest
 ///
 /// # Arguments
@@ -336,7 +440,7 @@ fn columns<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, PlanCommand, ProjectCommand, columns};
+    use super::{Cli, Command, NodeCommand, PlanCommand, ProjectCommand, columns};
     use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
 
@@ -371,6 +475,30 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["reef", "project", "add", "x", "--project", "y"]).is_err());
         assert!(Cli::try_parse_from(["reef", "project", "ls", "--project", "y"]).is_err());
+        // a node's project and plan are picked on the command line
+        let get = Cli::try_parse_from(["reef", "node", "get", "C17", "--plan", "central"]);
+        match get.unwrap().command {
+            Command::Node(NodeCommand::Get { id, pick }) => {
+                assert_eq!(id, "C17");
+                assert_eq!(pick.plan.as_deref(), Some("central"));
+                assert_eq!(pick.project.project, None);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // a put's file is optional, and `rm` needs at least one id
+        let put = Cli::try_parse_from(["reef", "node", "put", "--project", "reef"]);
+        assert!(matches!(
+            put.unwrap().command,
+            Command::Node(NodeCommand::Put { file: None, .. })
+        ));
+        assert!(Cli::try_parse_from(["reef", "node", "rm"]).is_err());
+        let rm = Cli::try_parse_from(["reef", "node", "rm", "M3", "C11"]).unwrap();
+        assert!(matches!(
+            rm.command,
+            Command::Node(NodeCommand::Rm { ids, .. }) if ids == ["M3", "C11"]
+        ));
+        // and `--plan` means nothing where no plan is picked
+        assert!(Cli::try_parse_from(["reef", "plan", "ls", "--plan", "x"]).is_err());
     }
 
     /// The first column is padded to its widest cell

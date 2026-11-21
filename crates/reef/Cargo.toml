@@ -1,6 +1,6 @@
 [package]
 name = "reef"
-description = "reef's terminal client: registers projects and lists plans through the service's JSON API"
+description = "reef's terminal client: projects, plans and nodes as YAML, through the service's JSON API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,8 @@ repository.workspace = true
 [dependencies]
 # the service's data types, and the JSON API's requests, answers, routes and config location
 reef-api = { path = "../reef-api" }
-# plan names; frontmatter parsing waits for `reef node put` (C17)
-reef-model.workspace = true
+# plan names, and the frontmatter `reef node put` reads and `reef node get` prints
+reef-model = { workspace = true, features = ["parse"] }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

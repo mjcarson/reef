@@ -561,22 +561,22 @@ async fn list<S: Serves>(
     Ok(Json(listing))
 }
 
-/// Puts a batch of nodes into a plan: 200 if written, 409 if stale, 422 if refused
+/// Puts and removes a batch of nodes in a plan: 200 if written, 409 if stale, 422 if refused
 ///
 /// # Arguments
 ///
 /// * `serves` - The service
 /// * `segments` - The plan's project and name
-/// * `puts` - The nodes to write, each with the version its writer read
+/// * `batch` - The nodes to write and to remove, each with the version its writer read
 #[instrument(name = "api::put", skip_all, err(Debug))]
 async fn put<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<PlanSegments>,
-    Body(puts): Body<Puts>,
+    Body(batch): Body<Puts>,
 ) -> Result<(StatusCode, Json<Checked>), Failure> {
     let plan = segments.name()?;
     // checked against the whole plan, under its write lock
-    let checked = serves.service().put(&plan, puts.puts).await?;
+    let checked = serves.service().batch(&plan, batch).await?;
     let status = match checked {
         Checked::Applied { .. } => StatusCode::OK,
         Checked::Stale(_) => StatusCode::CONFLICT,

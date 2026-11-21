@@ -10,9 +10,9 @@
 //!   write with check's own message. A stored node's problems sit at its name, with no line,
 //!   so they hold still across writes, and a fix gets through on a plan that already has
 //!   other problems.
-//! - **Puts come in batches.** A group with no members yet is a piece of work that says
-//!   neither why nor what, and a member alone names a group that isn't a node, so a group goes
-//!   in with its members, checked as one change.
+//! - **Puts and removals come in batches.** A group with no members yet is a piece of work
+//!   that says neither why nor what, and a member alone names a group that isn't a node, so a
+//!   group goes in with its members, and comes out with them, checked as one change.
 //! - **Checked under the plan's write lock**, so two writes that are fine alone can't break the
 //!   plan together.
 //! - **Docs come from the project's working tree.** A stored node's links resolve from its
@@ -21,8 +21,8 @@
 //! - **Docs are served as pages.** A payload's links lead under [`paths::docs`], where
 //!   [`Service::doc_page`] renders each doc as the page mdbook would write for it, so the
 //!   viewer's *Read here* cuts a section out of it as out of a book's page.
-//! - **Each applied write is a change.** A project registered, a plan listed, a batch put or a
-//!   whole plan written is sent to every subscriber of [`Service::changes`], after the write's
+//! - **Each applied write is a change.** A project registered, a plan listed, a batch written or
+//!   a whole plan written is sent to every subscriber of [`Service::changes`], after the write's
 //!   lock is let go, so two writers' changes to one plan can arrive in either order. A refused
 //!   write sends nothing.
 //!
@@ -45,7 +45,7 @@ use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::store::{
     AddedProject, Checked, Listing, NodePut, NodeWrite, NotListed, NotRegistered, PlanInfo,
-    Project, Proposal, Rewrite, Store, StoredNode,
+    Project, Proposal, Puts, Rewrite, Store, StoredNode,
 };
 
 /// The process's one service over shoal, opened on first use
@@ -269,10 +269,7 @@ impl<B: Backend> Service<B> {
 
     /// Puts a batch of nodes into a plan, unless one is stale or they would add a problem
     ///
-    /// Each put names the version its writer read, or `None` for a new node. A stale put
-    /// refuses the whole batch as [`Checked::Stale`], and a batch that would add a problem to
-    /// the plan is refused as [`Checked::Refused`] with check's messages. Either writes
-    /// nothing.
+    /// This is [`Service::batch`] with no removals.
     ///
     /// # Arguments
     ///
@@ -280,17 +277,45 @@ impl<B: Backend> Service<B> {
     /// * `puts` - The nodes to write, each with the version its writer read
     #[instrument(name = "Service::put", skip_all, err(Debug))]
     pub async fn put(&self, plan: &PlanName, puts: Vec<NodePut>) -> anyhow::Result<Checked> {
+        // a batch of puts alone
+        self.batch(plan, Puts::new(puts)).await
+    }
+
+    /// Puts and removes a batch of nodes in a plan, unless one is stale or they would add a
+    /// problem
+    ///
+    /// Each put names the version its writer read, or `None` for a new node, and each removal
+    /// the version its writer read. A stale node refuses the whole batch as [`Checked::Stale`],
+    /// and a batch that would add a problem to the plan is refused as [`Checked::Refused`] with
+    /// check's messages. Either writes nothing. A node another needs can't be removed alone, nor
+    /// a group without its members.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `batch` - The nodes to write and to remove, each with the version its writer read
+    #[instrument(name = "Service::batch", skip_all, err(Debug))]
+    pub async fn batch(&self, plan: &PlanName, batch: Puts) -> anyhow::Result<Checked> {
         // the plan's docs are its project's working tree
         let repo = self.repo(plan).await?;
         let sections = self.sections.clone();
-        // the ids put, for the change the batch makes if it is written
-        let ids: Vec<String> = puts.iter().map(|put| put.node.spec.id.clone()).collect();
-        // judged under the plan's write lock, against the plan the puts land on
+        // the ids put and removed, for the change the batch makes if it is written
+        let ids: Vec<String> = batch
+            .puts
+            .iter()
+            .map(|put| put.node.spec.id.clone())
+            .collect();
+        let removed: Vec<String> = batch
+            .removes
+            .iter()
+            .map(|remove| remove.id.clone())
+            .collect();
+        // judged under the plan's write lock, against the plan the batch lands on
         let checked = self
             .store
-            .put_checked(plan, puts, move |proposal| added(repo, sections, proposal))
+            .batch_checked(plan, batch, move |proposal| added(repo, sections, proposal))
             .await?;
-        // tell the change stream of each node written, at its new version
+        // tell the change stream of each node written, at its new version, and each removed
         if let Checked::Applied { versions } = &checked {
             let nodes = ids
                 .into_iter()
@@ -300,6 +325,7 @@ impl<B: Backend> Service<B> {
             self.publish(Change::NodesPut {
                 plan: plan.clone(),
                 nodes,
+                removed,
             });
         }
         Ok(checked)
@@ -654,6 +680,7 @@ mod tests {
                 id: "C11".to_string(),
                 version: 1,
             }],
+            removed: Vec::new(),
         };
         assert_eq!(changes.try_recv()?, expected);
         // once the stream is ended, every receiver closes, and a new one is closed from the start

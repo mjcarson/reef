@@ -1,8 +1,9 @@
 //! Nodes as the service reads and writes them, and what came of a write
 //!
-//! Each put names the version its writer read, or `None` for a new node, so a write made against
-//! a node that has moved on is refused as stale, an answer and not a failure. A write that would
-//! add a problem to the plan is refused with check's messages. Either refusal writes nothing.
+//! Each put names the version its writer read, or `None` for a new node, and each removal the
+//! version its writer read, so a write made against a node that has moved on is refused as stale,
+//! an answer and not a failure. A write that would add a problem to the plan is refused with
+//! check's messages. Either refusal writes nothing.
 //!
 //! Enums take serde's external tagging, their variants in kebab-case, so an answer reads as
 //! `{"applied":{"versions":[1]}}` or `{"refused":[...]}`.
@@ -99,11 +100,123 @@ impl NodePut {
     }
 }
 
-/// A batch of puts to one plan, checked as one change
+/// One removal of a batch: a node's id, and the version its writer read it at
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeRemove {
+    /// The id of the node to remove
+    pub id: String,
+    /// The version it was read at, which it must still be at to be removed
+    pub read: u64,
+}
+
+impl NodeRemove {
+    /// A removal of a node, at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The id of the node to remove
+    /// * `read` - The version it was read at
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::NodeRemove;
+    ///
+    /// let remove = NodeRemove::new("C62", 3);
+    /// assert_eq!(remove.id, "C62");
+    /// ```
+    pub fn new<T: Into<String>>(id: T, read: u64) -> NodeRemove {
+        NodeRemove {
+            id: id.into(),
+            read,
+        }
+    }
+}
+
+/// A batch of puts and removals to one plan, checked as one change
+///
+/// A group and its members go in together, and come out together, since either alone breaks
+/// the plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Puts {
     /// The nodes to write, each with the version its writer read
     pub puts: Vec<NodePut>,
+    /// The nodes to remove, each with the version its writer read
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removes: Vec<NodeRemove>,
+}
+
+impl Puts {
+    /// A batch of puts alone
+    ///
+    /// # Arguments
+    ///
+    /// * `puts` - The nodes to write, each with the version its writer read
+    pub fn new(puts: Vec<NodePut>) -> Puts {
+        Puts {
+            puts,
+            removes: Vec::new(),
+        }
+    }
+
+    /// A batch of removals alone
+    ///
+    /// # Arguments
+    ///
+    /// * `removes` - The nodes to remove, each with the version its writer read
+    pub fn removing(removes: Vec<NodeRemove>) -> Puts {
+        Puts {
+            puts: Vec::new(),
+            removes,
+        }
+    }
+}
+
+/// Lifts a spec's inline members out of it, as the store keeps them: the spec first, then each
+/// member after the node that lists it, depth first
+///
+/// A member belongs to the node that lists it unless it names a group of its own, so each is
+/// given that node's id as its `group`. Its `body` stays in its spec, as it was written.
+///
+/// # Arguments
+///
+/// * `spec` - The spec, its members inline
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::lift;
+/// use reef_model::NodeSpec;
+///
+/// let member = NodeSpec { id: "C11".into(), ..NodeSpec::default() };
+/// let group = NodeSpec { id: "M3".into(), nodes: vec![member], ..NodeSpec::default() };
+/// let lifted = lift(group);
+/// assert_eq!(lifted[1].group.as_deref(), Some("M3"));
+/// ```
+pub fn lift(spec: NodeSpec) -> Vec<NodeSpec> {
+    let mut out = Vec::new();
+    lift_into(spec, &mut out);
+    out
+}
+
+/// Pushes a spec, then each of its members after it, depth first
+///
+/// # Arguments
+///
+/// * `spec` - The spec to push, members and all
+/// * `out` - The lifted specs so far
+fn lift_into(mut spec: NodeSpec, out: &mut Vec<NodeSpec>) {
+    // take its members out of it, so the store holds it alone
+    let members = std::mem::take(&mut spec.nodes);
+    let id = spec.id.clone();
+    out.push(spec);
+    for mut member in members {
+        // a member belongs to the node that lists it unless it names a group
+        if member.group.is_none() {
+            member.group = Some(id.clone());
+        }
+        lift_into(member, out);
+    }
 }
 
 /// A whole plan, written as a new revision
@@ -233,7 +346,9 @@ pub fn records(plan: &PlanName, nodes: Vec<NodeWrite>) -> Result<Vec<Record>, Na
 
 #[cfg(test)]
 mod tests {
-    use super::{Checked, NodePut, NodeWrite, Refusal, Rewrite, Rewritten, StalePut};
+    use super::{
+        Checked, NodePut, NodeRemove, NodeWrite, Puts, Refusal, Rewrite, Rewritten, StalePut, lift,
+    };
     use reef_model::{Diagnostic, NodeSpec};
     use serde_json::json;
 
@@ -302,6 +417,51 @@ mod tests {
             serde_json::from_value(json!({"node": {"spec": {"id": "a"}, "body": "", "order": 0}}))
                 .expect("the put deserializes");
         assert_eq!(put, NodePut::new(NodeWrite::new("a", 0), None));
+    }
+
+    /// A batch with removals reads back the same, and one sent without them has none
+    #[test]
+    fn removals_ride_in_the_batch() {
+        // a put and a removal, as the API sends them
+        let batch = Puts {
+            puts: vec![NodePut::new(NodeWrite::new("a", 0), None)],
+            removes: vec![NodeRemove::new("b", 2)],
+        };
+        let value = serde_json::to_value(&batch).expect("the batch serializes");
+        assert_eq!(value["removes"], json!([{"id": "b", "read": 2}]));
+        assert_eq!(serde_json::from_value::<Puts>(value).unwrap(), batch);
+        // a batch of puts alone leaves the key out, and one written without it reads as none
+        let puts = Puts::new(vec![NodePut::new(NodeWrite::new("a", 0), None)]);
+        let value = serde_json::to_value(&puts).expect("the batch serializes");
+        assert!(value.get("removes").is_none(), "{value}");
+        let read: Puts = serde_json::from_value(json!({"puts": []})).unwrap();
+        assert!(read.removes.is_empty());
+    }
+
+    /// Inline members lift into nodes of their own after the node that lists them, their group
+    /// filled in unless they name one
+    #[test]
+    fn inline_members_lift_with_their_group() {
+        // a group listing a member with members of its own, and one that names another group
+        let spec = |id: &str, nodes: Vec<NodeSpec>| NodeSpec {
+            id: id.to_string(),
+            nodes,
+            ..NodeSpec::default()
+        };
+        let mut elsewhere = spec("m2", Vec::new());
+        elsewhere.group = Some("G2".to_string());
+        let group = spec(
+            "G",
+            vec![spec("m1", vec![spec("m1a", Vec::new())]), elsewhere],
+        );
+        // each comes out alone, depth first, after the node that lists it
+        let lifted = lift(group);
+        let ids: Vec<&str> = lifted.iter().map(|node| node.id.as_str()).collect();
+        assert_eq!(ids, ["G", "m1", "m1a", "m2"]);
+        assert!(lifted.iter().all(|node| node.nodes.is_empty()));
+        // each in the group that lists it, unless it named its own
+        let groups: Vec<Option<&str>> = lifted.iter().map(|node| node.group.as_deref()).collect();
+        assert_eq!(groups, [None, Some("G"), Some("m1"), Some("G2")]);
     }
 
     /// Each outcome's JSON is pinned, since clients match on it

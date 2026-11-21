@@ -56,4 +56,5 @@ suite!(
     payload_equals_graph_build_of_stored_nodes,
     put_to_unlisted_plan_is_an_error,
     node_write_refused_midway_is_an_error,
+    removes_are_checked_with_the_batch,
 );

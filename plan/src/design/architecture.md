@@ -170,9 +170,19 @@ app.
   its tree.
 - **It takes the same YAML as frontmatter.** `reef node put` reads a `NodeSpec`, and
   `reef node get` prints one, so the skill's rules and the reference carry over unchanged.
+- **A got node's version rides in a comment.** `get` prints `# version: N` before the YAML,
+  which YAML skips, and `put` reads it back as the version its writer read. So a put made after
+  another writer's is refused as stale, and YAML with no version line is a new node, refused if
+  its id is taken rather than written over it. A flag would be dropped between the get and the
+  put; the comment travels with the text Claude edits.
+- **A group goes in with its members, and `rm` removes only what it names.** A spec's inline
+  `nodes:` are lifted out and put as one batch with it, each a new node in its group. `rm`
+  takes several ids as one checked batch, and never removes a node it wasn't given: a group's
+  members are named with it, and a node another needs goes once nothing needs it.
 - **The working directory picks the project:** the registered project whose repo holds it. A
   linked worktree picks its main repo's project (`git rev-parse --git-common-dir`).
-  `--project` and `--plan` override.
+  `--project` overrides. A node's plan is the project's only plan; with several, `--plan`
+  names one, and without it the command lists them and stops.
 - **It reads the service's own config, for `[api] address` alone.** `reef_api::config` finds the
   file for both (`--conf`, else `$REEF_CONFIG`, else the XDG path), so they meet at the address
   one file names. The CLI ignores every other key; the service checks them.
