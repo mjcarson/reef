@@ -8,7 +8,8 @@
 //! JSON API's clients share them. It reads and writes through a `Store`, which keeps plans and
 //! their nodes by version over a `Backend`: a `ShoalBackend`, which runs a pool in this process
 //! with `embedded` or reaches an external node such as `reef-shoal`, or a `MemoryBackend`, its
-//! in-memory twin. The rows reef keeps in shoal are its `schema`, and reef's `conf` says how to
+//! in-memory twin. The rows reef keeps in shoal are its `schema`, the user's queue sorts by
+//! `rank` strings, and reef's `conf` says how to
 //! reach shoal and where to serve. Projects name the repos their plans describe, and `repo`
 //! locates the one a working directory, or a linked worktree, is in. Before a pool starts,
 //! `checks` refuses a config shoal would fail on obscurely, naming the fix. Without `embedded`
@@ -23,6 +24,7 @@ pub mod conf;
 pub mod memory;
 #[cfg(feature = "embedded")]
 pub mod pool;
+pub mod rank;
 pub mod repo;
 pub mod schema;
 pub mod service;
