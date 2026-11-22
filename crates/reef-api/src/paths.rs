@@ -19,6 +19,8 @@
 //! | `GET` | [`CHECK`] |
 //! | `GET` | [`NEXT`] |
 //! | `GET` | [`DOC`] |
+//! | `GET`, `POST` | [`PAGES`] |
+//! | `GET` | [`PAGE`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
 use reef_model::PlanName;
@@ -69,6 +71,12 @@ pub const NEXT: &str = "/api/v1/projects/{project}/plans/{plan}/next";
 /// `path` is the page mdbook would write for the doc, from the root of the plan's docs:
 /// `docs/design.html` for the repo's `docs/design.md`.
 pub const DOC: &str = "/api/v1/projects/{project}/plans/{plan}/docs/{*path}";
+
+/// A plan's own pages: listed by `GET`, edited a page at a time by `POST`
+pub const PAGES: &str = "/api/v1/projects/{project}/plans/{plan}/pages";
+
+/// One of a plan's own pages, by its path: `design/app.md`
+pub const PAGE: &str = "/api/v1/projects/{project}/plans/{plan}/pages/{*path}";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
@@ -238,6 +246,42 @@ pub fn docs(plan: &PlanName) -> String {
     format!("{}/docs/", self::plan(plan))
 }
 
+/// The path of a plan's own pages
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn pages(plan: &PlanName) -> String {
+    format!("{}/pages", self::plan(plan))
+}
+
+/// The path of one of a plan's own pages
+///
+/// Each part of the page's path is encoded on its own, and they stay apart.
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `path` - The page's path
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::paths;
+/// use reef_model::PlanName;
+///
+/// let plan = PlanName::new("reef", "central").unwrap();
+/// assert_eq!(
+///     paths::page(&plan, "design/the app.md"),
+///     "/api/v1/projects/reef/plans/central/pages/design/the%20app.md"
+/// );
+/// ```
+pub fn page(plan: &PlanName, path: &str) -> String {
+    // each part is encoded, and the slashes between them kept
+    let parts: Vec<String> = path.split('/').map(encode).collect();
+    format!("{}/{}", pages(plan), parts.join("/"))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -280,6 +324,13 @@ mod tests {
         assert_eq!(super::payload(&plan), format!("{filled}/payload"));
         assert_eq!(super::check(&plan), format!("{filled}/check"));
         assert_eq!(super::next(&plan), format!("{filled}/next"));
+        assert_eq!(super::pages(&plan), format!("{filled}/pages"));
+        // a page's path fills in the page's template, its slashes kept
+        let page = super::PAGE
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{*path}", "design/app.md");
+        assert_eq!(super::page(&plan, "design/app.md"), page);
         // and a project's queue and its next fill in theirs
         assert_eq!(
             super::queue("reef"),

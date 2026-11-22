@@ -10,6 +10,8 @@
 //!   batch or a whole-plan write, a plan's listing, and a spec's inline members lifted out.
 //! - **Projects and plans** ([`project`]): a project and the repo its plans describe, a plan and
 //!   the revision readers load, and the requests that add them.
+//! - **Pages** ([`page`]): a plan's own markdown docs, as read and as written, an edit of one,
+//!   what came of it, and the paths a page can have.
 //! - **The queue** ([`queue`]): a project's order of work, where an edit puts an entry, and
 //!   what came of one.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
@@ -24,15 +26,20 @@ pub mod change;
 pub mod config;
 pub mod error;
 pub mod node;
+pub mod page;
 pub mod paths;
 pub mod project;
 pub mod queue;
 
-pub use change::{Change, PutNode};
+pub use change::{Change, PutNode, PutPage};
 pub use error::{ApiError, ErrorCode};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
     StalePut, StoredNode, lift, puts_for, records,
+};
+pub use page::{
+    PLAN_PAGES_MAX_BYTES, PageEdit, PageEdited, PageListing, PageWrite, StoredPage,
+    WRITE_BODY_MAX, check_page_path,
 };
 pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Project};
 pub use queue::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};

@@ -369,6 +369,11 @@ mod web {
             .map_err(|e| format!("{e:?}"))
     }
 
+    /// Forgets every doc section read, so each is fetched again when it is next shown
+    pub fn forget_docs() {
+        reef_draw::web::docs::forget();
+    }
+
     /// Writes SVG into a chart's overlay, the group drawn over the rest of it
     ///
     /// # Arguments
@@ -556,6 +561,9 @@ mod server {
     pub async fn read_doc(_href: String, _part: Part) -> Result<String, String> {
         Err("docs are read in the browser".into())
     }
+
+    /// No doc is kept on the server
+    pub fn forget_docs() {}
 
     /// No chart is drawn on the server
     pub fn overlay(_chart: &El, _svg: &str) {}

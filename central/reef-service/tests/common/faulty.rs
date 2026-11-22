@@ -5,7 +5,7 @@
 //! so the next write must recover from both the same way.
 
 use reef_model::PlanName;
-use reef_service::schema::{NodeKey, NodeRow, PlanRow, ProjectRow, QueueRow};
+use reef_service::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow};
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,12 @@ pub struct Faults {
     fail_queue_delete: AtomicBool,
     /// Let this many writes of a queue row through, then fail the next before writing it
     queue_inserts_left: Mutex<Option<usize>>,
+    /// Fail the next bulk write of page rows after writing this many of them
+    page_rows_left: Mutex<Option<usize>>,
+    /// Fail the next delete of page rows, before deleting any
+    fail_page_prune: AtomicBool,
+    /// Refuse the next write of one page row as moved, without writing it
+    refuse_page_write: AtomicBool,
 }
 
 impl Faults {
@@ -92,6 +98,26 @@ impl Faults {
     /// * `writes` - How many queue row writes to let through first
     pub fn fail_queue_inserts_after(&self, writes: usize) {
         *self.queue_inserts_left.lock().unwrap() = Some(writes);
+    }
+
+    /// Fails the next bulk write of page rows once it has written `rows` of them
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - How many page rows to write before failing
+    pub fn fail_page_rows_after(&self, rows: usize) {
+        *self.page_rows_left.lock().unwrap() = Some(rows);
+    }
+
+    /// Fails the next delete of page rows, before deleting any
+    pub fn fail_next_page_prune(&self) {
+        self.fail_page_prune.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuses the next write of one page row as another process's write would, without writing
+    /// it
+    pub fn refuse_next_page_write(&self) {
+        self.refuse_page_write.store(true, Ordering::SeqCst);
     }
 
     /// Whether the next write of a queue row fails, counting it against the fault armed
@@ -288,6 +314,68 @@ impl<B: Backend> Backend for Faulty<B> {
             anyhow::bail!("killed before pruning");
         }
         self.inner.delete_nodes(key, ids).await
+    }
+
+    /// Reads a revision's page rows
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `path` - The one page to read, or `None` for all of them
+    async fn pages(&self, key: &RevisionKey, path: Option<&str>) -> anyhow::Result<Vec<PageRow>> {
+        self.inner.pages(key, path).await
+    }
+
+    /// Writes one page row, if its condition holds, refusing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_page(&self, row: PageRow, expect: Expect) -> anyhow::Result<Written> {
+        // a fault armed for this write refuses it, as another process having written would
+        if self.faults.refuse_page_write.swap(false, Ordering::SeqCst) {
+            return Ok(Written::Refused(Refusal::Moved));
+        }
+        self.inner.write_page(row, expect).await
+    }
+
+    /// Lists a revision's page keys
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    async fn page_keys(&self, key: &RevisionKey) -> anyhow::Result<Vec<PageKey>> {
+        self.inner.page_keys(key).await
+    }
+
+    /// Writes page rows, failing partway if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_pages(&self, mut rows: Vec<PageRow>) -> anyhow::Result<()> {
+        // a fault armed for this write lets only so many rows through
+        let Some(left) = self.faults.page_rows_left.lock().unwrap().take() else {
+            return self.inner.write_pages(rows).await;
+        };
+        rows.truncate(left);
+        self.inner.write_pages(rows).await?;
+        anyhow::bail!("killed after writing {left} page rows")
+    }
+
+    /// Deletes page rows, failing before any if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `paths` - The paths of the pages to delete
+    async fn delete_pages(&self, key: &RevisionKey, paths: Vec<String>) -> anyhow::Result<()> {
+        // a fault armed for this delete stops it before anything is deleted
+        if self.faults.fail_page_prune.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("killed before pruning pages");
+        }
+        self.inner.delete_pages(key, paths).await
     }
 
     /// Lists a project's queue rows

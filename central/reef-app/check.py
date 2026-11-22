@@ -1,6 +1,6 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
-Each step checks one of M4's or M5's criteria in the browser, printing `ok` or `FAILED` and what
+Each step checks one of M4's, M5's or M6's criteria in the browser, printing `ok` or `FAILED` and what
 it saw; the script exits 1 if any failed.
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
@@ -447,6 +447,63 @@ def c20_a_stale_save_shows_the_newer(page):
            "newer taken": "status: done" in taken})
 
 
+# a page kept with a plan, under a heading a node links
+PAGE = "# The design\n\n## Rows\n\nRows live with the plan.\n\n## Columns\n\nColumns are elsewhere.\n"
+
+
+def page_text(page):
+    """The text of the sidebar's open doc sections."""
+    return page.evaluate("() => [...document.querySelectorAll('.reef-side .reef-doc-text')]"
+                         ".map(d => d.textContent).join(' | ')")
+
+
+def c28_a_linked_page_shows_in_the_sidebar(page):
+    """C28: a node's doc link to a page kept with the plan, with no file in the repo behind it,
+    shows the page's section in the sidebar."""
+    # a plan with a page put from the terminal, and a node linking its heading
+    reef("plan", "new", "pages")
+    source = WORK / "rows.md"
+    source.write_text(PAGE)
+    reef("page", "put", "design/rows.md", str(source), "--plan", "pages")
+    put("pages", node_yaml("P1", "P1 Linked to a page", "docs: [design/rows.md#rows]\n"))
+    in_repo = (WORK / "repo/design/rows.md").exists()
+    page.goto(URL + "/plans/check/pages")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="P1 Linked to a page").click()
+    page.wait_for_selector(".reef-side", timeout=5000)
+    try:
+        page.wait_for_function("() => [...document.querySelectorAll('.reef-side .reef-doc-text')]"
+                               ".some(d => d.textContent.includes('Rows live with the plan.'))", timeout=10000)
+    except Exception:
+        pass
+    text = page_text(page)
+    page.screenshot(path=str(SHOTS / "reef-app-page.png"))
+    check("C28 a linked plan page shows in the sidebar",
+          "Rows live with the plan." in text and "Columns are elsewhere." not in text and not in_repo,
+          {"sidebar": text, "file in the repo": in_repo})
+
+
+def c28_an_edited_page_shows_live(page):
+    """C28: a page edited from the terminal shows in the sidebar that has it open, without a
+    reload."""
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    # the page got, changed and put back from the terminal, at the version it was got at
+    got = reef("page", "get", "design/rows.md", "--plan", "pages")
+    edited = WORK / "rows-edited.md"
+    edited.write_text(got.replace("Rows live with the plan.", "Rows moved with the plan."))
+    reef("page", "put", "design/rows.md", str(edited), "--plan", "pages")
+    try:
+        page.wait_for_function("() => [...document.querySelectorAll('.reef-side .reef-doc-text')]"
+                               ".some(d => d.textContent.includes('Rows moved with the plan.'))", timeout=10000)
+    except Exception:
+        pass
+    text = page_text(page)
+    kept = page.evaluate("() => window.__kept")
+    check("C28 a page edited from the terminal shows in the open sidebar without a reload",
+          "Rows moved with the plan." in text and kept == "same page",
+          {"sidebar": text, "no reload": kept})
+
+
 def queue_order():
     """The check's queue as `reef queue ls` lists it: each entry's name, in order."""
     return [line.split()[1] for line in reef("queue", "ls").splitlines() if line[:1].isdigit()]
@@ -582,6 +639,8 @@ def main():
             c20_a_stale_save_shows_the_newer(page)
             c25_a_drag_writes_one_row(page)
             c25_keys_and_the_sidebar_queue(page)
+            c28_a_linked_page_shows_in_the_sidebar(page)
+            c28_an_edited_page_shows_live(page)
             browser.close()
     finally:
         stop(server)

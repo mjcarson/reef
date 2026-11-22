@@ -16,9 +16,10 @@ reef-app       the UI, a Dioxus 0.7 fullstack app on axum, which serves the JSON
 The service's data types, and the JSON API's requests, answers, routes and changes, are
 `reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
-add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef status`, `reef accept`, `reef
-check`, `reef next` and `reef queue add|move|rm|ls`, which call the address `[api] address` names
-and say so when nothing answers there.
+add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
+status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, and `reef import`
+and `reef export`, which carry a book's nodes and pages in and out. They call the address
+`[api] address` names and say so when nothing answers there.
 
 ## Building
 
@@ -87,10 +88,14 @@ It reads and writes through a `Store`, and checks every write against the whole 
   written.
 - **A whole plan is checked too** (`Service::write_plan`). An import into an empty plan is
   refused if it has any problem, before a revision is reserved.
-- **Docs come from the project's working tree.** A stored node's links resolve from its repo's
-  root, so a link to a doc or heading that isn't there refuses the write, and a node can take
-  its why and what from a doc. A link that leaves the repo (``doc `../x.md` leaves the repo``)
-  refuses it too, and no doc is read through a symlink that leads out of the repo.
+- **Docs come from the plan's pages, over the project's working tree.** A stored node's links
+  resolve from its repo's root, so a link to a doc or heading that isn't there refuses the write,
+  and a node can take its why and what from a doc. A plan keeps markdown pages of its own, which
+  lie over the repo: a page hides the repo's file at its path. A link that leaves the repo
+  (``doc `../x.md` leaves the repo``) refuses it too, and no doc is read through a symlink that
+  leads out of the repo.
+- **A page edit is checked as a node write is** (`Service::edit_page`): taking out a page a node
+  links to, or the heading it names, or the section its why came from, is refused.
 - **The check runs under the plan's write lock**, through `Store::put_checked` and
   `Store::write_plan_checked`, so two writes that are fine alone can't break the plan together.
   It builds the plan off the async threads, since its docs are files.
@@ -99,8 +104,8 @@ It reads and writes through a `Store`, and checks every write against the whole 
   renders each doc as the page mdbook would write for it: a `<main>` holding the doc, each
   heading under mdbook's id, so the viewer's *Read here* cuts its section out unchanged. Only
   markdown is served, so an image a doc shows doesn't load there.
-- **Each applied write is a change.** A project registered, a plan listed, a batch put or a whole
-  plan written goes to every subscriber of `Service::changes`, after the write's lock is let go,
+- **Each applied write is a change.** A project registered, a plan listed, a batch put, a page
+  edited or a whole plan written goes to every subscriber of `Service::changes`, after the write's lock is let go,
   so two writers' changes to one plan can arrive in either order; each put names its node's new
   version. `Service::end_changes` closes every subscriber, as a server does before it stops.
 
@@ -128,7 +133,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `PUT …/plans/{plan}/revision` `PlanWrite` | `Rewrite`: 200, or 422 if it would add a problem |
 | `GET …/plans/{plan}/payload` | the viewer's `Payload` |
 | `GET …/plans/{plan}/check` | its problems, as check prints them |
-| `GET …/plans/{plan}/docs/{*path}` | a doc as its HTML page (`docs/design.html` for `docs/design.md`), or 404 |
+| `GET …/plans/{plan}/docs/{*path}` | a doc as its HTML page (`docs/design.html` for `docs/design.md`), the plan's page or the repo's file, or 404 |
+| `GET …/plans/{plan}/pages` | its own pages: a `PageListing` |
+| `POST …/plans/{plan}/pages` `PageEdit` | `PageEdited`: 200, 409 if stale, 422 if it would add a problem |
+| `GET …/plans/{plan}/pages/{*path}` | the `StoredPage`, or 404 |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
@@ -136,8 +144,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
 - **An error is an `ApiError`**, `{"code":…,"message":…}`: `not-registered`, `not-listed` and
   `not-found` are 404, `bad-name` and `bad-request` 400, and `internal` 500. Paths a client sends
   (`repo`, `dir`) must be absolute directories on the service's host.
+- **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
+  48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,
-  `plan-added`, `nodes-put`, `plan-written`), its data the change as JSON. It is live only: a
+  `plan-added`, `nodes-put`, `pages-put`, `plan-written`), its data the change as JSON. It is live only: a
   client reads what it needs, then follows. One that falls behind by more than 256 changes is
   sent `missed`, with how many, and should read again. `plan` narrows it within a `project`.
 - **Localhost only.** `api::bind` refuses any address but a loopback one until users sign in
@@ -196,7 +206,7 @@ group at the end.
 
 ## The store
 
-`Store<B: Backend>` reads and writes plans and their nodes by version. Its logic (each plan's lock,
+`Store<B: Backend>` reads and writes plans, their nodes and their pages by version. Its logic (each plan's lock,
 the versions, the full-key checks) is written once, over a backend that only reads rows and makes
 conditional writes the way shoal does: `ShoalBackend`, or `MemoryBackend`, its in-memory twin,
 which needs no shoal and builds on stable. `tests/store.rs` runs every case against both, so shoal
@@ -217,6 +227,13 @@ is the twin's oracle.
   plan's row, its rows written, then made current by one conditional write, and the revision it
   replaced pruned. A write killed midway leaves the old revision current and whole, and the next
   write prunes what it left. `tests/common/faulty.rs` kills writes where a case asks it to.
+- **A plan's pages are a revision of their own.** A whole-plan write that carries pages writes
+  them under its new revision and makes them current in the same flip, so an import lands whole.
+  The plan's row names the pages' revision apart from its nodes', so a batch of node writes
+  leaves the pages where they are rather than copying them, and each table is pruned only of
+  the revisions it doesn't read. A page edit (`Store::edit_page_checked`) is one row's
+  conditional write in the pages' revision. A plan's pages hold at most 32 MiB, and a bulk write
+  is sent in bundles of at most 256 rows and 16 MiB, under shoal's 64 MiB frame.
 - **A project's queue is one row an entry** (`Store::edit_queue`), sorted by a rank string
   (`rank`), so an edit writes one row. A move writes its new row, then deletes its old one; of a
   node's two rows the later write wins, and the next edit prunes the other. A rank grown past 32
@@ -227,8 +244,9 @@ is the twin's oracle.
 | Table | Partition | Sort | Holds |
 |---|---|---|---|
 | `ProjectRow` | the constant `"projects"` | name | the repo's path |
-| `PlanRow` | project | plan name | `current`, `pending` and `retired` revisions, and a `version` |
+| `PlanRow` | project | plan name | `current`, `pending` and `retired` revisions, the pages' `pages_current` and `pages_retired`, and a `version` |
 | `NodeRow` | (project, plan, revision) | id | a `version`, status, group, written order, the spec as JSON, the body |
+| `PageRow` | (project, plan, revision) | path | a `version`, and the page's markdown |
 | `QueueRow` | project | rank | the plan and id of the node queued, and the `seq` it was written at |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a

@@ -8,7 +8,7 @@
 use reef_model::PlanName;
 use std::future::Future;
 
-use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow};
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
 pub use reef_api::Refusal;
@@ -40,9 +40,13 @@ pub struct Pointers {
     pub pending: Option<u64>,
     /// A revision replaced and not yet pruned, or 0
     pub retired: Option<u64>,
+    /// The revision of the plan's pages readers load
+    pub pages_current: Option<u64>,
+    /// A revision of pages replaced and not yet pruned, or 0
+    pub pages_retired: Option<u64>,
 }
 
-/// The key of one revision of a plan: the partition its nodes sit in
+/// The key of one revision of a plan: the partition its nodes sit in, and the one its pages do
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RevisionKey {
     /// The project the plan belongs to
@@ -83,6 +87,24 @@ impl RevisionKey {
     ///
     /// * `key` - The key to check
     pub fn holds_key(&self, key: &NodeKey) -> bool {
+        key.project == self.project && key.plan == self.plan && key.revision == self.revision
+    }
+
+    /// Whether a page row is part of this revision
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to check
+    pub fn holds_page(&self, row: &PageRow) -> bool {
+        row.project == self.project && row.plan == self.plan && row.revision == self.revision
+    }
+
+    /// Whether a page's key is part of this revision
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to check
+    pub fn holds_page_key(&self, key: &PageKey) -> bool {
         key.project == self.project && key.plan == self.plan && key.revision == self.revision
     }
 }
@@ -200,6 +222,64 @@ pub trait Backend: Send + Sync {
         &self,
         key: &RevisionKey,
         ids: Vec<String>,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Reads the page rows stored in a revision's partition, in path order, or the one at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `path` - The one page to read, or `None` for all of them
+    fn pages(
+        &self,
+        key: &RevisionKey,
+        path: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<PageRow>>> + Send;
+
+    /// Writes one page row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_page(
+        &self,
+        row: PageRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Lists the paths and versions stored in a revision's partition of pages, without their text
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    fn page_keys(
+        &self,
+        key: &RevisionKey,
+    ) -> impl Future<Output = anyhow::Result<Vec<PageKey>>> + Send;
+
+    /// Writes page rows over whatever is stored under their keys, every answer checked
+    ///
+    /// The writes are not atomic: one that fails partway leaves the rows before it written.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    fn write_pages(&self, rows: Vec<PageRow>) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Deletes pages from a revision's partition, every answer checked
+    ///
+    /// A delete of a row that isn't stored deletes nothing and is no failure, so a prune that is
+    /// tried again is harmless.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `paths` - The paths of the pages to delete
+    fn delete_pages(
+        &self,
+        key: &RevisionKey,
+        paths: Vec<String>,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     /// Lists the queue rows stored in a project's partition, in rank order

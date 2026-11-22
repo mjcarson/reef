@@ -15,14 +15,18 @@
 //!   group goes in with its members, and comes out with them, checked as one change.
 //! - **Checked under the plan's write lock**, so two writes that are fine alone can't break the
 //!   plan together.
-//! - **Docs come from the project's working tree.** A stored node's links resolve from its
-//!   repo's root, as `mdbook-reef check` resolves a book's from its `src`, and a link that
-//!   leaves the repo is refused. They are read off the async threads.
+//! - **Docs come from the plan's pages, over the project's working tree.** A stored node's links
+//!   resolve from its repo's root, as `mdbook-reef check` resolves a book's from its `src`, and
+//!   a link that leaves the repo is refused. A page the plan keeps hides the repo's file at its
+//!   path. Docs are read off the async threads, and a plan's nodes and pages are read at one
+//!   moment.
+//! - **A page edit is checked as a node write is.** Taking out a page a node links to, or a
+//!   heading a link names, adds a problem, and is refused.
 //! - **Docs are served as pages.** A payload's links lead under [`paths::docs`], where
 //!   [`Service::doc_page`] renders each doc as the page mdbook would write for it, so the
 //!   viewer's *Read here* cuts a section out of it as out of a book's page.
 //! - **Each applied write is a change.** A project registered, a plan listed, a batch written, a
-//!   whole plan written or a queue edited is sent to every subscriber of [`Service::changes`],
+//!   page edited, a whole plan written or a queue edited is sent to every subscriber of [`Service::changes`],
 //!   after the write's lock is let go, so two writers' changes to one plan can arrive in either
 //!   order. A refused write sends nothing.
 //! - **next follows the user's queue.** A project's queue spans its plans, so next reads every
@@ -33,11 +37,14 @@
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
 //! pool would find the data directory locked.
 
-use reef_api::{Change, Listed, PutNode, QueueListing, paths};
+use reef_api::{Change, Listed, PutNode, PutPage, QueueListing, check_page_path, paths};
 use reef_model::{
     Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record, nodes_from_records,
 };
-use reef_render::{DocSource, ROOT, Renderer, RepoSource, Sections, doc_body, render_page};
+use reef_render::{
+    Cached, DocSource, Layered, MemSource, ROOT, Renderer, RepoSource, Sections, doc_body,
+    render_page,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -49,8 +56,9 @@ use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::store::{
-    AddedProject, Checked, Listing, NodePut, NodeWrite, NotListed, NotRegistered, PlanInfo,
-    Project, Proposal, Puts, QueueEdit, Queued, Rewrite, Store, StoredNode,
+    AddedProject, Checked, Listing, NodePut, NotListed, NotRegistered, PageEdit, PageEdited,
+    PageListing, PageWrite, PlanInfo, PlanWrite, Project, Proposal, Puts, QueueEdit, Queued,
+    Rewrite, Store, StoredNode, StoredPage,
 };
 
 /// The process's one service over shoal, opened on first use
@@ -338,25 +346,22 @@ impl<B: Backend> Service<B> {
 
     /// Writes a whole plan as a new revision, unless it would add a problem
     ///
-    /// An import into an empty plan is refused if it has any problem at all.
+    /// An import into an empty plan is refused if it has any problem at all. A write that
+    /// carries pages replaces the plan's pages with them; one without leaves them as they are.
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
-    /// * `nodes` - Every node of the plan, each a node of its own
+    /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
     #[instrument(name = "Service::write_plan", skip_all, err(Debug))]
-    pub async fn write_plan(
-        &self,
-        plan: &PlanName,
-        nodes: Vec<NodeWrite>,
-    ) -> anyhow::Result<Rewrite> {
-        // the plan's docs are its project's working tree
+    pub async fn write_plan(&self, plan: &PlanName, write: PlanWrite) -> anyhow::Result<Rewrite> {
+        // the plan's docs are its pages over its project's working tree
         let repo = self.repo(plan).await?;
         let sections = self.sections.clone();
         // judged under the plan's write lock, against the plan it replaces
         let rewrite = self
             .store
-            .write_plan_checked(plan, nodes, move |proposal| added(repo, sections, proposal))
+            .write_plan_checked(plan, write, move |proposal| added(repo, sections, proposal))
             .await?;
         // tell the change stream of the revision readers now load
         if let Rewrite::Applied(rewritten) = &rewrite {
@@ -368,6 +373,74 @@ impl<B: Backend> Service<B> {
         Ok(rewrite)
     }
 
+    /// Lists a plan's own pages, by path
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Service::pages", skip_all, err(Debug))]
+    pub async fn pages(&self, plan: &PlanName) -> anyhow::Result<PageListing> {
+        // a plan of a project that isn't registered says so
+        self.repo(plan).await?;
+        self.store.pages(plan).await
+    }
+
+    /// Gets one of a plan's own pages, or `None` if it keeps none at that path
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `path` - The page's path
+    #[instrument(name = "Service::page", skip_all, err(Debug))]
+    pub async fn page(&self, plan: &PlanName, path: &str) -> anyhow::Result<Option<StoredPage>> {
+        // a plan of a project that isn't registered says so
+        self.repo(plan).await?;
+        self.store.page(plan, path).await
+    }
+
+    /// Writes or takes out one of a plan's own pages, unless it is stale or would add a problem
+    ///
+    /// A page put names the version its writer read, or `None` for a new page, and a removal
+    /// the version its writer read. A stale page is refused as [`PageEdited::Stale`], and an
+    /// edit that would add a problem to the plan, such as taking out a page a node links to, is
+    /// refused as [`PageEdited::Refused`] with check's messages. Either writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `edit` - The page to write or take out, with the version its writer read
+    #[instrument(name = "Service::edit_page", skip_all, err(Debug))]
+    pub async fn edit_page(&self, plan: &PlanName, edit: PageEdit) -> anyhow::Result<PageEdited> {
+        // the plan's docs are its pages over its project's working tree
+        let repo = self.repo(plan).await?;
+        let sections = self.sections.clone();
+        let path = edit.path().to_string();
+        // judged under the plan's write lock, against the plan the edit lands on
+        let edited = self
+            .store
+            .edit_page_checked(plan, edit, move |proposal| added(repo, sections, proposal))
+            .await?;
+        // tell the change stream of the page written, at its new version, or taken out
+        if let PageEdited::Applied { version } = &edited {
+            let (pages, removed) = match version {
+                Some(version) => (
+                    vec![PutPage {
+                        path,
+                        version: *version,
+                    }],
+                    Vec::new(),
+                ),
+                None => (Vec::new(), vec![path]),
+            };
+            self.publish(Change::PagesPut {
+                plan: plan.clone(),
+                pages,
+                removed,
+            });
+        }
+        Ok(edited)
+    }
+
     /// Finds a plan's problems, as `mdbook-reef check` finds a book's
     ///
     /// # Arguments
@@ -375,12 +448,12 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::check", skip_all, err(Debug))]
     pub async fn check(&self, plan: &PlanName) -> anyhow::Result<Vec<Diagnostic>> {
-        // the plan as it stands, and the working tree its docs are read from
-        let (records, repo) = self.records(plan).await?;
+        // the plan and its pages as they stand, and the working tree under them
+        let (records, pages, repo) = self.snapshot(plan).await?;
         let sections = self.sections.clone();
         // build it off the async threads, since its docs are files
         let problems = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(RepoSource::new(repo), sections);
+            let renderer = Renderer::new(Layered::new(pages, RepoSource::new(repo)), sections);
             build(&renderer, records).1
         })
         .await?;
@@ -511,10 +584,11 @@ impl<B: Backend> Service<B> {
             .await?
             .ok_or_else(|| NotRegistered(project.to_string()))?
             .repo;
-        // each plan as it stands
+        // each plan and its pages as they stand
         let mut read = Vec::with_capacity(plans.len());
         for plan in &plans {
-            read.push((plan.clone(), self.store.list(plan).await?.records(plan)?));
+            let (records, pages, _) = self.snapshot(plan).await?;
+            read.push((plan.clone(), records, pages));
         }
         // and the queue's entries of those plans, in its order
         let queue: Vec<NodeName> = self
@@ -526,12 +600,14 @@ impl<B: Backend> Service<B> {
             .filter(|node| plans.contains(&node.plan))
             .collect();
         let sections = self.sections.clone();
-        // build them off the async threads, since their docs are files
+        // build them off the async threads, since their docs are files, each over its own pages
+        // and every one over the same read of the working tree
         let next = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(RepoSource::new(repo), sections);
+            let repo = Cached::new(RepoSource::new(repo));
             let graphs: Vec<PlanGraph> = read
                 .into_iter()
-                .map(|(name, records)| {
+                .map(|(name, records, pages)| {
+                    let renderer = Renderer::new(Layered::new(pages, &repo), sections.clone());
                     let (graph, problems) = build(&renderer, records);
                     PlanGraph {
                         name,
@@ -558,12 +634,12 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::payload", skip_all, err(Debug))]
     pub async fn payload(&self, plan: &PlanName) -> anyhow::Result<Payload> {
-        // the plan as it stands, and the working tree its docs are read from
-        let (records, repo) = self.records(plan).await?;
+        // the plan and its pages as they stand, and the working tree under them
+        let (records, pages, repo) = self.snapshot(plan).await?;
         let sections = self.sections.clone();
         // build and render it off the async threads, since its docs are files
         let payload = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(RepoSource::new(repo), sections);
+            let renderer = Renderer::new(Layered::new(pages, RepoSource::new(repo)), sections);
             let (graph, _) = build(&renderer, records);
             // a stored node has no page of its own
             renderer.payload(&graph, |_| None)
@@ -576,10 +652,11 @@ impl<B: Backend> Service<B> {
     /// Renders one of a plan's docs as the page its links lead to, or `None` if no doc of the
     /// plan's is written to that page
     ///
-    /// The page is the one mdbook would write for the doc: `docs/design.html` for the repo's
-    /// `docs/design.md`, its `<main>` holding the doc with each heading under the id mdbook
-    /// gives it. Its links lead under [`paths::docs`], as the payload's do. A page whose path
-    /// leaves the repo, or whose doc a symlink leads out of it to, is not found.
+    /// The page is the one mdbook would write for the doc: `docs/design.html` for the plan's
+    /// page or the repo's file `docs/design.md`, its `<main>` holding the doc with each heading
+    /// under the id mdbook gives it. A page the plan keeps hides the repo's file at its path. Its
+    /// links lead under [`paths::docs`], as the payload's do. A page whose path leaves the repo,
+    /// or whose doc a symlink leads out of it to, is not found.
     ///
     /// # Arguments
     ///
@@ -594,27 +671,41 @@ impl<B: Backend> Service<B> {
             return Err(NotListed(plan.clone()).into());
         }
         let docs = paths::docs(plan);
-        let page = page.to_string();
-        // read and render it off the async threads, since its doc is a file
+        // the plan's pages the page could be written from, read alone rather than with the rest
+        let page = reef_render::paths::join("", page);
+        let mut pages = MemSource::new();
+        for md in reef_render::paths::md_of(&page) {
+            // a path no page can have, such as one that climbs out, is left to the repo to refuse
+            if check_page_path(&md).is_err() {
+                continue;
+            }
+            if let Some(stored) = self.store.page(plan, &md).await? {
+                pages.insert(stored.path, stored.text);
+            }
+        }
+        // read and render it off the async threads, since its doc may be a file
         let html = tokio::task::spawn_blocking(move || {
-            let source = RepoSource::new(repo);
+            let source = Layered::new(pages, RepoSource::new(repo));
             page_of(&source, &page).map(|html| html.replace(ROOT, &docs))
         })
         .await?;
         Ok(html)
     }
 
-    /// Reads a plan's records as it stands, and the repo its docs are read from
+    /// Reads a plan's records and its pages as they stand at one moment, and the repo its
+    /// other docs are read from
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
-    #[instrument(name = "Service::records", skip_all, err(Debug))]
-    async fn records(&self, plan: &PlanName) -> anyhow::Result<(Vec<Record>, PathBuf)> {
+    #[instrument(name = "Service::snapshot", skip_all, err(Debug))]
+    async fn snapshot(&self, plan: &PlanName) -> anyhow::Result<(Vec<Record>, MemSource, PathBuf)> {
         // the repo first, so a plan of an unknown project says so
         let repo = self.repo(plan).await?;
-        let records = self.store.list(plan).await?.records(plan)?;
-        Ok((records, repo))
+        let (listing, pages) = self.store.snapshot(plan).await?;
+        let records = listing.records(plan)?;
+        let pages = page_source(pages.pages.into_iter().map(PageWrite::from).collect());
+        Ok((records, pages, repo))
     }
 
     /// The repo a plan's docs are read from: its project's
@@ -653,12 +744,13 @@ fn build<S: DocSource>(renderer: &Renderer<S>, records: Vec<Record>) -> (Graph, 
 
 /// The problems a write would add to a plan, judged off the async threads
 ///
-/// Both sides are built with one renderer, so they see the docs as they were at one moment,
-/// and each doc is read once.
+/// Both sides read the working tree through one cache, so they see its docs as they were at
+/// one moment, and each is read once. A write that leaves the pages as they stand builds both
+/// sides with one renderer; one that changes them builds each over its own pages.
 ///
 /// # Arguments
 ///
-/// * `repo` - The working tree the plan's docs are read from
+/// * `repo` - The working tree under the plan's pages
 /// * `sections` - The doc sections a node's brief form is taken from
 /// * `proposal` - The plan as it stands and as the write would leave it
 async fn added(
@@ -666,15 +758,46 @@ async fn added(
     sections: Sections,
     proposal: Proposal,
 ) -> anyhow::Result<Vec<Diagnostic>> {
+    let Proposal {
+        before,
+        after,
+        pages,
+        pages_after,
+    } = proposal;
     // its docs are files, so build both sides off the async threads
     let added = tokio::task::spawn_blocking(move || {
-        let renderer = Renderer::new(RepoSource::new(repo), sections);
-        let (_, before) = build(&renderer, proposal.before);
-        let (_, after) = build(&renderer, proposal.after);
+        let repo = Cached::new(RepoSource::new(repo));
+        let pages = page_source(pages);
+        let (before, after) = match pages_after {
+            // the same docs on both sides, each read once
+            None => {
+                let renderer = Renderer::new(Layered::new(&pages, &repo), sections);
+                (build(&renderer, before).1, build(&renderer, after).1)
+            }
+            // each side over its own pages, the working tree read once for both
+            Some(pages_after) => {
+                let pages_after = page_source(pages_after);
+                let stood = Renderer::new(Layered::new(&pages, &repo), sections.clone());
+                let left = Renderer::new(Layered::new(&pages_after, &repo), sections);
+                (build(&stood, before).1, build(&left, after).1)
+            }
+        };
         new_problems(&before, after)
     })
     .await?;
     Ok(added)
+}
+
+/// A plan's pages as a source of docs, each by its path
+///
+/// # Arguments
+///
+/// * `pages` - The plan's pages
+fn page_source(pages: Vec<PageWrite>) -> MemSource {
+    pages
+        .into_iter()
+        .map(|page| (page.path, page.text))
+        .collect()
 }
 
 /// A payload with its links put under the path its plan's docs are served from
@@ -896,10 +1019,17 @@ mod tests {
         let service = Service::memory();
         let plan = PlanName::new("reef", "central").unwrap();
         send(service.put(&plan, Vec::new()));
-        send(service.write_plan(&plan, Vec::new()));
+        send(service.write_plan(&plan, Vec::new().into()));
         send(service.check(&plan));
         send(service.payload(&plan));
         send(service.doc_page(&plan, "design.html"));
+        send(service.pages(&plan));
+        send(service.page(&plan, "design.md"));
+        let page = crate::store::PageEdit::Remove {
+            path: "design.md".to_string(),
+            read: 1,
+        };
+        send(service.edit_page(&plan, page));
         send(service.next(&plan));
         send(service.project_next("reef"));
         send(service.queue("reef"));

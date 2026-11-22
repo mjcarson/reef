@@ -2,11 +2,12 @@
 //!
 //! A `Service` is what the front doors call: the JSON API (`api`), and the app's server
 //! functions. It checks every write against the whole plan with `mdbook-reef check`'s rules,
-//! reading docs from the project's working tree, which no link may leave, builds a plan into
+//! reading docs from the plan's own pages over the project's working tree, which no link may
+//! leave, builds a plan into
 //! the viewer's payload, renders each of its docs as the page the payload links to, and tells
 //! the change stream of each write it applies. Its data types are `reef-api`'s, so the
-//! JSON API's clients share them. It reads and writes through a `Store`, which keeps plans and
-//! their nodes by version over a `Backend`: a `ShoalBackend`, which runs a pool in this process
+//! JSON API's clients share them. It reads and writes through a `Store`, which keeps plans,
+//! their nodes and their pages by version over a `Backend`: a `ShoalBackend`, which runs a pool in this process
 //! with `embedded` or reaches an external node such as `reef-shoal`, or a `MemoryBackend`, its
 //! in-memory twin. The rows reef keeps in shoal are its `schema`, the user's queue sorts by
 //! `rank` strings, and reef's `conf` says how to
@@ -37,6 +38,7 @@ pub use memory::MemoryBackend;
 pub use service::Service;
 pub use store::{
     AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
-    Place, PlanInfo, Project, Proposal, Put, Puts, QueueEdit, Queued, Ranked, Rewrite, Rewritten,
-    StalePut, Store, StoredNode, Unkeepable,
+    PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Proposal,
+    Put, Puts, QueueEdit, Queued, Ranked, Rewrite, Rewritten, StalePut, Store, StoredNode,
+    StoredPage, Unkeepable,
 };

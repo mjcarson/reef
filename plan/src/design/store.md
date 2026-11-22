@@ -60,6 +60,19 @@ Its limits there shape reef's rows:
   touch at the version it was at, so another writer's edit read before the batch still gets in
   after it. A batch then costs a revision's write and prune, 2.2 ms and 2.0 ms for 202 nodes in
   X2, rather than 0.15 ms a put.
+- **A plan's pages in revisions of their own** ([C28](../milestones/m6.md)). A page is a row in
+  a partition keyed by project, plan and revision, sorted by path, with a version and its
+  markdown. A whole-plan write that carries pages writes them under its new revision, beside its
+  nodes, and its flip makes both current. The plan's row names the pages' revision apart from the
+  nodes' (`pages_current`, `pages_retired`), so a batch of node writes, which is a revision of
+  its own, leaves the pages where they are: the example book's pages are 2.4 MB, which a batch
+  would otherwise copy and prune. A revision can then be current for pages and retired for
+  nodes, so each table is pruned only of the revisions it doesn't read: nodes of `pending` and
+  `retired`, pages of `pending` and `pages_retired`. A page edit is one row's conditional write
+  in the pages' revision, and an import moves every page's version on, as a node's.
+- **Bundles held under shoal's frame.** A bulk write's bundles hold at most 256 rows and 16 MiB,
+  and a plan's pages at most 32 MiB together, since a plan's pages are read as one partition and
+  a frame is 64 MiB by default.
 - **Every write's answer checked.** Bulk writes go through shoal's `exec`, and single ones
   through `send_one`. Draining a bundle's stream would accept a refused or failed write.
 - **Every row checked against its full key on read**, so a hash collision is caught instead of
@@ -125,8 +138,8 @@ run killed midway is followed by one that opens what it left on disk.
   too. Client and server must agree on its fingerprint, and a test pins it so a change is
   deliberate. The pin is the schema's `SCHEMA_ID` and each table's fingerprint, which leave out
   shoal's protocol version, so a shoal bump that keeps every row moves nothing.
-- **Each table arrives with the node that needs it.** The queue, work records, comments and
-  loop state each add a table. While reef is in development a table may also change, at the
+- **Each table arrives with the node that needs it.** The queue, a plan's pages, work records,
+  comments and loop state each add a table. While reef is in development a table may also change, at the
   cost of a fresh data directory, until shoal can migrate it.
 - **Persistent tables throughout.** Ephemeral tables are lost on restart and never evicted.
 

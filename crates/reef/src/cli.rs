@@ -9,6 +9,10 @@
 //! reef [--conf PATH] node put [FILE] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node get <ID> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node rm <ID>... [--project NAME] [--plan NAME]
+//! reef [--conf PATH] page ls [--project NAME] [--plan NAME]
+//! reef [--conf PATH] page get <PATH> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] page put <PATH> [FILE] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] page rm <PATH> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] status <ID> <STATUS> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] accept <ID> [<N> <STATUS> [--test TEST]] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] check [--project NAME] [--plan NAME]
@@ -24,7 +28,7 @@
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
-//! only plan, unless `--plan` names one. `next` and the queue span the project's plans, and
+//! only plan, unless `--plan` names one, and so is a page's. `next` and the queue span the project's plans, and
 //! `--plan` narrows `next` to one. `import` picks the project the book is in, and lists the
 //! plan `--plan` names if it isn't listed. `export` picks the project the new book's directory
 //! is in.
@@ -42,6 +46,7 @@ use crate::export;
 use crate::import;
 use crate::mcp::{self, Tools};
 use crate::node;
+use crate::page;
 use crate::queue;
 use crate::work;
 
@@ -93,6 +98,11 @@ pub enum Command {
     /// Put, get and remove a plan's nodes as YAML
     #[command(subcommand)]
     Node(NodeCommand),
+    /// List, put, get and remove a plan's own pages as markdown
+    ///
+    /// A plan's pages lie over its repo's files, and nodes link to them as they do to the repo's.
+    #[command(subcommand)]
+    Page(PageCommand),
     /// Set where a node's work stands: todo, in-progress, done or blocked
     ///
     /// A group's status is derived from its members, so only a member's is set.
@@ -266,6 +276,47 @@ pub enum NodeCommand {
     },
 }
 
+/// What can be done with a plan's own pages
+#[derive(Debug, Subcommand)]
+pub enum PageCommand {
+    /// List the plan's pages by path, each at its version
+    Ls {
+        /// The plan whose pages to list, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Print a page's markdown, after the `<!-- version: -->` line a put of it keeps
+    Get {
+        /// The page's path, as a doc link names it
+        path: String,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Put a page's markdown, unless it is stale or breaks the plan
+    ///
+    /// Markdown whose first line is the `<!-- version: -->` line `get` printed changes the page
+    /// got; markdown without one is a new page. A page hides the repo's file at its path.
+    Put {
+        /// The page's path, as a doc link names it
+        path: String,
+        /// The markdown to put, else standard input, which `-` names too
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// The plan to put it in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Take a page out of the plan, unless a node's doc link still names it
+    Rm {
+        /// The page's path
+        path: String,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+}
+
 /// What can be done with a project's queue
 #[derive(Debug, Subcommand)]
 pub enum QueueCommand {
@@ -394,6 +445,24 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Node(NodeCommand::Rm { ids, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             node::rm(&client, &plan, &ids, out).await
+        }
+        Command::Page(PageCommand::Ls { pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            page::ls(&client, &plan, out).await
+        }
+        Command::Page(PageCommand::Get { path, pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            page::get(&client, &plan, &path, out).await
+        }
+        Command::Page(PageCommand::Put { path, file, pick }) => {
+            // the markdown first, so a file that can't be read asks nothing of the service
+            let text = node::read_input(cwd, file.as_deref())?;
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            page::put(&client, &plan, &path, &text, out).await
+        }
+        Command::Page(PageCommand::Rm { path, pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            page::rm(&client, &plan, &path, out).await
         }
         Command::Status { id, status, pick } => {
             let plan = picked_plan(&client, cwd, &pick).await?;
@@ -691,10 +760,12 @@ fn columns<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, NodeCommand, PlanCommand, ProjectCommand, QueueCommand, columns};
+    use super::{
+        Cli, Command, NodeCommand, PageCommand, PlanCommand, ProjectCommand, QueueCommand, columns,
+    };
     use clap::{CommandFactory, Parser};
     use reef_model::{Met, Status};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// clap's own checks of the command line's shape
     #[test]
@@ -744,6 +815,18 @@ mod tests {
             Command::Node(NodeCommand::Put { file: None, .. })
         ));
         assert!(Cli::try_parse_from(["reef", "node", "rm"]).is_err());
+        // a page is named by its path, and put from a file or standard input
+        let put = Cli::try_parse_from(["reef", "page", "put", "design/app.md", "app.md"]);
+        match put.unwrap().command {
+            Command::Page(PageCommand::Put { path, file, .. }) => {
+                assert_eq!(path, "design/app.md");
+                assert_eq!(file.as_deref(), Some(Path::new("app.md")));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["reef", "page", "get"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "page", "rm", "a.md", "b.md"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "page", "ls", "--plan", "central"]).is_ok());
         let rm = Cli::try_parse_from(["reef", "node", "rm", "M3", "C11"]).unwrap();
         assert!(matches!(
             rm.command,

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::PROJECTS;
-use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow};
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -23,6 +23,8 @@ struct Tables {
     nodes: BTreeMap<RevisionKey, BTreeMap<String, NodeRow>>,
     /// Each project's queue, by rank
     queues: BTreeMap<String, BTreeMap<String, QueueRow>>,
+    /// Each revision's pages, by path
+    pages: BTreeMap<RevisionKey, BTreeMap<String, PageRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -66,6 +68,21 @@ impl MemoryBackend {
             .entry(partition.clone())
             .or_default()
             .insert(row.id.clone(), row);
+    }
+
+    /// Stores a page row in a partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The revision whose partition the row lands in
+    /// * `row` - The row, keyed by its own path as any other
+    pub fn plant_page(&self, partition: &RevisionKey, row: PageRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .pages
+            .entry(partition.clone())
+            .or_default()
+            .insert(row.path.clone(), row);
     }
 
     /// Stores a queue row in a project's partition other than its own, as a hash collision would
@@ -256,6 +273,12 @@ impl Backend for MemoryBackend {
         if let Some(retired) = pointers.retired {
             row.retired = retired;
         }
+        if let Some(pages_current) = pointers.pages_current {
+            row.pages_current = pages_current;
+        }
+        if let Some(pages_retired) = pointers.pages_retired {
+            row.pages_retired = pages_retired;
+        }
         row.version = read + 1;
         Ok(Written::Applied)
     }
@@ -324,6 +347,118 @@ impl Backend for MemoryBackend {
             // and a partition left empty is gone, as it never existed
             if partition.is_empty() {
                 tables.nodes.remove(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the page rows stored in a revision's partition, in path order, or the one at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `path` - The one page to read, or `None` for all of them
+    async fn pages(&self, key: &RevisionKey, path: Option<&str>) -> anyhow::Result<Vec<PageRow>> {
+        let tables = self.tables();
+        // a partition that holds nothing reads as no rows
+        let Some(partition) = tables.pages.get(key) else {
+            return Ok(Vec::new());
+        };
+        // the one row asked for, or every row in sort key order
+        Ok(match path {
+            Some(path) => partition.get(path).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes one page row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_page(&self, row: PageRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its keys hash
+        let key = RevisionKey {
+            project: row.project.clone(),
+            plan: row.plan.clone(),
+            revision: row.revision,
+        };
+        let partition = tables.pages.entry(key).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.path).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.path.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Lists the paths and versions stored in a revision's partition of pages, without their text
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    async fn page_keys(&self, key: &RevisionKey) -> anyhow::Result<Vec<PageKey>> {
+        // every row in the partition, projected as shoal projects it
+        let tables = self.tables();
+        Ok(tables
+            .pages
+            .get(key)
+            .into_iter()
+            .flat_map(|partition| partition.values())
+            .map(|row| PageKey {
+                project: row.project.clone(),
+                plan: row.plan.clone(),
+                revision: row.revision,
+                path: row.path.clone(),
+                version: row.version,
+            })
+            .collect())
+    }
+
+    /// Writes page rows over whatever is stored under their keys
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_pages(&self, rows: Vec<PageRow>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        // each into its own partition, as its keys hash
+        for row in rows {
+            let key = RevisionKey {
+                project: row.project.clone(),
+                plan: row.plan.clone(),
+                revision: row.revision,
+            };
+            tables
+                .pages
+                .entry(key)
+                .or_default()
+                .insert(row.path.clone(), row);
+        }
+        Ok(())
+    }
+
+    /// Deletes pages from a revision's partition
+    ///
+    /// A delete of a row that isn't stored deletes nothing, as shoal's does.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `paths` - The paths of the pages to delete
+    async fn delete_pages(&self, key: &RevisionKey, paths: Vec<String>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        if let Some(partition) = tables.pages.get_mut(key) {
+            // each row by its sort key
+            for path in paths {
+                partition.remove(&path);
+            }
+            // and a partition left empty is gone, as it never existed
+            if partition.is_empty() {
+                tables.pages.remove(key);
             }
         }
         Ok(())

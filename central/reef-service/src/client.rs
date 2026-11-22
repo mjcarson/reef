@@ -13,9 +13,10 @@ use tracing::instrument;
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PlanRow, PlanRowFilter,
-    PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter,
-    QueueRowGet, ReefClient, ReefQueryKinds,
+    NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow,
+    PageRowDelete, PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate,
+    ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient,
+    ReefQueryKinds,
 };
 
 #[cfg(feature = "embedded")]
@@ -359,6 +360,8 @@ impl Backend for ShoalBackend {
             current: pointers.current,
             pending: pointers.pending,
             retired: pointers.retired,
+            pages_current: pointers.pages_current,
+            pages_retired: pointers.pages_retired,
             version: Some(read + 1),
         };
         // and only if no one changed the row since it was read
@@ -442,6 +445,122 @@ impl Backend for ShoalBackend {
                 Ok(())
             }
             Err(error) => anyhow::bail!("deleting node rows failed: {error:?}"),
+        }
+    }
+
+    /// Reads the page rows stored in a revision's partition, in path order, or the one at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `path` - The one page to read, or `None` for all of them
+    #[instrument(name = "ShoalBackend::pages", skip_all, err(Debug))]
+    async fn pages(&self, key: &RevisionKey, path: Option<&str>) -> anyhow::Result<Vec<PageRow>> {
+        // the revision's partition, whole or one row of it
+        let partition = (key.project.clone(), key.plan.clone(), key.revision);
+        let mut get = PageRowGet::new(vec![partition]);
+        if let Some(path) = path {
+            get = get.sort_keys(vec![path.to_string()]);
+        }
+        self.read::<_, PageRow>(get).await
+    }
+
+    /// Writes one page row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_page", skip_all, err(Debug))]
+    async fn write_page(&self, row: PageRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = PageRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
+    }
+
+    /// Lists the paths and versions stored in a revision's partition of pages, without their text
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    #[instrument(name = "ShoalBackend::page_keys", skip_all, err(Debug))]
+    async fn page_keys(&self, key: &RevisionKey) -> anyhow::Result<Vec<PageKey>> {
+        // the whole partition, projected to its keys
+        let partition = (key.project.clone(), key.plan.clone(), key.revision);
+        let get = PageRowGet::new(vec![partition]).projection::<PageKey>();
+        self.read::<_, PageKey>(get).await
+    }
+
+    /// Writes page rows over whatever is stored under their keys, every answer checked
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    #[instrument(name = "ShoalBackend::write_pages", skip_all, err(Debug))]
+    async fn write_pages(&self, rows: Vec<PageRow>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // one bundle, whose every answer `exec` checks, which draining its stream would not
+        let mut bundle = self.client.query();
+        for row in rows {
+            bundle.add_mut(row);
+        }
+        self.client
+            .exec(bundle)
+            .await
+            .map_err(|error| anyhow::anyhow!("writing page rows failed: {error:?}"))?;
+        Ok(())
+    }
+
+    /// Deletes pages from a revision's partition, every answer checked
+    ///
+    /// A delete of a row that isn't stored is answered as `QueryDidNotSucceed`, as a node's is,
+    /// and is no failure here.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The revision's key
+    /// * `paths` - The paths of the pages to delete
+    #[instrument(name = "ShoalBackend::delete_pages", skip_all, err(Debug))]
+    async fn delete_pages(&self, key: &RevisionKey, paths: Vec<String>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if paths.is_empty() {
+            return Ok(());
+        }
+        // one bundle of deletes, shoal having no way to delete a partition
+        let mut bundle = self.client.query();
+        for path in paths {
+            bundle.add_mut(PageRowDelete::new(
+                key.project.clone(),
+                key.plan.clone(),
+                key.revision,
+                path,
+            ));
+        }
+        match self.client.exec(bundle).await {
+            Ok(_) => Ok(()),
+            // a delete that found nothing to delete worked, which makes a prune tried again
+            // harmless
+            Err(Errors::QueryDidNotSucceed { .. }) => Ok(()),
+            Err(Errors::BulkErrors(errors))
+                if errors
+                    .iter()
+                    .all(|error| matches!(error, Errors::QueryDidNotSucceed { .. })) =>
+            {
+                Ok(())
+            }
+            Err(error) => anyhow::bail!("deleting page rows failed: {error:?}"),
         }
     }
 

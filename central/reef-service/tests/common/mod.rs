@@ -12,6 +12,7 @@ pub mod cases;
 pub mod faulty;
 pub mod git;
 pub mod http;
+pub mod page_cases;
 pub mod queue_cases;
 pub mod service_cases;
 

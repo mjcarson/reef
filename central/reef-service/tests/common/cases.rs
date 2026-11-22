@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use super::{Fx, Reopen, git, ids, node};
 
-// the queue's cases, run by the same suite, which the other suites sharing `common` don't use
+// the queue's and the pages' cases, run by the same suite, which the other suites sharing
+// `common` don't use
+#[allow(unused_imports)]
+pub use super::page_cases::*;
 #[allow(unused_imports)]
 pub use super::queue_cases::*;
 
@@ -272,7 +275,7 @@ pub async fn bulk_write_replaces_the_revision<B: Reopen>(fx: Fx<B>) -> anyhow::R
     let before = fx.store.list(&fx.plan).await?.revision;
     // a whole plan that keeps one, drops one and adds one
     let nodes = vec![node("C2", 0), node("C3", 1)];
-    let written = fx.store.write_plan(&fx.plan, nodes).await?;
+    let written = fx.store.write_plan(&fx.plan, nodes.into()).await?;
     assert_ne!(written.revision, before);
     assert_eq!((written.recovered, written.left_retired), (0, false));
     // lists as written, under the new revision
@@ -305,7 +308,7 @@ pub async fn bulk_write_moves_versions_on<B: Reopen>(fx: Fx<B>) -> anyhow::Resul
     fx.store.put(&fx.plan, node("C1", 0), Some(1)).await?;
     // a whole plan that keeps it and adds another
     fx.store
-        .write_plan(&fx.plan, vec![node("C1", 0), node("C2", 1)])
+        .write_plan(&fx.plan, vec![node("C1", 0), node("C2", 1)].into())
         .await?;
     // the kept node moved on a version, and the new one starts at 1
     let listing = fx.store.list(&fx.plan).await?;
@@ -331,7 +334,7 @@ pub async fn bulk_write_refuses_what_it_cant_keep<B: Reopen>(fx: Fx<B>) -> anyho
     let twice = vec![node("C1", 0), node("C1", 1)];
     let error = fx
         .store
-        .write_plan(&fx.plan, twice)
+        .write_plan(&fx.plan, twice.into())
         .await
         .expect_err("C1 was written twice");
     assert!(format!("{error:#}").contains("twice"), "{error:#}");
@@ -341,7 +344,12 @@ pub async fn bulk_write_refuses_what_it_cant_keep<B: Reopen>(fx: Fx<B>) -> anyho
         id: "C1".to_string(),
         ..NodeSpec::default()
     }];
-    assert!(fx.store.write_plan(&fx.plan, vec![group]).await.is_err());
+    assert!(
+        fx.store
+            .write_plan(&fx.plan, vec![group].into())
+            .await
+            .is_err()
+    );
     // and the plan's row names no revision either left
     let row = fx
         .store
@@ -361,12 +369,12 @@ pub async fn bulk_write_refuses_what_it_cant_keep<B: Reopen>(fx: Fx<B>) -> anyho
 pub async fn killed_write_leaves_old_revision_whole<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a first revision of three nodes
     let first = vec![node("A1", 0), node("A2", 1), node("A3", 2)];
-    fx.store.write_plan(&fx.plan, first).await?;
+    fx.store.write_plan(&fx.plan, first.into()).await?;
     let before = fx.store.list(&fx.plan).await?;
     // a second, killed after one of its three rows
     fx.faults.fail_rows_after(1);
     let second = vec![node("B1", 0), node("B2", 1), node("B3", 2)];
-    let killed = fx.store.write_plan(&fx.plan, second).await;
+    let killed = fx.store.write_plan(&fx.plan, second.into()).await;
     let error = killed.expect_err("the killed write succeeded");
     assert!(format!("{error:#}").contains("killed"), "{error:#}");
     // the first is still current, every node as it was
@@ -396,7 +404,7 @@ pub async fn next_write_prunes_what_a_killed_write_left<B: Reopen>(
     // a write killed after two of its three rows
     fx.faults.fail_rows_after(2);
     let killed = vec![node("B1", 0), node("B2", 1), node("B3", 2)];
-    assert!(fx.store.write_plan(&fx.plan, killed).await.is_err());
+    assert!(fx.store.write_plan(&fx.plan, killed.into()).await.is_err());
     let row = fx
         .store
         .backend()
@@ -406,7 +414,10 @@ pub async fn next_write_prunes_what_a_killed_write_left<B: Reopen>(
     let dead = RevisionKey::new(&fx.plan, row.pending);
     // the process restarts, and its next write finds them by the plan's pending revision
     let fx = fx.reopen().await?;
-    let written = fx.store.write_plan(&fx.plan, vec![node("C1", 0)]).await?;
+    let written = fx
+        .store
+        .write_plan(&fx.plan, vec![node("C1", 0)].into())
+        .await?;
     assert_eq!(written.recovered, 2);
     // and prunes them, leaving the plan as that write wrote it
     assert!(fx.store.backend().nodes(&dead, None).await?.is_empty());
@@ -432,7 +443,10 @@ pub async fn killed_prune_is_finished_by_the_next_put<B: Reopen>(fx: Fx<B>) -> a
     let first = fx.store.list(&fx.plan).await?.revision;
     // a whole-plan write whose prune of that revision fails
     fx.faults.fail_next_prune();
-    let written = fx.store.write_plan(&fx.plan, vec![node("B1", 0)]).await?;
+    let written = fx
+        .store
+        .write_plan(&fx.plan, vec![node("B1", 0)].into())
+        .await?;
     assert!(written.left_retired);
     // its revision is current, and the first is retired with its row still stored
     assert_eq!(ids(&fx).await?, ["B1"]);
@@ -478,7 +492,7 @@ pub async fn put_during_bulk_write_waits_and_is_refused<B: Reopen>(
     import.spec.title = Some("Imported".to_string());
     // a whole-plan write that stops between its rows and its flip
     let pause = fx.faults.pause_next_flip();
-    let write = fx.store.write_plan(&fx.plan, vec![import.clone()]);
+    let write = fx.store.write_plan(&fx.plan, vec![import.clone()].into());
     let racer = async {
         pause.reached.notified().await;
         // the editor's put waits on the plan's lock, rather than writing into the old revision

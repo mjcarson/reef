@@ -3,6 +3,7 @@
 
 use crate::markdown::headings_of;
 use reef_model::spec::frontmatter_is_yaml;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -306,6 +307,128 @@ impl<P: Into<String>, T: Into<String>> FromIterator<(P, T)> for MemSource {
     }
 }
 
+/// Docs read from one source first and another under it, such as a plan's pages over its
+/// repo's working tree
+///
+/// A doc the source over holds hides the one at the same path under it. Paths are named as the
+/// source under names them, so check's messages, and the paths it refuses, are the same with
+/// or without the layer over it.
+#[derive(Debug, Clone)]
+pub struct Layered<A, B> {
+    /// The source read first, whose docs hide those at the same paths under it
+    over: A,
+    /// The source read when the one over it holds no doc at a path, which names every path
+    under: B,
+}
+
+impl<A: DocSource, B: DocSource> Layered<A, B> {
+    /// Read docs from one source, then from another under it
+    ///
+    /// # Arguments
+    ///
+    /// * `over` - The source read first
+    /// * `under` - The source read when the one over it holds no doc at a path
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_render::{DocSource, Layered, MemSource};
+    ///
+    /// let pages = MemSource::new().with("design.md", "# Page\n");
+    /// let repo = MemSource::new().with("design.md", "# Repo\n").with("other.md", "# Other\n");
+    /// let docs = Layered::new(pages, repo);
+    /// assert_eq!(docs.read("design.md").as_deref(), Some("# Page\n"));
+    /// assert_eq!(docs.read("other.md").as_deref(), Some("# Other\n"));
+    /// ```
+    pub fn new(over: A, under: B) -> Self {
+        Layered { over, under }
+    }
+}
+
+impl<A: DocSource, B: DocSource> DocSource for Layered<A, B> {
+    /// Read a doc from the source over, else from the one under it
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path
+    fn read(&self, path: &str) -> Option<String> {
+        self.over.read(path).or_else(|| self.under.read(path))
+    }
+
+    /// The headings of the doc the source over holds at a path, else of the one under it
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path
+    fn headings(&self, path: &str) -> Option<Headings> {
+        self.over
+            .headings(path)
+            .or_else(|| self.under.headings(path))
+    }
+
+    /// Where the source under looks for a doc, or why it can't hold one there
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path
+    fn place(&self, path: &str) -> Result<String, String> {
+        self.under.place(path)
+    }
+}
+
+/// A source whose docs are each read once, however often they are asked for
+///
+/// Two renderers over one cached source, such as a write's plan as it stands and as the write
+/// would leave it, read each doc from the same moment.
+#[derive(Debug)]
+pub struct Cached<S> {
+    /// The source each doc is first read from
+    source: S,
+    /// Each path read so far, with the doc found there, if any
+    read: RefCell<HashMap<String, Option<String>>>,
+}
+
+impl<S: DocSource> Cached<S> {
+    /// Keep each doc read from a source
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The source each doc is first read from
+    pub fn new(source: S) -> Self {
+        Cached {
+            source,
+            read: RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+impl<S: DocSource> DocSource for Cached<S> {
+    /// Read a doc as it was the first time it was asked for
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path
+    fn read(&self, path: &str) -> Option<String> {
+        // a path read before answers as it did then
+        if let Some(doc) = self.read.borrow().get(path) {
+            return doc.clone();
+        }
+        // otherwise read it now, and keep what was found
+        let doc = self.source.read(path);
+        self.read.borrow_mut().insert(path.to_string(), doc.clone());
+        doc
+    }
+
+    /// Where the source looks for a doc
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path
+    fn place(&self, path: &str) -> Result<String, String> {
+        self.source.place(path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +492,78 @@ mod tests {
         assert_eq!(renderer.doc_link("", "docs/out.md").unwrap_err(), "doc `docs/out.md` not found (looked for docs/out.md)");
         assert_eq!(renderer.doc_link("", "docs/in.md#rows").unwrap().href, "reef-root:/docs/in.html#rows");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A page hides the repo's doc at its path, a path it doesn't hold falls through, and paths
+    /// are named and refused by the source under
+    #[test]
+    fn layered_reads_over_first_and_places_from_under() {
+        use crate::docs::{Renderer, Sections};
+        let dir = std::env::temp_dir().join(format!("reef-layered-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("design")).unwrap();
+        std::fs::write(dir.join("design/a.md"), "# Repo\n\n## Rows\n").unwrap();
+        std::fs::write(dir.join("design/b.md"), "# B\n\n## Columns\n").unwrap();
+        let pages = MemSource::new().with("design/a.md", "# Page\n\n## Pages\n").with("c.md", "# C\n");
+        let docs = Layered::new(&pages, RepoSource::new(&dir));
+        // a page hides the repo's doc at its path, headings and all
+        assert_eq!(docs.read("design/a.md").as_deref(), Some("# Page\n\n## Pages\n"));
+        assert_eq!(docs.headings("design/a.md").unwrap()[1].0, "pages");
+        // a path no page holds is read from the repo, and one neither holds is no doc
+        assert_eq!(docs.headings("design/b.md").unwrap()[1].0, "columns");
+        assert_eq!(docs.read("c.md").as_deref(), Some("# C\n"));
+        assert!(docs.read("gone.md").is_none());
+        // paths are named as the repo names them, and a climb out is refused even over a page
+        assert_eq!(docs.place("c.md").as_deref(), Ok("c.md"));
+        assert_eq!(docs.place("../c.md").unwrap_err(), "leaves the repo");
+        let renderer = Renderer::new(&docs, Sections::default());
+        assert_eq!(renderer.doc_link("", "gone.md").unwrap_err(), "doc `gone.md` not found (looked for gone.md)");
+        assert_eq!(renderer.doc_link("", "design/a.md#rows").unwrap_err(), "doc `design/a.md#rows`: design/a.md has no heading with the id `rows`");
+        assert_eq!(renderer.doc_link("", "design/a.md#pages").unwrap().href, "reef-root:/design/a.html#pages");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cached source reads each doc once, a missing one included, and names paths as its
+    /// source does
+    #[test]
+    fn cached_reads_each_doc_once() {
+        /// A source that counts its reads
+        struct Counting {
+            /// The docs it holds
+            docs: MemSource,
+            /// How many reads it has answered
+            reads: std::cell::Cell<usize>,
+        }
+        impl DocSource for Counting {
+            /// Read a doc, counting the read
+            ///
+            /// # Arguments
+            ///
+            /// * `path` - The doc's path
+            fn read(&self, path: &str) -> Option<String> {
+                self.reads.set(self.reads.get() + 1);
+                self.docs.read(path)
+            }
+
+            /// Name a path as a repo would
+            ///
+            /// # Arguments
+            ///
+            /// * `path` - The doc's path
+            fn place(&self, path: &str) -> Result<String, String> {
+                Ok(path.to_string())
+            }
+        }
+        let source = Counting { docs: MemSource::new().with("a.md", "# A\n\n## Why\n"), reads: Default::default() };
+        let docs = Cached::new(&source);
+        // each path is read from the source once, found or not
+        for _ in 0..3 {
+            assert_eq!(docs.read("a.md").as_deref(), Some("# A\n\n## Why\n"));
+            assert!(docs.read("gone.md").is_none());
+            assert_eq!(docs.headings("a.md").unwrap()[1].0, "why");
+        }
+        assert_eq!(source.reads.get(), 2);
+        // and named as the source names it
+        assert_eq!(docs.place("a.md").as_deref(), Ok("a.md"));
     }
 }

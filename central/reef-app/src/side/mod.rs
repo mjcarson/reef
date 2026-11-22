@@ -34,10 +34,13 @@ pub enum Tab {
 /// * `id` - The selected node's id
 /// * `project` - The project the plan belongs to
 /// * `plan` - The plan's name within it
-/// * `changes` - How many changes to the plan have come, which the editor reads the node again on
+/// * `changes` - How many changes to the plan have come, which the editor reads the node again
+///   on, and each doc's section too
 #[component]
 pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u64>) -> Element {
     let mut view = use_context::<View>();
+    // the plan's changes, which each doc it shows is read again on
+    use_context_provider(|| docs::DocChanges(changes));
     // the project's queue, which a plan's page shares and a sidebar drawn alone lacks
     let queue = try_use_context::<Queue>();
     // a newly selected node is read from its top, while a newer revision keeps the scroll

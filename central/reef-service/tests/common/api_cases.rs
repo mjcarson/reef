@@ -7,8 +7,9 @@
 
 use reef_api::{
     AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
-    NodePut, NodeWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit,
-    QueueListing, Queued, Refusal, Rewrite, StalePut, StoredNode, paths,
+    NodePut, NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite,
+    Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, Rewrite, StalePut,
+    StoredNode, StoredPage, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -292,9 +293,7 @@ pub async fn whole_plan_written_as_a_revision<B: Backend + 'static>(
     // the revision the plan was listed with
     let (_, before): (_, PlanInfo) = ax.client.get(&plan).await?;
     // two nodes, one needing the other, written as a new revision
-    let write = PlanWrite {
-        nodes: vec![work("C11", &[], 0), work("C53", &["C11"], 1)],
-    };
+    let write = PlanWrite::from(vec![work("C11", &[], 0), work("C53", &["C11"], 1)]);
     let (status, rewrite): (_, Rewrite) = ax.client.put(&revision, &write).await?;
     assert_eq!(status, StatusCode::OK);
     let Rewrite::Applied(rewritten) = rewrite else {
@@ -308,9 +307,7 @@ pub async fn whole_plan_written_as_a_revision<B: Backend + 'static>(
     let ids: Vec<&str> = listing.nodes.iter().map(|n| n.spec.id.as_str()).collect();
     assert_eq!(ids, ["C11", "C53"]);
     // a plan that needs a node it doesn't have is refused, and the revision stays
-    let broken = PlanWrite {
-        nodes: vec![work("C53", &["C11"], 0)],
-    };
+    let broken = PlanWrite::from(vec![work("C53", &["C11"], 0)]);
     let (status, refused): (_, Rewrite) = ax.client.put(&revision, &broken).await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(matches!(refused, Rewrite::Refused(_)), "{refused:?}");
@@ -353,9 +350,7 @@ pub async fn change_stream_tells_of_each_write<B: Backend + 'static>(
         .client
         .post(&paths::nodes(&ax.plan), &one(work("C11", &[], 0), None))
         .await?;
-    let write = PlanWrite {
-        nodes: vec![work("C11", &[], 0), work("C53", &["C11"], 1)],
-    };
+    let write = PlanWrite::from(vec![work("C11", &[], 0), work("C53", &["C11"], 1)]);
     let (_, rewrite): (_, Rewrite) = ax.client.put(&paths::revision(&ax.plan), &write).await?;
     let Rewrite::Applied(rewritten) = rewrite else {
         anyhow::bail!("the write was refused: {rewrite:?}");
@@ -623,5 +618,140 @@ pub async fn queue_routes_answer_with_their_status<B: Backend + 'static>(
         (status, error.code),
         (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
     );
+    Ok(())
+}
+
+/// The page routes list, get and edit a plan's pages, each edit's outcome said by its status,
+/// and a page they keep is served as a doc where the payload links it
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn page_routes_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    let pages = paths::pages(&ax.plan);
+    // a page is a doc without a node's frontmatter
+    let text = SECTIONED.trim_start_matches("---\nid: D1\n---\n");
+    // a plan's pages start empty
+    let (status, listing): (_, PageListing) = ax.client.get(&pages).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(listing.pages.is_empty(), "{listing:?}");
+    // a new page is put, at version 1, and read back by its path
+    let put = |text: &str, read: Option<u64>| PageEdit::Put {
+        page: PageWrite::new("design/rows.md", text),
+        read,
+    };
+    let (status, edited): (_, PageEdited) = ax.client.post(&pages, &put(text, None)).await?;
+    assert_eq!(
+        (status, edited),
+        (StatusCode::OK, PageEdited::Applied { version: Some(1) })
+    );
+    let (status, page): (_, StoredPage) = ax
+        .client
+        .get(&paths::page(&ax.plan, "design/rows.md"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((page.text.as_str(), page.version), (text, 1));
+    // a node links its heading, and the payload's link opens the page's section
+    let mut node = work("D1", &[], 0);
+    node.spec.docs = vec!["design/rows.md#rows".to_string()];
+    let (status, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(node, None))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (_, payload): (_, Payload) = ax.client.get(&paths::payload(&ax.plan)).await?;
+    let href = &payload.nodes[0].docs[0].href;
+    let docs = paths::docs(&ax.plan);
+    assert_eq!(href, &format!("{docs}design/rows.html#rows"));
+    let response = ax
+        .client
+        .open(href.split('#').next().unwrap_or(href))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response.text().await?;
+    assert!(html.contains("<h2 id=\"rows\">Rows</h2>"), "{html}");
+    // a stale edit is a conflict, and one that breaks the node's link unprocessable
+    let (status, edited): (_, PageEdited) = ax.client.post(&pages, &put("# Rows\n", None)).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        matches!(
+            edited,
+            PageEdited::Stale {
+                refusal: Refusal::Exists,
+                ..
+            }
+        ),
+        "{edited:?}"
+    );
+    let remove = PageEdit::Remove {
+        path: "design/rows.md".to_string(),
+        read: 1,
+    };
+    let (status, edited): (_, PageEdited) = ax.client.post(&pages, &remove).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(matches!(edited, PageEdited::Refused(_)), "{edited:?}");
+    // a page it doesn't keep is not found, a path no page can have is a bad request, and the
+    // pages of a plan no one listed are not listed
+    let unlisted = PlanName::new("reef", "missing")?;
+    let cases = [
+        (paths::page(&ax.plan, "gone.md"), ErrorCode::NotFound),
+        (paths::pages(&unlisted), ErrorCode::NotListed),
+    ];
+    for (path, code) in cases {
+        let (status, error): (_, ApiError) = ax.client.get(&path).await?;
+        assert_eq!(
+            (status.as_u16(), error.code),
+            (code.status(), code),
+            "{path}"
+        );
+    }
+    let bad = PageEdit::Put {
+        page: PageWrite::new("../out.md", "# Out\n"),
+        read: None,
+    };
+    let (status, error): (_, ApiError) = ax.client.post(&pages, &bad).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    // and the listing holds the one page, at its version
+    let (_, listing): (_, PageListing) = ax.client.get(&pages).await?;
+    let listed: Vec<(&str, u64)> = listing
+        .pages
+        .iter()
+        .map(|page| (page.path.as_str(), page.version))
+        .collect();
+    assert_eq!(listed, [("design/rows.md", 1)]);
+    Ok(())
+}
+
+/// A whole-plan write carrying more than axum's default body of 2 MiB, as a book's pages do, is
+/// taken
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn whole_plan_write_over_two_mebibytes_is_taken<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // three pages of a mebibyte each, beside a node
+    let big = format!("# Big\n\n{}\n", "x".repeat(1 << 20));
+    let write = PlanWrite {
+        nodes: vec![work("C1", &[], 0)],
+        pages: Some(
+            ["a.md", "b.md", "c.md"]
+                .into_iter()
+                .map(|path| PageWrite::new(path, big.as_str()))
+                .collect(),
+        ),
+    };
+    let (status, rewrite): (_, Rewrite) = ax.client.put(&paths::revision(&ax.plan), &write).await?;
+    assert_eq!(status, StatusCode::OK, "{rewrite:?}");
+    // every page kept whole
+    let (_, listing): (_, PageListing) = ax.client.get(&paths::pages(&ax.plan)).await?;
+    assert_eq!(listing.pages.len(), 3);
+    assert!(listing.pages.iter().all(|page| page.text == big));
     Ok(())
 }

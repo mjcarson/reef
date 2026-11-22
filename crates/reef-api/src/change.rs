@@ -3,8 +3,8 @@
 //! The service sends a change after each write it applied, and none for a write it refused. The
 //! stream is live only: a client that connects, or connects again, reads what it needs first and
 //! follows the stream after, and one that falls behind is told how many changes it missed, so it
-//! reads again. Changes to one plan by two writers can arrive in either order, so each node put
-//! carries its new version.
+//! reads again. Changes to one plan by two writers can arrive in either order, so each node or
+//! page put carries its new version.
 
 use reef_model::PlanName;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,15 @@ use crate::project::Project;
 pub struct PutNode {
     /// The node's id
     pub id: String,
+    /// Its new version
+    pub version: u64,
+}
+
+/// A page an edit wrote, and the version it is now at
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutPage {
+    /// The page's path
+    pub path: String,
     /// Its new version
     pub version: u64,
 }
@@ -45,6 +54,18 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         removed: Vec<String>,
     },
+    /// Pages of a plan were written or taken out as one change, every page it didn't touch at
+    /// the version it was at
+    PagesPut {
+        /// The plan's full name
+        plan: PlanName,
+        /// Each page written
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pages: Vec<PutPage>,
+        /// The path of each page taken out
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        removed: Vec<String>,
+    },
     /// A whole plan was written as a new revision, made current
     PlanWritten {
         /// The plan's full name
@@ -71,6 +92,7 @@ impl Change {
             Change::ProjectAdded { .. } => "project-added",
             Change::PlanAdded { .. } => "plan-added",
             Change::NodesPut { .. } => "nodes-put",
+            Change::PagesPut { .. } => "pages-put",
             Change::PlanWritten { .. } => "plan-written",
             Change::QueueChanged { .. } => "queue-changed",
             Change::Missed { .. } => "missed",
@@ -83,6 +105,7 @@ impl Change {
             Change::ProjectAdded { project } => Some(project.name.as_str()),
             Change::PlanAdded { plan }
             | Change::NodesPut { plan, .. }
+            | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
             Change::QueueChanged { project } => Some(project.as_str()),
             Change::Missed { .. } => None,
@@ -96,6 +119,7 @@ impl Change {
         match self {
             Change::PlanAdded { plan }
             | Change::NodesPut { plan, .. }
+            | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
             Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
                 None
@@ -106,7 +130,7 @@ impl Change {
 
 #[cfg(test)]
 mod tests {
-    use super::{Change, PutNode};
+    use super::{Change, PutNode, PutPage};
     use reef_model::PlanName;
     use serde_json::json;
 
@@ -139,6 +163,18 @@ mod tests {
         let value = serde_json::to_value(&removed).unwrap();
         assert_eq!(value["removed"], json!(["C62"]));
         assert_eq!(serde_json::from_value::<Change>(value).unwrap(), removed);
+        // a page edit names the page it wrote, or the one it took out
+        let page = Change::PagesPut {
+            plan: PlanName::new("reef", "central").unwrap(),
+            pages: Vec::new(),
+            removed: vec!["plan.md".to_string()],
+        };
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!(
+            value,
+            json!({"kind": "pages-put", "plan": "reef/central", "removed": ["plan.md"]})
+        );
+        assert_eq!(serde_json::from_value::<Change>(value).unwrap(), page);
     }
 
     /// Each change's kind is the tag serde writes for it
@@ -157,6 +193,14 @@ mod tests {
             Change::NodesPut {
                 plan: plan.clone(),
                 nodes: Vec::new(),
+                removed: Vec::new(),
+            },
+            Change::PagesPut {
+                plan: plan.clone(),
+                pages: vec![PutPage {
+                    path: "design/app.md".to_string(),
+                    version: 2,
+                }],
                 removed: Vec::new(),
             },
             Change::PlanWritten { plan, revision: 4 },

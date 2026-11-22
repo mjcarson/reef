@@ -10,15 +10,17 @@
 //! - **Nodes** ([`node`]): put, get and remove a plan's nodes as the YAML a book's frontmatter
 //!   holds. `get` prints the version a node was read at as a comment, which `put` reads back, so
 //!   a put made after another writer's is refused as stale.
+//! - **Pages** ([`page`]): list, put, get and remove a plan's own markdown pages, which lie
+//!   over its repo's files, by version as nodes are.
 //! - **Work** ([`work`]): set a node's status and whether each criterion is met, check the plan,
 //!   and say what is ready to start, the user's queue first, and what the rest waits on.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
 //! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
-//!   plan as one revision, each inline member a node of its own and each link leading from the
-//!   repo's root.
+//!   plan as one revision, each inline member a node of its own, each page the plan's own, and
+//!   each link leading where it did.
 //! - **Export** ([`export`]): a plan written out as a new book, a file for each group with its
-//!   members inline, which imports back as the same plan.
+//!   members inline and a file for each page, which imports back as the same plan.
 //! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
@@ -35,6 +37,7 @@ pub mod export;
 pub mod import;
 pub mod mcp;
 pub mod node;
+pub mod page;
 pub mod queue;
 pub mod work;
 

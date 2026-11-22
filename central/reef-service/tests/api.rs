@@ -53,6 +53,8 @@ suite!(
     anchored_doc_link_opens_its_section,
     next_says_what_is_ready_and_what_waits,
     queue_routes_answer_with_their_status,
+    page_routes_answer_with_their_status,
+    whole_plan_write_over_two_mebibytes_is_taken,
 );
 
 /// The API listens on a loopback address, and refuses any other until users sign in

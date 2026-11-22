@@ -63,4 +63,7 @@ suite!(
     next_follows_the_queue_across_plans,
     queue_lists_each_entry_with_its_state,
     queue_edit_is_a_change_and_a_refusal_none,
+    plan_pages_are_docs_over_the_repo,
+    page_edits_are_checked,
+    each_plan_reads_its_own_pages,
 );

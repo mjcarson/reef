@@ -1,4 +1,4 @@
-//! Times a plan's payload: built in process, and fetched over the JSON API on loopback
+//! Times a plan's payload and its writes, with its docs in the repo and as the plan's own pages
 //!
 //! ```sh
 //! cargo +nightly run --release -p reef-service --features embedded --example payload_bench
@@ -8,16 +8,22 @@
 //! The plan is the example book's 202 nodes. Its `src` is copied to a fresh directory outside
 //! git, which is registered as the project's repo, and each node is flattened out of its group
 //! as the store keeps it, its `docs` rebased from its file onto the repo's root, as an import
-//! will put them. The plan is written unchecked, and the problems check finds are printed.
+//! puts them. The plan is written unchecked, and the problems check finds are printed. It is
+//! written twice: once with its docs in the repo, and once into a project whose repo is empty,
+//! with the book's 100 other files, 2.4 MB, as the plan's own pages (C28).
 //!
-//! Each side is timed over three warm-up rounds, then `--rounds` timed ones (10 by default):
-//! `Service::payload` called in process, and `GET …/payload` from a reqwest client on loopback,
-//! its body decoded into a `Payload`. It runs over the in-memory twin, and with `embedded` over
-//! an in-process pool of two shards too, its data under `central/target`.
+//! Each figure is timed over three warm-up rounds, then `--rounds` timed ones (10 by default):
 //!
-//! `Renderer::prepare` is timed alone too, the same way: the plan's stored nodes built into a
-//! graph, then checked for doc links and briefed from their docs by a fresh renderer over the
-//! repo, as each build of a payload or a check does.
+//! - `Renderer::prepare` alone: the plan's stored nodes built into a graph, then checked for doc
+//!   links and briefed from their docs by a fresh renderer, as each build of a payload does;
+//! - `Service::payload` called in process, and `GET …/payload` from a reqwest client on loopback,
+//!   its body decoded into a `Payload`;
+//! - a checked put of one node, at the version it was read at, which is one row's write;
+//! - a checked batch of two nodes, which is a revision of its own;
+//! - and, for the plan with pages, a checked edit of one page, which is one row's write.
+//!
+//! It runs over the in-memory twin, and with `embedded` over an in-process pool of two shards
+//! too, its data under `central/target`.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
@@ -26,8 +32,11 @@ use reef_api::{lift, paths};
 use reef_model::spec::parse_node_file;
 use reef_model::{Graph, Payload, PlanName, nodes_from_records};
 use reef_render::paths::{Target, resolve};
-use reef_render::{Renderer, RepoSource, Sections};
-use reef_service::{Backend, Conf, NodeWrite, Service, api};
+use reef_render::{DocSource, Layered, MemSource, Renderer, RepoSource, Sections};
+use reef_service::{
+    Backend, Checked, Conf, NodePut, NodeWrite, PageEdit, PageEdited, PageWrite, PlanWrite,
+    Service, api,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,14 +53,29 @@ async fn main() -> anyhow::Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let docs = std::env::temp_dir().join(format!("reef-payload-bench-{}", std::process::id()));
     copy_dir(&root.join("example-book/src"), &docs)?;
-    let nodes = flatten(&docs)?;
+    let (nodes, pages) = flatten(&docs)?;
+    let bytes: usize = pages.iter().map(|page| page.text.len()).sum();
     println!(
-        "{} nodes from the example book, docs at {}",
+        "{} nodes and {} pages ({:.1} MB) from the example book, docs at {}",
         nodes.len(),
+        pages.len(),
+        bytes as f64 / 1e6,
         docs.display()
     );
+    // a repo with no docs in it, for the plan whose docs are its own pages
+    let empty = docs.with_extension("empty");
+    if empty.exists() {
+        std::fs::remove_dir_all(&empty)?;
+    }
+    std::fs::create_dir_all(&empty)?;
+    let book = Book {
+        docs: &docs,
+        empty: &empty,
+        nodes: &nodes,
+        pages: &pages,
+    };
     // over the twin, always
-    bench("twin", Service::memory(), &docs, nodes.clone(), rounds).await?;
+    bench("twin", Service::memory(), &book, rounds).await?;
     // and over an in-process pool, with the engine
     #[cfg(feature = "embedded")]
     {
@@ -64,51 +88,132 @@ async fn main() -> anyhow::Result<()> {
         conf.shoal.data = Some(data.canonicalize()?);
         conf.shoal.cores = 2;
         let service = Service::open(&conf).await?;
-        bench("shoal", service, &docs, nodes, rounds).await?;
+        bench("shoal", service, &book, rounds).await?;
     }
     std::fs::remove_dir_all(&docs)?;
+    std::fs::remove_dir_all(&empty)?;
     Ok(())
 }
 
-/// Writes the plan into a service, serves it, and times its payload both ways
+/// The example book, as the plans the bench writes are made of
+struct Book<'a> {
+    /// The repo holding the book's docs
+    docs: &'a Path,
+    /// A repo holding none
+    empty: &'a Path,
+    /// The plan's nodes, each a node of its own
+    nodes: &'a [NodeWrite],
+    /// The book's other files, as the plan's own pages
+    pages: &'a [PageWrite],
+}
+
+/// Writes the plan into a service twice, its docs in the repo and as its own pages, serves it,
+/// and times each
 ///
 /// # Arguments
 ///
 /// * `label` - The backend's name, for the output
 /// * `service` - A fresh service
-/// * `docs` - The project's repo, holding the plan's docs
-/// * `nodes` - The plan's nodes, each a node of its own
-/// * `rounds` - How many timed rounds each side runs
+/// * `book` - The book the plans are made of
+/// * `rounds` - How many timed rounds each figure takes
 async fn bench<B: Backend + 'static>(
     label: &str,
     service: Service<B>,
-    docs: &Path,
-    nodes: Vec<NodeWrite>,
+    book: &Book<'_>,
     rounds: usize,
 ) -> anyhow::Result<()> {
-    // the plan, written unchecked, and what check finds in it
+    // the plan with its docs in the repo, written unchecked
     let plan = PlanName::new("example", "book")?;
-    service.add_project("example", docs).await?;
+    service.add_project("example", book.docs).await?;
     service.add_plan(&plan).await?;
-    service.store().write_plan(&plan, nodes).await?;
-    let problems = service.check(&plan).await?;
+    service
+        .store()
+        .write_plan(&plan, book.nodes.to_vec().into())
+        .await?;
+    // and the same plan in a project whose repo is empty, its docs as its own pages
+    let paged = PlanName::new("paged", "book")?;
+    service.add_project("paged", book.empty).await?;
+    service.add_plan(&paged).await?;
+    let write = PlanWrite {
+        nodes: book.nodes.to_vec(),
+        pages: Some(book.pages.to_vec()),
+    };
+    service.store().write_plan(&paged, write).await?;
     // served on a loopback port of its own
     let service = Arc::new(service);
     let mut conf = Conf::default();
     conf.api.address = "127.0.0.1:0".parse()?;
     let listener = api::bind(&conf).await?;
-    let url = format!("http://{}{}", listener.local_addr()?, paths::payload(&plan));
+    let address = listener.local_addr()?;
     let server = tokio::spawn(api::serve(
         listener,
         service.clone(),
         std::future::pending(),
     ));
+    // each timed the same way
+    let repo = RepoSource::new(book.docs.to_path_buf());
+    let pages: MemSource = book
+        .pages
+        .iter()
+        .map(|page| (page.path.clone(), page.text.clone()))
+        .collect();
+    let in_pages = Layered::new(&pages, RepoSource::new(book.empty.to_path_buf()));
+    time_plan(
+        &format!("{label}, docs in the repo"),
+        &service,
+        &plan,
+        &repo,
+        address,
+        rounds,
+        false,
+    )
+    .await?;
+    time_plan(
+        &format!("{label}, docs as pages"),
+        &service,
+        &paged,
+        &in_pages,
+        address,
+        rounds,
+        true,
+    )
+    .await?;
+    // stop serving, then close the service once nothing holds it
+    server.abort();
+    let _ = server.await;
+    if let Ok(service) = Arc::try_unwrap(service) {
+        close(service).await?;
+    }
+    Ok(())
+}
+
+/// Times one plan's build, payload and writes, and prints the figures
+///
+/// # Arguments
+///
+/// * `label` - What the figures are of, for the output
+/// * `service` - The service the plan is in
+/// * `plan` - The plan
+/// * `source` - Where its docs are read from, for timing `prepare` alone
+/// * `address` - Where the service is served
+/// * `rounds` - How many timed rounds each figure takes
+/// * `paged` - Whether the plan's docs are its own pages, so a page edit is timed too
+async fn time_plan<B: Backend + 'static, S: DocSource>(
+    label: &str,
+    service: &Service<B>,
+    plan: &PlanName,
+    source: &S,
+    address: std::net::SocketAddr,
+    rounds: usize,
+    paged: bool,
+) -> anyhow::Result<()> {
+    let problems = service.check(plan).await?;
     // the docs' part of a build alone: a fresh renderer checking links and briefing nodes
-    let records = service.list(&plan).await?.records(&plan)?;
+    let records = service.list(plan).await?.records(plan)?;
     let mut prepare = Vec::with_capacity(rounds);
     for round in 0..WARMUP + rounds {
         let (mut graph, _) = Graph::build(nodes_from_records(records.clone()));
-        let renderer = Renderer::new(RepoSource::new(docs.to_path_buf()), Sections::default());
+        let renderer = Renderer::new(source, Sections::default());
         let start = Instant::now();
         let found = renderer.prepare(&mut graph);
         let took = start.elapsed();
@@ -121,7 +226,7 @@ async fn bench<B: Backend + 'static>(
     let mut local = Vec::with_capacity(rounds);
     for round in 0..WARMUP + rounds {
         let start = Instant::now();
-        let payload = service.payload(&plan).await?;
+        let payload = service.payload(plan).await?;
         let took = start.elapsed();
         std::hint::black_box(payload);
         if round >= WARMUP {
@@ -129,6 +234,7 @@ async fn bench<B: Backend + 'static>(
         }
     }
     // over HTTP: the same build, sent as JSON and decoded
+    let url = format!("http://{address}{}", paths::payload(plan));
     let client = reqwest::Client::new();
     let mut remote = Vec::with_capacity(rounds);
     let mut bytes = 0;
@@ -149,22 +255,100 @@ async fn bench<B: Backend + 'static>(
             remote.push(took);
         }
     }
-    // the figures, as [median, lo, hi] in ms
+    // a checked put of one node at the version read, and a batch of two, each a retitling
+    let ids: Vec<String> = records
+        .iter()
+        .rev()
+        .take(2)
+        .map(|r| r.spec.id.clone())
+        .collect();
+    let mut put = Vec::with_capacity(rounds);
+    let mut batch = Vec::with_capacity(rounds);
+    for round in 0..WARMUP + rounds {
+        let one = retitled(service, plan, &ids[..1], round).await?;
+        let start = Instant::now();
+        let checked = service.put(plan, one).await?;
+        let took = start.elapsed();
+        anyhow::ensure!(matches!(checked, Checked::Applied { .. }), "{checked:?}");
+        if round >= WARMUP {
+            put.push(took);
+        }
+        let two = retitled(service, plan, &ids, round).await?;
+        let start = Instant::now();
+        let checked = service.put(plan, two).await?;
+        let took = start.elapsed();
+        anyhow::ensure!(matches!(checked, Checked::Applied { .. }), "{checked:?}");
+        if round >= WARMUP {
+            batch.push(took);
+        }
+    }
     println!(
-        "{label}: {} problems; payload {:.1} KiB\n  prepare:    {}\n  in process: {}\n  over HTTP:  {}",
+        "{label}: {} problems; payload {:.1} KiB\n  prepare:    {}\n  in process: {}\n  over HTTP:  {}\n  node put:   {}\n  node batch: {}",
         problems.len(),
         bytes as f64 / 1024.0,
         figures(&mut prepare),
         figures(&mut local),
-        figures(&mut remote)
+        figures(&mut remote),
+        figures(&mut put),
+        figures(&mut batch)
     );
-    // stop serving, then close the service once nothing holds it
-    server.abort();
-    let _ = server.await;
-    if let Ok(service) = Arc::try_unwrap(service) {
-        close(service).await?;
+    // and a checked edit of one page, a line added and taken away again in turn
+    if paged {
+        let path = "features/scan-rows.md";
+        let mut edits = Vec::with_capacity(rounds);
+        for round in 0..WARMUP + rounds {
+            let page = service
+                .page(plan, path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no page `{path}`"))?;
+            let text = match page.text.strip_suffix("\nEdited.\n") {
+                Some(text) => text.to_string(),
+                None => format!("{}\nEdited.\n", page.text),
+            };
+            let edit = PageEdit::Put {
+                page: PageWrite::new(path, text),
+                read: Some(page.version),
+            };
+            let start = Instant::now();
+            let edited = service.edit_page(plan, edit).await?;
+            let took = start.elapsed();
+            anyhow::ensure!(matches!(edited, PageEdited::Applied { .. }), "{edited:?}");
+            if round >= WARMUP {
+                edits.push(took);
+            }
+        }
+        println!("  page edit:  {}", figures(&mut edits));
     }
     Ok(())
+}
+
+/// Puts naming nodes as they stand, each retitled for a round, at the version read
+///
+/// # Arguments
+///
+/// * `service` - The service the plan is in
+/// * `plan` - The plan
+/// * `ids` - The nodes to retitle
+/// * `round` - The round, which the titles name
+async fn retitled<B: Backend + 'static>(
+    service: &Service<B>,
+    plan: &PlanName,
+    ids: &[String],
+    round: usize,
+) -> anyhow::Result<Vec<NodePut>> {
+    let mut puts = Vec::with_capacity(ids.len());
+    for id in ids {
+        // each node as it stands, a title of the round's
+        let node = service
+            .get(plan, id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no node `{id}`"))?;
+        let version = node.version;
+        let mut write = NodeWrite::from(node);
+        write.spec.title = Some(format!("{id} round {round}"));
+        puts.push(NodePut::new(write, Some(version)));
+    }
+    Ok(puts)
 }
 
 /// Closes a service, stopping an in-process pool if it is one
@@ -284,19 +468,22 @@ fn markdown_files(src: &Path) -> anyhow::Result<Vec<String>> {
     Ok(out)
 }
 
-/// Reads a book's nodes, each lifted out of its group as the store keeps it, depth first
+/// Reads a book's nodes, each lifted out of its group as the store keeps it, depth first, and
+/// its other files as pages
 ///
 /// # Arguments
 ///
 /// * `src` - The book's `src`, which is also the project's repo
-fn flatten(src: &Path) -> anyhow::Result<Vec<NodeWrite>> {
+fn flatten(src: &Path) -> anyhow::Result<(Vec<NodeWrite>, Vec<PageWrite>)> {
     let mut out = Vec::new();
+    let mut pages = Vec::new();
     for rel in markdown_files(src)? {
-        // a page with no frontmatter is not a node
+        // a file with no node's frontmatter is a page
         let text = std::fs::read_to_string(src.join(&rel))?;
         let Some((spec, fm)) =
             parse_node_file(&text).map_err(|error| anyhow::anyhow!("{rel}: {}", error.message))?
         else {
+            pages.push(PageWrite::new(rel, text));
             continue;
         };
         // the node and each of its members, its own body on the node alone
@@ -312,7 +499,7 @@ fn flatten(src: &Path) -> anyhow::Result<Vec<NodeWrite>> {
             });
         }
     }
-    Ok(out)
+    Ok((out, pages))
 }
 
 /// A link written in a file, as a link from the repo's root

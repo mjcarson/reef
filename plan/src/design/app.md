@@ -174,13 +174,26 @@ A node's doc is a markdown file in its project's repo, or a page stored with the
   `/api/v1/projects/{project}/plans/{plan}/docs/`, each at the page mdbook would write for it
   (`docs/design.html` for `docs/design.md`), so a plan's own pages can sit beside its repo's
   ([C28](../milestones/m6.md)).
+- **A plan's pages lie over its repo.** A plan keeps markdown pages of its own, named by paths
+  in the same space as the repo's files, and read first: a page hides the repo's file at its
+  path. Check, briefs, the payload's links and the served pages all read through the one
+  layered source, so a link names a page as it names a file ([C28](../milestones/m6.md)).
+- **A book's pages keep their paths from its `src`.** Import makes each markdown file of a book
+  that isn't a node's file a page at its path from `src`: `plan/src/design/app.md` is the page
+  `design/app.md`, and a node's link to it is `design/app.md#…`. A page's links to other pages
+  are left as written, since they keep their places, and its other links lead to the repo's
+  files from where the page now is. Export writes each page back at its path under `src`.
+- **A page edit is checked as a node write is.** Taking out a page a node links to, or the
+  heading it names, or the section its why came from, adds a problem and is refused. An edit
+  names the version its writer read, and the app reads an open section again after each change.
 - **The same section for Claude.** next_task returns the doc section as markdown, so Claude reads
   the same design the user sees.
 - **Links that leave the repo are refused.** Check refuses a link that climbs out with `..`, and
   no doc is read or served through a symlink that leads out of the repo.
 - **Only markdown is served.** An image or other file a doc links to doesn't load in its page.
-- **Docs come from the working tree.** The docs shown are those of the checked-out branch, which
-  can differ from the commit a node was done on.
+- **Pages come from the plan, other docs from the working tree.** A plan's pages are its own,
+  versioned with it. Any other doc shown is the checked-out branch's, which can differ from the
+  commit a node was done on.
 
 ## The queue panel
 

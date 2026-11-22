@@ -59,8 +59,9 @@ impl Drop for Follow {
 #[cfg(not(feature = "web"))]
 type Follow = ();
 
-/// The changes that mean reading a plan again: a put, a whole plan written, or a gap
-const PLAN_KINDS: &[&str] = &["nodes-put", "plan-written", "missed"];
+/// The changes that mean reading a plan again: a put, a page edited, a whole plan written, or
+/// a gap
+const PLAN_KINDS: &[&str] = &["nodes-put", "pages-put", "plan-written", "missed"];
 
 /// The changes that mean reading a project's queue again: an edit of it, a plan listed, or any
 /// change to a plan, which can make an entry ready or waiting
@@ -116,6 +117,9 @@ pub fn use_project_changes(project: ReadSignal<String>) -> ReadSignal<u64> {
 /// Opens a change stream, bumping `count` for each change of the kinds given, and for a
 /// reconnect
 ///
+/// Each bump forgets the doc sections read first, since a change can change the page one is cut
+/// from, so a section shown again after it is fetched again.
+///
 /// # Arguments
 ///
 /// * `url` - The stream's path, narrowed to what is followed
@@ -131,10 +135,13 @@ fn follow(url: &str, kinds: &[&'static str], count: Signal<u64>) -> Option<Follo
         source,
         listeners: Vec::new(),
     };
-    // each change of a kind that means reading again
+    // each change of a kind that means reading again, the docs read before it forgotten first
     for kind in kinds {
         let mut count = count;
-        follow.listen(kind, move |_| *count.write() += 1);
+        follow.listen(kind, move |_| {
+            crate::canvas::dom::forget_docs();
+            *count.write() += 1;
+        });
     }
     // the browser reconnects a dropped stream itself, but what changed meanwhile isn't sent again
     let dropped = Rc::new(Cell::new(false));
@@ -143,6 +150,7 @@ fn follow(url: &str, kinds: &[&'static str], count: Signal<u64>) -> Option<Follo
     let mut reconnected = count;
     follow.listen("open", move |_| {
         if dropped.replace(false) {
+            crate::canvas::dom::forget_docs();
             *reconnected.write() += 1;
         }
     });

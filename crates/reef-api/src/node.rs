@@ -8,6 +8,7 @@
 //! Enums take serde's external tagging, their variants in kebab-case, so an answer reads as
 //! `{"applied":{"versions":[1]}}` or `{"refused":[...]}`.
 
+use crate::page::PageWrite;
 use reef_model::{Diagnostic, NameError, NodeSpec, Origin, PlanName, Record};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -280,6 +281,20 @@ fn lift_into(mut spec: NodeSpec, out: &mut Vec<NodeSpec>) {
 pub struct PlanWrite {
     /// Every node of the plan, each a node of its own
     pub nodes: Vec<NodeWrite>,
+    /// Every page of the plan, replacing those it has, or `None` to keep them as they are
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<Vec<PageWrite>>,
+}
+
+impl From<Vec<NodeWrite>> for PlanWrite {
+    /// A whole plan's nodes, its pages kept as they are
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - Every node of the plan
+    fn from(nodes: Vec<NodeWrite>) -> Self {
+        PlanWrite { nodes, pages: None }
+    }
 }
 
 /// Why a conditional write was refused, as shoal says it
@@ -403,8 +418,10 @@ pub fn records(plan: &PlanName, nodes: Vec<NodeWrite>) -> Result<Vec<Record>, Na
 #[cfg(test)]
 mod tests {
     use super::{
-        Checked, NodePut, NodeRemove, NodeWrite, Puts, Refusal, Rewrite, Rewritten, StalePut, lift,
+        Checked, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
+        StalePut, lift,
     };
+    use crate::PageWrite;
     use reef_model::{Diagnostic, NodeSpec};
     use serde_json::json;
 
@@ -567,5 +584,29 @@ mod tests {
             let text = serde_json::to_string(&outcome).unwrap();
             assert_eq!(serde_json::from_str::<Checked>(&text).unwrap(), outcome);
         }
+    }
+
+    /// A whole-plan write that leaves its pages out keeps them, and one that names them,
+    /// even none, replaces them
+    #[test]
+    fn plan_write_without_pages_keeps_them() {
+        // a write sent without pages reads as keeping them, and is sent without them
+        let kept: PlanWrite = serde_json::from_value(json!({"nodes": []})).unwrap();
+        assert_eq!(kept, PlanWrite::from(Vec::new()));
+        assert_eq!(kept.pages, None);
+        assert_eq!(serde_json::to_value(&kept).unwrap(), json!({"nodes": []}));
+        // pages named, even none, replace the plan's
+        let none: PlanWrite = serde_json::from_value(json!({"nodes": [], "pages": []})).unwrap();
+        assert_eq!(none.pages, Some(Vec::new()));
+        let one = PlanWrite {
+            nodes: Vec::new(),
+            pages: Some(vec![PageWrite::new("plan.md", "# Plan\n")]),
+        };
+        let json = serde_json::to_value(&one).unwrap();
+        assert_eq!(
+            json,
+            json!({"nodes": [], "pages": [{"path": "plan.md", "text": "# Plan\n"}]})
+        );
+        assert_eq!(serde_json::from_value::<PlanWrite>(json).unwrap(), one);
     }
 }

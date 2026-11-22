@@ -4,11 +4,16 @@
 use crate::canvas::dom::{self, Part};
 use dioxus::prelude::*;
 
+/// How many changes to the plan have come, which a doc's section is read again on, since a
+/// change can change the page it is cut from
+#[derive(Debug, Clone, Copy)]
+pub struct DocChanges(pub ReadSignal<u64>);
+
 /// What the sidebar shows of a doc it can't read
 const UNREADABLE: &str =
     r#"<p class="reef-note">This doc can't be read here. Use <em>Open page ↗</em>.</p>"#;
 
-/// A doc's section, open, read once as it is first shown
+/// A doc's section, open, read as it is first shown and again after each change to the plan
 ///
 /// # Arguments
 ///
@@ -20,7 +25,10 @@ const UNREADABLE: &str =
 pub fn DocText(href: String, class: &'static str, head: Element, part: Part) -> Element {
     // read as soon as it shows, since it starts open; a browser may fire no `toggle` for that
     let link = href.clone();
-    let text = use_resource(use_reactive!(|(link, part)| async move {
+    // and again after each change to the plan, which forgets what was read before it
+    let seen = try_use_context::<DocChanges>().map_or(0, |changes| (changes.0)());
+    let text = use_resource(use_reactive!(|(link, part, seen)| async move {
+        let _ = seen;
         match dom::read_doc(link, part).await {
             Ok(html) => html,
             Err(error) => {

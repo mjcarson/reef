@@ -43,7 +43,7 @@ impl Part {
 ///
 /// The page is fetched, the section under the link's anchor (or the whole page, with none) is
 /// cut out of its `<main>`, and its links and images are made to point where they did on the
-/// page. A section read once is kept for the page's life.
+/// page. A section read once is kept for the page's life, or until [`forget`].
 ///
 /// # Arguments
 ///
@@ -192,4 +192,10 @@ fn rebase(el: &Element, page: &str) {
             }
         }
     }
+}
+
+/// Forgets every section read, so the next read of each fetches its page again, as when a doc
+/// may have changed under it
+pub fn forget() {
+    CACHE.with(|c| c.borrow_mut().clear());
 }

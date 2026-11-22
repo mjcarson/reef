@@ -1,4 +1,4 @@
-//! reef's store: plans and their nodes, read and written by version
+//! reef's store: plans, their nodes and their pages, read and written by version
 //!
 //! A store keeps the logic, over a [`Backend`] that reads and writes rows the way shoal does:
 //! [`ShoalBackend`] in service, [`MemoryBackend`] in tests and on stable.
@@ -15,6 +15,11 @@
 //!   the plan's row first, and is made current by one conditional write to that row. A write
 //!   killed midway leaves the old revision current and whole, and the next write prunes what it
 //!   left. A batch's revision carries every node it doesn't touch at the version it was at.
+//! - **A plan's pages in revisions of their own.** A whole-plan write that carries pages writes
+//!   them under its new revision too, and its flip makes both current at once. A plan's row
+//!   names its pages' revision apart from its nodes', so a batch of node writes leaves the pages
+//!   where they are rather than copying them. A page edit is one row's conditional write in the
+//!   pages' current revision, checked as a node write is.
 //! - **Checks under the plan's lock.** The store keeps rows; it doesn't judge what they make.
 //!   `batch_checked` and `write_plan_checked` hand a caller's check the plan as it stands and as
 //!   the write would leave it, under the plan's write lock, and write only if it finds no
@@ -30,9 +35,11 @@
 
 // the store's data types are the JSON API's, so the service and its clients share them
 pub use reef_api::{
-    AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, Place, PlanInfo, Project, Puts,
-    QueueEdit, Queued, Ranked, Rewrite, Rewritten, StalePut, StoredNode, records,
+    AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, PageEdit, PageEdited,
+    PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Puts, QueueEdit, Queued, Ranked,
+    Rewrite, Rewritten, StalePut, StoredNode, StoredPage, records,
 };
+use reef_api::{PLAN_PAGES_MAX_BYTES, check_page_path};
 use reef_model::{Diagnostic, NodeName, PlanName, Record};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -48,10 +55,16 @@ use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::rank;
 use crate::repo::{self, Located};
-use crate::schema::{NodeRow, PROJECTS, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{NodeRow, PROJECTS, PageRow, PlanRow, ProjectRow, QueueRow};
 
-/// How many node rows a bulk write sends in one bundle
+/// How many rows a bulk write sends in one bundle, at most
 const BUNDLE_ROWS: usize = 256;
+
+/// How many bytes of specs, bodies and pages a bulk write sends in one bundle, at most
+///
+/// A bundle must fit in one of shoal's frames, 64 MiB by default. A row bigger than this goes
+/// in a bundle of its own.
+const BUNDLE_BYTES: usize = 16 << 20;
 
 /// A plan as it stands and as a write would leave it, for a check to judge
 #[derive(Debug, Clone)]
@@ -60,6 +73,11 @@ pub struct Proposal {
     pub before: Vec<Record>,
     /// The plan's nodes as the write would leave them, in written order
     pub after: Vec<Record>,
+    /// The plan's pages as they stand, by path
+    pub pages: Vec<PageWrite>,
+    /// The plan's pages as the write would leave them, or `None` for a write that leaves them
+    /// as they stand
+    pub pages_after: Option<Vec<PageWrite>>,
 }
 
 /// What came of a put
@@ -406,13 +424,17 @@ impl<B: Backend> Store<B> {
         if !projects.iter().any(|project| project.name == plan.project) {
             return Err(NotRegistered(plan.project.clone()).into());
         }
-        // its first revision is current and empty, so a put has somewhere to go
+        // its first revision is current and empty, so a put has somewhere to go, and its pages'
+        // revision is the same one, empty too
+        let revision = fresh_revision();
         let row = PlanRow {
             project: plan.project.clone(),
             name: plan.plan.clone(),
-            current: fresh_revision(),
+            current: revision,
             pending: 0,
             retired: 0,
+            pages_current: revision,
+            pages_retired: 0,
             version: 1,
         };
         // written only if its project lists no plan of that name
@@ -453,6 +475,116 @@ impl<B: Backend> Store<B> {
             revision: row.current,
             nodes,
         })
+    }
+
+    /// Lists a plan's pages as they stand, by path
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Store::pages", skip_all, err(Debug))]
+    pub async fn pages(&self, plan: &PlanName) -> anyhow::Result<PageListing> {
+        // never while a write is retiring the revision this reads
+        let _read = self.reading(plan).await;
+        let row = self.plan_row(plan).await?;
+        // every page of the pages' current revision
+        let pages = self.page_revision(plan, row.pages_current, None).await?;
+        Ok(PageListing {
+            revision: row.pages_current,
+            pages,
+        })
+    }
+
+    /// Gets one of a plan's pages, or `None` if it has none at that path
+    ///
+    /// A path no page can have names none, so asking for one is no failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `path` - The page's path
+    #[instrument(name = "Store::page", skip_all, err(Debug))]
+    pub async fn page(&self, plan: &PlanName, path: &str) -> anyhow::Result<Option<StoredPage>> {
+        // never while a write is retiring the revision this reads
+        let _read = self.reading(plan).await;
+        let row = self.plan_row(plan).await?;
+        // a path no page can have is no page, though the plan must be listed
+        if check_page_path(path).is_err() {
+            return Ok(None);
+        }
+        // the one row of the pages' current revision
+        let pages = self
+            .page_revision(plan, row.pages_current, Some(path))
+            .await?;
+        Ok(pages.into_iter().next())
+    }
+
+    /// Reads a plan's nodes and its pages as they stand at one moment
+    ///
+    /// Both are read under one hold of the plan's read lock, from one read of its row, so no
+    /// write lands between them.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Store::snapshot", skip_all, err(Debug))]
+    pub async fn snapshot(&self, plan: &PlanName) -> anyhow::Result<(Listing, PageListing)> {
+        // never while a write is retiring the revisions this reads
+        let _read = self.reading(plan).await;
+        let row = self.plan_row(plan).await?;
+        // every node of the current revision, put in written order
+        let mut nodes = self.revision(plan, row.current, None).await?;
+        listed_order(&mut nodes);
+        // and every page of the pages' current revision
+        let pages = self.page_revision(plan, row.pages_current, None).await?;
+        Ok((
+            Listing {
+                revision: row.current,
+                nodes,
+            },
+            PageListing {
+                revision: row.pages_current,
+                pages,
+            },
+        ))
+    }
+
+    /// Reads a revision's pages, or one of them, checking each against its full key
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `revision` - The revision of the plan's pages to read
+    /// * `path` - The one page to read, or `None` for all of them
+    #[instrument(name = "Store::page_revision", skip_all, err(Debug))]
+    async fn page_revision(
+        &self,
+        plan: &PlanName,
+        revision: u64,
+        path: Option<&str>,
+    ) -> anyhow::Result<Vec<StoredPage>> {
+        // the revision's partition, whole or one row of it
+        let key = RevisionKey::new(plan, revision);
+        let rows = self.backend.pages(&key, path).await?;
+        let mut pages = rows
+            .into_iter()
+            .map(|row| {
+                // a row of another partition that hashed the same is a collision, not a page
+                anyhow::ensure!(
+                    key.holds_page(&row) && path.is_none_or(|path| row.path == path),
+                    "page row `{}/{}/{}` at revision {} was stored where `{plan}`'s pages at \
+                     revision {revision} are: their partition keys' hashes collide",
+                    row.project,
+                    row.plan,
+                    row.path,
+                    row.revision
+                );
+                Ok(stored_page(row))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        // by path, as a listing reads
+        pages.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(pages)
     }
 
     /// Reads a revision's rows, or one of them, checking each against its full key
@@ -533,30 +665,33 @@ impl<B: Backend> Store<B> {
     /// The steps, under the plan's lock:
     ///
     /// 1. Prune any revision a killed write left pending or retired.
-    /// 2. Read the current revision's versions, so each node's moves on.
+    /// 2. Read the current revision's versions, so each node's moves on, and the pages' if the
+    ///    write carries pages.
     /// 3. Reserve the new revision: name it `pending` on the plan's row.
-    /// 4. Write its rows, each bundle's answers checked.
-    /// 5. Flip: make it current and the old one retired, in one conditional write.
-    /// 6. Prune the old revision, and clear `retired`.
+    /// 4. Write its rows, nodes then pages, each bundle's answers checked.
+    /// 5. Flip: make it current and the old one retired, in one conditional write, and its
+    ///    pages current too if it carries pages.
+    /// 6. Prune the old revision, and its pages if they were replaced, and clear `retired`.
     ///
     /// A write killed or failed before step 5 leaves the old revision current and whole, with
     /// the new one named pending for the next write to prune. One that fails pruning after step
-    /// 5 has still made its revision current, and says so with `left_retired`.
+    /// 5 has still made its revision current, and says so with `left_retired`. A write without
+    /// pages leaves the plan's pages as they are.
     ///
     /// This doesn't check what the nodes make of the plan; `write_plan_checked` does.
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
-    /// * `nodes` - Every node of the plan, each a node of its own
+    /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
     #[instrument(name = "Store::write_plan", skip_all, err(Debug))]
-    pub async fn write_plan(
-        &self,
-        plan: &PlanName,
-        nodes: Vec<NodeWrite>,
-    ) -> anyhow::Result<Rewritten> {
-        // every node must be one the store can keep, under an id no other node has
+    pub async fn write_plan(&self, plan: &PlanName, write: PlanWrite) -> anyhow::Result<Rewritten> {
+        let PlanWrite { nodes, pages } = write;
+        // every node and page must be one the store can keep, under a name no other has
         check_plan_nodes(plan, &nodes)?;
+        if let Some(pages) = &pages {
+            check_pages(pages)?;
+        }
         // one write to this plan at a time
         let _write = self.writing(plan).await;
         let row = self.plan_row(plan).await?;
@@ -564,17 +699,29 @@ impl<B: Backend> Store<B> {
         let (row, recovered) = self.recover(plan, row).await?;
         // 2. carry each node's version on, so a put read before this write is refused after it
         let old: HashMap<String, u64> = self.keys(plan, row.current).await?.into_iter().collect();
+        // and each page's, if the pages change
+        let pages = match pages {
+            Some(pages) => {
+                let old: HashMap<String, u64> = self
+                    .page_keys(plan, row.pages_current)
+                    .await?
+                    .into_iter()
+                    .collect();
+                Some(pages_moved_on(pages, &old))
+            }
+            None => None,
+        };
         // 3 to 6. write the new revision, make it current and prune the old one
-        self.rewrite(plan, row, recovered, moved_on(nodes, &old))
+        self.rewrite(plan, row, recovered, moved_on(nodes, &old), pages)
             .await
     }
 
     /// Writes a whole plan as a new revision, if a check finds no problem it would add
     ///
     /// Under the plan's write lock, this prunes what a killed write left, reads the current
-    /// revision, and hands `check` the plan as it stands and as these nodes would make it. A
-    /// check that finds problems refuses the write before a revision is reserved, so nothing
-    /// is written. Otherwise the nodes are written as `write_plan` writes them.
+    /// revision and pages, and hands `check` the plan as it stands and as this write would make
+    /// it. A check that finds problems refuses the write before a revision is reserved, so
+    /// nothing is written. Otherwise the plan is written as `write_plan` writes it.
     ///
     /// The check runs under the plan's write lock, so it must not read or write this plan
     /// through the store, or it waits forever.
@@ -582,21 +729,25 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
-    /// * `nodes` - Every node of the plan, each a node of its own
+    /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
     /// * `check` - Finds the problems the write would add, or none
     #[instrument(name = "Store::write_plan_checked", skip_all, err(Debug))]
     pub async fn write_plan_checked<F, Fut>(
         &self,
         plan: &PlanName,
-        mut nodes: Vec<NodeWrite>,
+        write: PlanWrite,
         check: F,
     ) -> anyhow::Result<Rewrite>
     where
         F: FnOnce(Proposal) -> Fut + Send,
         Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
     {
-        // every node must be one the store can keep, under an id no other node has
+        let PlanWrite { mut nodes, pages } = write;
+        // every node and page must be one the store can keep, under a name no other has
         check_plan_nodes(plan, &nodes)?;
+        if let Some(pages) = &pages {
+            check_pages(pages)?;
+        }
         // one write to this plan at a time, so the check judges the plan this lands on
         let _write = self.writing(plan).await;
         let row = self.plan_row(plan).await?;
@@ -609,20 +760,29 @@ impl<B: Backend> Store<B> {
             .iter()
             .map(|node| (node.spec.id.clone(), node.version))
             .collect();
-        // judge the plan as these nodes would make it, and write nothing if it adds a problem
+        // and the pages as they stand, whose versions each page carries on
+        let stood = self.page_revision(plan, row.pages_current, None).await?;
+        let old_pages: HashMap<String, u64> = stood
+            .iter()
+            .map(|page| (page.path.clone(), page.version))
+            .collect();
+        // judge the plan as this write would make it, and write nothing if it adds a problem
         in_written_order(&mut nodes);
         let before = records(plan, current.into_iter().map(NodeWrite::from).collect())?;
         let proposal = Proposal {
             before,
             after: records(plan, nodes.clone())?,
+            pages: stood.into_iter().map(PageWrite::from).collect(),
+            pages_after: pages.clone(),
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
             return Ok(Rewrite::Refused(problems));
         }
         // write the new revision, make it current and prune the old one
+        let pages = pages.map(|pages| pages_moved_on(pages, &old_pages));
         let rewritten = self
-            .rewrite(plan, row, recovered, moved_on(nodes, &old))
+            .rewrite(plan, row, recovered, moved_on(nodes, &old), pages)
             .await?;
         Ok(Rewrite::Applied(rewritten))
     }
@@ -631,7 +791,7 @@ impl<B: Backend> Store<B> {
     ///
     /// These are steps 3 to 6 of `write_plan`, and how a batch of several writes lands. The
     /// caller holds the plan's write lock, has pruned what a killed write left, and has decided
-    /// each node's version.
+    /// each node's version, and each page's if the pages change.
     ///
     /// # Arguments
     ///
@@ -639,6 +799,8 @@ impl<B: Backend> Store<B> {
     /// * `row` - The plan's row as it now stands
     /// * `recovered` - How many rows a killed write had left, which the caller pruned
     /// * `nodes` - Every node of the plan, each a node of its own, with the version to write it at
+    /// * `pages` - Every page of the plan with the version to write it at, or `None` to leave
+    ///   the pages as they are
     #[instrument(name = "Store::rewrite", skip_all, err(Debug))]
     async fn rewrite(
         &self,
@@ -646,6 +808,7 @@ impl<B: Backend> Store<B> {
         row: PlanRow,
         recovered: usize,
         nodes: Vec<(NodeWrite, u64)>,
+        pages: Option<Vec<(PageWrite, u64)>>,
     ) -> anyhow::Result<Rewritten> {
         // 3. reserve the new revision, so a write killed from here on can be found
         let revision = fresh_revision();
@@ -659,25 +822,45 @@ impl<B: Backend> Store<B> {
         for (node, version) in nodes {
             rows.push(node_row(plan, revision, node, version)?);
         }
-        while !rows.is_empty() {
-            let rest = rows.split_off(rows.len().min(BUNDLE_ROWS));
-            self.backend
-                .write_nodes(std::mem::replace(&mut rows, rest))
-                .await?;
+        for bundle in bundles(rows, |row| row.spec.len() + row.body.len()) {
+            self.backend.write_nodes(bundle).await?;
         }
-        // 5. flip: the new revision current, the old one retired, in one conditional write
-        let flip = Pointers {
+        // and its pages under the same revision, if they change
+        let replaces_pages = pages.is_some();
+        if let Some(pages) = pages {
+            let rows: Vec<PageRow> = pages
+                .into_iter()
+                .map(|(page, version)| page_row(plan, revision, page, version))
+                .collect();
+            for bundle in bundles(rows, |row| row.path.len() + row.text.len()) {
+                self.backend.write_pages(bundle).await?;
+            }
+        }
+        // 5. flip: the new revision current, the old one retired, in one conditional write, and
+        // its pages current over the old ones if it carries them
+        let mut flip = Pointers {
             current: Some(revision),
             pending: Some(0),
             retired: Some(row.current),
+            ..Pointers::default()
         };
+        if replaces_pages {
+            flip.pages_current = Some(revision);
+            flip.pages_retired = Some(row.pages_current);
+        }
         let version = self.update_plan(plan, version, flip).await?;
-        // 6. prune the old revision, then say there is nothing left to prune; the new revision
-        // is current either way, so a failure here is left for the next write
-        let left_retired = match self.prune(plan, row.current).await {
+        // 6. prune the old revision, and its pages if they were replaced, then say there is
+        // nothing left to prune; the new revision is current either way, so a failure here is
+        // left for the next write
+        let pruned = match self.prune_nodes(plan, row.current).await {
+            Ok(_) if replaces_pages => self.prune_pages(plan, row.pages_current).await,
+            pruned => pruned,
+        };
+        let left_retired = match pruned {
             Ok(_) => {
                 let cleared = Pointers {
                     retired: Some(0),
+                    pages_retired: replaces_pages.then_some(0),
                     ..Pointers::default()
                 };
                 self.update_plan(plan, version, cleared).await.is_err()
@@ -810,12 +993,16 @@ impl<B: Backend> Store<B> {
                 None => after.push((put.node.clone(), version)),
             }
         }
-        // judge it, and write nothing if it adds a problem
+        // judge it over the pages as they stand, which a batch leaves where they are, and write
+        // nothing if it adds a problem
         let mut judged: Vec<NodeWrite> = after.iter().map(|(node, _)| node.clone()).collect();
         in_written_order(&mut judged);
+        let pages = self.page_revision(plan, row.pages_current, None).await?;
         let proposal = Proposal {
             before,
             after: records(plan, judged)?,
+            pages: pages.into_iter().map(PageWrite::from).collect(),
+            pages_after: None,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
@@ -825,7 +1012,7 @@ impl<B: Backend> Store<B> {
         if puts.len() + removes.len() == 1 {
             self.write_one(plan, &row, puts, removes).await?;
         } else {
-            self.rewrite(plan, row, recovered, after).await?;
+            self.rewrite(plan, row, recovered, after, None).await?;
         }
         Ok(Checked::Applied { versions })
     }
@@ -883,7 +1070,145 @@ impl<B: Backend> Store<B> {
         Ok(())
     }
 
+    /// Writes or takes out one of a plan's pages, if it is as its writer read it and a check
+    /// finds no problem the edit would add
+    ///
+    /// The steps, under the plan's write lock:
+    ///
+    /// 1. Prune whatever a killed write left.
+    /// 2. Read the current revision and the pages as they stand.
+    /// 3. Refuse the edit as [`PageEdited::Stale`] if the page is other than its writer read it.
+    /// 4. Hand `check` the plan as it stands, over its pages as they stand and as the edit would
+    ///    leave them, and refuse the edit as [`PageEdited::Refused`] if it finds problems.
+    /// 5. Write the page into the pages' current revision, only over the version read or only
+    ///    where there is no row, or delete it.
+    ///
+    /// A page write refused in step 5 means another process wrote the plan, since reef-service
+    /// is shoal's only writer, and is an error.
+    ///
+    /// The check runs under the plan's write lock, so it must not read or write this plan
+    /// through the store, or it waits forever.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `edit` - The page to write or take out, with the version its writer read
+    /// * `check` - Finds the problems the edit would add, or none
+    #[instrument(name = "Store::edit_page_checked", skip_all, err(Debug))]
+    pub async fn edit_page_checked<F, Fut>(
+        &self,
+        plan: &PlanName,
+        edit: PageEdit,
+        check: F,
+    ) -> anyhow::Result<PageEdited>
+    where
+        F: FnOnce(Proposal) -> Fut + Send,
+        Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
+    {
+        // the page must be one the store can keep
+        match &edit {
+            PageEdit::Put { page, .. } => check_page(page)?,
+            PageEdit::Remove { path, .. } => check_page_path(path).map_err(Unkeepable)?,
+        }
+        // one write to this plan at a time, so the check judges the plan the edit lands on
+        let _write = self.writing(plan).await;
+        let row = self.plan_row(plan).await?;
+        // 1. prune whatever a killed write left
+        let (row, _) = self.recover(plan, row).await?;
+        // 2. the plan as it stands, its nodes in written order and its pages by path
+        let mut current = self.revision(plan, row.current, None).await?;
+        listed_order(&mut current);
+        let pages = self.page_revision(plan, row.pages_current, None).await?;
+        // 3. the page must be as its writer read it, before anything is judged
+        let path = edit.path().to_string();
+        let stored = pages
+            .iter()
+            .find(|page| page.path == path)
+            .map(|page| page.version);
+        let read = match &edit {
+            PageEdit::Put { read, .. } => *read,
+            PageEdit::Remove { read, .. } => Some(*read),
+        };
+        let refusal = match (stored, read) {
+            (None, None) => None,
+            (Some(stored), Some(read)) if stored == read => None,
+            (Some(_), None) => Some(Refusal::Exists),
+            (None, Some(_)) => Some(Refusal::Missing),
+            (Some(_), Some(_)) => Some(Refusal::Moved),
+        };
+        if let Some(refusal) = refusal {
+            return Ok(PageEdited::Stale { path, refusal });
+        }
+        // 4. the pages as the edit would leave them, the page put in its place or taken out
+        let before: Vec<PageWrite> = pages.into_iter().map(PageWrite::from).collect();
+        let mut after: Vec<PageWrite> = before
+            .iter()
+            .filter(|page| page.path != path)
+            .cloned()
+            .collect();
+        if let PageEdit::Put { page, .. } = &edit {
+            after.push(page.clone());
+            after.sort_by(|a, b| a.path.cmp(&b.path));
+        }
+        check_pages_size(&after)?;
+        // judged over the plan's nodes as they stand, and nothing written if it adds a problem
+        let nodes = records(plan, current.into_iter().map(NodeWrite::from).collect())?;
+        let proposal = Proposal {
+            before: nodes.clone(),
+            after: nodes,
+            pages: before,
+            pages_after: Some(after),
+        };
+        let problems = check(proposal).await?;
+        if !problems.is_empty() {
+            return Ok(PageEdited::Refused(problems));
+        }
+        // 5. the page written in place, one version on from the one read, or deleted outright
+        match edit {
+            PageEdit::Put { page, read } => {
+                let (version, expect) = match read {
+                    Some(read) => (read + 1, Expect::Version(read)),
+                    None => (1, Expect::Absent),
+                };
+                let new = page_row(plan, row.pages_current, page, version);
+                let written = self
+                    .backend
+                    .write_page(new, expect)
+                    .await
+                    .map_err(|error| {
+                        error.context(format!("writing page `{path}` of plan `{plan}`"))
+                    })?;
+                // this process holds the plan's lock and saw the page as read, so another wrote it
+                if let Written::Refused(refusal) = written {
+                    anyhow::bail!(
+                        "page `{path}` of plan `{plan}` changed under this edit ({refusal}): \
+                         another process wrote the plan"
+                    );
+                }
+                Ok(PageEdited::Applied {
+                    version: Some(version),
+                })
+            }
+            PageEdit::Remove { .. } => {
+                let key = RevisionKey::new(plan, row.pages_current);
+                self.backend
+                    .delete_pages(&key, vec![path.clone()])
+                    .await
+                    .map_err(|error| {
+                        error.context(format!("removing page `{path}` of plan `{plan}`"))
+                    })?;
+                Ok(PageEdited::Applied { version: None })
+            }
+        }
+    }
+
     /// Prunes any revision a killed or failed write left named on a plan's row
+    ///
+    /// Each table is pruned of the revisions it may hold that aren't its current one: the
+    /// nodes of the pending and retired revisions, and the pages of the pending revision and
+    /// the pages' retired one. A revision can be current in one table and retired in the other,
+    /// since a batch of node writes leaves the pages where they are, so neither table is pruned
+    /// by the other's pointers.
     ///
     /// Returns the plan's row as it now stands, and how many rows were pruned. The caller holds
     /// the plan's write lock.
@@ -894,22 +1219,29 @@ impl<B: Backend> Store<B> {
     /// * `row` - The plan's row as it was read
     #[instrument(name = "Store::recover", skip_all, err(Debug))]
     async fn recover(&self, plan: &PlanName, row: PlanRow) -> anyhow::Result<(PlanRow, usize)> {
-        // only a revision that is named and isn't the current one is left over
-        let leftovers: Vec<u64> = [row.pending, row.retired]
-            .into_iter()
-            .filter(|revision| *revision != 0 && *revision != row.current)
-            .collect();
-        if leftovers.is_empty() && row.pending == 0 && row.retired == 0 {
+        // nothing named is nothing left over
+        if row.pending == 0 && row.retired == 0 && row.pages_retired == 0 {
             return Ok((row, 0));
         }
+        // only a revision that is named and isn't the table's current one is left over
+        let nodes_left = [row.pending, row.retired]
+            .into_iter()
+            .filter(|revision| *revision != 0 && *revision != row.current);
+        let pages_left = [row.pending, row.pages_retired]
+            .into_iter()
+            .filter(|revision| *revision != 0 && *revision != row.pages_current);
         // prune each, then say there is nothing left to prune
         let mut pruned = 0;
-        for revision in leftovers {
-            pruned += self.prune(plan, revision).await?;
+        for revision in nodes_left {
+            pruned += self.prune_nodes(plan, revision).await?;
+        }
+        for revision in pages_left {
+            pruned += self.prune_pages(plan, revision).await?;
         }
         let cleared = Pointers {
             pending: Some(0),
             retired: Some(0),
+            pages_retired: Some(0),
             ..Pointers::default()
         };
         let version = self.update_plan(plan, row.version, cleared).await?;
@@ -918,6 +1250,7 @@ impl<B: Backend> Store<B> {
             PlanRow {
                 pending: 0,
                 retired: 0,
+                pages_retired: 0,
                 version,
                 ..row
             },
@@ -978,7 +1311,7 @@ impl<B: Backend> Store<B> {
             .collect()
     }
 
-    /// Deletes every row of a revision, and returns how many there were
+    /// Deletes every node row of a revision, and returns how many there were
     ///
     /// Shoal can't delete a partition, so this lists the revision's keys and deletes each row,
     /// a bundle at a time. A key of another partition is refused before anything is deleted,
@@ -988,8 +1321,8 @@ impl<B: Backend> Store<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `revision` - The revision to delete
-    #[instrument(name = "Store::prune", skip_all, err(Debug))]
-    async fn prune(&self, plan: &PlanName, revision: u64) -> anyhow::Result<usize> {
+    #[instrument(name = "Store::prune_nodes", skip_all, err(Debug))]
+    async fn prune_nodes(&self, plan: &PlanName, revision: u64) -> anyhow::Result<usize> {
         // find the rows to delete
         let key = RevisionKey::new(plan, revision);
         let mut ids: Vec<String> = self
@@ -1004,6 +1337,67 @@ impl<B: Backend> Store<B> {
             let rest = ids.split_off(ids.len().min(BUNDLE_ROWS));
             self.backend
                 .delete_nodes(&key, std::mem::replace(&mut ids, rest))
+                .await?;
+        }
+        Ok(count)
+    }
+
+    /// Lists a revision's page paths and versions, checking each against its full key
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `revision` - The revision of the plan's pages to list
+    #[instrument(name = "Store::page_keys", skip_all, err(Debug))]
+    async fn page_keys(
+        &self,
+        plan: &PlanName,
+        revision: u64,
+    ) -> anyhow::Result<Vec<(String, u64)>> {
+        // the whole partition, projected to its keys
+        let key = RevisionKey::new(plan, revision);
+        let keys = self.backend.page_keys(&key).await?;
+        keys.into_iter()
+            .map(|page| {
+                // a key of another partition that hashed the same is never this revision's
+                anyhow::ensure!(
+                    key.holds_page_key(&page),
+                    "page key `{}/{}/{}` at revision {} was stored where `{plan}`'s pages at \
+                     revision {revision} are: their partition keys' hashes collide",
+                    page.project,
+                    page.plan,
+                    page.path,
+                    page.revision
+                );
+                Ok((page.path, page.version))
+            })
+            .collect()
+    }
+
+    /// Deletes every page row of a revision, and returns how many there were
+    ///
+    /// As with nodes, a key of another partition is refused before anything is deleted.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `revision` - The revision of the plan's pages to delete
+    #[instrument(name = "Store::prune_pages", skip_all, err(Debug))]
+    async fn prune_pages(&self, plan: &PlanName, revision: u64) -> anyhow::Result<usize> {
+        // find the rows to delete
+        let key = RevisionKey::new(plan, revision);
+        let mut paths: Vec<String> = self
+            .page_keys(plan, revision)
+            .await?
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        let count = paths.len();
+        // and delete them, each answer checked
+        while !paths.is_empty() {
+            let rest = paths.split_off(paths.len().min(BUNDLE_ROWS));
+            self.backend
+                .delete_pages(&key, std::mem::replace(&mut paths, rest))
                 .await?;
         }
         Ok(count)
@@ -1472,7 +1866,148 @@ fn moved_on(nodes: Vec<NodeWrite>, old: &HashMap<String, u64>) -> Vec<(NodeWrite
         .collect()
 }
 
-/// Refuses a node the store can't keep as one row
+/// Each page of a whole-plan write at the version it is written at: one on from the version
+/// the pages' current revision has it at, else 1 for a page new to the plan
+///
+/// # Arguments
+///
+/// * `pages` - Every page of the plan as it should be written
+/// * `old` - The version of each page as it stands, by path
+fn pages_moved_on(pages: Vec<PageWrite>, old: &HashMap<String, u64>) -> Vec<(PageWrite, u64)> {
+    pages
+        .into_iter()
+        .map(|page| {
+            // carried on, so an edit read before this write is refused after it
+            let version = old.get(&page.path).map_or(1, |version| version + 1);
+            (page, version)
+        })
+        .collect()
+}
+
+/// Refuses a page the store can't keep: one at a path no page can have, or one a book would
+/// read as a node, since its frontmatter has an `id`
+///
+/// # Arguments
+///
+/// * `page` - The page
+fn check_page(page: &PageWrite) -> anyhow::Result<()> {
+    // its path must be one a book's walk keeps and a link can name
+    check_page_path(&page.path).map_err(Unkeepable)?;
+    // and a page exported into a book must import back as a page, not a node
+    if !matches!(reef_model::spec::parse_node_file(&page.text), Ok(None)) {
+        let message = format!(
+            "page `{}` opens with a node's frontmatter, an `id`, so a book would read it as a \
+             node: put it as a node, or take its `id` out",
+            page.path
+        );
+        return Err(Unkeepable(message).into());
+    }
+    Ok(())
+}
+
+/// Refuses pages that hold more text together than a plan may keep
+///
+/// # Arguments
+///
+/// * `pages` - Every page of the plan
+fn check_pages_size(pages: &[PageWrite]) -> anyhow::Result<()> {
+    // a plan's pages are read as one partition, which must fit in one of shoal's frames
+    let bytes: usize = pages
+        .iter()
+        .map(|page| page.path.len() + page.text.len())
+        .sum();
+    if bytes > PLAN_PAGES_MAX_BYTES {
+        let message = format!(
+            "the plan's pages hold {bytes} bytes, more than the {PLAN_PAGES_MAX_BYTES} a plan \
+             keeps"
+        );
+        return Err(Unkeepable(message).into());
+    }
+    Ok(())
+}
+
+/// Refuses a whole plan's pages the store can't keep: a page it can't keep, a path twice, or
+/// more text than a plan may keep
+///
+/// # Arguments
+///
+/// * `pages` - Every page of the plan
+fn check_pages(pages: &[PageWrite]) -> anyhow::Result<()> {
+    // every page must be one the store can keep, at a path no other page has
+    let mut paths = HashSet::with_capacity(pages.len());
+    for page in pages {
+        check_page(page)?;
+        if !paths.insert(page.path.as_str()) {
+            let message = format!("page `{}` is written twice", page.path);
+            return Err(Unkeepable(message).into());
+        }
+    }
+    // and all of them must fit in one read
+    check_pages_size(pages)
+}
+
+/// Cuts rows into bundles of at most [`BUNDLE_ROWS`] rows and [`BUNDLE_BYTES`] bytes, in order
+///
+/// A row bigger than a bundle's bytes goes in a bundle of its own.
+///
+/// # Arguments
+///
+/// * `rows` - The rows to send
+/// * `size` - How many bytes a row sends
+fn bundles<T>(rows: Vec<T>, size: impl Fn(&T) -> usize) -> Vec<Vec<T>> {
+    let mut out = Vec::new();
+    let mut bundle = Vec::new();
+    let mut bytes = 0;
+    for row in rows {
+        // a full bundle is sent before the row that would overfill it
+        let row_bytes = size(&row);
+        if !bundle.is_empty() && (bundle.len() == BUNDLE_ROWS || bytes + row_bytes > BUNDLE_BYTES) {
+            out.push(std::mem::take(&mut bundle));
+            bytes = 0;
+        }
+        bytes += row_bytes;
+        bundle.push(row);
+    }
+    // and whatever is left is the last
+    if !bundle.is_empty() {
+        out.push(bundle);
+    }
+    out
+}
+
+/// Builds a page's row in a revision of the plan's pages
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `revision` - The revision of the plan's pages the row is part of
+/// * `page` - The page
+/// * `version` - The version the row is written at
+fn page_row(plan: &PlanName, revision: u64, page: PageWrite, version: u64) -> PageRow {
+    PageRow {
+        project: plan.project.clone(),
+        plan: plan.plan.clone(),
+        revision,
+        path: page.path,
+        version,
+        text: page.text,
+    }
+}
+
+/// Reads a page out of its row
+///
+/// # Arguments
+///
+/// * `row` - The row
+fn stored_page(row: PageRow) -> StoredPage {
+    StoredPage {
+        path: row.path,
+        text: row.text,
+        version: row.version,
+    }
+}
+
+/// Refuses a node the store can't keep as one row/// Refuses a node the store can't keep as one row
 ///
 /// # Arguments
 ///
@@ -1565,9 +2100,9 @@ fn fresh_revision() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddedProject, NodeWrite, Store, settle};
+    use super::{AddedProject, BUNDLE_BYTES, BUNDLE_ROWS, NodeWrite, Store, bundles, settle};
     use crate::backend::RevisionKey;
-    use crate::schema::{NodeRow, QueueRow};
+    use crate::schema::{NodeRow, PageRow, QueueRow};
     use reef_model::PlanName;
     use std::path::Path;
 
@@ -1667,6 +2202,78 @@ mod tests {
             id: id.to_string(),
             seq,
         }
+    }
+
+    /// A row stored in a plan's pages under another plan's key is an error, never a page
+    #[tokio::test]
+    async fn collided_page_row_is_an_error() -> anyhow::Result<()> {
+        // a plan with one page of its own
+        let store = Store::memory();
+        store
+            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")))
+            .await?;
+        let plan = PlanName::new("reef", "central")?;
+        store.add_plan(&plan).await?;
+        let pages = store.plan_row(&plan).await?.pages_current;
+        let own = PageRow {
+            project: "reef".to_string(),
+            plan: "central".to_string(),
+            revision: pages,
+            path: "a.md".to_string(),
+            version: 1,
+            text: "# A\n".to_string(),
+        };
+        store
+            .backend()
+            .plant_page(&RevisionKey::new(&plan, pages), own);
+        assert!(store.page(&plan, "a.md").await?.is_some());
+        // and a row of another project's, landing in its partition as a hash collision would
+        let stray = PageRow {
+            project: "other".to_string(),
+            plan: "central".to_string(),
+            revision: pages,
+            path: "b.md".to_string(),
+            version: 1,
+            text: "# B\n".to_string(),
+        };
+        store
+            .backend()
+            .plant_page(&RevisionKey::new(&plan, pages), stray);
+        // a get of it is caught, and so are a listing and a snapshot of the whole revision
+        let got = store
+            .page(&plan, "b.md")
+            .await
+            .expect_err("a collided row was served");
+        assert!(format!("{got:#}").contains("collide"), "{got:#}");
+        let listed = store
+            .pages(&plan)
+            .await
+            .expect_err("a collided row was listed");
+        assert!(format!("{listed:#}").contains("collide"), "{listed:#}");
+        assert!(store.snapshot(&plan).await.is_err());
+        // while the plan's own page still reads back
+        assert!(store.page(&plan, "a.md").await?.is_some());
+        Ok(())
+    }
+
+    /// Bundles stop at either budget, a row too big for one goes alone, and none is empty
+    #[test]
+    fn bundles_cut_by_rows_and_bytes() {
+        // small rows, cut by count
+        let rows: Vec<usize> = vec![1; BUNDLE_ROWS * 2 + 1];
+        let cut = bundles(rows, |row| *row);
+        let lens: Vec<usize> = cut.iter().map(Vec::len).collect();
+        assert_eq!(lens, [BUNDLE_ROWS, BUNDLE_ROWS, 1]);
+        // big rows, cut by bytes, one too big for a bundle alone in its own
+        let half = BUNDLE_BYTES / 2;
+        let rows = vec![half, half, 1, BUNDLE_BYTES * 2, 1];
+        let cut = bundles(rows, |row| *row);
+        assert_eq!(
+            cut,
+            [vec![half, half], vec![1], vec![BUNDLE_BYTES * 2], vec![1]]
+        );
+        // and nothing makes no bundles
+        assert!(bundles(Vec::<usize>::new(), |row| *row).is_empty());
     }
 
     /// A row stored in a project's queue under another project's key is an error, never an entry

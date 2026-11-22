@@ -1,10 +1,11 @@
-//! reef's shoal schema: projects, plans, each revision's nodes, and each project's queue
+//! reef's shoal schema: projects, plans, each revision's nodes and pages, and each project's
+//! queue
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
-//! plans sit in that project's, a plan's nodes sit in a partition of their revision, and a
-//! project's queue sits in a partition of its own. Sort keys are a single `String` there, so each
-//! table sorts by a name, an id or a rank.
+//! plans sit in that project's, a plan's nodes and its pages each sit in a partition of their
+//! revision, and a project's queue sits in a partition of its own. Sort keys are a single `String`
+//! there, so each table sorts by a name, an id, a path or a rank.
 //!
 //! This one module is both halves of the schema. Built with `embedded` it is the whole schema,
 //! which `reef-shoal` serves and an in-process pool runs. Built without it, only the client half
@@ -39,11 +40,13 @@ pub struct ProjectRow {
     pub repo: String,
 }
 
-/// A plan, listed in its project's partition, and the pointer to its current revision
+/// A plan, listed in its project's partition, and the pointers to its current revisions
 ///
 /// A bulk write names its new revision in `pending` before writing any of its rows, and names
-/// the revision it replaced in `retired` when it makes its own current. Whatever a write killed
-/// midway leaves behind is named here, so the next write can prune it without a scan.
+/// the revision it replaced in `retired` when it makes its own current. One that carries pages
+/// writes them under the same revision, and names the pages' revision it replaced in
+/// `pages_retired`. Whatever a write killed midway leaves behind is named here, so the next write
+/// can prune it without a scan.
 #[derive(
     Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
 )]
@@ -65,6 +68,15 @@ pub struct PlanRow {
     /// A revision replaced and not yet pruned, or 0
     #[shoal(update)]
     pub retired: u64,
+    /// The revision of the plan's pages readers load
+    ///
+    /// Only a whole-plan write that carries pages moves it, so a batch of node writes leaves
+    /// the pages where they are. It can name the same revision as `current`, or an older one.
+    #[shoal(update)]
+    pub pages_current: u64,
+    /// A revision of pages replaced and not yet pruned, or 0
+    #[shoal(update)]
+    pub pages_retired: u64,
     /// Bumped by every change to this row, and named by the next one
     #[shoal(filter, update)]
     pub version: u64,
@@ -132,6 +144,56 @@ pub struct NodeKey {
     pub version: u64,
 }
 
+/// One of a plan's own pages, in one revision of the plan's pages
+///
+/// A page is markdown kept with its plan, which nodes link to as they do to the repo's files.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct PageRow {
+    /// The project the page's plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The page's plan
+    #[shoal(partition)]
+    pub plan: String,
+    /// The revision of the plan's pages this row is part of
+    #[shoal(partition)]
+    pub revision: u64,
+    /// The page's path, which sorts the partition
+    #[shoal(sort)]
+    pub path: String,
+    /// Bumped by every write of this page, and named by the next one
+    #[shoal(filter, update)]
+    pub version: u64,
+    /// Its markdown as written
+    pub text: String,
+}
+
+/// A page row's keys and version alone, for pruning a revision and carrying versions forward
+///
+/// It carries the partition key, as [`NodeKey`] does, for the derive on `ScanSupport`.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalProjection)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "PageRow")]
+pub struct PageKey {
+    /// The project the page's plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The page's plan
+    #[shoal(partition)]
+    pub plan: String,
+    /// The revision of the plan's pages this row is part of
+    #[shoal(partition)]
+    pub revision: u64,
+    /// The page's path
+    pub path: String,
+    /// The page's version
+    pub version: u64,
+}
+
 /// One entry of a project's queue, sorted by its rank
 ///
 /// A row is written once and deleted, never updated. A move writes the entry's new row before
@@ -178,6 +240,9 @@ pub struct Reef {
     pub nodes: PersistentSortedTable<NodeRow, FileSystem>,
     /// Each project's queue, by rank
     pub queue: PersistentSortedTable<QueueRow, FileSystem>,
+    /// Each revision's pages
+    #[shoal(projections(PageKey))]
+    pub pages: PersistentSortedTable<PageRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -186,14 +251,15 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 10508282782169471902;
+    const SCHEMA_ID: u64 = 15686170799915864681;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
         ("ProjectRow", 12832186597557680855),
-        ("PlanRow", 2457880101249943207),
+        ("PlanRow", 15730717529105804003),
         ("NodeRow", 1919551679666722412),
         ("QueueRow", 7438970626929457281),
+        ("PageRow", 13886911418170667521),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

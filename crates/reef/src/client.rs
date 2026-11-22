@@ -7,8 +7,9 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PlanInfo,
-    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, Rewrite, StoredNode, paths,
+    AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PageEdit,
+    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
+    Rewrite, StoredNode, StoredPage, paths,
 };
 use reef_model::{Diagnostic, Next, PlanName};
 use serde::de::DeserializeOwned;
@@ -170,16 +171,54 @@ impl Client {
     /// Writes a whole plan as a new revision, made current at once, unless it would add a
     /// problem to the plan
     ///
-    /// Every node the plan had and the write leaves out is gone from the revision it makes. A
-    /// refused write is an answer, not an error, and writes nothing.
+    /// Every node the plan had and the write leaves out is gone from the revision it makes, and
+    /// so is every page, if the write carries pages. A refused write is an answer, not an error,
+    /// and writes nothing.
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
-    /// * `write` - Every node of the plan, each a node of its own
+    /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
     pub async fn write_plan(&self, plan: &PlanName, write: &PlanWrite) -> anyhow::Result<Rewrite> {
         let path = paths::revision(plan);
         let request = self.http.put(self.url(&path)).json(write);
+        self.send(request, &path).await
+    }
+
+    /// Lists a plan's own pages, by path, each at the version an edit of it names
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn pages(&self, plan: &PlanName) -> anyhow::Result<PageListing> {
+        let path = paths::pages(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Gets one of a plan's own pages, at the version an edit of it names
+    ///
+    /// A page the plan doesn't keep comes back as a `not-found` error naming it.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `page` - The page's path
+    pub async fn page(&self, plan: &PlanName, page: &str) -> anyhow::Result<StoredPage> {
+        let path = paths::page(plan, page);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Writes or takes out one of a plan's own pages, checked against the whole plan
+    ///
+    /// A stale or refused edit is an answer, not an error, and writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `edit` - The page to write or take out, with the version its writer read
+    pub async fn edit_page(&self, plan: &PlanName, edit: &PageEdit) -> anyhow::Result<PageEdited> {
+        let path = paths::pages(plan);
+        let request = self.http.post(self.url(&path)).json(edit);
         self.send(request, &path).await
     }
 

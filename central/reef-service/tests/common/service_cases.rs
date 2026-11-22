@@ -3,13 +3,14 @@
 //! Each case's plan is `reef/central`, of a project registered for a fresh git repo whose working
 //! tree holds the plan's docs.
 
+use reef_api::PutPage;
 use reef_api::{Change, PutNode, paths};
 use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
 use reef_model::{EntryState, Status, WaitsOn};
-use reef_render::{ROOT, Renderer, RepoSource, Sections};
+use reef_render::{Layered, MemSource, ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
-    Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, Place, Puts,
-    QueueEdit, Queued, Refusal, RevisionKey, Rewrite, StalePut,
+    Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, PageEdit,
+    PageEdited, PageWrite, Place, Puts, QueueEdit, Queued, Refusal, RevisionKey, Rewrite, StalePut,
 };
 use std::time::Duration;
 
@@ -138,7 +139,10 @@ pub async fn half_brief_fix_gets_through<B: Backend>(sx: Sx<B>) -> anyhow::Resul
     // a plan holding work that says neither why nor what, written as an import would be
     let mut bare = work("A", 0);
     bare.spec.description = None;
-    sx.service.store().write_plan(&sx.plan, vec![bare]).await?;
+    sx.service
+        .store()
+        .write_plan(&sx.plan, vec![bare].into())
+        .await?;
     let broken = sx.service.check(&sx.plan).await?;
     assert_eq!(broken.len(), 2, "{broken:?}");
     // a put that writes its what alone adds no problem, so it gets through
@@ -502,7 +506,7 @@ pub async fn put_during_checked_import_is_judged_against_it<B: Backend>(
     // a node a put will need, which a whole-plan write drops
     sx.service.put(&sx.plan, new(vec![work("Y", 0)])).await?;
     let pause = sx.faults.pause_next_flip();
-    let write = sx.service.write_plan(&sx.plan, vec![work("W", 0)]);
+    let write = sx.service.write_plan(&sx.plan, vec![work("W", 0)].into());
     let racer = async {
         pause.reached.notified().await;
         // the put waits on the plan's lock while the write holds it
@@ -540,7 +544,7 @@ pub async fn checked_import_refuses_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyh
     let row = sx.service.store().backend().plan(&sx.plan).await?;
     // an import into the empty plan with one broken node is refused with its problem
     let broken = vec![work("A", 0), needing(work("B", 1), &["nope"])];
-    let answer = sx.service.write_plan(&sx.plan, broken).await?;
+    let answer = sx.service.write_plan(&sx.plan, broken.into()).await?;
     let expected = vec![problem("B", "needs `nope`, which is not a node")];
     assert_eq!(answer, Rewrite::Refused(expected));
     // leaving the plan's row as it was: no revision reserved, none made current
@@ -548,7 +552,7 @@ pub async fn checked_import_refuses_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyh
     assert!(ids(&sx).await?.is_empty());
     // and a whole import goes in
     let whole = vec![work("A", 0), needing(work("B", 1), &["A"])];
-    let answer = sx.service.write_plan(&sx.plan, whole).await?;
+    let answer = sx.service.write_plan(&sx.plan, whole.into()).await?;
     assert!(matches!(answer, Rewrite::Applied(_)), "{answer:?}");
     assert_eq!(ids(&sx).await?, ["A", "B"]);
     assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
@@ -563,14 +567,19 @@ pub async fn checked_import_refuses_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyh
 pub async fn payload_equals_graph_build_of_stored_nodes<B: Backend>(
     sx: Sx<B>,
 ) -> anyhow::Result<()> {
-    // a group, two members, one taking its why and what from a doc, and a node after them
+    // a group, two members, one taking its why and what from a doc, one from a page of the
+    // plan's, and a node after them
     doc(&sx.repo, "docs/design.md", DESIGN)?;
+    put_page(&sx, "pages/rows.md", DESIGN, None).await?;
     let mut c11 = linking(member("C11", "M3", 1), &["docs/design.md#rows"]);
     c11.body = "# C11\n\nSee [the rows](docs/design.md#rows).\n".to_string();
     let written = vec![
         group("M3", 0),
         c11,
-        needing(member("C53", "M3", 2), &["C11"]),
+        needing(
+            linking(member("C53", "M3", 2), &["pages/rows.md#rows"]),
+            &["C11"],
+        ),
         needing(work("C14", 3), &["C53"]),
     ];
     let answer = sx.service.put(&sx.plan, new(written.clone())).await?;
@@ -585,10 +594,22 @@ pub async fn payload_equals_graph_build_of_stored_nodes<B: Backend>(
     let specs: Vec<NodeSpec> = listing.nodes.iter().map(|node| node.spec.clone()).collect();
     let expected: Vec<NodeSpec> = written.iter().map(|node| node.spec.clone()).collect();
     assert_eq!(specs, expected);
-    // the oracle: the graph their records build, briefed from the working tree and rendered
+    // the oracle: the graph their records build, briefed from the plan's pages over the working
+    // tree and rendered
     let records = listing.records(&sx.plan)?;
     let (mut graph, mut problems) = Graph::build(nodes_from_records(records));
-    let renderer = Renderer::new(RepoSource::new(&sx.repo), Sections::default());
+    let pages: MemSource = sx
+        .service
+        .pages(&sx.plan)
+        .await?
+        .pages
+        .into_iter()
+        .map(|page| (page.path, page.text))
+        .collect();
+    let renderer = Renderer::new(
+        Layered::new(pages, RepoSource::new(&sx.repo)),
+        Sections::default(),
+    );
     problems.extend(renderer.prepare(&mut graph));
     assert_eq!(problems, Vec::<Diagnostic>::new());
     let oracle = renderer.payload(&graph, |_| None);
@@ -945,5 +966,249 @@ pub async fn queue_edit_is_a_change_and_a_refusal_none<B: Backend>(
     ));
     queue_last(&sx, &sx.plan, "nope").await?;
     assert!(changes.try_recv().is_err());
+    Ok(())
+}
+
+/// Puts a page into a plan, at the version its writer read, failing unless it is written
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+/// * `path` - The page's path
+/// * `text` - Its markdown
+/// * `read` - The version its writer read, or `None` for a new page
+async fn put_page<B: Backend>(
+    sx: &Sx<B>,
+    path: &str,
+    text: &str,
+    read: Option<u64>,
+) -> anyhow::Result<u64> {
+    let edit = PageEdit::Put {
+        page: PageWrite::new(path, text),
+        read,
+    };
+    match sx.service.edit_page(&sx.plan, edit).await? {
+        PageEdited::Applied {
+            version: Some(version),
+        } => Ok(version),
+        other => anyhow::bail!("the page wasn't put: {other:?}"),
+    }
+}
+
+/// A page with a why and a what of its own under its `Rows` heading
+const PAGE: &str = "# The page\n\n## Rows\n\n### Context\n\nPages are kept.\n\n### What it does\n\nPages go with the plan.\n";
+
+/// A doc link naming a plan's page is checked, briefed and served from the page, which hides
+/// the repo's file at its path
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn plan_pages_are_docs_over_the_repo<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // the repo's doc, and a page of the plan's at the same path, and one the repo hasn't
+    doc(&sx.repo, "docs/design.md", DESIGN)?;
+    put_page(&sx, "docs/design.md", PAGE, None).await?;
+    put_page(&sx, "plan/only.md", PAGE, None).await?;
+    // nodes linking each are checked against the pages, and written
+    let a = linking(work("A", 0), &["docs/design.md#rows"]);
+    let b = linking(work("B", 1), &["plan/only.md#rows"]);
+    let answer = sx.service.put(&sx.plan, new(vec![a, b])).await?;
+    assert_eq!(
+        answer,
+        Checked::Applied {
+            versions: vec![1, 1]
+        }
+    );
+    assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
+    // each briefed from its page, the page hiding the repo's doc
+    let payload = sx.service.payload(&sx.plan).await?;
+    for node in &payload.nodes {
+        let why = &node.why;
+        assert!(why.contains("Pages are kept."), "{}: {why}", node.id);
+        assert_eq!(node.why_from.as_deref(), Some("Context"));
+    }
+    // their links lead to the pages, served from the plan
+    let docs = paths::docs(&sx.plan);
+    assert_eq!(
+        payload.nodes[1].docs[0].href,
+        format!("{docs}plan/only.html#rows")
+    );
+    let page = sx
+        .service
+        .doc_page(&sx.plan, "docs/design.html")
+        .await?
+        .expect("the page is served");
+    assert!(page.contains("Pages are kept."), "{page}");
+    assert!(!page.contains("Rows are slow."), "{page}");
+    let only = sx.service.doc_page(&sx.plan, "plan/only.html").await?;
+    assert!(only.is_some_and(|page| page.contains("<h2 id=\"rows\">")));
+    // a heading the page lacks is refused, though the repo's doc has it
+    let mut nope = work("C", 2);
+    nope.spec.docs = vec!["docs/design.md#design-choices".to_string()];
+    let answer = sx.service.put(&sx.plan, new(vec![nope])).await?;
+    let expected = vec![problem(
+        "C",
+        "doc `docs/design.md#design-choices`: docs/design.md has no heading with the id \
+         `design-choices`",
+    )];
+    assert_eq!(answer, Checked::Refused(expected));
+    Ok(())
+}
+
+/// A page edit is refused only if it adds a problem, a stale one as stale, and an applied one
+/// is a change while a refused one is none
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // a node briefed from a page's section
+    put_page(&sx, "design.md", PAGE, None).await?;
+    let linked = linking(work("A", 0), &["design.md#rows"]);
+    sx.service.put(&sx.plan, new(vec![linked])).await?;
+    let mut changes = sx.service.changes();
+    // taking the page out leaves the link nowhere to lead
+    let remove = PageEdit::Remove {
+        path: "design.md".to_string(),
+        read: 1,
+    };
+    let answer = sx.service.edit_page(&sx.plan, remove.clone()).await?;
+    let PageEdited::Refused(problems) = answer else {
+        panic!("a linked page was taken out: {answer:?}");
+    };
+    assert_eq!(
+        problems[0],
+        problem("A", "doc `design.md#rows` not found (looked for design.md)")
+    );
+    // dropping its heading does too, and so does dropping the section the node's why is from
+    let headless = PageEdit::Put {
+        page: PageWrite::new("design.md", "# The page\n\nNo rows.\n"),
+        read: Some(1),
+    };
+    let answer = sx.service.edit_page(&sx.plan, headless).await?;
+    let PageEdited::Refused(problems) = answer else {
+        panic!("a linked heading was dropped: {answer:?}");
+    };
+    assert_eq!(
+        problems[0],
+        problem(
+            "A",
+            "doc `design.md#rows`: design.md has no heading with the id `rows`"
+        )
+    );
+    let whyless = PageEdit::Put {
+        page: PageWrite::new(
+            "design.md",
+            "# The page\n\n## Rows\n\n### What it does\n\nKept.\n",
+        ),
+        read: Some(1),
+    };
+    let answer = sx.service.edit_page(&sx.plan, whyless).await?;
+    let PageEdited::Refused(problems) = answer else {
+        panic!("a page the node's why is from lost it: {answer:?}");
+    };
+    assert!(
+        problems[0]
+            .message
+            .contains("does not say why it is needed"),
+        "{problems:?}"
+    );
+    // a stale edit is refused as stale, before it is judged
+    let stale = PageEdit::Put {
+        page: PageWrite::new("design.md", PAGE),
+        read: Some(9),
+    };
+    let answer = sx.service.edit_page(&sx.plan, stale).await?;
+    assert_eq!(
+        answer,
+        PageEdited::Stale {
+            path: "design.md".to_string(),
+            refusal: Refusal::Moved
+        }
+    );
+    // none of them wrote anything, or told the stream
+    let page = sx
+        .service
+        .page(&sx.plan, "design.md")
+        .await?
+        .expect("the page stands");
+    assert_eq!((page.text.as_str(), page.version), (PAGE, 1));
+    assert!(changes.try_recv().is_err());
+    // an edit that keeps what the node needs gets through, and is a change
+    let more = format!("{PAGE}\nMore.\n");
+    assert_eq!(put_page(&sx, "design.md", &more, Some(1)).await?, 2);
+    let expected = Change::PagesPut {
+        plan: sx.plan.clone(),
+        pages: vec![PutPage {
+            path: "design.md".to_string(),
+            version: 2,
+        }],
+        removed: Vec::new(),
+    };
+    assert_eq!(changes.try_recv()?, expected);
+    // and once nothing links it, it comes out, which is a change too
+    let gone = Puts::removing(vec![NodeRemove::new("A", 1)]);
+    sx.service.batch(&sx.plan, gone).await?;
+    let _ = changes.try_recv()?;
+    let remove = PageEdit::Remove {
+        path: "design.md".to_string(),
+        read: 2,
+    };
+    let answer = sx.service.edit_page(&sx.plan, remove).await?;
+    assert_eq!(answer, PageEdited::Applied { version: None });
+    let expected = Change::PagesPut {
+        plan: sx.plan.clone(),
+        pages: Vec::new(),
+        removed: vec!["design.md".to_string()],
+    };
+    assert_eq!(changes.try_recv()?, expected);
+    Ok(())
+}
+
+/// Each plan of a project reads its own pages, in check and in next across the project
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // two plans, each with a page at the same path under a heading of its own
+    let other = PlanName::new("reef", "other")?;
+    sx.service.add_plan(&other).await?;
+    put_page(&sx, "design.md", PAGE, None).await?;
+    let columns = PAGE.replace("## Rows", "## Columns");
+    let edit = PageEdit::Put {
+        page: PageWrite::new("design.md", columns),
+        read: None,
+    };
+    sx.service.edit_page(&other, edit).await?;
+    // each plan's node links its own page's heading
+    sx.service
+        .put(
+            &sx.plan,
+            new(vec![linking(work("A", 0), &["design.md#rows"])]),
+        )
+        .await?;
+    let answer = sx
+        .service
+        .put(
+            &other,
+            new(vec![linking(work("B", 0), &["design.md#columns"])]),
+        )
+        .await?;
+    assert_eq!(answer, Checked::Applied { versions: vec![1] });
+    // and not the other plan's
+    let answer = sx
+        .service
+        .put(
+            &other,
+            new(vec![linking(work("C", 1), &["design.md#rows"])]),
+        )
+        .await?;
+    assert!(matches!(answer, Checked::Refused(_)), "{answer:?}");
+    // so each checks clean, and next across the project finds no problem in either
+    assert_eq!(sx.service.check(&other).await?, Vec::<Diagnostic>::new());
+    let next = sx.service.project_next("reef").await?;
+    assert_eq!(next.problems, 0, "{next:?}");
+    assert_eq!(next.ready.len(), 2, "{next:?}");
     Ok(())
 }

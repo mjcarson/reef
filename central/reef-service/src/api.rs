@@ -24,6 +24,9 @@
 //! | `GET …/plans/{plan}/check` | `check` | its problems |
 //! | `GET …/plans/{plan}/next` | `next` | its ready work, its queue's first, and what the rest waits on: [`Next`] |
 //! | `GET …/plans/{plan}/docs/{*path}` | `doc_page` | a doc rendered as its page, or 404 |
+//! | `GET …/plans/{plan}/pages` | `pages` | its own pages: [`PageListing`] |
+//! | `POST …/plans/{plan}/pages` | `edit_page` | [`PageEdited`]: 200, 409 if stale, 422 if refused |
+//! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -33,13 +36,18 @@
 //!   and check's or the service's own message.
 //! - **A doc is a page.** The payload's doc links lead under a plan's `docs/`, where each doc is
 //!   served as the HTML page mdbook would write for it, so the viewer's *Read here* works as it
-//!   does in a book. A page opened on its own runs no script a doc holds.
+//!   does in a book. A page opened on its own runs no script a doc holds. A plan's own pages,
+//!   read and edited as markdown under its `pages/`, are served there too, over its repo's.
+//! - **A whole plan or a page is a big body.** Those two routes take up to
+//!   [`WRITE_BODY_MAX`] bytes, since a plan's pages run past axum's default of 2 MiB.
 //! - **The change stream is server-sent events,** one a change, its event named by its kind and
 //!   its data the change as JSON. It is live only, and narrowed by `project` and `plan`.
 //! - **Localhost only.** [`bind`] refuses any address but a loopback one until users sign in
 //!   (M10).
 
-use axum::extract::{FromRequest, FromRequestParts, Path as Segment, Query, Request, State};
+use axum::extract::{
+    DefaultBodyLimit, FromRequest, FromRequestParts, Path as Segment, Query, Request, State,
+};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -48,8 +56,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
     AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
-    PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, Rewrite, StoredNode,
-    paths,
+    PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing,
+    Queued, Rewrite, StoredNode, StoredPage, WRITE_BODY_MAX, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, Payload, PlanName};
 use serde::Deserialize;
@@ -125,11 +133,21 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PLAN, get(plan::<S>))
         .route(paths::NODES, get(list::<S>).post(put::<S>))
         .route(paths::NODE, get(node::<S>))
-        .route(paths::REVISION, axum::routing::put(write_plan::<S>))
+        .route(
+            paths::REVISION,
+            axum::routing::put(write_plan::<S>).layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
         .route(paths::PAYLOAD, get(payload::<S>))
         .route(paths::CHECK, get(check::<S>))
         .route(paths::NEXT, get(next::<S>))
         .route(paths::DOC, get(doc::<S>))
+        .route(
+            paths::PAGES,
+            get(pages::<S>)
+                .post(edit_page::<S>)
+                .layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
+        .route(paths::PAGE, get(page::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -356,6 +374,17 @@ struct DocSegments {
     /// The plan's name within its project
     plan: String,
     /// The doc's page, from the root of the plan's docs
+    path: String,
+}
+
+/// The segments of a route to one of a plan's own pages
+#[derive(Deserialize)]
+struct PageSegments {
+    /// The project the plan belongs to
+    project: String,
+    /// The plan's name within its project
+    plan: String,
+    /// The page's path
     path: String,
 }
 
@@ -679,7 +708,7 @@ async fn node<S: Serves>(
 ///
 /// * `serves` - The service
 /// * `segments` - The plan's project and name
-/// * `write` - Every node of the plan
+/// * `write` - Every node of the plan, and its pages if they change
 #[instrument(name = "api::write_plan", skip_all, err(Debug))]
 async fn write_plan<S: Serves>(
     State(serves): State<S>,
@@ -688,7 +717,7 @@ async fn write_plan<S: Serves>(
 ) -> Result<(StatusCode, Json<Rewrite>), Failure> {
     let plan = segments.name()?;
     // checked against the plan it replaces, under its write lock
-    let rewrite = serves.service().write_plan(&plan, write.nodes).await?;
+    let rewrite = serves.service().write_plan(&plan, write).await?;
     let status = match rewrite {
         Rewrite::Applied(_) => StatusCode::OK,
         Rewrite::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -770,6 +799,69 @@ async fn doc<S: Serves>(
         None => Err(Failure::new(
             ErrorCode::NotFound,
             format!("no doc of `{plan}` is written to `{}`", segments.path),
+        )),
+    }
+}
+
+/// Lists a plan's own pages, by path
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+#[instrument(name = "api::pages", skip_all, err(Debug))]
+async fn pages<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+) -> Result<Json<PageListing>, Failure> {
+    let plan = segments.name()?;
+    // every page as it stands, each at the version an edit of it names
+    let listing = serves.service().pages(&plan).await?;
+    Ok(Json(listing))
+}
+
+/// Writes or takes out one of a plan's own pages: 200 if written, 409 if stale, 422 if refused
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+/// * `edit` - The page to write or take out, with the version its writer read
+#[instrument(name = "api::edit_page", skip_all, err(Debug))]
+async fn edit_page<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+    Body(edit): Body<PageEdit>,
+) -> Result<(StatusCode, Json<PageEdited>), Failure> {
+    let plan = segments.name()?;
+    // checked against the whole plan, under its write lock
+    let edited = serves.service().edit_page(&plan, edit).await?;
+    let status = match edited {
+        PageEdited::Applied { .. } => StatusCode::OK,
+        PageEdited::Stale { .. } => StatusCode::CONFLICT,
+        PageEdited::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(edited)))
+}
+
+/// Gets one of a plan's own pages, at the version an edit of it names
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the page's path
+#[instrument(name = "api::page", skip_all, err(Debug))]
+async fn page<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PageSegments>,
+) -> Result<Json<StoredPage>, Failure> {
+    let plan = PlanName::new(segments.project, segments.plan)?;
+    // the page as it stands, or a 404 naming it
+    match serves.service().page(&plan, &segments.path).await? {
+        Some(page) => Ok(Json(page)),
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("no page `{}` in `{plan}`", segments.path),
         )),
     }
 }
