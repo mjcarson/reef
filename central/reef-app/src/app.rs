@@ -3,6 +3,7 @@
 use crate::calls::{self, ProjectPlans};
 use crate::canvas::{Canvas, Keyed};
 use crate::live::use_changes;
+use crate::queue::{QueuePanel, use_queue};
 use dioxus::prelude::*;
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
@@ -41,6 +42,30 @@ code { font-size: 0.92em; }
 .reef-app-actions { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
 .reef-app-problems { margin: 0.3rem 0 0.6rem; padding-left: 1.2rem; color: #c0392b; font-size: 0.9rem; }
 .reef-app-newer { white-space: pre-wrap; font-size: 0.8rem; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem; }
+.reef-app-queue { flex: none; width: 15rem; overflow-y: auto; box-sizing: border-box; padding: 0.6rem 0.7rem; border-right: 1px solid var(--line); background: var(--panel); font-size: 0.85rem; }
+.reef-app-queue-head { margin: 0 0 0.5rem; font-size: 0.95rem; }
+.reef-app-queue-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
+.reef-app-queue-list.dragging { user-select: none; cursor: grabbing; }
+.reef-app-queue-entry { display: flex; gap: 0.35rem; align-items: flex-start; padding: 0.35rem 0.3rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.reef-app-queue-entry:focus { outline: 2px solid var(--links); outline-offset: 1px; }
+.reef-app-queue-entry.dragged { opacity: 0.45; }
+.reef-app-queue-entry.drop-before { box-shadow: 0 -3px 0 var(--links); }
+.reef-app-queue-entry.drop-after { box-shadow: 0 3px 0 var(--links); }
+.reef-app-queue-grip { cursor: grab; touch-action: none; color: var(--muted); padding: 0 0.1rem; }
+.reef-app-queue-place { color: var(--muted); min-width: 1.4rem; text-align: right; }
+.reef-app-queue-body { flex: 1; min-width: 0; }
+.reef-app-queue-top { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
+.reef-app-queue-id { overflow-wrap: anywhere; }
+.reef-app-queue-state { font-size: 0.75rem; color: var(--muted); }
+.reef-app-queue-state.s-ready { color: var(--reef-ready); }
+.reef-app-queue-state.s-done { color: var(--reef-done); }
+.reef-app-queue-state.s-blocked, .reef-app-queue-state.s-missing { color: var(--reef-blocked); }
+.reef-app-queue-state.s-in-progress { color: var(--reef-progress); }
+.reef-app-queue-title { margin-top: 0.1rem; overflow-wrap: anywhere; }
+.reef-app-queue-needs { margin-top: 0.1rem; color: var(--muted); font-size: 0.78rem; }
+.reef-app-queue-off { flex: none; font: inherit; line-height: 1; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 0.15rem; }
+.reef-app-queue-off:hover { color: var(--fg); }
+.reef-app-queue-problem { margin: 0 0 0.5rem; }
 "#;
 
 /// The app's pages, by path
@@ -153,10 +178,12 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
     }
 }
 
-/// A plan's page: a bar naming the plan, or saying why it can't be read, over the plan's canvas
+/// A plan's page: a bar naming the plan, or saying why it can't be read, over its project's
+/// queue and the plan's canvas
 ///
 /// Its props are signals, so a route to another plan reads that plan again, and the canvas is
-/// keyed by the plan, so another plan starts it afresh.
+/// keyed by the plan, so another plan starts it afresh. The queue is the project's, so it sits
+/// outside that key, and the canvas's sidebar reaches it through context.
 ///
 /// # Arguments
 ///
@@ -178,6 +205,8 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
             .await
             .map(|payload| -> Keyed { (name, payload) })
     });
+    // the project's queue, which the panel shows and the sidebar edits
+    use_queue(project);
     let (project_now, plan_now) = (project(), plan());
     rsx! {
         div { class: "reef-app-plan",
@@ -189,6 +218,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                 }
             }
             div { class: "reef-app-stage",
+                QueuePanel { project }
                 // a key holds only on a block's first node, so the canvas is one of its own
                 {
                     rsx! {

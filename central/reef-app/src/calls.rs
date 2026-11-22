@@ -6,7 +6,7 @@
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
-use reef_api::{PlanInfo, Project};
+use reef_api::{PlanInfo, Project, QueueEdit, QueueListing, Queued};
 use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
@@ -81,6 +81,46 @@ pub async fn payload(project: String, plan: String) -> Result<Payload, ServerFnE
     let name = plan_name(project, plan)?;
     crate::server::service()
         .payload(&name)
+        .await
+        .map_err(failed)
+}
+
+/// A project's queue: each entry with its rank, and whether next takes it, and if not why
+///
+/// # Arguments
+///
+/// * `project` - The project whose queue it is
+#[get("/app/queue?project")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::queue", skip_all, err(Debug))
+)]
+pub async fn queue(project: String) -> Result<QueueListing, ServerFnError> {
+    // refused for a project that isn't registered
+    crate::server::service()
+        .queue(&project)
+        .await
+        .map_err(failed)
+}
+
+/// Edits a project's queue: puts a node in it, moves one, or takes one off, writing its one row
+///
+/// A node that isn't queued, or isn't in its plan, is an answer, not a failure, and changes
+/// nothing.
+///
+/// # Arguments
+///
+/// * `project` - The project whose queue it is
+/// * `edit` - The edit
+#[post("/app/queue")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::edit_queue", skip_all, err(Debug))
+)]
+pub async fn edit_queue(project: String, edit: QueueEdit) -> Result<Queued, ServerFnError> {
+    // under the queue's lock, told to the change stream once it is made
+    crate::server::service()
+        .edit_queue(&project, edit)
         .await
         .map_err(failed)
 }

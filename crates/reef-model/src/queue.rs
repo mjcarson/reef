@@ -61,6 +61,29 @@ pub enum EntryState {
     Missing,
 }
 
+impl EntryState {
+    /// The word a queue's listing names this state by
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_model::EntryState;
+    ///
+    /// assert_eq!(EntryState::InProgress.as_str(), "in-progress");
+    /// assert_eq!(EntryState::Waiting(Vec::new()).as_str(), "waiting");
+    /// ```
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EntryState::Ready(_) => "ready",
+            EntryState::Waiting(_) => "waiting",
+            EntryState::InProgress => "in-progress",
+            EntryState::Blocked => "blocked",
+            EntryState::Done => "done",
+            EntryState::Missing => "missing",
+        }
+    }
+}
+
 /// What each entry of a queue is now
 ///
 /// # Arguments

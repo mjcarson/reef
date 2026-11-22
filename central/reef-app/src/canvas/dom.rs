@@ -102,6 +102,22 @@ mod web {
             .map_or(0, |list| list.length() as usize)
     }
 
+    /// Every element under one that a selector matches, in document order
+    ///
+    /// # Arguments
+    ///
+    /// * `el` - Where to look under
+    /// * `sel` - The selector
+    pub fn query_all(el: &El, sel: &str) -> Vec<El> {
+        let Ok(list) = el.query_selector_all(sel) else {
+            return Vec::new();
+        };
+        (0..list.length())
+            .filter_map(|i| list.item(i))
+            .filter_map(|node| node.dyn_into::<El>().ok())
+            .collect()
+    }
+
     /// An element's attribute
     ///
     /// # Arguments
@@ -429,6 +445,11 @@ mod server {
     /// No element has children on the server
     pub fn count(_el: &El, _sel: &str) -> usize {
         0
+    }
+
+    /// No element has children on the server
+    pub fn query_all(_el: &El, _sel: &str) -> Vec<El> {
+        Vec::new()
     }
 
     /// No element has attributes on the server

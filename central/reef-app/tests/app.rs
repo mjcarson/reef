@@ -318,3 +318,60 @@ fn the_editor_saves_over_the_version_it_read() -> anyhow::Result<()> {
         anyhow::Ok(())
     })
 }
+
+/// The queue's server functions move an entry by writing its one row, take one off, and the CLI
+/// lists the queue as they left it
+#[test]
+fn the_queue_moves_an_entry_with_one_row() -> anyhow::Result<()> {
+    use reef_api::{Place, QueueEdit, Queued};
+    use reef_app::calls::{edit_queue, queue};
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // two plans of A1 each, and B1 in the first, queued after them through the CLI
+        let repo = fx.project("queued", &["first", "second"]).await?;
+        let file = fx.dir.join("queued-b1.yaml");
+        std::fs::write(
+            &file,
+            "id: B1\ntitle: \"B1 The second of first\"\ndescription:\n  why: \"first has one node.\"\n  what: \"first has two.\"\n",
+        )?;
+        let file = file.to_str().expect("the file is a utf-8 path");
+        fx.reef(&repo, &["node", "put", file, "--plan", "first"])
+            .await?;
+        for node in ["queued/first/A1", "queued/second/A1", "queued/first/B1"] {
+            fx.reef(&repo, &["queue", "add", node]).await?;
+        }
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        // the queue as the panel reads it
+        let ranks = |listing: reef_api::QueueListing| -> Vec<(String, String)> {
+            listing
+                .entries
+                .into_iter()
+                .map(|listed| (listed.entry.node.to_string(), listed.rank))
+                .collect()
+        };
+        let before = ranks(queue("queued".into()).await.map_err(failed)?);
+        // B1 to the top, as a drag does it
+        let edit = QueueEdit::Move {
+            node: "queued/first/B1".parse()?,
+            at: Place::Top,
+        };
+        let moved = edit_queue("queued".into(), edit).await.map_err(failed)?;
+        assert!(matches!(moved, Queued::Applied { .. }), "{moved:?}");
+        let after = ranks(queue("queued".into()).await.map_err(failed)?);
+        // B1 is first, under a rank of its own, and the others' rows are as they were
+        assert_eq!(after[0].0, "queued/first/B1");
+        assert_ne!(after[0].1, before[2].1);
+        assert_eq!(&after[1..], &before[..2]);
+        // and the CLI lists it first
+        let ls = fx.reef(&repo, &["queue", "ls"]).await?;
+        assert!(ls.starts_with("1. queued/first/B1 "), "{ls}");
+        // taken off through the server function, it is gone from the CLI's listing too
+        let edit = QueueEdit::Remove {
+            node: "queued/first/B1".parse()?,
+        };
+        edit_queue("queued".into(), edit).await.map_err(failed)?;
+        let ls = fx.reef(&repo, &["queue", "ls"]).await?;
+        assert!(!ls.contains("B1"), "{ls}");
+        anyhow::Ok(())
+    })
+}

@@ -2,7 +2,8 @@
 //!
 //! **Details** is what reef-view's sidebar shows: why and what, acceptance, performance, docs,
 //! design choices and the nodes around it. **Edit** is the node's YAML, saved as `reef node put`
-//! saves it. M7's Changes and Comments tabs go beside them.
+//! saves it. M7's Changes and Comments tabs go beside them. Inside a plan's page, its actions
+//! queue the node first or last in its project's queue, or take it off.
 
 mod details;
 mod docs;
@@ -10,9 +11,12 @@ mod perf;
 
 use crate::canvas::{View, dom};
 use crate::panel::NodeEditor;
+use crate::queue::Queue;
 use details::Details;
 use dioxus::prelude::*;
+use reef_api::{Place, QueueEdit};
 use reef_draw::markup::{status_class, status_label};
+use reef_model::PlanName;
 
 /// The sidebar's tabs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +38,8 @@ pub enum Tab {
 #[component]
 pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u64>) -> Element {
     let mut view = use_context::<View>();
+    // the project's queue, which a plan's page shares and a sidebar drawn alone lacks
+    let queue = try_use_context::<Queue>();
     // a newly selected node is read from its top, while a newer revision keeps the scroll
     let mut aside = use_signal(|| None::<dom::El>);
     use_effect(use_reactive!(|id| {
@@ -59,6 +65,12 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
         .collect();
     let open = g.is_group(i).then(|| view.expanded.read().contains(&n.id));
     let (center_id, edit_id) = (id.clone(), id.clone());
+    // the node in full, as the queue names it, and whether it is queued
+    let queued = PlanName::new(project.clone(), plan.clone())
+        .ok()
+        .and_then(|name| name.node(id.clone()).ok())
+        .zip(queue)
+        .map(|(node, queue)| (queue.holds(&node), node, queue));
     let (status, status_text) = (status_class(&g, i), status_label(&g, i));
     let tab = *view.tab.read();
     let tab_class = |t: Tab| {
@@ -134,6 +146,42 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
                     "data-act": "center",
                     onclick: move |_| view.goto(&center_id),
                     "Show in diagram"
+                }
+            }
+            if let Some((held, node, queue)) = queued {
+                div { class: "reef-actions reef-app-queue-actions",
+                    {
+                        let top = node.clone();
+                        rsx! {
+                            button {
+                                class: "reef-button",
+                                "data-act": "queue-top",
+                                title: "Put it first in the queue, or move it there",
+                                onclick: move |_| queue.edit(QueueEdit::Add { node: top.clone(), at: Place::Top }),
+                                "Queue first"
+                            }
+                        }
+                    }
+                    {
+                        let bottom = node.clone();
+                        rsx! {
+                            button {
+                                class: "reef-button",
+                                "data-act": "queue-bottom",
+                                title: "Put it last in the queue, or move it there",
+                                onclick: move |_| queue.edit(QueueEdit::Add { node: bottom.clone(), at: Place::Bottom }),
+                                "Queue last"
+                            }
+                        }
+                    }
+                    if held {
+                        button {
+                            class: "reef-button",
+                            "data-act": "unqueue",
+                            onclick: move |_| queue.edit(QueueEdit::Remove { node: node.clone() }),
+                            "Off the queue"
+                        }
+                    }
                 }
             }
             nav { class: "reef-app-tabs", role: "tablist",

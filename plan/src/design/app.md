@@ -181,3 +181,26 @@ A node's doc is a markdown file in its project's repo, or a page stored with the
 - **Only markdown is served.** An image or other file a doc links to doesn't load in its page.
 - **Docs come from the working tree.** The docs shown are those of the checked-out branch, which
   can differ from the commit a node was done on.
+
+## The queue panel
+
+The user orders a project's ready work, and the terminal sets that order first
+([C24](../milestones/m5.md)). The app shows the queue beside the plan and reorders it by dragging
+([C25](../milestones/m5.md)).
+
+### Design choices
+
+- **One queue a project, beside the canvas, outside the plan's key.** The panel is a column in
+  the plan's page, so moving between a project's plans keeps it, and the canvas's sidebar
+  reaches it through context the page provides.
+- **Followed on the project's stream.** Whether an entry is ready moves with any of the
+  project's plans, so the queue is read again on any change to the project, not only on its own
+  `queue-changed`. The canvas still follows its own plan's stream.
+- **A drag is one move**, which writes the one row of the entry moved: after the entry it was
+  dropped below, or at the top. The place is worked out by name from the queue as the drag
+  began, so a change read mid-drag can't put it elsewhere.
+- **Pointer events, as the canvas's drags are**: capture on the entry's grip and a movement
+  threshold, so touch works too, rather than HTML drag and drop, which touch never fires. The
+  arrow keys move a focused entry a place, Home and End to either end, and Delete takes it off.
+- **The sidebar queues the selected node** first or last, moving it if it is queued already, and
+  takes it off. A sidebar drawn outside a plan's page has no queue, and no buttons.

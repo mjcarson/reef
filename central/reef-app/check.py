@@ -1,7 +1,7 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
-Each step checks one of M4's criteria in the browser, printing `ok` or `FAILED` and what it saw;
-the script exits 1 if any failed.
+Each step checks one of M4's or M5's criteria in the browser, printing `ok` or `FAILED` and what
+it saw; the script exits 1 if any failed.
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -355,10 +355,11 @@ def c55_answers_the_pointer(page):
     page.mouse.up()
     page.wait_for_timeout(150)
     seen["drag pans"] = transform() != zoomed and page.locator(".reef-side").count() == 0
-    # a double-click on the collapsed group opens it
+    # a double-click on the collapsed group's head opens it: past its toggle, and left of where the
+    # sidebar its first click opens comes in, which reaches over the right of the centred plan
     page.keyboard.press("0")
     group = page.locator(".reef-viewport .reef-node.collapsed", has_text="G1 The work").bounding_box()
-    page.mouse.dblclick(group["x"] + group["width"] - 20, group["y"] + 12)
+    page.mouse.dblclick(group["x"] + 60, group["y"] + 12)
     page.wait_for_timeout(300)
     seen["double-click opens"] = page.get_attribute(".reef", "data-boxes") == "5"
     # every arrow's head is a marker the page has
@@ -446,6 +447,99 @@ def c20_a_stale_save_shows_the_newer(page):
            "newer taken": "status: done" in taken})
 
 
+def queue_order():
+    """The check's queue as `reef queue ls` lists it: each entry's name, in order."""
+    return [line.split()[1] for line in reef("queue", "ls").splitlines() if line[:1].isdigit()]
+
+
+def queue_ranks():
+    """Each entry of the check's queue with its rank, as the JSON API lists them."""
+    with urllib.request.urlopen(f"{URL}/api/v1/projects/check/queue", timeout=5) as answer:
+        listing = json.load(answer)
+    return [(listed["entry"]["node"], listed["rank"]) for listed in listing["entries"]]
+
+
+def panel_order(page):
+    """The queue panel's entries, in order, as their names."""
+    return page.eval_on_selector_all(".reef-app-queue-entry", "es => es.map(e => e.dataset.node)")
+
+
+def first_entry_is(page, node):
+    """Waits for the queue panel's first entry to be a node."""
+    page.wait_for_function(
+        "node => document.querySelector('.reef-app-queue-entry')?.dataset.node === node", arg=node, timeout=10000)
+
+
+def c25_a_drag_writes_one_row(page):
+    """C25: the last entry dragged above the first writes that entry's row alone, and the CLI agrees."""
+    # three entries across the project's plans, queued from the terminal
+    for node in ["check/first/A1", "check/second/A1", "check/draws/L1"]:
+        reef("queue", "add", node)
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.wait_for_function("() => document.querySelectorAll('.reef-app-queue-entry').length === 3", timeout=10000)
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    before = queue_ranks()
+    shown = panel_order(page)
+    # the last entry's grip, dragged above the first entry's middle
+    grip = page.locator(".reef-app-queue-grip").nth(2).bounding_box()
+    first = page.locator(".reef-app-queue-entry").first.bounding_box()
+    x = grip["x"] + grip["width"] / 2
+    page.mouse.move(x, grip["y"] + grip["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(x, first["y"] + 2, steps=8)
+    marked = page.locator(".reef-app-queue-entry.drop-before").count() == 1
+    page.screenshot(path=str(SHOTS / "reef-app-queue-drag.png"))
+    page.mouse.up()
+    first_entry_is(page, "check/draws/L1")
+    after = queue_ranks()
+    moved = [node for node, rank in after if (node, rank) not in before]
+    listed, panel = queue_order(), panel_order(page)
+    page.screenshot(path=str(SHOTS / "reef-app-queue.png"))
+    check("C25 a drag writes one row, and reef queue ls agrees",
+          shown == [node for node, _ in before] and marked and moved == ["check/draws/L1"]
+          and len(after) == len(before) and listed == panel and panel[0] == "check/draws/L1"
+          and page.evaluate("() => window.__kept") == "same page",
+          {"before": before, "after": after, "rows moved": moved, "drop marked": marked, "ls": listed,
+           "panel": panel})
+
+
+def c25_keys_and_the_sidebar_queue(page):
+    """C25: an entry moves by its arrow key, and the sidebar takes the selected node off and queues it first."""
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.wait_for_selector(".reef-app-queue-entry")
+    seen = {}
+    # the first entry moved down a place from the keyboard
+    start = panel_order(page)
+    page.locator(".reef-app-queue-entry").first.focus()
+    page.keyboard.press("ArrowDown")
+    first_entry_is(page, start[1])
+    seen["arrow down"] = (panel_order(page), queue_order())
+    # L1 selected in the diagram, then taken off from its sidebar
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    page.locator(".reef-viewport .reef-node", has_text="L1 After the work").click()
+    page.wait_for_selector(".reef-side [data-act=unqueue]", timeout=5000)
+    page.click(".reef-side [data-act=unqueue]")
+    page.wait_for_function(
+        "() => ![...document.querySelectorAll('.reef-app-queue-entry')].some(e => e.dataset.node === 'check/draws/L1')",
+        timeout=10000)
+    page.wait_for_timeout(200)
+    seen["taken off"] = (panel_order(page), queue_order(), page.locator(".reef-side [data-act=unqueue]").count())
+    # and queued first again
+    page.click(".reef-side [data-act=queue-top]")
+    first_entry_is(page, "check/draws/L1")
+    seen["queued first"] = (panel_order(page), queue_order())
+    page.screenshot(path=str(SHOTS / "reef-app-queue-side.png"))
+    rest = [node for node in start if node != "check/draws/L1"]
+    check("C25 an entry moves by its keys, and the sidebar queues and takes off",
+          seen["arrow down"] == ([start[1], start[0], start[2]],) * 2
+          and seen["taken off"] == (rest, rest, 0)
+          and seen["queued first"] == (["check/draws/L1", *rest],) * 2,
+          seen)
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -486,6 +580,8 @@ def main():
             c55_answers_the_pointer(page)
             c15_a_put_shows_live(page)
             c20_a_stale_save_shows_the_newer(page)
+            c25_a_drag_writes_one_row(page)
+            c25_keys_and_the_sidebar_queue(page)
             browser.close()
     finally:
         stop(server)

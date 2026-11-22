@@ -280,7 +280,7 @@ pub fn listed(listing: &QueueListing) -> String {
             };
             (
                 name,
-                word(&entry.state),
+                entry.state.as_str(),
                 entry.title.clone(),
                 details(&entry.node, &entry.state),
             )
@@ -310,22 +310,6 @@ pub fn listed(listing: &QueueListing) -> String {
         }
     }
     out
-}
-
-/// The word an entry's state is listed by
-///
-/// # Arguments
-///
-/// * `state` - The entry's state
-fn word(state: &EntryState) -> &'static str {
-    match state {
-        EntryState::Ready(_) => "ready",
-        EntryState::Waiting(_) => "waiting",
-        EntryState::InProgress => "in-progress",
-        EntryState::Blocked => "blocked",
-        EntryState::Done => "done",
-        EntryState::Missing => "missing",
-    }
 }
 
 /// The lines listed under an entry: the needs it waits on, or the members next takes for a

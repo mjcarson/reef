@@ -1,9 +1,10 @@
-//! Live refresh: a plan's changes, followed from the JSON API's change stream
+//! Live refresh: a plan's changes, or a project's, followed from the JSON API's change stream
 //!
 //! The stream is live only, so it says that something changed, not what the plan is now. Each
 //! change bumps a counter, and whatever reads the counter reads the plan again: a put or a whole
 //! plan written, a gap the stream says it left, and a reconnect, since nothing is sent again
-//! after a dropped connection.
+//! after a dropped connection. A project's queue spans its plans, and whether an entry is ready
+//! moves with any of them, so the queue follows the whole project's stream.
 
 use dioxus::prelude::*;
 
@@ -58,6 +59,19 @@ impl Drop for Follow {
 #[cfg(not(feature = "web"))]
 type Follow = ();
 
+/// The changes that mean reading a plan again: a put, a whole plan written, or a gap
+const PLAN_KINDS: &[&str] = &["nodes-put", "plan-written", "missed"];
+
+/// The changes that mean reading a project's queue again: an edit of it, a plan listed, or any
+/// change to a plan, which can make an entry ready or waiting
+const PROJECT_KINDS: &[&str] = &[
+    "queue-changed",
+    "plan-added",
+    "nodes-put",
+    "plan-written",
+    "missed",
+];
+
 /// Counts the changes to a plan announced since the page opened it, following its stream again
 /// when the route names another plan
 ///
@@ -73,32 +87,52 @@ pub fn use_changes(project: ReadSignal<String>, plan: ReadSignal<String>) -> Rea
     let mut stream = use_signal(|| None::<Follow>);
     // follow the plan the route names; the stream it replaces closes as it is dropped
     use_effect(move || {
-        let (project, plan) = (project(), plan());
-        stream.set(follow(&project, &plan, count));
+        let url = reef_api::paths::changes(Some(&project()), Some(&plan()));
+        stream.set(follow(&url, PLAN_KINDS, count));
     });
     count.into()
 }
 
-/// Opens a plan's change stream, bumping `count` for each change that means reading it again
+/// Counts the changes to a project announced since the page opened, its queue's and every
+/// plan's, following its stream again when the route names another project
+///
+/// A resource that reads the count reads the project's queue again after each change.
 ///
 /// # Arguments
 ///
-/// * `project` - The project the plan belongs to
-/// * `plan` - The plan's name within it
+/// * `project` - The project
+pub fn use_project_changes(project: ReadSignal<String>) -> ReadSignal<u64> {
+    // how many changes have come, and the stream they come on
+    let count = use_signal(|| 0u64);
+    let mut stream = use_signal(|| None::<Follow>);
+    // follow the project the route names, every plan of it
+    use_effect(move || {
+        let url = reef_api::paths::changes(Some(&project()), None);
+        stream.set(follow(&url, PROJECT_KINDS, count));
+    });
+    count.into()
+}
+
+/// Opens a change stream, bumping `count` for each change of the kinds given, and for a
+/// reconnect
+///
+/// # Arguments
+///
+/// * `url` - The stream's path, narrowed to what is followed
+/// * `kinds` - The kinds of change that mean reading again
 /// * `count` - What to bump
 #[cfg(feature = "web")]
-fn follow(project: &str, plan: &str, count: Signal<u64>) -> Option<Follow> {
+fn follow(url: &str, kinds: &[&'static str], count: Signal<u64>) -> Option<Follow> {
     use std::cell::Cell;
     use std::rc::Rc;
-    // the plan's changes alone, from the JSON API on this page's own server
-    let url = reef_api::paths::changes(Some(project), Some(plan));
-    let source = web_sys::EventSource::new(&url).ok()?;
+    // the changes asked for, from the JSON API on this page's own server
+    let source = web_sys::EventSource::new(url).ok()?;
     let mut follow = Follow {
         source,
         listeners: Vec::new(),
     };
-    // a put, a whole plan written, or a gap the stream left: the plan is read again
-    for kind in ["nodes-put", "plan-written", "missed"] {
+    // each change of a kind that means reading again
+    for kind in kinds {
         let mut count = count;
         follow.listen(kind, move |_| *count.write() += 1);
     }
@@ -117,6 +151,6 @@ fn follow(project: &str, plan: &str, count: Signal<u64>) -> Option<Follow> {
 
 /// Nothing is followed on the server, where effects never run
 #[cfg(not(feature = "web"))]
-fn follow(_project: &str, _plan: &str, _count: Signal<u64>) -> Option<Follow> {
+fn follow(_url: &str, _kinds: &[&'static str], _count: Signal<u64>) -> Option<Follow> {
     None
 }

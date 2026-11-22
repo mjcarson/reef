@@ -1,6 +1,7 @@
 //! reef's UI: a Dioxus 0.7 fullstack app on axum
 //!
-//! Its front page picks a project's plan, and each plan opens full-window. The server answers
+//! Its front page picks a project's plan, and each plan opens full-window, beside its project's
+//! queue of work to take first (`queue`). The server answers
 //! the app's server functions, which call `reef-service`, and serves reef's JSON API on the same
 //! port, so the CLI, the MCP server and the app all reach one service.
 //!
@@ -19,6 +20,7 @@ pub mod calls;
 pub mod canvas;
 pub mod live;
 pub mod panel;
+pub mod queue;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod side;
