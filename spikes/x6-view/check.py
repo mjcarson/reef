@@ -1,7 +1,8 @@
 """Drives X6's app in headless Chromium and prints what each check saw.
 
-Steps 1 to 5 print what they saw, as X6 ran them. Steps 6 to 8 check C12's handle, and step 5's
-last check C58's teardown: each prints `ok` or `FAILED`, and the script exits 1 if any failed.
+Steps 1 to 5 print what they saw, as X6 ran them. Steps 6 to 8 check C12's handle, step 5's last
+check C58's teardown, and step 9 C66's double-click: each prints `ok` or `FAILED`, and the script
+exits 1 if any failed.
 
 Run it against `dx serve` with Playwright installed (`pip install playwright` and
 `python -m playwright install chromium`):
@@ -205,6 +206,27 @@ with sync_playwright() as p:
     check("8a the example's groups come back", example_again == example_open, [example_open, example_again])
     check("8b this plan's groups come back", plan_again == plan_closed, [plan_closed, plan_again])
     check("8c each plan is saved under its own key", keys == ["reef:plan:example", "reef:plan:plan"], keys)
+
+    # 9. a double-click on a collapsed group opens it, though the SVG holds the pointer
+    pick(page, "Example book")
+    page.click("button[data-act=collapse]")
+    page.wait_for_timeout(300)
+    collapsed = view(page)[0]
+    # the box's lower right, away from its toggle
+    group = page.locator(".reef-viewport .reef-node.collapsed").first.bounding_box()
+    page.mouse.dblclick(group["x"] + group["width"] - 20, group["y"] + group["height"] - 8)
+    page.wait_for_timeout(300)
+    opened = view(page)[0]
+    check("9a a double-click on a collapsed group opens it", int(opened) > int(collapsed), [collapsed, opened])
+    # a double-click on its toggle opens and closes it, one press each, and opens nothing more
+    page.click("button[data-act=collapse]")
+    page.wait_for_timeout(300)
+    collapsed = view(page)[0]
+    toggle = page.locator(".reef-viewport .reef-node.collapsed .reef-expand").first.bounding_box()
+    page.mouse.dblclick(toggle["x"] + toggle["width"] / 2, toggle["y"] + toggle["height"] / 2)
+    page.wait_for_timeout(300)
+    toggled = view(page)[0]
+    check("9b a double-click on a group's toggle leaves it as it was", toggled == collapsed, [collapsed, toggled])
 
     # anything the page logged or failed to load
     print("--- console and errors")

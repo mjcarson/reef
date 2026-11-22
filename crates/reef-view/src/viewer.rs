@@ -51,6 +51,11 @@ pub struct Viewer {
     measure: Measure,
     pointers: Vec<(i32, f64, f64)>,
     press: Option<Press>,
+    /// What the last press landed on, kept for the double-click after it
+    ///
+    /// The SVG holds the pointer from a press, so the browser sends the double-click
+    /// to the SVG, not to the box.
+    last_press: Option<Element>,
     pinch: Option<f64>,
     hint_timer: Option<i32>,
     /// Filling the page beside the book's sidebar: a plain wheel zooms, as in full screen.
@@ -304,6 +309,7 @@ impl Viewer {
             measure,
             pointers: Vec::new(),
             press: None,
+            last_press: None,
             pinch: None,
             hint_timer: None,
             page_mode,
@@ -928,8 +934,11 @@ impl Viewer {
                 let _ = v.svg.set_pointer_capture(e.pointer_id());
                 v.pointers.retain(|p| p.0 != e.pointer_id());
                 v.pointers.push((e.pointer_id(), e.client_x() as f64, e.client_y() as f64));
+                // keep what the press landed on, since what follows it goes to the SVG
+                let target: Option<Element> = e.target().and_then(|t| t.dyn_into().ok());
+                v.last_press = target.clone();
                 if v.pointers.len() == 1 {
-                    v.press = Some(Press { x: e.client_x() as f64, y: e.client_y() as f64, moved: false, target: e.target().and_then(|t| t.dyn_into().ok()) });
+                    v.press = Some(Press { x: e.client_x() as f64, y: e.client_y() as f64, moved: false, target });
                 } else {
                     v.press = None;
                     v.pinch = None;
@@ -1002,14 +1011,20 @@ impl Viewer {
         let vc = v.clone();
         w.listen(&svg, "pointerleave", false, true, move |_: PointerEvent| with(&vc, |v| v.light(None)));
         let vc = v.clone();
-        w.listen(&svg, "dblclick", false, true, move |e: Event| {
-            let t: Option<Element> = e.target().and_then(|t| t.dyn_into().ok());
-            if closest_item(&t, "[data-toggle]", "data-toggle").is_some() {
-                return;
-            }
-            if let Some(item) = closest_item(&t, ".reef-node.collapsed", "data-item") {
-                with(&vc, |v| v.toggle(item));
-            }
+        w.listen(&svg, "dblclick", false, true, move |_: Event| {
+            with(&vc, |v| {
+                // the SVG holds the pointer from a press, so the event's own target is the SVG:
+                // look at what the last press landed on, if it is still drawn
+                let t = v.last_press.clone().filter(|t| t.is_connected());
+                // a toggle opened or closed its group on each press already
+                if closest_item(&t, "[data-toggle]", "data-toggle").is_some() {
+                    return;
+                }
+                // a collapsed group opens
+                if let Some(item) = closest_item(&t, ".reef-node.collapsed", "data-item") {
+                    v.toggle(item);
+                }
+            });
         });
         let vc = v.clone();
         w.listen(&svg, "wheel", false, false, move |e: WheelEvent| {

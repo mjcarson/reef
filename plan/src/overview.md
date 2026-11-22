@@ -174,12 +174,15 @@ nodes:
           after: 831.5
   - id: C66
     title: "C66 A double-click opens a collapsed group in reef-view"
+    status: done
     description:
       why: "reef-view takes the pointer on a press, so the browser sends the double-click to the diagram's SVG, and a double-click on a collapsed group finds no box and does nothing."
       what: "A double-click on a collapsed group opens it in the static mode's viewer, as it does in reef-app's canvas."
-      details: "Found while building C55, whose canvas opens the box the double-click's press landed on. On the example book's plan page, 43 boxes were drawn before and after a double-click on a collapsed group in headless Chromium."
+      details: "Found while building C55, whose canvas opens the box the double-click's press landed on. The viewer now keeps what its last press landed on and opens that, if it is a collapsed group still drawn. A double-click on a toggle still does nothing more, since each press toggled it. reef.js is rebuilt from it. On the example book's plan page, with every group collapsed, a double-click on the first collapsed group drew 43 boxes and then 43 with the old bundle, and 43 and then 49 with the new one, in headless Chromium. `check.py`'s step 9 does the same through `mount`, and a double-click on a toggle leaves 43."
     acceptance:
       - feature: "A double-click on a collapsed group in the example book opens it"
+        test: spikes/x6-view/check.py
+        status: met
 ---
 # Centralized reef
 

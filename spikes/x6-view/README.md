@@ -29,7 +29,7 @@ python check.py http://127.0.0.1:8080/ /tmp
 
 `check.py` draws the example book and opens three nodes' sidebars. It opens every group and
 reloads. It swaps in the newer revision and then the other plan, and hides and shows the view.
-It prints anything the page logged.
+It double-clicks a collapsed group and a group's toggle. It prints anything the page logged.
 
 ## Sizes
 

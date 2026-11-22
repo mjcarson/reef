@@ -130,8 +130,9 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
   in an SVG. A local `dioxus_elements` module adds `svgtitle`, made in SVG's namespace.
 - **The SVG holds the pointer from a press,** so the browser sends the click and double-click
   that follow it to the SVG, not to the box. The canvas opens the box the press landed on.
-  reef-view looks for the box under the double-click and finds none, so its double-click never
-  opens a collapsed group ([C66](../overview.md)).
+  reef-view looked for the box under the double-click and found none, so its double-click never
+  opened a collapsed group. It now opens the box its last press landed on too
+  ([C66](../overview.md)).
 - **What the server rendered is what hydration keeps.** The sidebar's width, read from local
   storage as its signal started, never reached the stage's style, and the arrows' marker, named
   from a timer, differed from the server's, so no arrow had a head. Storage is now read in an
