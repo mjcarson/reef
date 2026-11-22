@@ -3,7 +3,7 @@
 
 use super::{View, dom};
 use crate::side::Tab;
-use crate::side::threads::{Threads, excerpt, target_label};
+use crate::side::threads::{Threads, excerpt, place_label};
 use dioxus::prelude::*;
 use reef_draw::accept;
 use reef_draw::markup::status_class;
@@ -204,7 +204,7 @@ fn OpenComments() -> Element {
                             },
                             div { class: "reef-app-open-where",
                                 code { "{thread.node.id}" }
-                                " {target_label(&thread.target)}"
+                                " {place_label(&thread)}"
                             }
                             div { class: "reef-app-open-text", "{excerpt(&thread)}" }
                         }

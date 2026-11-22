@@ -8,6 +8,10 @@
 //! - **Each record written is a change**, [`Change::WorkRecorded`], naming its node and the
 //!   version it is now at. A start or a capture that wrote nothing sends none. A capture kept as
 //!   a revision is [`Change::RevisionCaptured`] too, naming the revision.
+//! - **A capture brings its node's threads along.** Each capture from the node's start follows
+//!   the threads on its lines to its latest revision before any of it is told, so a reader told
+//!   of the revision finds them on it, and the threads it wrote are [`Change::ThreadsFollowed`].
+//!   One that kept no revision still follows any thread an earlier capture left behind.
 //! - **A node's revisions are read where its plan is listed,** as its record is, whether or not
 //!   the node is still in its plan.
 
@@ -78,7 +82,10 @@ impl<B: Backend> Service<B> {
     }
 
     /// Keeps a capture as its node's next revision, if it was taken from the node's start and
-    /// changed anything, and adds the SHAs it read to the node's record
+    /// changed anything, adds the SHAs it read to the node's record, and follows the threads on
+    /// the node's lines to its latest revision
+    ///
+    /// A follow that fails comes back as the error, once what the capture kept is told.
     ///
     /// # Arguments
     ///
@@ -88,8 +95,16 @@ impl<B: Backend> Service<B> {
     pub async fn add_capture(&self, node: &NodeName, add: AddCapture) -> anyhow::Result<Captured> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(&node.plan).await?;
-        // written under the project's work lock, and told to the change stream once it is
+        // written under the project's work lock
         let captured = self.store.add_capture(node, add).await?;
+        // the node's threads follow it before anything is told, under the comment lock
+        let followed = match &captured {
+            Captured::Added { .. } | Captured::Unchanged { .. } => {
+                self.store.follow_threads(node).await
+            }
+            Captured::NotStarted { .. } | Captured::Restarted { .. } => Ok(None),
+        };
+        // then told to the change stream, the threads last
         match &captured {
             Captured::Added { record, revision } => {
                 self.publish(Change::RevisionCaptured {
@@ -106,6 +121,13 @@ impl<B: Backend> Service<B> {
                 version: record.version,
             }),
             Captured::NotStarted { .. } | Captured::Restarted { .. } => {}
+        }
+        if let Some(followed) = followed? {
+            self.publish(Change::ThreadsFollowed {
+                node: node.clone(),
+                revision: followed.revision,
+                threads: followed.threads,
+            });
         }
         Ok(captured)
     }

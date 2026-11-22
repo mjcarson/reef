@@ -258,17 +258,22 @@ diff, and on the node as a whole ([C35](../milestones/m7.md)), over the threads 
 ### Design choices
 
 - **The plan's threads, read once for the canvas.** The canvas reads every thread of the plan,
-  again after each comment or mark the plan's stream announces and after each write the page
-  makes, and gives them to the toolbar and the sidebar through context. The toolbar's list,
+  again after each comment, mark or follow the plan's stream announces and after each write
+  the page makes, and gives them to the toolbar and the sidebar through context. The toolbar's list,
   the Comments tab and the diff's threads show the same, from one read a change.
 - **A line's numbers start a thread on it.** One handler on the diff's table finds the line a
-  click on its numbers landed on, by its side and number, and opens a box under it. A line's
-  threads are drawn under it, in the diff of the revision they name. Two attributes a row and
-  a lookup a line moved X2's `Cargo.lock` from 83 ms to 92 ms to open.
+  click on its numbers landed on, by its side and number, and opens a box under it. A thread
+  is drawn under its line in each revision it was followed to, where its line was in that
+  revision ([C36](../milestones/m7.md)), so an older revision picked still shows it where it was then.
+  Two attributes a row and a lookup a line moved X2's `Cargo.lock` from 83 ms to 92 ms to open.
 - **The Comments tab, general threads first.** Its count says how many of the node's threads
   are open. The threads on the node come first, then a box for a new one, then those on its
-  lines, open before resolved, each with a way to its line: the Changes tab at the line's
-  revision, its file open and the line brought into view.
+  lines, open before resolved, each named where its line is now, with a way to it: the Changes
+  tab at the latest revision its line was followed to, its file open and the line brought into
+  view.
+- **Outdated, said and drawn.** A thread whose line a later revision lost is named where its
+  line was last, "outdated in r*N*", with an outdated tag before its state and a dashed edge.
+  It is drawn in the revisions up to the one that lost its line, and in none after.
 - **A plan-wide list in the toolbar.** "Comments N" counts the plan's open threads, and lists
   each by its node, where it is, and the first line of its text. An entry selects its node and
   brings its thread into view in the Comments tab.

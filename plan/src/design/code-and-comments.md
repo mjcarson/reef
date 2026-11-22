@@ -170,9 +170,6 @@ The rules:
 
 - **A node with two needs done but not merged** would start from a merge of their heads, which
   `reef start` would make. That wasn't tried.
-- **A round of fixes after the node's work has landed** on its base branch, and its branch was
-  rebased onto it, shows only that round's changes. Whether comments follow onto that revision
-  is [C36](../milestones/m7.md)'s.
 
 ## A node's diff
 
@@ -221,10 +218,35 @@ The rules:
   as it is and Claude reads the markdown.
 - **Marked by version.** A thread is marked open or resolved over the version its writer read,
   so a mark made against a thread since changed is stale and changes nothing.
-- **Comments follow the code between revisions.** When a later revision of a node's changes
-  moves a commented line, the comment moves with it. reef maps the line by comparing the two
-  stored revisions, not git's history. When the line is gone, the comment is marked outdated
-  rather than lost.
+- **Comments follow the code between revisions** ([C36](../milestones/m7.md)). When a later revision of a
+  node's changes moves a commented line, the comment moves with it. reef maps the line by
+  comparing the two stored revisions' hunks, not git's history, a revision at a time from the
+  one the line was last in. A thread keeps where it was started, where its line went in each
+  later revision, and the revision that lost it.
+  - **Blobs tie two revisions together.** A worktree file the next revision holds unchanged has
+    the line where it was. One that is the next revision's base has it as that base's line of
+    the same number, which is what a round of fixes after the node's work landed on its base
+    branch sees.
+  - **Otherwise the two sides are aligned as a patience diff aligns them.** A line of a base
+    both revisions share is matched by its number there, and any other by its text, so an
+    edited line matches nothing. The lines between two hunks, which neither revision holds,
+    match nothing either.
+  - **Followed only to a line the next revision shows**, on the same side, since that is where
+    its thread is drawn: an added or context line to an added or context line, and a removed
+    line only while the next revision still removes it. So a round of fixes after the work
+    landed, which shows only its own changes, takes a thread along only where its hunks show
+    the line.
+  - **Outdated rather than lost.** A line deleted, edited or no longer shown outdates its
+    thread from that revision on, and it is followed no further. It is still drawn in each
+    revision it was followed through, and listed in the Comments tab and the toolbar, marked
+    outdated, open until it is resolved.
+  - **Resolved threads follow too**, so one reopened is where its line is.
+  - **A thread started on an older revision is followed at once**, under the lock a capture's
+    follow takes, so neither misses the other.
+  - **Each capture follows, and says so.** A capture follows its node's threads before the
+    change stream hears of it, a capture that keeps no revision included, so one a failed
+    follow left behind catches up. Each thread it writes moves on a version, so a mark made
+    before it is stale, and the stream names them in a `threads-followed` change.
 - **Resolved by a change.** A `Reef-Resolves: <comment>` trailer, read when its commit is
   captured, resolves the comment and links it to that revision, so the user sees which change
   answered which comment. `reef comment resolve` does the same by hand.

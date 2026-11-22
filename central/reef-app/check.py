@@ -14,7 +14,7 @@ Build the app first, from central/reef-app, with no `RUSTFLAGS` exported:
 
 then, with Playwright installed:
 
-    python check.py [screenshot dir] [--release] [--only=c33,c35]
+    python check.py [screenshot dir] [--release] [--only=c33,c35,c36]
 
 `--release` runs the server `dx build ... --release` built instead, which the timings in the
 plan's figures are taken on. `--only` runs the checks whose names start with one of those given.
@@ -808,6 +808,80 @@ def c35_comment_threads_in_the_diff(page):
           {"live": live, "entries": entries, "went to": went, "shown in diff": shown})
 
 
+def c36_comments_follow_the_code(page):
+    """C36: a capture that moves a commented line shows its thread at the line's new place, resolved
+    or not, one that deletes a commented line shows its thread as outdated, and an older revision
+    still shows each thread where its line was then. Runs after C35, on its plan."""
+    repo = WORK / "repo"
+    page.goto(URL + "/plans/check/changes")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
+    page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    page.wait_for_selector('.reef-app-file-head[data-path="src/keep.rs"]', timeout=10000)
+    # a thread on the line revision 2 added to small.rs, from another writer
+    line = {"on": "line", "revision": 2, "path": "src/small.rs", "side": "new", "line": 4}
+    request = urllib.request.Request(
+        f"{URL}/api/v1/projects/check/plans/changes/nodes/K1/comments",
+        data=json.dumps({"target": line, "body": "Why more?"}).encode(),
+        headers={"content-type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as answer:
+        answer.read()
+    # revision 3 adds a line above keep.rs's `B`, C35's resolved thread's line, and drops small.rs's last
+    (repo / "src" / "keep.rs").write_text("a\nz\nB\nc\n")
+    (repo / "src" / "small.rs").write_text('fn main() {\n    println!("<hi> & bye");\n}\n')
+    git("add", "-A")
+    reef("node", "capture")
+    seen = {}
+    try:
+        page.wait_for_function("() => document.querySelector('.reef-app-revision')?.value === '3'", timeout=10000)
+    except Exception:
+        pass
+    seen["picked"] = page.eval_on_selector(".reef-app-revision", "s => s.value")
+    # in revision 3, the thread is under `B` where it is now, and small.rs has none
+    moved = '.reef-app-diff[data-path="src/keep.rs"] tr.reef-app-line[data-side="new"][data-line="3"]'
+    page.click('.reef-app-file-head[data-path="src/keep.rs"]')
+    page.click('.reef-app-file-head[data-path="src/small.rs"]')
+    page.wait_for_selector(f"{moved} + tr.reef-app-thread-row", timeout=10000)
+    page.wait_for_selector('.reef-app-diff[data-path="src/small.rs"][data-revision="3"] tr.reef-app-line',
+                           timeout=10000)
+    under = """line => { const l = document.querySelector(line), row = l?.nextElementSibling;
+        return [l?.querySelector('.reef-app-code').textContent,
+                row?.classList.contains('reef-app-thread-row') ? row.querySelector('.reef-app-comment-body').textContent.trim() : null,
+                [...(row?.querySelector('.reef-app-thread')?.classList ?? [])].filter(c => c !== 'reef-app-thread')]; }"""
+    seen["r3 keep.rs:3"] = page.evaluate(under, moved)
+    seen["r3 threads on small.rs"] = page.locator('.reef-app-diff[data-path="src/small.rs"] .reef-app-thread-row').count()
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-followed.png"))
+    # the Comments tab names each where its line is now, and says which is outdated
+    page.click(".reef-side .reef-app-tab:nth-child(3)")
+    page.wait_for_selector(".reef-app-line-thread .reef-app-outdated", timeout=10000)
+    seen["places"] = page.eval_on_selector_all(
+        ".reef-app-line-thread",
+        "ts => ts.map(t => [t.querySelector('code').textContent, !!t.querySelector('.reef-app-outdated')])")
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-outdated.png"))
+    page.emulate_media(color_scheme="dark")
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-outdated-dark.png"))
+    page.emulate_media(color_scheme="light")
+    # revision 2 picked again still shows each thread where its line was then
+    page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    page.wait_for_selector(".reef-app-revision", timeout=10000)
+    page.select_option(".reef-app-revision", "2")
+    try:
+        page.wait_for_function("() => [...document.querySelectorAll('.reef-app-diff')].every(d => d.dataset.revision === '2')"
+                               " && document.querySelectorAll('.reef-app-thread-row').length === 2", timeout=10000)
+    except Exception:
+        pass
+    seen["r2 keep.rs:2"] = page.evaluate(
+        under, '.reef-app-diff[data-path="src/keep.rs"] tr.reef-app-line[data-side="new"][data-line="2"]')
+    seen["r2 small.rs:4"] = page.evaluate(
+        under, '.reef-app-diff[data-path="src/small.rs"] tr.reef-app-line[data-side="new"][data-line="4"]')
+    check("C36 a thread shows at its line in each revision it followed, and an outdated one says so",
+          seen == {"picked": "3", "r3 keep.rs:3": ["+B", "hi <b>x</b>", ["resolved"]], "r3 threads on small.rs": 0,
+                   "places": [["r2 · src/small.rs:4 · outdated in r3", True], ["r3 · src/keep.rs:3", False]],
+                   "r2 keep.rs:2": ["+B", "hi <b>x</b>", ["resolved"]],
+                   "r2 small.rs:4": ["+// more", "Why more?", ["open", "outdated"]]},
+          seen)
+
+
 def queue_order():
     """The check's queue as `reef queue ls` lists it: each entry's name, in order."""
     return [line.split()[1] for line in reef("queue", "ls").splitlines() if line[:1].isdigit()]
@@ -950,6 +1024,7 @@ def main():
                 c69_a_body_put_shows_in_the_sidebar,
                 c33_changes_in_the_sidebar,
                 c35_comment_threads_in_the_diff,
+                c36_comments_follow_the_code,
             ]
             for step in checks:
                 # every check, or those `--only` names

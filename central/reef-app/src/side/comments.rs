@@ -1,10 +1,11 @@
 //! The Comments tab: the selected node's threads, general ones first with a box to start one,
 //! then those on its lines, each with a way to its line in the diff
 //!
-//! Open threads come before resolved ones. A thread on a line opens the Changes tab at that
-//! line's revision, its file open and the line brought into view.
+//! Open threads come before resolved ones. A thread on a line opens the Changes tab at the
+//! latest revision its line was followed to, its file open and the line brought into view; an
+//! outdated thread's is the last revision that held its line.
 
-use super::threads::{Compose, Composer, ThreadView, Threads, target_label};
+use super::threads::{Compose, Composer, ThreadView, Threads, place_label};
 use super::{Review, Tab};
 use crate::canvas::View;
 use dioxus::prelude::*;
@@ -74,7 +75,7 @@ pub fn Comments(id: String) -> Element {
     }
 }
 
-/// A thread on a line: where it is, a way to that line in the diff, and the thread
+/// A thread on a line: where its line is now, a way to that line in the diff, and the thread
 ///
 /// # Arguments
 ///
@@ -83,8 +84,8 @@ pub fn Comments(id: String) -> Element {
 fn LineThread(thread: Thread) -> Element {
     let mut view = use_context::<View>();
     let review = use_context::<Review>();
-    let place = target_label(&thread.target);
-    let anchor = thread.target.anchor().cloned();
+    let place = place_label(&thread);
+    let anchor = thread.latest_anchor().cloned();
     rsx! {
         div { class: "reef-app-line-thread",
             div { class: "reef-app-line-thread-head",

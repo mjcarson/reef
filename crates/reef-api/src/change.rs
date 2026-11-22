@@ -21,6 +21,18 @@ pub struct PutNode {
     pub version: u64,
 }
 
+/// A thread a capture followed to its node's latest revision, and the version it is now at
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FollowedThread {
+    /// The thread's number
+    pub thread: u32,
+    /// Its new version
+    pub version: u64,
+    /// Whether its line was lost on the way, so it is now outdated
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outdated: bool,
+}
+
 /// A page an edit wrote, and the version it is now at
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PutPage {
@@ -113,6 +125,15 @@ pub enum Change {
         /// The version it is now at
         version: u64,
     },
+    /// A capture followed the threads on its node's lines to the node's latest revision
+    ThreadsFollowed {
+        /// The node they are on
+        node: NodeName,
+        /// The revision they were followed to
+        revision: u32,
+        /// Each thread it wrote, by number
+        threads: Vec<FollowedThread>,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -134,6 +155,7 @@ impl Change {
             Change::RevisionCaptured { .. } => "revision-captured",
             Change::CommentAdded { .. } => "comment-added",
             Change::ThreadMarked { .. } => "thread-marked",
+            Change::ThreadsFollowed { .. } => "threads-followed",
             Change::Missed { .. } => "missed",
         }
     }
@@ -150,7 +172,8 @@ impl Change {
             Change::WorkRecorded { node, .. }
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
-            | Change::ThreadMarked { node, .. } => Some(node.plan.project.as_str()),
+            | Change::ThreadMarked { node, .. }
+            | Change::ThreadsFollowed { node, .. } => Some(node.plan.project.as_str()),
             Change::Missed { .. } => None,
         }
     }
@@ -167,7 +190,8 @@ impl Change {
             Change::WorkRecorded { node, .. }
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
-            | Change::ThreadMarked { node, .. } => Some(&node.plan),
+            | Change::ThreadMarked { node, .. }
+            | Change::ThreadsFollowed { node, .. } => Some(&node.plan),
             Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
                 None
             }
@@ -272,6 +296,15 @@ mod tests {
                 thread: 1,
                 state: crate::ThreadState::Resolved,
                 version: 2,
+            },
+            Change::ThreadsFollowed {
+                node: "reef/central/C36".parse().unwrap(),
+                revision: 3,
+                threads: vec![super::FollowedThread {
+                    thread: 1,
+                    version: 3,
+                    outdated: true,
+                }],
             },
             Change::Missed { count: 3 },
         ];

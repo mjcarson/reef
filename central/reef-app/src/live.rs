@@ -68,11 +68,12 @@ type Follow = ();
 const PLAN_KINDS: &[&str] = &["nodes-put", "pages-put", "plan-written", "missed"];
 
 /// The changes that mean reading a node's work again: a revision captured, a comment kept, a
-/// thread marked, or a gap
+/// thread marked, threads followed to a new revision, or a gap
 const WORK_KINDS: &[&str] = &[
     "revision-captured",
     "comment-added",
     "thread-marked",
+    "threads-followed",
     "missed",
 ];
 

@@ -114,6 +114,7 @@ code { font-size: 0.92em; }
 .reef-app-thread { border: 1px solid var(--line); border-left: 3px solid var(--links); border-radius: 6px; padding: 0.4rem 0.55rem; background: var(--bg); }
 .reef-app-thread.resolved { border-left-color: var(--reef-done); opacity: 0.8; }
 .reef-app-thread.focus { box-shadow: 0 0 0 2px var(--links); }
+.reef-app-thread.outdated { border-left-style: dashed; }
 .reef-app-comment + .reef-app-comment { margin-top: 0.4rem; padding-top: 0.4rem; border-top: 1px dashed var(--line); }
 .reef-app-comment-head { color: var(--muted); font-size: 0.75rem; }
 .reef-app-comment-number { font-family: monospace; }

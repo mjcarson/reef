@@ -2,8 +2,8 @@
 //! the twin
 
 use reef_api::{
-    Anchor, COMMENT_BODY_MAX, Commented, FileStatus, Hunk, Line, LineKind, MarkThread, Marked,
-    NewReply, NewThread, Side, Target, Thread, ThreadState,
+    Anchor, COMMENT_BODY_MAX, Commented, FileStatus, FollowedThread, Hunk, Line, LineKind,
+    MarkThread, Marked, NewReply, NewThread, Side, Target, Thread, ThreadState,
 };
 use reef_model::NodeName;
 use reef_service::{Backend, FileDiff, Unkeepable};
@@ -62,6 +62,59 @@ fn modified() -> FileDiff {
                 line(LineKind::Added, None, Some(2), "new"),
             ],
         }],
+    }
+}
+
+/// A new file's diff, its worktree blob named by a letter, so two captures of other contents
+/// hold other blobs
+///
+/// # Arguments
+///
+/// * `path` - The file's path
+/// * `text` - What it holds, a line to each newline
+/// * `blob` - The letter its worktree blob is made of
+fn added_as(path: &str, text: &str, blob: char) -> FileDiff {
+    FileDiff {
+        new_id: Some(blob.to_string().repeat(40)),
+        ..added_file(path, text)
+    }
+}
+
+/// Keeps the next capture of a node that was started, holding the files given
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `node` - The node captured
+/// * `sha` - The letter the capture's SHAs are made of, which must be new to the node
+/// * `files` - The capture's files
+async fn recaptured<B: Backend>(
+    fx: &Fx<B>,
+    node: &NodeName,
+    sha: char,
+    files: Vec<FileDiff>,
+) -> anyhow::Result<u32> {
+    // taken from the start the node is on
+    let Some(record) = fx.store.work_of(node).await? else {
+        panic!("`{node}` was never started");
+    };
+    let revision = kept(fx, node, capture(&record.start.pinned, sha, files)).await?;
+    Ok(revision.revision)
+}
+
+/// A line of a node's revision, as an anchor
+///
+/// # Arguments
+///
+/// * `revision` - The revision's number
+/// * `path` - The file's path
+/// * `line` - Its number in the worktree
+fn new_line(revision: u32, path: &str, line: u32) -> Anchor {
+    Anchor {
+        revision,
+        path: path.to_string(),
+        side: Side::New,
+        line,
     }
 }
 
@@ -324,5 +377,129 @@ pub async fn marking_over_an_older_version_is_stale<B: Reopen>(fx: Fx<B>) -> any
         mark(&fx, 2, ThreadState::Resolved, 1).await?,
         Marked::NoThread { thread: 2 }
     );
+    Ok(())
+}
+
+/// A capture that deletes a commented line outdates its thread from that revision on, as does
+/// one that no longer changes its file, and an outdated thread is followed no further
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn deleting_a_commented_line_outdates_its_thread<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // A's revision 1 adds two files, and a thread is on a line of each
+    let files = vec![
+        added_as("src/a.rs", "one\ntwo\nthree\n", '1'),
+        added_as("src/b.rs", "only\n", '2'),
+    ];
+    let a = captured(&fx, "A", files).await?;
+    let (on_two, _) = started(&fx, &a, on_line(1, "src/a.rs", Side::New, 2), "Why two?").await?;
+    started(&fx, &a, on_line(1, "src/b.rs", Side::New, 1), "And b?").await?;
+    // revision 2 deletes `two`, and leaves `b.rs` out of its changes
+    let two = vec![added_as("src/a.rs", "one\nthree\n", '3')];
+    assert_eq!(recaptured(&fx, &a, 'd', two).await?, 2);
+    let Some(followed) = fx.store.follow_threads(&a).await? else {
+        panic!("a capture that lost two lines followed no thread");
+    };
+    let outdated = |thread| FollowedThread {
+        thread,
+        version: 2,
+        outdated: true,
+    };
+    assert_eq!(followed.revision, 2);
+    assert_eq!(followed.threads, [outdated(1), outdated(2)]);
+    // each thread is outdated from revision 2, and still on its line in revision 1
+    let threads = fx.store.threads(&fx.plan).await?;
+    for thread in &threads {
+        assert_eq!(thread.outdated, Some(2));
+        assert!(thread.followed.is_empty());
+        assert_eq!(thread.anchor_in(1), thread.target.anchor());
+        assert_eq!(thread.anchor_in(2), None);
+        assert!(thread.is_open());
+    }
+    assert_eq!(threads[0].comments, on_two.comments);
+    assert_eq!(threads[0].latest_anchor(), on_two.target.anchor());
+    // a later revision follows them no further, even one with `two` back
+    let three = vec![added_as("src/a.rs", "one\ntwo\nthree\n", '4')];
+    recaptured(&fx, &a, 'e', three).await?;
+    assert_eq!(fx.store.follow_threads(&a).await?, None);
+    // and they read back so once the store is reopened
+    let fx = fx.reopen().await?;
+    assert_eq!(fx.store.threads(&fx.plan).await?, threads);
+    Ok(())
+}
+
+/// A follow moves each of a node's line threads to where its line went, resolved ones too,
+/// leaves general threads and other nodes' alone, and a thread started on an older revision
+/// is followed at once
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn captures_follow_their_nodes_threads<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // A's revision 1 and B's each add the same file
+    let file = || vec![added_as("src/a.rs", "one\ntwo\nthree\n", '1')];
+    let a = captured(&fx, "A", file()).await?;
+    let b = captured(&fx, "B", file()).await?;
+    // a thread on A's `two`, one on its `three` resolved, a general one, and one on B's `two`
+    let (on_two, _) = started(&fx, &a, on_line(1, "src/a.rs", Side::New, 2), "Two?").await?;
+    let (on_three, _) = started(&fx, &a, on_line(1, "src/a.rs", Side::New, 3), "Three?").await?;
+    let Marked::Marked { .. } = mark(&fx, 2, ThreadState::Resolved, on_three.version).await? else {
+        panic!("marking thread 2 over the version read was refused");
+    };
+    let (general, _) = started(&fx, &a, Target::Node, "Overall?").await?;
+    let (on_b, _) = started(&fx, &b, on_line(1, "src/a.rs", Side::New, 2), "B's two?").await?;
+    // A's revision 2 adds two lines above them
+    let two = vec![added_as("src/a.rs", "zero\nhalf\none\ntwo\nthree\n", '2')];
+    recaptured(&fx, &a, 'd', two).await?;
+    let Some(followed) = fx.store.follow_threads(&a).await? else {
+        panic!("a capture that moved two lines followed no thread");
+    };
+    let moved = |thread, version| FollowedThread {
+        thread,
+        version,
+        outdated: false,
+    };
+    assert_eq!(followed.revision, 2);
+    assert_eq!(followed.threads, [moved(1, 2), moved(2, 3)]);
+    // each moved down by two, the resolved one still resolved, and the others as they were
+    let threads = fx.store.threads(&fx.plan).await?;
+    assert_eq!(threads[0].followed, [new_line(2, "src/a.rs", 4)]);
+    assert_eq!(threads[1].followed, [new_line(2, "src/a.rs", 5)]);
+    assert_eq!(threads[1].state, ThreadState::Resolved);
+    assert_eq!((&threads[2], &threads[3]), (&general, &on_b));
+    assert!(threads.iter().all(|thread| !thread.is_outdated()));
+    // the follow moved its threads' versions on, so a mark over the one read before is stale
+    let stale = mark(&fx, 1, ThreadState::Resolved, on_two.version).await?;
+    assert!(matches!(stale, Marked::Stale { .. }), "{stale:?}");
+    // a follow with no newer revision writes nothing
+    assert_eq!(fx.store.follow_threads(&a).await?, None);
+    // revision 3 drops `zero`, and a thread started on revision 1's `one` is followed at once
+    let three = vec![added_as("src/a.rs", "half\none\ntwo\nthree\n", '3')];
+    recaptured(&fx, &a, 'e', three).await?;
+    let (late, _) = started(&fx, &a, on_line(1, "src/a.rs", Side::New, 1), "One?").await?;
+    assert_eq!(
+        late.followed,
+        [new_line(2, "src/a.rs", 3), new_line(3, "src/a.rs", 2)]
+    );
+    assert_eq!(late.anchor_in(1), late.target.anchor());
+    assert_eq!(late.outdated, None);
+    // then the follow takes the others on to revision 3, and leaves the late one where it is
+    let Some(followed) = fx.store.follow_threads(&a).await? else {
+        panic!("a capture that moved two lines followed no thread");
+    };
+    assert_eq!(followed.threads, [moved(1, 3), moved(2, 4)]);
+    let threads = fx.store.threads(&fx.plan).await?;
+    assert_eq!(
+        threads[0].latest_anchor(),
+        Some(&new_line(3, "src/a.rs", 3))
+    );
+    assert_eq!(threads[0].anchor_in(2), Some(&new_line(2, "src/a.rs", 4)));
+    assert_eq!(threads[4], late);
+    // and all of it reads back once the store is reopened
+    let fx = fx.reopen().await?;
+    assert_eq!(fx.store.threads(&fx.plan).await?, threads);
     Ok(())
 }

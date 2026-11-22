@@ -38,8 +38,8 @@ pub use memory::MemoryBackend;
 pub use service::Service;
 pub use store::{
     AddCapture, AddedProject, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX, FileDiff,
-    FileSummary, Listing, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, PageEdit,
-    PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Proposal, Put, Puts,
-    QueueEdit, Queued, Ranked, Revision, Rewrite, Rewritten, StalePut, StartWork, Started, Store,
-    StoredNode, StoredPage, Unkeepable, WorkRecord, WorkStart,
+    FileSummary, Followed, Listing, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
+    PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Proposal,
+    Put, Puts, QueueEdit, Queued, Ranked, Revision, Rewrite, Rewritten, StalePut, StartWork,
+    Started, Store, StoredNode, StoredPage, Unkeepable, WorkRecord, WorkStart,
 };

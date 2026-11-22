@@ -2,8 +2,9 @@
 //!
 //! A revision lists its files without their hunks, so a node with many changes opens at once,
 //! and a file's hunks are read only once the file is opened. Each hunk is a header and a row a
-//! line, numbered on both sides as git numbers them. The threads on a line are drawn under it,
-//! and a click on a line's numbers opens a box under it to start one.
+//! line, numbered on both sides as git numbers them. Each thread whose line is in the revision
+//! is drawn under that line, where it was followed to, and a click on a line's numbers opens a
+//! box under it to start one.
 
 use super::Review;
 use super::threads::{Compose, Composer, ThreadView, Threads};
@@ -38,7 +39,7 @@ pub fn FileView(
     let file = use_resource(move || async move {
         calls::revision_file(project(), plan(), id(), revision(), path()).await
     });
-    // the threads on this file's lines in this revision, if the plan's are read
+    // the threads whose line is in this file in this revision, if the plan's are read
     let threads = try_use_context::<Threads>();
     let on_file: Vec<Thread> = threads
         .map(|threads| threads.of(&id.read()))
@@ -46,9 +47,8 @@ pub fn FileView(
         .into_iter()
         .filter(|thread| {
             thread
-                .target
-                .anchor()
-                .is_some_and(|anchor| anchor.revision == revision() && anchor.path == *path.read())
+                .anchor_in(revision())
+                .is_some_and(|anchor| anchor.path == *path.read())
         })
         .collect();
     // a line is commented on only where the plan's threads are kept
@@ -84,7 +84,7 @@ pub fn FileView(
 ///
 /// * `revision` - The revision the file is in
 /// * `file` - The file, its hunks and all
-/// * `threads` - The threads on its lines in this revision
+/// * `threads` - The threads whose line is in it in this revision
 /// * `node` - The id of the node it is a change of, if its lines can be commented on
 #[component]
 pub fn Diff(
@@ -105,10 +105,10 @@ pub fn Diff(
         (Some(old), Some(new)) if old != new => Some(format!("Mode {old} → {new}")),
         _ => None,
     };
-    // each line's threads, by where they are
+    // each line's threads, by where their line is in this revision
     let mut by_line: HashMap<Spot, Vec<Thread>> = HashMap::new();
     for thread in threads {
-        if let Some(anchor) = thread.target.anchor() {
+        if let Some(anchor) = thread.anchor_in(revision) {
             by_line
                 .entry(spot(anchor.side, anchor.line))
                 .or_default()

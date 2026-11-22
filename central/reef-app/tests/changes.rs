@@ -9,7 +9,7 @@ use reef_api::{
     Anchor, Comment, FileDiff, FileStatus, Hunk, Line, LineKind, Side, Target, Thread, ThreadState,
 };
 use reef_app::side::diff::Diff;
-use reef_app::side::threads::{excerpt, target_label};
+use reef_app::side::threads::{ThreadView, excerpt, place_label};
 
 /// A line of a kind, numbered on the sides that kind is on
 ///
@@ -220,6 +220,8 @@ fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
             side,
             line,
         }),
+        followed: Vec::new(),
+        outdated: None,
         state: ThreadState::Open,
         comments: vec![Comment {
             number,
@@ -230,14 +232,42 @@ fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
     }
 }
 
-/// A thread on a line draws under that line, numbered on its side, and a line names where a
-/// comment on it is anchored
+/// A thread started on revision 2 and followed to a line of revision 3, or one lost there
+///
+/// # Arguments
+///
+/// * `number` - The thread's number
+/// * `to` - The line of revision 3 its line was followed to, or `None` if revision 3 lost it
+fn followed_from_2(number: u32, to: Option<u32>) -> Thread {
+    // started on line 7 of revision 2
+    let mut thread = thread_on(number, Side::New, 7, "Moved?");
+    if let Target::Line(anchor) = &mut thread.target {
+        anchor.revision = 2;
+    }
+    match to {
+        Some(line) => thread.followed.push(Anchor {
+            revision: 3,
+            path: "src/new.rs".to_string(),
+            side: Side::New,
+            line,
+        }),
+        None => thread.outdated = Some(3),
+    }
+    thread
+}
+
+/// A thread on a line draws under that line, numbered on its side, one followed from an
+/// earlier revision draws where its line went, and a line names where a comment on it is
+/// anchored
 #[test]
 fn threads_show_under_their_lines() {
-    // one thread on the removed line, numbered in the base, and one on an added line
+    // one thread on the removed line, numbered in the base, one on an added line, one followed
+    // to line 20, and one revision 3 lost
     let threads = vec![
         thread_on(4, Side::Old, 2, "Why gone?"),
         thread_on(5, Side::New, 21, "Done?"),
+        followed_from_2(6, Some(20)),
+        followed_from_2(7, None),
     ];
     let html = dioxus_ssr::render_element(rsx! {
         Diff { revision: 3, file: edited(), threads, node: Some("C35".to_string()) }
@@ -267,6 +297,7 @@ fn threads_show_under_their_lines() {
             "thread 4",
             "new:2",
             "new:20",
+            "thread 6",
             "new:21",
             "reef-app-eof",
             "thread 5",
@@ -280,19 +311,58 @@ fn threads_show_under_their_lines() {
     assert_eq!(body.as_deref(), Some("Why gone?"));
 }
 
-/// A list names a thread by where it is, and by its first line cut short
+/// A list names a thread by where its line is now, and by its first line cut short
 #[test]
 fn threads_are_named_by_where_and_what() {
     // on a removed line, on an added one, and on the node as a whole
     let old = thread_on(4, Side::Old, 2, "Why gone?");
-    assert_eq!(target_label(&old.target), "r3 · src/new.rs:2 (removed)");
+    assert_eq!(place_label(&old), "r3 · src/new.rs:2 (removed)");
     assert_eq!(
-        target_label(&thread_on(5, Side::New, 21, "x").target),
+        place_label(&thread_on(5, Side::New, 21, "x")),
         "r3 · src/new.rs:21"
     );
-    assert_eq!(target_label(&Target::Node), "general");
+    let general = Thread {
+        target: Target::Node,
+        ..old.clone()
+    };
+    assert_eq!(place_label(&general), "general");
+    // one followed is named where it went, and one lost where it was last, and when it was lost
+    assert_eq!(
+        place_label(&followed_from_2(6, Some(20))),
+        "r3 · src/new.rs:20"
+    );
+    assert_eq!(
+        place_label(&followed_from_2(7, None)),
+        "r2 · src/new.rs:7 · outdated in r3"
+    );
     // the first line with anything on it, cut at 80 characters
     let long = thread_on(6, Side::New, 1, &format!("\n  {}\nmore", "é".repeat(90)));
     assert_eq!(excerpt(&long), format!("{}…", "é".repeat(80)));
     assert_eq!(excerpt(&old), "Why gone?");
+}
+
+/// An outdated thread says so before its state, and one still on its line doesn't
+#[test]
+fn outdated_threads_say_so() {
+    // a thread revision 3 lost, and one it kept
+    for (thread, outdated) in [
+        (followed_from_2(7, None), true),
+        (followed_from_2(6, Some(20)), false),
+    ] {
+        let html = dioxus_ssr::render_element(rsx! {
+            ThreadView { thread }
+        });
+        let doc = roxmltree::Document::parse(&html).expect("the thread is well formed");
+        let root = doc.root_element();
+        assert_eq!(class(root).split(' ').any(|c| c == "outdated"), outdated);
+        let tag: Vec<String> = root
+            .descendants()
+            .filter(|n| class(*n).contains("reef-app-outdated"))
+            .map(text)
+            .collect();
+        assert_eq!(tag.len(), usize::from(outdated), "{html}");
+        if outdated {
+            assert_eq!(tag, ["outdated"]);
+        }
+    }
 }

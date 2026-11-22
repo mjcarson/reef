@@ -10,21 +10,27 @@
 //!   of its own, naming its thread, so a reply and a mark never write the same row.
 //! - **A line comment names a line of a stored revision.** A thread on a line is kept only if
 //!   the line's revision lists its file, and the file has a line of that number on that side.
+//! - **A line's thread follows its line.** Each capture follows the node's threads from the
+//!   revision their line was last in to the latest, a revision at a time, by comparing the two
+//!   revisions' hunks ([`follow`](super::follow)), and writes each one's row again over the
+//!   version read. A thread keeps where its line was in each revision, and the revision that
+//!   lost it, which outdates it. A thread started on an older revision is followed at once.
 //! - **Writes take a lock per project; reads take none.** Each comment is one row's write, so
 //!   every step leaves the plan's comments reading whole.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another plan's comments.
 
 use reef_api::{
-    Anchor, COMMENT_BODY_MAX, Comment, Commented, MarkThread, Marked, NewReply, NewThread, Target,
-    Thread, ThreadState,
+    Anchor, COMMENT_BODY_MAX, Comment, Commented, FileDiff, FollowedThread, MarkThread, Marked,
+    NewReply, NewThread, Revision, Target, Thread, ThreadState,
 };
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::instrument;
 
+use super::follow::{follow_line, next_file};
 use super::{Store, Unkeepable, work::now_ms};
 use crate::backend::{Backend, Expect, Written};
 use crate::schema::CommentRow;
@@ -48,8 +54,14 @@ struct Kept {
 enum KeptOn {
     /// A thread's first comment
     Thread {
-        /// What the thread is on
+        /// What the thread is on, as it was started
         target: Target,
+        /// Where its line was in each revision after its target's, oldest first
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        followed: Vec<Anchor>,
+        /// The revision that no longer held its line
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outdated: Option<u32>,
         /// Whether the thread is open or resolved
         state: ThreadState,
     },
@@ -62,6 +74,19 @@ enum KeptOn {
 
 /// One comment row as read: its number, the version its row is at, and what it keeps
 type Read = (u32, u64, Kept);
+
+/// The files of a node's revisions read so far, by revision and path, each `None` if its
+/// revision doesn't list it
+type Files = HashMap<(u32, String), Option<Arc<FileDiff>>>;
+
+/// The threads a follow wrote, and the revision it followed them to
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Followed {
+    /// The node's latest revision
+    pub revision: u32,
+    /// Each thread written, by number
+    pub threads: Vec<FollowedThread>,
+}
 
 impl<B: Backend> Store<B> {
     /// Finds a project's comment lock, making it on first use
@@ -141,12 +166,25 @@ impl<B: Backend> Store<B> {
         let _held = lock.lock().await;
         let rows = self.comment_rows(&node.plan).await?;
         let number = next_number(&rows)?;
+        // a line of an older revision is followed at once to the latest, read under the lock
+        // so a capture's follow after it finds the thread where this left it
+        let (followed, outdated) = match &new.target {
+            Target::Line(anchor) => {
+                let revisions = self.revisions(node).await?;
+                let mut files = Files::new();
+                self.trail(node, &revisions, anchor.clone(), &mut files)
+                    .await?
+            }
+            Target::Node => (Vec::new(), None),
+        };
         let kept = Kept {
             node: node.id.clone(),
             at: now_ms(),
             body: new.body,
             on: KeptOn::Thread {
                 target: new.target,
+                followed,
+                outdated,
                 state: ThreadState::Open,
             },
         };
@@ -242,6 +280,157 @@ impl<B: Backend> Store<B> {
             Written::Applied => Ok(Marked::Marked { thread }),
             Written::Refused(_) => Ok(Marked::Stale { thread }),
         }
+    }
+
+    /// Follows the threads on a node's lines to its latest revision, and answers what it wrote
+    ///
+    /// Each thread whose line was last in an earlier revision is followed a revision at a time,
+    /// until it reaches the latest or a revision no longer holds its line, which outdates it,
+    /// and its row is written again over the version read. Resolved threads are followed too,
+    /// so one reopened is where its line is, but an outdated one is followed no further. A row
+    /// another process wrote since the read is left as it is, for the next follow to take on
+    /// from where it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    #[instrument(name = "Store::follow_threads", skip_all, err(Debug))]
+    pub async fn follow_threads(&self, node: &NodeName) -> anyhow::Result<Option<Followed>> {
+        // under the project's comment lock, so no mark or new thread lands between a read and
+        // its write
+        let lock = self.comment_lock(&node.plan.project);
+        let _held = lock.lock().await;
+        // the node's revisions, read under the lock, so a thread started before it was followed
+        // as far as its start saw
+        let revisions = self.revisions(node).await?;
+        let Some(latest) = revisions.last().map(|revision| revision.revision) else {
+            return Ok(None);
+        };
+        let rows = self.comment_rows(&node.plan).await?;
+        let mut files = Files::new();
+        let mut written = Vec::new();
+        for (number, version, mut kept) in rows {
+            // only this node's threads on a line, still on it, and behind its latest revision
+            if kept.node != node.id {
+                continue;
+            }
+            let KeptOn::Thread {
+                target: Target::Line(anchor),
+                followed,
+                outdated,
+                ..
+            } = &mut kept.on
+            else {
+                continue;
+            };
+            let from = followed.last().unwrap_or(anchor).clone();
+            if outdated.is_some() || from.revision >= latest {
+                continue;
+            }
+            // followed a revision at a time, then written over the version read
+            let (moved, lost) = self.trail(node, &revisions, from, &mut files).await?;
+            followed.extend(moved);
+            *outdated = lost;
+            let row = comment_row(&node.plan, number, version + 1, &kept)?;
+            match self
+                .backend
+                .write_comment(row, Expect::Version(version))
+                .await?
+            {
+                Written::Applied => written.push(FollowedThread {
+                    thread: number,
+                    version: version + 1,
+                    outdated: lost.is_some(),
+                }),
+                // under the lock, only a writer in another process could have moved it
+                Written::Refused(_) => {}
+            }
+        }
+        Ok((!written.is_empty()).then_some(Followed {
+            revision: latest,
+            threads: written,
+        }))
+    }
+
+    /// Follows a line through each revision after the one it is in, until one no longer holds
+    /// it, and answers where it was in each, and the revision that lost it if one did
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `revisions` - The node's revisions, oldest first
+    /// * `from` - The line, in the revision it is in
+    /// * `files` - The files of the node's revisions read so far
+    async fn trail(
+        &self,
+        node: &NodeName,
+        revisions: &[Revision],
+        from: Anchor,
+        files: &mut Files,
+    ) -> anyhow::Result<(Vec<Anchor>, Option<u32>)> {
+        let start = from.revision;
+        let mut at = from;
+        let mut moved = Vec::new();
+        for next in revisions
+            .iter()
+            .filter(|revision| revision.revision > start)
+        {
+            // the file the line is in, as its revision lists it, and the one it became
+            let listed = revisions
+                .iter()
+                .find(|revision| revision.revision == at.revision)
+                .and_then(|revision| revision.files.iter().find(|file| file.path() == at.path));
+            let Some(became) = listed.and_then(|file| next_file(file, &next.files)) else {
+                return Ok((moved, Some(next.revision)));
+            };
+            // the line in the file it became, if the next revision's hunks hold it
+            let from_file = self.file_of(node, at.revision, &at.path, files).await?;
+            let to_file = self
+                .file_of(node, next.revision, became.path(), files)
+                .await?;
+            let followed = match (from_file, to_file) {
+                (Some(from_file), Some(to_file)) => {
+                    follow_line(&at, &from_file, next.revision, &to_file)
+                }
+                _ => None,
+            };
+            match followed {
+                Some(anchor) => {
+                    moved.push(anchor.clone());
+                    at = anchor;
+                }
+                None => return Ok((moved, Some(next.revision))),
+            }
+        }
+        Ok((moved, None))
+    }
+
+    /// Reads one file of a node's revision, once for each follow
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `revision` - The revision's number
+    /// * `path` - The path the file is shown under
+    /// * `files` - The files of the node's revisions read so far
+    async fn file_of(
+        &self,
+        node: &NodeName,
+        revision: u32,
+        path: &str,
+        files: &mut Files,
+    ) -> anyhow::Result<Option<Arc<FileDiff>>> {
+        // a file read already is read from what was kept of it
+        let key = (revision, path.to_string());
+        if let Some(file) = files.get(&key) {
+            return Ok(file.clone());
+        }
+        let file = self
+            .revision_file(node, revision, path)
+            .await?
+            .map(Arc::new);
+        files.insert(key, file.clone());
+        Ok(file)
     }
 
     /// Reads every comment row of a plan, in number order, each checked against its full key
@@ -458,7 +647,12 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
         };
         match kept.on {
             // a thread's first comment starts it, on its node
-            KeptOn::Thread { target, state } => {
+            KeptOn::Thread {
+                target,
+                followed,
+                outdated,
+                state,
+            } => {
                 let node = plan.node(kept.node)?;
                 threads.insert(
                     number,
@@ -467,6 +661,8 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
                         number,
                         version,
                         target,
+                        followed,
+                        outdated,
                         state,
                         comments: vec![comment],
                     },
@@ -503,6 +699,8 @@ mod tests {
             body: "Looks good".to_string(),
             on: KeptOn::Thread {
                 target: Target::Node,
+                followed: Vec::new(),
+                outdated: None,
                 state: ThreadState::Open,
             },
         }

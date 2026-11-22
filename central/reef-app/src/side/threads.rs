@@ -5,12 +5,15 @@
 //! the plan's stream announces, so the toolbar's list of open threads, the Comments tab and the
 //! threads under the diff's lines all show the same. A write reads them again at once too, so
 //! its writer sees it without waiting for the stream.
+//!
+//! A thread on a line is named where its line is in the latest revision it was followed to, and
+//! one whose line a later revision lost says it is outdated.
 
 use super::when;
 use crate::calls;
 use crate::live::use_work_changes;
 use dioxus::prelude::*;
-use reef_api::{Commented, Marked, Side, Target, Thread, ThreadState};
+use reef_api::{Anchor, Commented, Marked, Side, Target, Thread, ThreadState};
 
 /// The plan's comment threads, as the canvas read them last, and the plan they are of
 #[derive(Clone, Copy, PartialEq)]
@@ -75,26 +78,39 @@ pub fn use_threads(project: ReadSignal<String>, plan: ReadSignal<String>) -> Thr
     })
 }
 
-/// Where a thread is, as a list names it: on the node as a whole, or at a line of a revision
+/// Where a thread is, as a list names it: on the node as a whole, or at its line in the latest
+/// revision it was followed to, and the revision that lost the line if one did
 ///
 /// # Arguments
 ///
-/// * `target` - What the thread is on
-pub fn target_label(target: &Target) -> String {
-    match target {
-        Target::Node => "general".to_string(),
-        Target::Line(anchor) => {
-            // a removed line is numbered in the base
-            let side = match anchor.side {
-                Side::Old => " (removed)",
-                Side::New => "",
-            };
-            format!(
-                "r{} · {}:{}{side}",
-                anchor.revision, anchor.path, anchor.line
-            )
-        }
+/// * `thread` - The thread
+pub fn place_label(thread: &Thread) -> String {
+    // a line's thread is named where its line is now, or was last
+    let place = match thread.latest_anchor() {
+        Some(anchor) => anchor_label(anchor),
+        None => "general".to_string(),
+    };
+    match thread.outdated {
+        Some(revision) => format!("{place} · outdated in r{revision}"),
+        None => place,
     }
+}
+
+/// Where a line is, as a list names it: its revision, its file and its number
+///
+/// # Arguments
+///
+/// * `anchor` - The line
+fn anchor_label(anchor: &Anchor) -> String {
+    // a removed line is numbered in the base
+    let side = match anchor.side {
+        Side::Old => " (removed)",
+        Side::New => "",
+    };
+    format!(
+        "r{} · {}:{}{side}",
+        anchor.revision, anchor.path, anchor.line
+    )
 }
 
 /// The first line of a thread's first comment, cut short to fit a list
@@ -116,8 +132,8 @@ pub fn excerpt(thread: &Thread) -> String {
     }
 }
 
-/// One thread: its comments, rendered, then its state, a reply box and a resolve or reopen
-/// button
+/// One thread: its comments, rendered, then whether it is outdated, its state, a reply box and
+/// a resolve or reopen button
 ///
 /// # Arguments
 ///
@@ -131,13 +147,13 @@ pub fn ThreadView(thread: Thread) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let focused = threads.is_some_and(|threads| *threads.focus.read() == Some(thread.number));
     let open = thread.is_open();
-    let (number, read) = (thread.number, thread.version);
-    let class = match (open, focused) {
-        (true, false) => "reef-app-thread open",
-        (true, true) => "reef-app-thread open focus",
-        (false, false) => "reef-app-thread resolved",
-        (false, true) => "reef-app-thread resolved focus",
-    };
+    let (number, read, outdated) = (thread.number, thread.version, thread.outdated);
+    let class = format!(
+        "reef-app-thread {}{}{}",
+        if open { "open" } else { "resolved" },
+        if focused { " focus" } else { "" },
+        if outdated.is_some() { " outdated" } else { "" },
+    );
     rsx! {
         div {
             class,
@@ -164,6 +180,14 @@ pub fn ThreadView(thread: Thread) -> Element {
                 }
             }
             div { class: "reef-app-thread-foot",
+                // a line a later revision lost is said before the state
+                if let Some(revision) = outdated {
+                    span {
+                        class: "reef-app-tag reef-app-outdated",
+                        title: "Its line isn't in r{revision}",
+                        "outdated"
+                    }
+                }
                 span { class: if open { "reef-app-thread-state open" } else { "reef-app-thread-state resolved" },
                     if open {
                         "open"

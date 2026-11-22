@@ -19,7 +19,8 @@
 //! - **Revisions** ([`revision`]): each capture of a node's changes, its files, hunks and lines,
 //!   and the anchor a comment names a line by.
 //! - **Comments** ([`comment`]): threads on a line of a node's revision or on the node as a
-//!   whole, each open or resolved, and what came of a comment or a mark.
+//!   whole, each open or resolved, where a line's thread followed it to in later revisions, and
+//!   what came of a comment or a mark.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -40,7 +41,7 @@ pub mod queue;
 pub mod revision;
 pub mod work;
 
-pub use change::{Change, PutNode, PutPage};
+pub use change::{Change, FollowedThread, PutNode, PutPage};
 pub use comment::{
     COMMENT_BODY_MAX, Comment, Commented, MarkThread, Marked, NewReply, NewThread, Target, Thread,
     ThreadState,

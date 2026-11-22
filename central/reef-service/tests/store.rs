@@ -99,4 +99,6 @@ suite!(
     a_comment_and_its_reply_survive_a_restart,
     a_line_comment_off_its_revision_is_refused,
     marking_over_an_older_version_is_stale,
+    deleting_a_commented_line_outdates_its_thread,
+    captures_follow_their_nodes_threads,
 );

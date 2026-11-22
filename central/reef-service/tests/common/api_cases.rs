@@ -7,11 +7,11 @@
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
-    Commented, ErrorCode, FileDiff, Listing, MarkThread, Marked, NewPlan, NewProject, NewReply,
-    NewThread, NodePut, NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo,
-    PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, Revision, Rewrite,
-    Side, StalePut, StartWork, Started, StoredNode, StoredPage, Target, Thread, ThreadState,
-    WorkRecord, paths,
+    Commented, ErrorCode, FileDiff, FollowedThread, Listing, MarkThread, Marked, NewPlan,
+    NewProject, NewReply, NewThread, NodePut, NodeWrite, PageEdit, PageEdited, PageListing,
+    PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued,
+    Refusal, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode, StoredPage, Target,
+    Thread, ThreadState, WorkRecord, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -1142,6 +1142,146 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
             state: ThreadState::Resolved,
             version: 2,
         },
+    ];
+    for expected in expected {
+        let event = events.next().await?.expect("the stream sent the write");
+        assert_eq!(event.event, expected.kind());
+        let change: Change = serde_json::from_str(&event.data)?;
+        assert_eq!(change, expected);
+    }
+    Ok(())
+}
+
+/// A capture that moves or loses commented lines follows their threads before it is told, and
+/// the stream says which threads it wrote; a capture that moves none says nothing of threads
+///
+/// # Arguments
+///
+/// * `ax` - The served service and a client of it
+pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // C36 started, and captured once with a file of two lines
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C36", &[], 0), None))
+        .await?;
+    let node = ax.plan.node("C36")?;
+    let start = StartWork {
+        start: start_in(&ax.repo, "C36", 'a'),
+        replaces: None,
+    };
+    let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
+    let Started::Recorded { record } = started else {
+        anyhow::bail!("the start wasn't recorded: {started:?}");
+    };
+    // a capture of a tree, holding `src/a.rs` as it is in a blob of the same letter
+    let capture = |tree: char, text: &str| AddCapture {
+        pinned: record.start.pinned.clone(),
+        shas: CaptureShas {
+            head: "d".repeat(40),
+            tree: tree.to_string().repeat(40),
+            merge_base: None,
+            base: record.start.start_tree.clone(),
+        },
+        conflicts: Vec::new(),
+        files: vec![FileDiff {
+            new_id: Some(tree.to_string().repeat(40)),
+            ..added_file("src/a.rs", text)
+        }],
+    };
+    let (status, _): (_, Captured) = ax
+        .client
+        .post(&paths::captures(&node), &capture('1', "one\ntwo\n"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let response = ax
+        .client
+        .open(&paths::changes(Some("reef"), Some("central")))
+        .await?;
+    let mut events = Events::new(response);
+    // a thread on each line, and one on the node
+    let on_line = |line| NewThread {
+        target: Target::Line(Anchor {
+            revision: 1,
+            path: "src/a.rs".to_string(),
+            side: Side::New,
+            line,
+        }),
+        body: format!("Line {line}?"),
+    };
+    let general = NewThread {
+        target: Target::Node,
+        body: "Overall?".to_string(),
+    };
+    for new in [on_line(2), on_line(1), general] {
+        let (status, _): (_, Commented) =
+            ax.client.post(&paths::node_comments(&node), &new).await?;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // the next capture deletes `two` and adds a line above `one`
+    let (status, captured): (_, Captured) = ax
+        .client
+        .post(&paths::captures(&node), &capture('2', "zero\none\n"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(matches!(captured, Captured::Added { .. }), "{captured:?}");
+    // so the thread on `two` is outdated, the one on `one` moved down, and the general one alone
+    let (_, threads): (_, Vec<Thread>) = ax.client.get(&paths::node_comments(&node)).await?;
+    assert_eq!(threads[0].outdated, Some(2));
+    assert!(threads[0].followed.is_empty());
+    let moved = Anchor {
+        revision: 2,
+        path: "src/a.rs".to_string(),
+        side: Side::New,
+        line: 2,
+    };
+    assert_eq!(threads[1].followed, [moved]);
+    assert_eq!((threads[1].outdated, threads[1].version), (None, 2));
+    assert_eq!((threads[2].followed.len(), threads[2].version), (0, 1));
+    // the same tree again keeps nothing new and moves no thread
+    let (status, again): (_, Captured) = ax
+        .client
+        .post(&paths::captures(&node), &capture('2', "zero\none\n"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(matches!(again, Captured::Unchanged { .. }), "{again:?}");
+    // and the stream told of the comments, the revision, then the threads it followed
+    let added = |thread| Change::CommentAdded {
+        node: node.clone(),
+        thread,
+        comment: thread,
+    };
+    let recorded = |version| Change::WorkRecorded {
+        node: node.clone(),
+        version,
+    };
+    let expected = [
+        added(1),
+        added(2),
+        added(3),
+        Change::RevisionCaptured {
+            node: node.clone(),
+            revision: 2,
+        },
+        recorded(3),
+        Change::ThreadsFollowed {
+            node: node.clone(),
+            revision: 2,
+            threads: vec![
+                FollowedThread {
+                    thread: 1,
+                    version: 2,
+                    outdated: true,
+                },
+                FollowedThread {
+                    thread: 2,
+                    version: 2,
+                    outdated: false,
+                },
+            ],
+        },
+        recorded(4),
     ];
     for expected in expected {
         let event = events.next().await?.expect("the stream sent the write");

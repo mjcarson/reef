@@ -9,6 +9,11 @@
 //!
 //! A comment's body is markdown, kept as written. The service renders it on read, raw HTML
 //! escaped, so a client shows the HTML as it is.
+//!
+//! A thread on a line follows its line through the node's later revisions. Each capture compares
+//! the revision the line was last in with the next, and the thread keeps where the line went in
+//! each, its target staying where it was started. Once a revision no longer holds the line, the
+//! thread is outdated from that revision on, and is followed no further.
 
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
@@ -79,10 +84,18 @@ pub struct Thread {
     pub node: NodeName,
     /// Its number: its first comment's
     pub number: u32,
-    /// The version its state is at, which a mark names to change it
+    /// The version its row is at, which a mark names to change it: a mark moves it on, and so
+    /// does a capture that follows its line
     pub version: u64,
-    /// What it is on
+    /// What it is on, as it was started
     pub target: Target,
+    /// Where its line is in each revision after its target's that it was followed to, oldest
+    /// first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub followed: Vec<Anchor>,
+    /// The revision that no longer held its line, from which on it is outdated
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outdated: Option<u32>,
     /// Whether it is open or resolved
     pub state: ThreadState,
     /// Its comments, the first one first
@@ -93,6 +106,59 @@ impl Thread {
     /// Whether it still wants an answer
     pub fn is_open(&self) -> bool {
         self.state == ThreadState::Open
+    }
+
+    /// Whether a later revision no longer held its line
+    pub fn is_outdated(&self) -> bool {
+        self.outdated.is_some()
+    }
+
+    /// Where its line is in the latest revision it was followed to, or `None` for a thread on
+    /// the node as a whole
+    ///
+    /// An outdated thread's is where its line was last.
+    pub fn latest_anchor(&self) -> Option<&Anchor> {
+        // the last place it was followed to, else where it was started
+        self.followed.last().or(self.target.anchor())
+    }
+
+    /// Where its line is in one revision of its node, if it was followed there
+    ///
+    /// # Arguments
+    ///
+    /// * `revision` - The revision's number
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{Anchor, Side, Target, Thread, ThreadState};
+    ///
+    /// let at = |revision, line| Anchor {
+    ///     revision,
+    ///     path: "src/lib.rs".to_string(),
+    ///     side: Side::New,
+    ///     line,
+    /// };
+    /// let thread = Thread {
+    ///     node: "reef/central/C36".parse().unwrap(),
+    ///     number: 1,
+    ///     version: 2,
+    ///     target: Target::Line(at(1, 12)),
+    ///     followed: vec![at(2, 15)],
+    ///     outdated: Some(3),
+    ///     state: ThreadState::Open,
+    ///     comments: Vec::new(),
+    /// };
+    /// assert_eq!(thread.anchor_in(2).map(|anchor| anchor.line), Some(15));
+    /// assert!(thread.anchor_in(3).is_none());
+    /// ```
+    pub fn anchor_in(&self, revision: u32) -> Option<&Anchor> {
+        // where it was started, then each place it was followed to
+        self.target
+            .anchor()
+            .into_iter()
+            .chain(&self.followed)
+            .find(|anchor| anchor.revision == revision)
     }
 }
 
@@ -186,6 +252,15 @@ mod tests {
         }
     }
 
+    /// A thread as JSON
+    ///
+    /// # Arguments
+    ///
+    /// * `thread` - The thread
+    fn value_of(thread: &Thread) -> serde_json::Value {
+        serde_json::to_value(thread).unwrap()
+    }
+
     /// A target names what it is on, a line's anchor beside it
     #[test]
     fn targets_are_tagged_by_what_they_are_on() {
@@ -215,6 +290,8 @@ mod tests {
             number: 4,
             version: 2,
             target: Target::Line(anchor()),
+            followed: Vec::new(),
+            outdated: None,
             state: ThreadState::Resolved,
             comments: vec![
                 Comment {
@@ -241,6 +318,37 @@ mod tests {
         );
         assert_eq!(serde_json::from_value::<Thread>(value).unwrap(), thread);
         assert!(!thread.is_open());
+        // a thread never followed leaves its trail out, and is where it was started
+        assert!(value_of(&thread).get("followed").is_none());
+        assert!(value_of(&thread).get("outdated").is_none());
+        assert_eq!(thread.latest_anchor(), Some(&anchor()));
+        // one followed to revision 4 and lost in 5 says so, and is last where 4 had it
+        let moved = Anchor {
+            revision: 4,
+            line: 14,
+            ..anchor()
+        };
+        let followed = Thread {
+            followed: vec![moved.clone()],
+            outdated: Some(5),
+            ..thread.clone()
+        };
+        let value = value_of(&followed);
+        assert_eq!(value["followed"][0]["line"], 14);
+        assert_eq!(value["outdated"], 5);
+        assert_eq!(serde_json::from_value::<Thread>(value).unwrap(), followed);
+        assert!(followed.is_outdated() && !thread.is_outdated());
+        assert_eq!(followed.latest_anchor(), Some(&moved));
+        assert_eq!(followed.anchor_in(3), Some(&anchor()));
+        assert_eq!(followed.anchor_in(4), Some(&moved));
+        assert_eq!(followed.anchor_in(5), None);
+        // and a general thread is at no line in any revision
+        let general = Thread {
+            target: Target::Node,
+            ..thread.clone()
+        };
+        assert_eq!(general.latest_anchor(), None);
+        assert_eq!(general.anchor_in(3), None);
         // and a new thread is its target and its first body
         let new = NewThread {
             target: Target::Node,

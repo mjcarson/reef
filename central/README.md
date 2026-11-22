@@ -134,6 +134,11 @@ It reads and writes through a `Store`, and checks every write against the whole 
   (`Service::reply`), and a thread is marked open or resolved over the version its writer read
   (`Service::mark_thread`). A comment's body is markdown, read back rendered with raw HTML
   escaped, and each comment and mark is a change (`comment-added`, `thread-marked`).
+- **A line's thread follows its line** (`Store::follow_threads`). Each capture follows the
+  node's threads to its latest revision before it is told, by comparing each two revisions'
+  stored hunks, and a thread keeps where its line went in each. One whose line a revision
+  deleted, edited or no longer shows is outdated from it on. The threads a capture moved are a
+  change of their own (`threads-followed`).
 
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
@@ -166,11 +171,11 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
 | `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
 | `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
-| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200 if kept or unchanged, 409 if started again since, 422 if not started |
+| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200 if kept or unchanged, the node's threads followed to its latest revision, 409 if started again since, 422 if not started |
 | `GET …/plans/{plan}/work/{id}/revisions` | every `Revision` of the node, oldest first, its files without their hunks |
 | `GET …/plans/{plan}/work/{id}/revisions/{n}` | the `Revision`, or 404 |
 | `GET …/plans/{plan}/work/{id}/revisions/{n}/files/{*path}` | the `FileDiff`, its hunks and lines, or 404 if the revision doesn't list it |
-| `GET …/plans/{plan}/comments` | every `Thread` of the plan, by number, its comments rendered |
+| `GET …/plans/{plan}/comments` | every `Thread` of the plan, by number, its comments rendered, a line's with where it was `followed` and the revision it went `outdated` in |
 | `GET …/plans/{plan}/nodes/{id}/comments` | every `Thread` on the node, by number |
 | `POST …/plans/{plan}/nodes/{id}/comments` `NewThread` | `Commented`: 200, 422 if the node is not in its plan or the line not in its revisions |
 | `GET …/plans/{plan}/comments/{n}` | the `Thread`, or 404 |
@@ -276,9 +281,11 @@ the pages and the JSON API alike.
   capture the plan's stream announces reads the tab again (`live::WorkChanges`) without
   reading the plan again.
 - **Comments are threads on a diff's lines or on the node.** A click on a line's numbers opens a
-  box under it, and its threads show under it. The Comments tab holds the node's threads, a box
-  for a general one, and how many are open, and the toolbar counts and lists the plan's open
-  threads. The canvas reads the plan's threads once a change, for all three.
+  box under it, and its threads show under it, in each revision their line was followed to.
+  The Comments tab holds the node's threads, a box for a general one, and how many are open,
+  and the toolbar counts and lists the plan's open threads, each named where its line is now
+  and marked if it is outdated. The canvas reads the plan's threads once a change, for all
+  three.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under
@@ -354,7 +361,8 @@ is the twin's oracle.
 - **A plan's comments are a row each** (`Store::threads`), in the plan's partition by number,
   so a node's threads and the plan's are each one read. Every comment, a reply included, takes
   the number after the plan's last, through restarts. A thread's first comment holds its target
-  and state, and a mark writes it again by version; a reply is a row of its own.
+  and state, and a mark writes it again by version; a reply is a row of its own. Where a line's
+  thread was followed to sits on that row too, which a capture's follow writes by version.
 
 ## The schema
 
@@ -368,7 +376,7 @@ is the twin's oracle.
 | `WorkRow` | project | `plan/id` | a `version`, and the node's work record as JSON: its worktree, branch, base branch, start, start tree, fork and pin, and each capture's SHAs |
 | `RevisionRow` | (project, `plan/id`) | number, padded | a `version`, and the revision as JSON: its SHAs, conflicts and files without their hunks |
 | `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
-| `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target and state or a reply's thread |
+| `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target, trail and state or a reply's thread |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

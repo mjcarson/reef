@@ -237,6 +237,11 @@ Changes and Comments tabs show.
   version where it was.
 - **A line comment names a stored line.** A thread on a line is kept only if its revision lists
   the file and the file has a line of that number on that side, read from the file's row.
+- **A thread's trail on its first row** ([C36](../milestones/m7.md)). Where its line went in each later
+  revision, and the revision that lost it, sit beside its target, which stays where the
+  thread was started. A capture's follow reads the plan's comments and the node's revisions
+  under the comment lock, and writes each thread it moved over the version it read; a row
+  another process wrote since is left for the next follow. A file is read once a follow.
 - **Writes take a lock per project; reads take none.** Each write is one row, so the plan's
   comments read whole after every step.
 - **Every row checked against its full key on read**, its project and plan, so a hash collision

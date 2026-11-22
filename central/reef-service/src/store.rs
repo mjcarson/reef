@@ -40,11 +40,15 @@
 //!   first so a revision that reads has every file it lists.
 //! - **A plan's comments in its own partition** ([`comment`]): each comment a row numbered in
 //!   its plan, a thread's first holding the thread's target and state, which a mark writes again
-//!   by version.
+//!   by version, and where its line went in later revisions, which a capture's follow writes
+//!   ([`follow`]).
 
 mod comment;
+mod follow;
 mod revision;
 mod work;
+
+pub use comment::Followed;
 
 pub use revision::FILE_ROW_MAX;
 
