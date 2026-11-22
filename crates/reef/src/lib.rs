@@ -23,6 +23,8 @@
 //!   members inline and a file for each page, which imports back as the same plan.
 //! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
+//! - **git** ([`git`]): the checkout a node's work happens in, read through gix, its worktree
+//!   written as a tree through git's CLI, and its start pinned under `refs/reef/start/`.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
 //! - **Config** ([`conf`]): `[api] address` alone, from the file the service reads.
@@ -34,6 +36,7 @@ pub mod cli;
 pub mod client;
 pub mod conf;
 pub mod export;
+pub mod git;
 pub mod import;
 pub mod mcp;
 pub mod node;
