@@ -9,6 +9,7 @@
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
 
+use crate::comment::ThreadState;
 use crate::project::Project;
 
 /// A node a batch of puts wrote, and the version it is now at
@@ -92,6 +93,26 @@ pub enum Change {
         /// The revision's number
         revision: u32,
     },
+    /// A comment was kept: a new thread's first, or a reply
+    CommentAdded {
+        /// The node its thread is on
+        node: NodeName,
+        /// Its thread's number
+        thread: u32,
+        /// Its own number
+        comment: u32,
+    },
+    /// A thread was marked open or resolved
+    ThreadMarked {
+        /// The node it is on
+        node: NodeName,
+        /// Its number
+        thread: u32,
+        /// The state it is now in
+        state: ThreadState,
+        /// The version it is now at
+        version: u64,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -111,6 +132,8 @@ impl Change {
             Change::QueueChanged { .. } => "queue-changed",
             Change::WorkRecorded { .. } => "work-recorded",
             Change::RevisionCaptured { .. } => "revision-captured",
+            Change::CommentAdded { .. } => "comment-added",
+            Change::ThreadMarked { .. } => "thread-marked",
             Change::Missed { .. } => "missed",
         }
     }
@@ -124,9 +147,10 @@ impl Change {
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
             Change::QueueChanged { project } => Some(project.as_str()),
-            Change::WorkRecorded { node, .. } | Change::RevisionCaptured { node, .. } => {
-                Some(node.plan.project.as_str())
-            }
+            Change::WorkRecorded { node, .. }
+            | Change::RevisionCaptured { node, .. }
+            | Change::CommentAdded { node, .. }
+            | Change::ThreadMarked { node, .. } => Some(node.plan.project.as_str()),
             Change::Missed { .. } => None,
         }
     }
@@ -140,9 +164,10 @@ impl Change {
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
-            Change::WorkRecorded { node, .. } | Change::RevisionCaptured { node, .. } => {
-                Some(&node.plan)
-            }
+            Change::WorkRecorded { node, .. }
+            | Change::RevisionCaptured { node, .. }
+            | Change::CommentAdded { node, .. }
+            | Change::ThreadMarked { node, .. } => Some(&node.plan),
             Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
                 None
             }
@@ -236,6 +261,17 @@ mod tests {
             Change::RevisionCaptured {
                 node: "reef/central/C32".parse().unwrap(),
                 revision: 1,
+            },
+            Change::CommentAdded {
+                node: "reef/central/C34".parse().unwrap(),
+                thread: 1,
+                comment: 2,
+            },
+            Change::ThreadMarked {
+                node: "reef/central/C34".parse().unwrap(),
+                thread: 1,
+                state: crate::ThreadState::Resolved,
+                version: 2,
             },
             Change::Missed { count: 3 },
         ];

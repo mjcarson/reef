@@ -9,7 +9,7 @@ use reef_model::PlanName;
 use std::future::Future;
 
 use crate::schema::{
-    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
+    CommentRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
     RevisionRow, WorkRow,
 };
 
@@ -383,4 +383,31 @@ pub trait Backend: Send + Sync {
         &self,
         rows: Vec<RevisionFileRow>,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Reads the comment rows stored in a plan's partition, in number order, or the one of a
+    /// number
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `plan` - The plan's name within its project
+    /// * `number` - The one comment's sort key, its number padded, or `None` for all of them
+    fn comments(
+        &self,
+        project: &str,
+        plan: &str,
+        number: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<CommentRow>>> + Send;
+
+    /// Writes one comment row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_comment(
+        &self,
+        row: CommentRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 }

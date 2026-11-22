@@ -27,6 +27,11 @@
 //! | `GET` | [`REVISIONS`] |
 //! | `GET` | [`NODE_REVISION`] |
 //! | `GET` | [`REVISION_FILE`] |
+//! | `GET` | [`PLAN_COMMENTS`] |
+//! | `GET`, `POST` | [`NODE_COMMENTS`] |
+//! | `GET` | [`THREAD`] |
+//! | `POST` | [`REPLIES`] |
+//! | `PUT` | [`THREAD_STATE`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
 use reef_model::{NodeName, PlanName};
@@ -104,6 +109,21 @@ pub const NODE_REVISION: &str =
 /// One file of a node's revision, its hunks and all, by the path it is shown under
 pub const REVISION_FILE: &str =
     "/api/v1/projects/{project}/plans/{plan}/work/{id}/revisions/{revision}/files/{*path}";
+
+/// A plan's comment threads, on every node of it, by their numbers
+pub const PLAN_COMMENTS: &str = "/api/v1/projects/{project}/plans/{plan}/comments";
+
+/// One node's comment threads, read by `GET`, and a new one started by `POST`
+pub const NODE_COMMENTS: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/comments";
+
+/// One comment thread, by its number in its plan
+pub const THREAD: &str = "/api/v1/projects/{project}/plans/{plan}/comments/{thread}";
+
+/// A thread's replies, each one sent by `POST`
+pub const REPLIES: &str = "/api/v1/projects/{project}/plans/{plan}/comments/{thread}/replies";
+
+/// A thread's state, marked open or resolved by `PUT`
+pub const THREAD_STATE: &str = "/api/v1/projects/{project}/plans/{plan}/comments/{thread}/state";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
@@ -386,6 +406,66 @@ pub fn revision_file(node: &NodeName, revision: u32, path: &str) -> String {
     )
 }
 
+/// The path of a plan's comment threads
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn plan_comments(plan: &PlanName) -> String {
+    format!("{}/comments", self::plan(plan))
+}
+
+/// The path of one node's comment threads, which a new one is sent to
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::paths;
+///
+/// let node = "reef/central/Item 346".parse().unwrap();
+/// assert_eq!(
+///     paths::node_comments(&node),
+///     "/api/v1/projects/reef/plans/central/nodes/Item%20346/comments"
+/// );
+/// ```
+pub fn node_comments(node: &NodeName) -> String {
+    format!("{}/comments", self::node(&node.plan, &node.id))
+}
+
+/// The path of one comment thread
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `thread` - The thread's number
+pub fn thread(plan: &PlanName, thread: u32) -> String {
+    format!("{}/{thread}", plan_comments(plan))
+}
+
+/// The path a thread's replies are sent to
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `thread` - The thread's number
+pub fn replies(plan: &PlanName, thread: u32) -> String {
+    format!("{}/replies", self::thread(plan, thread))
+}
+
+/// The path a thread is marked open or resolved at
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `thread` - The thread's number
+pub fn thread_state(plan: &PlanName, thread: u32) -> String {
+    format!("{}/state", self::thread(plan, thread))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -475,6 +555,19 @@ mod tests {
             .replace("{revision}", "3")
             .replace("{*path}", "src/lib.rs");
         assert_eq!(super::revision_file(&node, 3, "src/lib.rs"), file);
+        // and the plan's comment threads, a node's, one thread, and its replies and state
+        let fill = |template: &str| {
+            template
+                .replace("{project}", "reef")
+                .replace("{plan}", "central")
+                .replace("{id}", "C30")
+                .replace("{thread}", "7")
+        };
+        assert_eq!(super::plan_comments(&plan), fill(super::PLAN_COMMENTS));
+        assert_eq!(super::node_comments(&node), fill(super::NODE_COMMENTS));
+        assert_eq!(super::thread(&plan, 7), fill(super::THREAD));
+        assert_eq!(super::replies(&plan, 7), fill(super::REPLIES));
+        assert_eq!(super::thread_state(&plan, 7), fill(super::THREAD_STATE));
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

@@ -6,11 +6,12 @@
 //! project registered for a fresh git repo.
 
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, CaptureShas, Captured, Change, Checked,
-    ErrorCode, FileDiff, Listing, NewPlan, NewProject, NodePut, NodeWrite, PageEdit, PageEdited,
-    PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit,
-    QueueListing, Queued, Refusal, Revision, Rewrite, StalePut, StartWork, Started, StoredNode,
-    StoredPage, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
+    Commented, ErrorCode, FileDiff, Listing, MarkThread, Marked, NewPlan, NewProject, NewReply,
+    NewThread, NodePut, NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo,
+    PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, Revision, Rewrite,
+    Side, StalePut, StartWork, Started, StoredNode, StoredPage, Target, Thread, ThreadState,
+    WorkRecord, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -934,6 +935,213 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         },
         recorded(2),
         recorded(3),
+    ];
+    for expected in expected {
+        let event = events.next().await?.expect("the stream sent the write");
+        assert_eq!(event.event, expected.kind());
+        let change: Change = serde_json::from_str(&event.data)?;
+        assert_eq!(change, expected);
+    }
+    Ok(())
+}
+
+/// The comment routes start threads on a node and its lines, reply in them and mark them, each
+/// outcome with its status, serve a node's and a plan's threads rendered, and tell the plan's
+/// followers of each comment and mark
+///
+/// # Arguments
+///
+/// * `ax` - The served service and a client of it
+pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a node started and captured once, and the plan's changes followed from then on
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C34", &[], 0), None))
+        .await?;
+    let node = ax.plan.node("C34")?;
+    let start = StartWork {
+        start: start_in(&ax.repo, "C34", 'a'),
+        replaces: None,
+    };
+    let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
+    let Started::Recorded { record } = started else {
+        anyhow::bail!("the start wasn't recorded: {started:?}");
+    };
+    let add = AddCapture {
+        pinned: record.start.pinned.clone(),
+        shas: CaptureShas {
+            head: "d".repeat(40),
+            tree: "e".repeat(40),
+            merge_base: None,
+            base: record.start.start_tree.clone(),
+        },
+        conflicts: Vec::new(),
+        files: vec![added_file("src/a.rs", "one\ntwo\n")],
+    };
+    let (status, _): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
+    assert_eq!(status, StatusCode::OK);
+    let response = ax
+        .client
+        .open(&paths::changes(Some("reef"), Some("central")))
+        .await?;
+    let mut events = Events::new(response);
+    // no thread yet, on the plan or the node
+    let (status, threads): (_, Vec<Thread>) =
+        ax.client.get(&paths::plan_comments(&ax.plan)).await?;
+    assert_eq!((status, threads), (StatusCode::OK, Vec::new()));
+    // a thread on a line of revision 1 is kept, 200, its comment rendered with raw HTML escaped
+    let line = Target::Line(Anchor {
+        revision: 1,
+        path: "src/a.rs".to_string(),
+        side: Side::New,
+        line: 2,
+    });
+    let new = NewThread {
+        target: line.clone(),
+        body: "Why **two** <b>here</b>?".to_string(),
+    };
+    let (status, added): (_, Commented) =
+        ax.client.post(&paths::node_comments(&node), &new).await?;
+    assert_eq!(status, StatusCode::OK);
+    let Commented::Added { thread, comment } = added else {
+        anyhow::bail!("the thread wasn't kept: {added:?}");
+    };
+    assert_eq!(
+        (thread.number, comment, thread.target.clone()),
+        (1, 1, line)
+    );
+    assert_eq!(
+        thread.comments[0].html,
+        "<p>Why <strong>two</strong> &lt;b&gt;here&lt;/b&gt;?</p>\n"
+    );
+    // a general thread, and a reply in the first, each 200
+    let general = NewThread {
+        target: Target::Node,
+        body: "Looks good".to_string(),
+    };
+    let (status, _): (_, Commented) = ax
+        .client
+        .post(&paths::node_comments(&node), &general)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let reply = NewReply {
+        body: "Because.".to_string(),
+    };
+    let (status, replied): (_, Commented) =
+        ax.client.post(&paths::replies(&ax.plan, 1), &reply).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(replied, Commented::Added { comment: 3, .. }),
+        "{replied:?}"
+    );
+    // the plan's threads and the node's are both, and one thread reads by its number
+    let (_, threads): (_, Vec<Thread>) = ax.client.get(&paths::plan_comments(&ax.plan)).await?;
+    let numbers: Vec<u32> = threads.iter().map(|thread| thread.number).collect();
+    assert_eq!(numbers, [1, 2]);
+    assert_eq!(threads[0].comments.len(), 2);
+    assert_eq!(threads[0].comments[1].html, "<p>Because.</p>\n");
+    let (_, on_node): (_, Vec<Thread>) = ax.client.get(&paths::node_comments(&node)).await?;
+    assert_eq!(on_node, threads);
+    let (status, one): (_, Thread) = ax.client.get(&paths::thread(&ax.plan, 1)).await?;
+    assert_eq!((status, &one), (StatusCode::OK, &threads[0]));
+    // resolved over its version, 200, then stale over the same version, 409
+    let mark = MarkThread {
+        state: ThreadState::Resolved,
+        read: 1,
+    };
+    let (status, marked): (_, Marked) = ax
+        .client
+        .put(&paths::thread_state(&ax.plan, 1), &mark)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let Marked::Marked { thread: resolved } = marked else {
+        anyhow::bail!("the mark was refused: {marked:?}");
+    };
+    assert_eq!(
+        (resolved.state, resolved.version),
+        (ThreadState::Resolved, 2)
+    );
+    assert!(!resolved.comments[0].html.is_empty());
+    let (status, stale): (_, Marked) = ax
+        .client
+        .put(&paths::thread_state(&ax.plan, 1), &mark)
+        .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(matches!(stale, Marked::Stale { .. }), "{stale:?}");
+    // a line its revisions don't hold, a node not in the plan, a reply or a mark in no thread,
+    // each 422, and nothing written
+    let off = NewThread {
+        target: Target::Line(Anchor {
+            revision: 1,
+            path: "src/a.rs".to_string(),
+            side: Side::New,
+            line: 3,
+        }),
+        body: "Here?".to_string(),
+    };
+    let (status, refused): (_, Commented) =
+        ax.client.post(&paths::node_comments(&node), &off).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused, Commented::NoLine { target: off.target });
+    let stray = ax.plan.node("C99")?;
+    let (status, refused): (_, Commented) = ax
+        .client
+        .post(&paths::node_comments(&stray), &general)
+        .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused, Commented::NotInPlan { node: stray });
+    let (status, refused): (_, Commented) =
+        ax.client.post(&paths::replies(&ax.plan, 3), &reply).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused, Commented::NoThread { thread: 3 });
+    let (status, refused): (_, Marked) = ax
+        .client
+        .put(&paths::thread_state(&ax.plan, 9), &mark)
+        .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused, Marked::NoThread { thread: 9 });
+    // an empty body is a bad request, a thread not there is not found, and a plan not listed
+    // is said as such
+    let empty = NewReply {
+        body: " ".to_string(),
+    };
+    let (status, error): (_, ApiError) =
+        ax.client.post(&paths::replies(&ax.plan, 1), &empty).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    let (status, error): (_, ApiError) = ax.client.get(&paths::thread(&ax.plan, 3)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+    );
+    let unlisted = PlanName::new("reef", "unlisted")?;
+    let (status, error): (_, ApiError) = ax.client.get(&paths::plan_comments(&unlisted)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    let (_, threads): (_, Vec<Thread>) = ax.client.get(&paths::plan_comments(&ax.plan)).await?;
+    assert_eq!(threads.len(), 2);
+    // and the plan's followers were told of each comment kept, and the one mark
+    let added = |thread, comment| Change::CommentAdded {
+        node: node.clone(),
+        thread,
+        comment,
+    };
+    let expected = [
+        added(1, 1),
+        added(2, 2),
+        added(1, 3),
+        Change::ThreadMarked {
+            node: node.clone(),
+            thread: 1,
+            state: ThreadState::Resolved,
+            version: 2,
+        },
     ];
     for expected in expected {
         let event = events.next().await?.expect("the stream sent the write");

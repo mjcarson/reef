@@ -213,3 +213,31 @@ Each capture of a node's changes is kept as a revision of its files, hunks and l
   without its hunks, marked too large, with its counts still said.
 - **Every row checked against its full key on read**, its project, node and number, so a hash
   collision is caught rather than served as another node's changes.
+
+## Comments
+
+Each comment on a node's work is a row of its plan's ([C34](../milestones/m7.md)): a thread on a line of
+one of the node's revisions, or on the node as a whole, and the replies in it, which the
+Changes and Comments tabs show.
+
+### Design choices
+
+- **A row a comment, in its plan's partition**, keyed by project and plan and sorted by its
+  number padded to ten digits. A node's threads and the plan's are each read from the one
+  partition and grouped into threads as they are read, so the plan-wide list of open threads
+  is one read. Its record is one JSON field, beside a version a mark can name.
+- **Numbered in the plan, through restarts.** Every comment, a reply included, takes the number
+  after the last one in its plan, so one number names a thread wherever in the plan it is read
+  from, as a `Reef-Resolves` trailer captured in another node's worktree must
+  ([C37](../milestones/m7.md)). The next number is read from the partition under the project's comment
+  lock, and written `if_absent`.
+- **A thread's first comment holds the thread.** Its target and state sit on its first row,
+  which a mark writes again over the version it read. A reply is a row of its own naming its
+  thread, so a reply and a mark never write the same row, and a reply leaves the thread's
+  version where it was.
+- **A line comment names a stored line.** A thread on a line is kept only if its revision lists
+  the file and the file has a line of that number on that side, read from the file's row.
+- **Writes take a lock per project; reads take none.** Each write is one row, so the plan's
+  comments read whole after every step.
+- **Every row checked against its full key on read**, its project and plan, so a hash collision
+  is caught rather than served as another plan's comments.

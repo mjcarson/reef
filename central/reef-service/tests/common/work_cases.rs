@@ -18,7 +18,7 @@ use super::{Fx, Reopen, git};
 ///
 /// * `fx` - The store and its plan
 /// * `id` - The node's id
-fn named<B>(fx: &Fx<B>, id: &str) -> NodeName {
+pub fn named<B>(fx: &Fx<B>, id: &str) -> NodeName {
     fx.plan.node(id).expect("a test's ids are good")
 }
 
@@ -68,7 +68,7 @@ async fn start<B: Backend>(
 /// * `id` - The node's id
 /// * `read` - What the start read
 /// * `replaces` - The version of the node's record it replaces, if any
-async fn recorded<B: Backend>(
+pub async fn recorded<B: Backend>(
     fx: &Fx<B>,
     id: &str,
     read: WorkStart,
@@ -140,7 +140,7 @@ pub fn added_file(path: &str, text: &str) -> FileDiff {
 /// * `pinned` - The pinned commit of the start it was taken from
 /// * `sha` - The letter its SHAs are made of
 /// * `files` - Its files
-fn capture(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
+pub fn capture(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
     AddCapture {
         pinned: pinned.to_string(),
         shas: shas(sha),
@@ -156,7 +156,7 @@ fn capture(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
 /// * `fx` - The store and its plan
 /// * `node` - The node captured
 /// * `add` - The capture
-async fn kept<B: Backend>(
+pub async fn kept<B: Backend>(
     fx: &Fx<B>,
     node: &NodeName,
     add: AddCapture,

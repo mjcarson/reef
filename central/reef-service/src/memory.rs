@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::PROJECTS;
 use crate::schema::{
-    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
+    CommentRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
     RevisionRow, WorkRow,
 };
 
@@ -20,6 +20,9 @@ type NodePartition = (String, String);
 
 /// A revision's partition of files: its project, its node's `plan/id` and its number
 type RevisionFilesKey = (String, String, u64);
+
+/// A plan's partition of comments: its project and its name
+type PlanPartition = (String, String);
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -40,6 +43,8 @@ struct Tables {
     revisions: BTreeMap<NodePartition, BTreeMap<String, RevisionRow>>,
     /// Each revision's files, by path
     revision_files: BTreeMap<RevisionFilesKey, BTreeMap<String, RevisionFileRow>>,
+    /// Each plan's comments, by padded number
+    comments: BTreeMap<PlanPartition, BTreeMap<String, CommentRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -168,6 +173,22 @@ impl MemoryBackend {
             .entry((project.to_string(), node.to_string(), revision))
             .or_default()
             .insert(row.path.clone(), row);
+    }
+
+    /// Stores a comment row in a plan's partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project of the plan whose partition the row lands in
+    /// * `plan` - That plan's name
+    /// * `row` - The row, keyed by its own number as any other
+    pub fn plant_comment(&self, project: &str, plan: &str, row: CommentRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .comments
+            .entry((project.to_string(), plan.to_string()))
+            .or_default()
+            .insert(row.number.clone(), row);
     }
 }
 
@@ -720,5 +741,51 @@ impl Backend for MemoryBackend {
                 .insert(row.path.clone(), row);
         }
         Ok(())
+    }
+
+    /// Reads the comment rows stored in a plan's partition, in number order, or the one of a
+    /// number
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `plan` - The plan's name within its project
+    /// * `number` - The one comment's sort key, or `None` for all of them
+    async fn comments(
+        &self,
+        project: &str,
+        plan: &str,
+        number: Option<&str>,
+    ) -> anyhow::Result<Vec<CommentRow>> {
+        let tables = self.tables();
+        // the plan's partition, whole or the one row of it
+        let key = (project.to_string(), plan.to_string());
+        let Some(partition) = tables.comments.get(&key) else {
+            return Ok(Vec::new());
+        };
+        Ok(match number {
+            Some(number) => partition.get(number).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes one comment row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_comment(&self, row: CommentRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its keys hash
+        let key = (row.project.clone(), row.plan.clone());
+        let partition = tables.comments.entry(key).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.number).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.number.clone(), row);
+        Ok(Written::Applied)
     }
 }

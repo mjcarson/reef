@@ -12,7 +12,7 @@
 //!   the node is still in its plan.
 
 use reef_api::Change;
-use reef_model::NodeName;
+use reef_model::{NodeName, PlanName};
 use tracing::instrument;
 
 use super::Service;
@@ -47,7 +47,7 @@ impl<B: Backend> Service<B> {
     #[instrument(name = "Service::work_of", skip_all, err(Debug))]
     pub async fn work_of(&self, node: &NodeName) -> anyhow::Result<Option<WorkRecord>> {
         // refused if the project isn't registered, or its plan isn't listed
-        self.listed(node).await?;
+        self.listed(&node.plan).await?;
         self.store.work_of(node).await
     }
 
@@ -87,7 +87,7 @@ impl<B: Backend> Service<B> {
     #[instrument(name = "Service::add_capture", skip_all, err(Debug))]
     pub async fn add_capture(&self, node: &NodeName, add: AddCapture) -> anyhow::Result<Captured> {
         // refused if the project isn't registered, or its plan isn't listed
-        self.listed(node).await?;
+        self.listed(&node.plan).await?;
         // written under the project's work lock, and told to the change stream once it is
         let captured = self.store.add_capture(node, add).await?;
         match &captured {
@@ -118,7 +118,7 @@ impl<B: Backend> Service<B> {
     #[instrument(name = "Service::revisions", skip_all, err(Debug))]
     pub async fn revisions(&self, node: &NodeName) -> anyhow::Result<Vec<Revision>> {
         // refused if the project isn't registered, or its plan isn't listed
-        self.listed(node).await?;
+        self.listed(&node.plan).await?;
         self.store.revisions(node).await
     }
 
@@ -135,7 +135,7 @@ impl<B: Backend> Service<B> {
         revision: u32,
     ) -> anyhow::Result<Option<Revision>> {
         // refused if the project isn't registered, or its plan isn't listed
-        self.listed(node).await?;
+        self.listed(&node.plan).await?;
         self.store.node_revision(node, revision).await
     }
 
@@ -154,20 +154,20 @@ impl<B: Backend> Service<B> {
         path: &str,
     ) -> anyhow::Result<Option<FileDiff>> {
         // refused if the project isn't registered, or its plan isn't listed
-        self.listed(node).await?;
+        self.listed(&node.plan).await?;
         self.store.revision_file(node, revision, path).await
     }
 
-    /// Refuses a node whose project isn't registered, or whose plan isn't listed
+    /// Refuses a plan whose project isn't registered, or that its project doesn't list
     ///
     /// # Arguments
     ///
-    /// * `node` - The node's full name
-    async fn listed(&self, node: &NodeName) -> anyhow::Result<()> {
+    /// * `plan` - The plan's full name
+    pub(super) async fn listed(&self, plan: &PlanName) -> anyhow::Result<()> {
         // the project's plans, refused if it isn't registered
-        let plans = self.plans(&node.plan.project).await?;
-        if !plans.iter().any(|info| info.name == node.plan) {
-            return Err(NotListed(node.plan.clone()).into());
+        let plans = self.plans(&plan.project).await?;
+        if !plans.iter().any(|info| info.name == *plan) {
+            return Err(NotListed(plan.clone()).into());
         }
         Ok(())
     }

@@ -21,5 +21,5 @@ pub mod paths;
 pub mod source;
 
 pub use docs::{Renderer, Sections};
-pub use markdown::{HeadingSpan, ROOT, heading_spans, headings_of, inline_html, is_reef, md_options, render, render_body, render_page};
+pub use markdown::{HeadingSpan, ROOT, heading_spans, headings_of, inline_html, is_reef, md_options, render, render_body, render_comment, render_page};
 pub use source::{Cached, DocSource, FsSource, Headings, Layered, MemSource, RepoSource, doc_body};

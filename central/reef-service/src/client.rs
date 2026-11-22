@@ -13,11 +13,11 @@ use tracing::instrument;
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow,
-    PageRowDelete, PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate,
-    ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient,
-    ReefQueryKinds, RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter,
-    RevisionRowGet, WorkRow, WorkRowFilter, WorkRowGet,
+    CommentRow, CommentRowFilter, CommentRowGet, NodeKey, NodeRow, NodeRowDelete, NodeRowFilter,
+    NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter, PageRowGet, PlanRow,
+    PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete,
+    QueueRowFilter, QueueRowGet, ReefClient, ReefQueryKinds, RevisionFileRow, RevisionFileRowGet,
+    RevisionRow, RevisionRowFilter, RevisionRowGet, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -733,6 +733,51 @@ impl Backend for ShoalBackend {
             .await
             .map_err(|error| anyhow::anyhow!("writing revision file rows failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// Reads the comment rows stored in a plan's partition, in number order, or the one of a
+    /// number
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `plan` - The plan's name within its project
+    /// * `number` - The one comment's sort key, or `None` for all of them
+    #[instrument(name = "ShoalBackend::comments", skip_all, err(Debug))]
+    async fn comments(
+        &self,
+        project: &str,
+        plan: &str,
+        number: Option<&str>,
+    ) -> anyhow::Result<Vec<CommentRow>> {
+        // a plan's comments sit in the plan's partition
+        let mut get = CommentRowGet::new(vec![(project.to_string(), plan.to_string())]);
+        if let Some(number) = number {
+            get = get.sort_keys(vec![number.to_string()]);
+        }
+        self.read::<_, CommentRow>(get).await
+    }
+
+    /// Writes one comment row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_comment", skip_all, err(Debug))]
+    async fn write_comment(&self, row: CommentRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = CommentRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
     }
 }
 

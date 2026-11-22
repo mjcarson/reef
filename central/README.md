@@ -129,6 +129,11 @@ It reads and writes through a `Store`, and checks every write against the whole 
   files as they are, untracked ones only where the base has them. gix takes every step but the
   snapshot. The service keeps each capture as the node's next revision (`Service::add_capture`),
   unless its latest already holds it, and tells the change stream of it (`revision-captured`).
+- **Comments are threads on a node's work** (`Service::start_thread`): on a line of one of its
+  revisions, which must hold that line, or on the node as a whole. Replies follow in a thread
+  (`Service::reply`), and a thread is marked open or resolved over the version its writer read
+  (`Service::mark_thread`). A comment's body is markdown, read back rendered with raw HTML
+  escaped, and each comment and mark is a change (`comment-added`, `thread-marked`).
 
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
@@ -165,6 +170,12 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/work/{id}/revisions` | every `Revision` of the node, oldest first, its files without their hunks |
 | `GET …/plans/{plan}/work/{id}/revisions/{n}` | the `Revision`, or 404 |
 | `GET …/plans/{plan}/work/{id}/revisions/{n}/files/{*path}` | the `FileDiff`, its hunks and lines, or 404 if the revision doesn't list it |
+| `GET …/plans/{plan}/comments` | every `Thread` of the plan, by number, its comments rendered |
+| `GET …/plans/{plan}/nodes/{id}/comments` | every `Thread` on the node, by number |
+| `POST …/plans/{plan}/nodes/{id}/comments` `NewThread` | `Commented`: 200, 422 if the node is not in its plan or the line not in its revisions |
+| `GET …/plans/{plan}/comments/{n}` | the `Thread`, or 404 |
+| `POST …/plans/{plan}/comments/{n}/replies` `NewReply` | `Commented`: 200, or 422 if no thread starts at `n` |
+| `PUT …/plans/{plan}/comments/{n}/state` `MarkThread` | `Marked`: 200, 409 if stale, 422 if no thread starts at `n` |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
@@ -245,7 +256,8 @@ reef import plan --plan central            # the plan, from its book
   unit, move `~/.local/share/reef/shoal` aside, start it, then `reef project add reef` and
   `reef import plan --plan central` again. Export first if the book is behind. A table added
   needed none when C30 added `WorkRow`: its binary opened a data directory the one before it
-  wrote, read the imported plan back, and kept work records beside it.
+  wrote, read the imported plan back, and kept work records beside it. C32's two tables and
+  C34's `CommentRow` needed none either.
 
 ## The app
 
@@ -329,6 +341,10 @@ is the twin's oracle.
   files written first and the revision `if_absent` after them, so a revision that reads has
   every file it lists. They count from 1 for the node, through restarts. A file whose row would
   pass 32 MiB is kept without its hunks.
+- **A plan's comments are a row each** (`Store::threads`), in the plan's partition by number,
+  so a node's threads and the plan's are each one read. Every comment, a reply included, takes
+  the number after the plan's last, through restarts. A thread's first comment holds its target
+  and state, and a mark writes it again by version; a reply is a row of its own.
 
 ## The schema
 
@@ -342,6 +358,7 @@ is the twin's oracle.
 | `WorkRow` | project | `plan/id` | a `version`, and the node's work record as JSON: its worktree, branch, base branch, start, start tree, fork and pin, and each capture's SHAs |
 | `RevisionRow` | (project, `plan/id`) | number, padded | a `version`, and the revision as JSON: its SHAs, conflicts and files without their hunks |
 | `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
+| `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target and state or a reply's thread |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

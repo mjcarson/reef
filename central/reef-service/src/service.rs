@@ -65,6 +65,7 @@ use crate::store::{
     Rewrite, Store, StoredNode, StoredPage,
 };
 
+mod comments;
 mod work;
 
 /// The process's one service over shoal, opened on first use

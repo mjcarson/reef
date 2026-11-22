@@ -96,4 +96,7 @@ suite!(
     captures_are_kept_as_numbered_revisions,
     killed_capture_serves_none_of_its_files,
     captures_keep_what_fits_and_refuse_what_cant_be_read,
+    a_comment_and_its_reply_survive_a_restart,
+    a_line_comment_off_its_revision_is_refused,
+    marking_over_an_older_version_is_stale,
 );

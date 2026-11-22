@@ -18,6 +18,8 @@
 //!   `reef start` read it from the node's checkout, and the SHAs each capture since read.
 //! - **Revisions** ([`revision`]): each capture of a node's changes, its files, hunks and lines,
 //!   and the anchor a comment names a line by.
+//! - **Comments** ([`comment`]): threads on a line of a node's revision or on the node as a
+//!   whole, each open or resolved, and what came of a comment or a mark.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -27,6 +29,7 @@
 //! reef's config names another.
 
 pub mod change;
+pub mod comment;
 pub mod config;
 pub mod error;
 pub mod node;
@@ -38,6 +41,10 @@ pub mod revision;
 pub mod work;
 
 pub use change::{Change, PutNode, PutPage};
+pub use comment::{
+    COMMENT_BODY_MAX, Comment, Commented, MarkThread, Marked, NewReply, NewThread, Target, Thread,
+    ThreadState,
+};
 pub use error::{ApiError, ErrorCode};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,

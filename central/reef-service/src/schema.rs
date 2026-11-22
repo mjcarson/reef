@@ -309,6 +309,37 @@ pub struct RevisionFileRow {
     pub file: String,
 }
 
+/// One comment on a node's work: a thread's first, which holds the thread's target and state,
+/// or a reply in a thread
+///
+/// A plan's comments share its partition, sorted by their numbers, so a node's threads and the
+/// plan's are each read from one partition, and the next number is the last one's after it.
+/// Each comment is written once, `if_absent`, and only a thread's first is written again, by
+/// version, when the thread is marked. Its record is one JSON field, as a work record is, so
+/// what a comment keeps can change without changing this table.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct CommentRow {
+    /// The project the plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The plan's name within its project
+    #[shoal(partition)]
+    pub plan: String,
+    /// The comment's number in its plan, padded with zeros to ten digits so the partition sorts
+    /// by it
+    #[shoal(sort)]
+    pub number: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// The comment as JSON, its plan and number left to the fields beside it
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -334,6 +365,8 @@ pub struct Reef {
     pub revisions: PersistentSortedTable<RevisionRow, FileSystem>,
     /// Each revision's files, by path
     pub revision_files: PersistentSortedTable<RevisionFileRow, FileSystem>,
+    /// Each plan's comments, by number
+    pub comments: PersistentSortedTable<CommentRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -342,7 +375,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 5784036979291396926;
+    const SCHEMA_ID: u64 = 12274217948300618264;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -354,6 +387,7 @@ mod tests {
         ("WorkRow", 606948397267046790),
         ("RevisionRow", 17497476575540100941),
         ("RevisionFileRow", 2270476186678581084),
+        ("CommentRow", 11872189191251839750),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

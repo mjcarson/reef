@@ -34,6 +34,12 @@
 //! | `GET …/plans/{plan}/work/{id}/revisions` | `revisions` | every [`Revision`] of the node, oldest first |
 //! | `GET …/plans/{plan}/work/{id}/revisions/{revision}` | `node_revision` | the [`Revision`], or 404 |
 //! | `GET …/plans/{plan}/work/{id}/revisions/{revision}/files/{*path}` | `revision_file` | the [`FileDiff`] the revision lists, or 404 |
+//! | `GET …/plans/{plan}/comments` | `threads` | every [`Thread`] of the plan, by number |
+//! | `GET …/plans/{plan}/nodes/{id}/comments` | `node_threads` | every [`Thread`] on the node, by number |
+//! | `POST …/plans/{plan}/nodes/{id}/comments` | `start_thread` | [`Commented`]: 200, 422 if not in its plan or on no line of its revisions |
+//! | `GET …/plans/{plan}/comments/{thread}` | `thread` | the [`Thread`], or 404 |
+//! | `POST …/plans/{plan}/comments/{thread}/replies` | `reply` | [`Commented`]: 200, or 422 if no thread starts there |
+//! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -63,10 +69,11 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, ErrorCode, FileDiff,
-    Listing, NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project,
-    Puts, QueueEdit, QueueListing, Queued, Revision, Rewrite, StartWork, Started, StoredNode,
-    StoredPage, WRITE_BODY_MAX, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, Commented, ErrorCode,
+    FileDiff, Listing, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, PageEdit,
+    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
+    Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread, WRITE_BODY_MAX,
+    WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -166,6 +173,14 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::REVISIONS, get(revisions::<S>))
         .route(paths::NODE_REVISION, get(node_revision::<S>))
         .route(paths::REVISION_FILE, get(revision_file::<S>))
+        .route(paths::PLAN_COMMENTS, get(threads::<S>))
+        .route(
+            paths::NODE_COMMENTS,
+            get(node_threads::<S>).post(start_thread::<S>),
+        )
+        .route(paths::THREAD, get(thread::<S>))
+        .route(paths::REPLIES, axum::routing::post(reply::<S>))
+        .route(paths::THREAD_STATE, axum::routing::put(mark_thread::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -425,6 +440,24 @@ struct RevisionFileSegments {
     revision: u32,
     /// The path the file is shown under
     path: String,
+}
+
+/// The segments of a route to one of a plan's comment threads
+#[derive(Deserialize)]
+struct ThreadSegments {
+    /// The project the plan belongs to
+    project: String,
+    /// The plan's name within its project
+    plan: String,
+    /// The thread's number
+    thread: u32,
+}
+
+impl ThreadSegments {
+    /// The plan these segments name, refusing a name that breaks the rule
+    fn name(&self) -> Result<PlanName, Failure> {
+        Ok(PlanName::new(self.project.clone(), self.plan.clone())?)
+    }
 }
 
 /// The segments of a route to one of a plan's docs
@@ -1084,6 +1117,146 @@ async fn revision_file<S: Serves>(
             ErrorCode::NotFound,
             format!("revision {revision} of node `{node}` has no file `{path}`"),
         )),
+    }
+}
+
+/// Lists a plan's comment threads, by number, each comment rendered
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+#[instrument(name = "api::threads", skip_all, err(Debug))]
+async fn threads<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+) -> Result<Json<Vec<Thread>>, Failure> {
+    let plan = segments.name()?;
+    // every thread on every node of it, none for a plan never commented on
+    let threads = serves.service().threads(&plan).await?;
+    Ok(Json(threads))
+}
+
+/// Lists one node's comment threads, by number, each comment rendered
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+#[instrument(name = "api::node_threads", skip_all, err(Debug))]
+async fn node_threads<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+) -> Result<Json<Vec<Thread>>, Failure> {
+    let node = segments.name()?;
+    // every thread on it, none for a node never commented on
+    let threads = serves.service().node_threads(&node).await?;
+    Ok(Json(threads))
+}
+
+/// Starts a thread on a node or one of its lines: 200 if kept, 422 if the node isn't in its
+/// plan or the line isn't in its revisions
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+/// * `new` - What the thread is on, and its first comment's body
+#[instrument(name = "api::start_thread", skip_all, err(Debug))]
+async fn start_thread<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+    Body(new): Body<NewThread>,
+) -> Result<(StatusCode, Json<Commented>), Failure> {
+    let node = segments.name()?;
+    // one row written, under the project's comment lock
+    let commented = serves.service().start_thread(&node, new).await?;
+    Ok((commented_status(&commented), Json(commented)))
+}
+
+/// Gets one comment thread of a plan, or a 404 if no thread starts at that number
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the thread's number
+#[instrument(name = "api::thread", skip_all, err(Debug))]
+async fn thread<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ThreadSegments>,
+) -> Result<Json<Thread>, Failure> {
+    let plan = segments.name()?;
+    // the thread, or a 404 naming it
+    match serves.service().thread(&plan, segments.thread).await? {
+        Some(thread) => Ok(Json(thread)),
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("`{plan}` has no comment thread {}", segments.thread),
+        )),
+    }
+}
+
+/// Replies in a thread: 200 if kept, 422 if no thread starts at that number
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the thread's number
+/// * `reply` - The reply's body
+#[instrument(name = "api::reply", skip_all, err(Debug))]
+async fn reply<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ThreadSegments>,
+    Body(reply): Body<NewReply>,
+) -> Result<(StatusCode, Json<Commented>), Failure> {
+    let plan = segments.name()?;
+    // one row written, under the project's comment lock
+    let commented = serves
+        .service()
+        .reply(&plan, segments.thread, reply)
+        .await?;
+    Ok((commented_status(&commented), Json(commented)))
+}
+
+/// Marks a thread open or resolved: 200 if marked, 409 if stale, 422 if no thread starts at
+/// that number
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the thread's number
+/// * `mark` - The state to mark it, and the version it was marked against
+#[instrument(name = "api::mark_thread", skip_all, err(Debug))]
+async fn mark_thread<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ThreadSegments>,
+    Body(mark): Body<MarkThread>,
+) -> Result<(StatusCode, Json<Marked>), Failure> {
+    let plan = segments.name()?;
+    // the thread's first row written again, under the project's comment lock
+    let marked = serves
+        .service()
+        .mark_thread(&plan, segments.thread, mark)
+        .await?;
+    let status = match marked {
+        Marked::Marked { .. } => StatusCode::OK,
+        Marked::Stale { .. } => StatusCode::CONFLICT,
+        Marked::NoThread { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(marked)))
+}
+
+/// The status a comment's outcome answers with: 200 if kept, else 422
+///
+/// # Arguments
+///
+/// * `commented` - What came of the comment
+fn commented_status(commented: &Commented) -> StatusCode {
+    match commented {
+        Commented::Added { .. } => StatusCode::OK,
+        Commented::NotInPlan { .. } | Commented::NoLine { .. } | Commented::NoThread { .. } => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
     }
 }
 

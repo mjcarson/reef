@@ -207,8 +207,20 @@ The rules:
 
 ### Design choices
 
-- **Anchored to node, revision, file and line**, threaded, each open or resolved, in a table of
-  their own.
+- **On a line, or on the node as a whole.** A thread is on a line of a file in one of the
+  node's revisions, named by its anchor, or on the node itself, as a general comment on its
+  work, as a merge request's overview discussion is. Each is threaded, open or resolved, in a
+  table of their own ([C34](../milestones/m7.md)).
+- **A line comment names a line its revision holds.** One whose revision, file, side or number
+  the node's stored revisions don't have is refused, and nothing is written.
+- **Numbered in the plan.** Every comment, a reply included, takes the plan's next number, and
+  a thread is named by its first comment's, so `Reef-Resolves: <n>` names one thread whichever
+  node's worktree its commit is captured in.
+- **Markdown, rendered on read.** A comment is kept as written and rendered as it is read, its
+  raw HTML shown as text and any link that could run script left out, so the app shows the HTML
+  as it is and Claude reads the markdown.
+- **Marked by version.** A thread is marked open or resolved over the version its writer read,
+  so a mark made against a thread since changed is stale and changes nothing.
 - **Comments follow the code between revisions.** When a later revision of a node's changes
   moves a commented line, the comment moves with it. reef maps the line by comparing the two
   stored revisions, not git's history. When the line is gone, the comment is marked outdated

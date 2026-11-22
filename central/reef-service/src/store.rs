@@ -38,7 +38,11 @@
 //! - **A node's revisions in its own partition** ([`revision`]): each capture of its changes a
 //!   row listing its files, each file a row of its revision's with its hunks, the files written
 //!   first so a revision that reads has every file it lists.
+//! - **A plan's comments in its own partition** ([`comment`]): each comment a row numbered in
+//!   its plan, a thread's first holding the thread's target and state, which a mark writes again
+//!   by version.
 
+mod comment;
 mod revision;
 mod work;
 
@@ -54,6 +58,7 @@ pub use reef_api::{
     PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Puts, QueueEdit, Queued, Ranked,
     Rewrite, Rewritten, StalePut, StoredNode, StoredPage, records,
 };
+pub use reef_api::{Comment, Commented, MarkThread, Marked, NewReply, NewThread, Thread};
 use reef_api::{PLAN_PAGES_MAX_BYTES, check_page_path};
 use reef_model::{Diagnostic, NodeName, PlanName, Record};
 use std::collections::{HashMap, HashSet};
@@ -158,6 +163,8 @@ pub struct Store<B = ShoalBackend> {
     queues: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Each project's work records' lock, held alone by their writes
     works: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Each project's comments' lock, held alone by their writes
+    comments: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Store<ShoalBackend> {
@@ -209,6 +216,7 @@ impl<B: Backend> Store<B> {
             projects: tokio::sync::Mutex::new(()),
             queues: Mutex::new(HashMap::new()),
             works: Mutex::new(HashMap::new()),
+            comments: Mutex::new(HashMap::new()),
         }
     }
 

@@ -6,7 +6,7 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
+    CommentRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
     RevisionRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
@@ -50,6 +50,8 @@ pub struct Faults {
     refuse_page_write: AtomicBool,
     /// Fail the next write of a revision row, before writing it, its files already written
     fail_revision_write: AtomicBool,
+    /// Refuse the next write of a comment row as moved, as another writer having written would
+    refuse_comment_write: AtomicBool,
 }
 
 impl Faults {
@@ -108,6 +110,12 @@ impl Faults {
     /// its files would leave it
     pub fn fail_next_revision_write(&self) {
         self.fail_revision_write.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuses the next write of a comment row as moved, as a write from another process between
+    /// the store's read and its write would be
+    pub fn refuse_next_comment_write(&self) {
+        self.refuse_comment_write.store(true, Ordering::SeqCst);
     }
 
     /// Lets `writes` writes of a queue row through, then fails the next before writing it
@@ -517,5 +525,39 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `rows` - The rows to write
     async fn write_revision_files(&self, rows: Vec<RevisionFileRow>) -> anyhow::Result<()> {
         self.inner.write_revision_files(rows).await
+    }
+
+    /// Reads a plan's comment rows, or one of them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `plan` - The plan's name
+    /// * `number` - The one comment's sort key, or `None` for all of them
+    async fn comments(
+        &self,
+        project: &str,
+        plan: &str,
+        number: Option<&str>,
+    ) -> anyhow::Result<Vec<CommentRow>> {
+        self.inner.comments(project, plan, number).await
+    }
+
+    /// Writes one comment row, if its condition holds, refusing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_comment(&self, row: CommentRow, expect: Expect) -> anyhow::Result<Written> {
+        // a fault armed for this write refuses it, as another process having written would
+        if self
+            .faults
+            .refuse_comment_write
+            .swap(false, Ordering::SeqCst)
+        {
+            return Ok(Written::Refused(Refusal::Moved));
+        }
+        self.inner.write_comment(row, expect).await
     }
 }

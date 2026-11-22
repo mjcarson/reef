@@ -175,6 +175,93 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
     html
 }
 
+/// Render a comment's markdown for the app, as safe to show as its text
+///
+/// Raw HTML is shown as text, a link or image whose scheme could run script is left out, its
+/// text kept, and a link naming a node is one the viewer follows to its box. A comment is
+/// written in no file, so every other link is left as written.
+///
+/// # Arguments
+///
+/// * `md` - The comment's body, as markdown
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::render_comment;
+///
+/// let html = render_comment("**Why** <b>here</b>?");
+/// assert_eq!(html, "<p><strong>Why</strong> &lt;b&gt;here&lt;/b&gt;?</p>\n");
+/// ```
+pub fn render_comment(md: &str) -> String {
+    // whether each link or image still open was kept, so it is closed as it was opened
+    let mut open: Vec<Option<bool>> = Vec::new();
+    let mut events = Vec::new();
+    for ev in Parser::new_ext(md, md_options()) {
+        let ev = match ev {
+            // raw HTML is shown as the text it was written as
+            Event::Html(html) | Event::InlineHtml(html) => Event::Text(html),
+            // a link naming a node opens as a link to its box, and one that could run script is
+            // left out, its text kept
+            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
+                if !matches!(link_type, LinkType::Autolink | LinkType::Email)
+                    && let Some((node, _)) = paths::node_link(&dest_url)
+                {
+                    open.push(Some(true));
+                    events.push(Event::InlineHtml(CowStr::from(node_anchor(node, &title))));
+                    continue;
+                }
+                if !safe_link(&dest_url) {
+                    open.push(None);
+                    continue;
+                }
+                open.push(Some(false));
+                Event::Start(Tag::Link { link_type, dest_url, title, id })
+            }
+            // an image whose source could run script is left out, its text kept
+            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
+                if !safe_link(&dest_url) {
+                    open.push(None);
+                    continue;
+                }
+                open.push(Some(false));
+                Event::Start(Tag::Image { link_type, dest_url, title, id })
+            }
+            // each closes as it was opened
+            Event::End(end @ (TagEnd::Link | TagEnd::Image)) => match open.pop().flatten() {
+                Some(true) => Event::InlineHtml(CowStr::Borrowed("</a>")),
+                Some(false) => Event::End(end),
+                None => continue,
+            },
+            ev => ev,
+        };
+        events.push(ev);
+    }
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, events.into_iter());
+    html
+}
+
+/// Whether a link a comment holds is safe to follow: one with no scheme, or the web's or mail's
+///
+/// # Arguments
+///
+/// * `dest` - The link as written
+fn safe_link(dest: &str) -> bool {
+    // a browser drops tabs and newlines anywhere in a URL, and controls and spaces around it
+    let dest: String = dest.chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let dest = dest.trim_matches(|c: char| c <= ' ');
+    // the scheme is what comes before the first colon, if no slash, query or anchor comes first
+    let Some(colon) = dest.find(':') else {
+        return true;
+    };
+    if dest[..colon].contains(['/', '?', '#']) {
+        return true;
+    }
+    let scheme = dest[..colon].to_ascii_lowercase();
+    matches!(scheme.as_str(), "http" | "https" | "mailto")
+}
+
 /// The links of markdown being rendered: each led where it did from the file it is written in,
 /// and each naming a node made a link the viewer follows to the node's box
 struct Links<'s> {
@@ -415,6 +502,28 @@ mod tests {
         assert!(is_reef("reef {x}"));
         assert!(!is_reef("reefs"));
         assert!(!is_reef("rust"));
+    }
+
+    /// A comment's raw HTML is shown as text, a link that could run script is left out, and a
+    /// link naming a node goes to its box
+    #[test]
+    fn comments_render_safe_to_show() {
+        // raw HTML, block and inline, is escaped
+        let html = render_comment("<script>alert(1)</script>\n\nA <b>bold</b> **claim**.\n");
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"), "{html}");
+        assert!(html.contains("A &lt;b&gt;bold&lt;/b&gt; <strong>claim</strong>."), "{html}");
+        // a link or image that could run script keeps only its text, however its scheme is written
+        let html = render_comment("[x](javascript:alert(1)) [y](<JaVa\tScript:alert(1)>) ![z](data:text/html,1)\n");
+        assert!(!html.to_ascii_lowercase().contains("script:"), "{html}");
+        assert!(!html.contains("<a") && !html.contains("<img"), "{html}");
+        assert!(html.contains("x") && html.contains("y"), "{html}");
+        // the web's links, mail and relative ones are left as written, and a node's goes to its box
+        let html = render_comment("[w](https://w.org) [m](mailto:a@b.org) [f](src/a.rs#L3) [C33](node:C33)\n");
+        assert!(html.contains(r#"href="https://w.org""#), "{html}");
+        assert!(html.contains(r#"href="mailto:a@b.org""#), "{html}");
+        assert!(html.contains(r#"href="src/a.rs#L3""#), "{html}");
+        assert!(html.contains(r#"<a href="javascript:void 0" data-goto="C33">C33</a>"#), "{html}");
     }
 
     #[test]

@@ -56,6 +56,7 @@ suite!(
     page_routes_answer_with_their_status,
     whole_plan_write_over_two_mebibytes_is_taken,
     work_routes_answer_with_their_status,
+    comment_routes_answer_with_their_status,
 );
 
 /// The API listens on a loopback address, and refuses any other until users sign in

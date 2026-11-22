@@ -7,7 +7,7 @@
 //! the viewer's payload, renders each of its docs as the page the payload links to, and tells
 //! the change stream of each write it applies. Its data types are `reef-api`'s, so the
 //! JSON API's clients share them. It reads and writes through a `Store`, which keeps plans,
-//! their nodes and their pages, and each node's work record and captured revisions, by version over a `Backend`: a `ShoalBackend`, which runs a pool in this process
+//! their nodes and their pages, each node's work record and captured revisions, and each plan's comments, by version over a `Backend`: a `ShoalBackend`, which runs a pool in this process
 //! with `embedded` or reaches an external node such as `reef-shoal`, or a `MemoryBackend`, its
 //! in-memory twin. The rows reef keeps in shoal are its `schema`, the user's queue sorts by
 //! `rank` strings, and reef's `conf` says how to
