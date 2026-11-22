@@ -1,8 +1,9 @@
 # central: reef's store and service over shoal
 
-Centralized reef keeps projects, plans and nodes in shoal instead of in a book's markdown. The plan
-for it is the book in `../plan`. This workspace is the only part of reef that depends on shoal, so
-it is a workspace of its own, which reef's stable root workspace excludes.
+Centralized reef keeps projects, plans and nodes in shoal instead of in a book's markdown. Its own
+plan is `reef/central`, kept by central reef itself, and `../plan` is that plan's export (see
+[Running it for real](#running-it-for-real)). This workspace is the only part of reef that depends
+on shoal, so it is a workspace of its own, which reef's stable root workspace excludes.
 
 ```
 reef-service   the service and its store: every write checked against the whole plan, reef's
@@ -18,8 +19,9 @@ The service's data types, and the JSON API's requests, answers, routes and chang
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
 add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
 status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, and `reef import`
-and `reef export`, which carry a book's nodes and pages in and out. They call the address
-`[api] address` names and say so when nothing answers there.
+and `reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
+a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
+the address `[api] address` names and say so when nothing answers there.
 
 ## Building
 
@@ -164,6 +166,55 @@ cargo +stable run -p reef-service --bin reef-serve -- --conf reef.toml          
 
 `examples/payload_bench.rs` times the example book's 202-node payload, built in process and fetched
 over loopback.
+
+## Running it for real
+
+reef's own plan lives in a reef-serve that runs as a systemd user unit, its data in the default
+`~/.local/share/reef/shoal`, with no config file. `../plan` is the plan's export, which git keeps:
+it is the copy a fresh data directory is imported from, and the book `mdbook-reef` still builds.
+
+```sh
+cargo install --locked --path ../crates/reef --target-dir ../target          # the terminal's client
+cargo +nightly install --locked --path reef-service --features embedded --bin reef-serve --target-dir target
+```
+
+`~/.config/systemd/user/reef.service`:
+
+```ini
+[Unit]
+Description=reef's central planner
+
+[Service]
+ExecStart=%h/.cargo/bin/reef-serve
+Restart=on-failure
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+A locked-memory limit of at least 30 MiB a shard, and 30 more, keeps glommio's registered io
+buffers, so a session whose `ulimit -l` is lower needs `LimitMEMLOCK=` in the unit too.
+
+```sh
+systemctl --user daemon-reload && systemctl --user enable --now reef
+journalctl --user -u reef                  # what it said starting, and any warning
+reef project add reef                      # from the repo's root, once
+reef import plan --plan central            # the plan, from its book
+```
+
+- **An edit goes through reef, then out to the book.** `reef node get|put`, `reef status`,
+  `reef accept` and `reef page get|put` change the plan, each checked. `reef export plan --replace`
+  then writes it back over `../plan`, only the files whose text changed, and the book is committed
+  in the same change. `plan/` is never edited by hand: the next export writes over it.
+- **A node's body comes from the book for now.** `reef node put` takes YAML alone and keeps a
+  stored body, so a body is edited in `../plan`, then `reef import plan --plan central --replace`
+  and the export again ([C69](../plan/src/milestones/m6.md)).
+- **A new binary is a reinstall and a restart.** Install again, then
+  `systemctl --user restart reef`. Stop the unit before running reef-app over the same data.
+- **A schema change needs a fresh data directory**, since shoal can't migrate a table: stop the
+  unit, move `~/.local/share/reef/shoal` aside, start it, then `reef project add reef` and
+  `reef import plan --plan central` again. Export first if the book is behind.
 
 ## The app
 

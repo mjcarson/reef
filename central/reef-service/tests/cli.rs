@@ -9,6 +9,7 @@
 
 mod common;
 
+use reef_model::spec::parse_node_file;
 use reef_model::{Payload, PlanName};
 use reef_render::ROOT;
 use reef_render::book::{Plan, read_nodes};
@@ -84,7 +85,7 @@ impl Cx {
         let mut out = Vec::new();
         let error = reef::run(cli, cwd, &mut out)
             .await
-            .expect_err("the command succeeded");
+            .expect_err(&format!("`reef {}` succeeded", args.join(" ")));
         Ok((String::from_utf8(out)?, error.to_string()))
     }
 
@@ -1197,6 +1198,49 @@ fn read_tree(dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
     Ok(out)
 }
 
+/// Checks that two plans hold the same nodes, each with its spec and body, and in the same
+/// places if asked, and the same pages
+///
+/// # Arguments
+///
+/// * `cx` - The case, whose service holds both plans
+/// * `a` - One plan
+/// * `b` - The other
+/// * `placed` - Whether each node must have the same place in the written order too
+async fn same_plans(cx: &Cx, a: &PlanName, b: &PlanName, placed: bool) -> anyhow::Result<()> {
+    let mut first = cx.ax.service.list(a).await?.nodes;
+    let mut second = cx.ax.service.list(b).await?.nodes;
+    // by id, if their places may differ
+    if !placed {
+        first.sort_by(|x, y| x.spec.id.cmp(&y.spec.id));
+        second.sort_by(|x, y| x.spec.id.cmp(&y.spec.id));
+    }
+    // each node its spec, its body and its place, if asked
+    assert_eq!(first.len(), second.len());
+    for (x, y) in first.iter().zip(&second) {
+        assert_eq!(
+            (&x.spec, &x.body),
+            (&y.spec, &y.body),
+            "`{}` differs",
+            x.spec.id
+        );
+        if placed {
+            assert_eq!(x.order, y.order, "`{}` moved", x.spec.id);
+        }
+    }
+    // and each page
+    let pages = |pages: Vec<reef_api::StoredPage>| -> Vec<(String, String)> {
+        pages
+            .into_iter()
+            .map(|page| (page.path, page.text))
+            .collect()
+    };
+    let first = cx.ax.service.pages(a).await?.pages;
+    let second = cx.ax.service.pages(b).await?.pages;
+    assert_eq!(pages(first), pages(second));
+    Ok(())
+}
+
 /// A plan exported to a book and imported again gives the same specs, bodies and order, and
 /// the book exports again to the same files
 #[tokio::test]
@@ -1218,33 +1262,12 @@ async fn export_then_import_gives_equal_specs() -> anyhow::Result<()> {
     let opened = reef::import::open_book(&repo.join("out"))?;
     let plan = Plan::load(&opened.src, &opened.config);
     assert!(plan.diags.is_empty(), "{}", plan.errors());
-    // imported again, into a plan of its own
+    // imported again, into a plan of its own, each node and page as the first import wrote it
     cx.reef(&repo, &["import", "out", "--plan", "again"])
         .await?;
     let again = PlanName::new("reef", "again")?;
-    let first = cx.ax.service.list(&cx.ax.plan).await?.nodes;
-    let second = cx.ax.service.list(&again).await?.nodes;
-    // each node its spec, its body and its place, as the first import wrote it
-    assert_eq!(first.len(), second.len());
-    for (a, b) in first.iter().zip(&second) {
-        assert_eq!(
-            (&a.spec, &a.body, a.order),
-            (&b.spec, &b.body, b.order),
-            "`{}` differs",
-            a.spec.id
-        );
-    }
-    // and each page as the first import wrote it
-    let first = cx.ax.service.pages(&cx.ax.plan).await?.pages;
-    let second = cx.ax.service.pages(&again).await?.pages;
-    let pages = |pages: Vec<reef_api::StoredPage>| -> Vec<(String, String)> {
-        pages
-            .into_iter()
-            .map(|page| (page.path, page.text))
-            .collect()
-    };
-    assert_eq!(first.len(), 100);
-    assert_eq!(pages(first), pages(second));
+    same_plans(&cx, &cx.ax.plan, &again, true).await?;
+    assert_eq!(cx.ax.service.pages(&again).await?.pages.len(), 100);
     // the summary lists each page after the node files
     let summary = std::fs::read_to_string(repo.join("out/src/SUMMARY.md"))?;
     assert!(
@@ -1272,7 +1295,10 @@ async fn export_refuses() -> anyhow::Result<()> {
     // a directory with anything in it
     write_files(&repo, &[("full/notes.md", "# Notes\n")])?;
     let (_, error) = cx.failing(&repo, &["export", "full"]).await?;
-    assert_eq!(error, "full isn't empty: export writes a new book");
+    assert_eq!(
+        error,
+        "full isn't empty: export writes a new book, or over a reef book with `--replace`"
+    );
     // a directory outside the project's repo, which the export takes away again
     let (_, error) = cx
         .failing(&repo, &["export", "../outside", "--project", "reef"])
@@ -1413,10 +1439,7 @@ async fn imported_pages_outlive_the_book() -> anyhow::Result<()> {
     let cx = Cx::new("plan-outlives").await?;
     let repo = cx.ax.repo.clone();
     // this repo's plan, copied into the project's repo
-    let plan_book = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan");
-    let book = repo.join("plan");
-    copy_dir(&plan_book.join("src"), &book.join("src"))?;
-    std::fs::copy(plan_book.join("book.toml"), book.join("book.toml"))?;
+    let book = this_plan(&repo)?;
     let pages = reef::import::pages_of(&book.join("src"), &read_nodes(&book.join("src"), &[]).0)?;
     // imported, every design page with it
     let out = cx.reef(&repo, &["import", "plan"]).await?;
@@ -1449,5 +1472,419 @@ async fn imported_pages_outlive_the_book() -> anyhow::Result<()> {
         .expect("the overview is exported");
     assert!(overview.1.contains("page = \"plan.md\""), "{}", overview.0);
     assert!(repo.join("out/src/plan.md").is_file());
+    Ok(())
+}
+
+/// Copies this repo's plan, its `book.toml` and its `src`, into a repo, returning where it is
+///
+/// # Arguments
+///
+/// * `repo` - The repo to copy it into
+fn this_plan(repo: &Path) -> anyhow::Result<PathBuf> {
+    let plan_book = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plan");
+    let book = repo.join("plan");
+    copy_dir(&plan_book.join("src"), &book.join("src"))?;
+    std::fs::copy(plan_book.join("book.toml"), book.join("book.toml"))?;
+    Ok(book)
+}
+
+/// Checks that a book written over holds what it did: the same files, each node file's nodes
+/// the same and its body byte for byte, and every other file byte for byte
+///
+/// # Arguments
+///
+/// * `before` - The book's files before, as `read_tree` reads them
+/// * `after` - The book's files after
+fn kept_as_written(before: &[(String, String)], after: &[(String, String)]) -> anyhow::Result<()> {
+    // the same files
+    let paths = |tree: &[(String, String)]| -> Vec<String> {
+        tree.iter().map(|(path, _)| path.clone()).collect()
+    };
+    assert_eq!(paths(before), paths(after));
+    for ((path, was), (_, now)) in before.iter().zip(after) {
+        // each read as a node file, if it is one
+        let was_node =
+            parse_node_file(was).map_err(|error| anyhow::anyhow!("{path}: {error:?}"))?;
+        let now_node =
+            parse_node_file(now).map_err(|error| anyhow::anyhow!("{path}: {error:?}"))?;
+        match (was_node, now_node) {
+            // a node file's nodes the same, however its frontmatter is styled, and its body
+            (Some((was_spec, was_fm)), Some((now_spec, now_fm))) => {
+                assert_eq!(
+                    reef_api::lift(was_spec),
+                    reef_api::lift(now_spec),
+                    "{path}'s nodes differ"
+                );
+                assert_eq!(was_fm.body, now_fm.body, "{path}'s body differs");
+            }
+            // and any other file as it was
+            _ => assert_eq!(was, now, "{path} differs"),
+        }
+    }
+    Ok(())
+}
+
+/// Checks that a book imported, then exported over itself, holds what it did, draws as it
+/// did, is written as it is by a second export, and imports again as the same plan, returning
+/// what the first export printed
+///
+/// # Arguments
+///
+/// * `cx` - The case, whose project's repo holds the book
+/// * `book` - The book's directory
+/// * `name` - The book's directory, as the command line names it from the repo's root
+async fn written_back(cx: &Cx, book: &Path, name: &str) -> anyhow::Result<String> {
+    let repo = &cx.ax.repo;
+    let before = read_tree(book)?;
+    // imported, then exported over the book it came from
+    cx.reef(repo, &["import", name]).await?;
+    let out = cx.reef(repo, &["export", name, "--replace"]).await?;
+    let after = read_tree(book)?;
+    kept_as_written(&before, &after)?;
+    draws_as_the_book(cx, book, &format!("{name}/src")).await?;
+    // a second export finds every file as it would write it
+    let again = cx.reef(repo, &["export", name, "--replace"]).await?;
+    assert!(again.contains(": 0 files written, "), "{again}");
+    assert_eq!(read_tree(book)?, after);
+    // and imported again, it is the same plan, each node in its place
+    cx.reef(repo, &["import", name, "--plan", "again"]).await?;
+    same_plans(cx, &cx.ax.plan, &PlanName::new("reef", "again")?, true).await?;
+    Ok(out)
+}
+
+/// This plan, imported and exported over the book it came from, keeps every file at its path,
+/// each node file's body, its pages, its summary, its `book.toml` and its other files as they
+/// were, and a second export writes nothing
+#[tokio::test]
+async fn export_replace_writes_this_plan_back_as_it_was() -> anyhow::Result<()> {
+    let cx = Cx::new("replace-this-plan").await?;
+    let book = this_plan(&cx.ax.repo)?;
+    // the viewer and a picture, which no export writes
+    write_files(
+        &book,
+        &[
+            ("reef.css", "/* the viewer */\n"),
+            ("src/x.svg", "<svg/>\n"),
+        ],
+    )?;
+    let out = written_back(&cx, &book, "plan").await?;
+    assert!(
+        out.contains(" pages of `reef/central` over the book in plan: ")
+            && out.ends_with(" unchanged, 0 removed\n"),
+        "{out}"
+    );
+    Ok(())
+}
+
+/// The example book, its node files deep under its `src` and unlisted in its summary, is
+/// written back over itself as it was
+#[tokio::test]
+async fn export_replace_keeps_the_example_books_layout() -> anyhow::Result<()> {
+    let cx = Cx::new("replace-example").await?;
+    let book = cx.ax.repo.join("example-book");
+    example_book(&book)?;
+    let out = written_back(&cx, &book, "example-book").await?;
+    assert!(
+        out.starts_with(
+            "exported 202 nodes and 100 pages of `reef/central` over the book in example-book: "
+        ),
+        "{out}"
+    );
+    Ok(())
+}
+
+/// Every link a node or a page writes leads to the same file and heading once the plan is
+/// written back over its book: a heading of its own file, another node's file, a page, a
+/// reference, a picture and the repo outside the book, and a book with no summary gets one
+#[tokio::test]
+async fn export_replace_rebases_links_from_each_file() -> anyhow::Result<()> {
+    let cx = Cx::new("replace-links").await?;
+    let repo = cx.ax.repo.clone();
+    write_files(&repo, &LINKED_BOOK)?;
+    let book = repo.join("book");
+    let before = read_tree(&book)?;
+    cx.reef(&repo, &["import", "book"]).await?;
+    let out = cx.reef(&repo, &["export", "book", "--replace"]).await?;
+    assert!(
+        out.ends_with(", 0 removed\n  added src/SUMMARY.md\n"),
+        "{out}"
+    );
+    // a summary written as a new book's is, listing the node files, then the pages
+    let mut after = read_tree(&book)?;
+    let at = after
+        .iter()
+        .position(|(path, _)| path == "src/SUMMARY.md")
+        .expect("a summary is written");
+    let (_, summary) = after.remove(at);
+    assert_eq!(
+        summary,
+        "# Summary\n\n- [a Some work](plan/a.md)\n- [g The group](plan/g.md)\n\n# Pages\n\n\
+         - [Design](design.md)\n- [Notes](plan/notes.md)\n"
+    );
+    // and every other file as it was, each link as written
+    kept_as_written(&before, &after)?;
+    draws_as_the_book(&cx, &book, "book/src").await?;
+    let again = cx.reef(&repo, &["export", "book", "--replace"]).await?;
+    assert!(
+        again.contains(": 0 files written, 5 unchanged, 0 removed\n"),
+        "{again}"
+    );
+    Ok(())
+}
+
+/// A book a plan is written back over: a root, two groups in files of their own, each with a
+/// member, a page, a page no node links, a picture, and a summary in parts
+const KEPT_BOOK: [(&str, &str); 8] = [
+    (
+        "book/book.toml",
+        "[book]\nsrc = \"src\"\n\n[preprocessor.reef]\n",
+    ),
+    (
+        "book/src/SUMMARY.md",
+        "# Summary\n\n[Root](root.md)\n\n# Groups\n\n- [G The group](groups/g.md)\n\
+         - [H Another](groups/h.md)\n\n# Design\n\n- [Design](design.md)\n",
+    ),
+    (
+        "book/src/root.md",
+        "---\nid: root\ntitle: Root\ndescription: { why: W, what: X }\n---\n# Root\n",
+    ),
+    (
+        "book/src/groups/g.md",
+        "---\nid: G\ntitle: G The group\ngroup: root\nnodes:\n  - id: g1\n    title: g1 First\n    \
+         description: { why: W, what: X }\n---\n# G\n\nSee [the design](../design.md#rows).\n",
+    ),
+    (
+        "book/src/groups/h.md",
+        "---\nid: H\ntitle: H Another\ngroup: root\nnodes:\n  - id: h1\n    title: h1 Only\n    \
+         description: { why: W, what: X }\n---\n# H\n",
+    ),
+    (
+        "book/src/design.md",
+        "# Design\n\n## Rows\n\nRows, as [G](groups/g.md) says.\n",
+    ),
+    ("book/src/old.md", "# Old notes\n"),
+    ("book/src/picture.svg", "<svg/>\n"),
+];
+
+/// Nodes and pages put and removed through the terminal land in the book written back over:
+/// a member in its group's file, a top-level node in a file of its own, a group's file and a
+/// page removed, a new page listed after the last, and a group retitled in the summary. A file
+/// moved by hand stays where it was put, and the book imports as the plan, each node in the
+/// book's order
+#[tokio::test]
+async fn export_replace_places_new_and_removed_nodes() -> anyhow::Result<()> {
+    let cx = Cx::new("replace-places").await?;
+    let repo = cx.ax.repo.clone();
+    write_files(&repo, &KEPT_BOOK)?;
+    let book = repo.join("book");
+    cx.reef(&repo, &["import", "book"]).await?;
+    // a member of G and a node of its own put, H and its member removed, a page swapped
+    cx.put(
+        "g2.yml",
+        "id: g2\ntitle: g2 Second\ngroup: G\ndocs: [design.md#rows]\ndescription: { why: W, what: X }\n",
+    )
+    .await?;
+    cx.put(
+        "t.yml",
+        "id: T\ntitle: T Top\ndocs: [design.md]\ndescription: { why: W, what: X }\n",
+    )
+    .await?;
+    cx.reef(&repo, &["node", "rm", "H", "h1"]).await?;
+    cx.reef(&repo, &["page", "rm", "old.md"]).await?;
+    write_files(&repo, &[("scratch/new.md", "# New notes\n")])?;
+    cx.reef(&repo, &["page", "put", "notes/new.md", "scratch/new.md"])
+        .await?;
+    // and G retitled
+    let got = cx.reef(&repo, &["node", "get", "G"]).await?;
+    cx.put(
+        "g.yml",
+        &got.replace("title: G The group", "title: G Renamed"),
+    )
+    .await?;
+    let before = read_tree(&book)?;
+    // written back over the book, each change where it belongs
+    let out = cx.reef(&repo, &["export", "book", "--replace"]).await?;
+    assert!(
+        out.starts_with("exported 5 nodes and 2 pages of `reef/central` over the book in book: ")
+            && out.ends_with(
+                ", 2 removed\n  added src/notes/new.md\n  added src/t.md\n  removed src/groups/h.md\n  \
+                 removed src/old.md\n"
+            ),
+        "{out}"
+    );
+    let summary = std::fs::read_to_string(book.join("src/SUMMARY.md"))?;
+    assert_eq!(
+        summary,
+        "# Summary\n\n[Root](root.md)\n\n# Groups\n\n- [G Renamed](groups/g.md)\n- [T Top](t.md)\n\n\
+         # Design\n\n- [Design](design.md)\n- [New notes](notes/new.md)\n"
+    );
+    // the new member listed in its group's file, after the one before it, its link from there
+    let g = std::fs::read_to_string(book.join("src/groups/g.md"))?;
+    let (spec, fm) = parse_node_file(&g)
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?
+        .expect("G's file holds G");
+    assert_eq!(spec.title.as_deref(), Some("G Renamed"));
+    let members: Vec<&str> = spec.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(members, ["g1", "g2"]);
+    assert_eq!(spec.nodes[1].docs, ["../design.md#rows"]);
+    assert_eq!(fm.body, "# G\n\nSee [the design](../design.md#rows).\n");
+    // the files gone, and the book's others left alone
+    assert!(!book.join("src/groups/h.md").exists() && !book.join("src/old.md").exists());
+    for (path, text) in &before {
+        if ["book.toml", "src/picture.svg", "src/design.md"].contains(&path.as_str()) {
+            assert_eq!(
+                &std::fs::read_to_string(book.join(path))?,
+                text,
+                "{path} changed"
+            );
+        }
+    }
+    // a file moved by hand stays where it was put, its links leading from there
+    std::fs::create_dir_all(book.join("src/groups"))?;
+    std::fs::rename(book.join("src/t.md"), book.join("src/groups/t.md"))?;
+    std::fs::write(
+        book.join("src/SUMMARY.md"),
+        summary.replace("(t.md)", "(groups/t.md)"),
+    )?;
+    let out = cx.reef(&repo, &["export", "book", "--replace"]).await?;
+    assert!(
+        out.contains(": 1 file written, 5 unchanged, 0 removed\n"),
+        "{out}"
+    );
+    let t = std::fs::read_to_string(book.join("src/groups/t.md"))?;
+    assert!(t.contains("docs:\n- ../design.md\n"), "{t}");
+    let again = cx.reef(&repo, &["export", "book", "--replace"]).await?;
+    assert!(again.contains(": 0 files written, "), "{again}");
+    // imported again, the plan comes back, each node in the order the book's files sort in
+    cx.reef(&repo, &["import", "book", "--plan", "again"])
+        .await?;
+    let again = PlanName::new("reef", "again")?;
+    same_plans(&cx, &cx.ax.plan, &again, false).await?;
+    let ids: Vec<String> = cx
+        .ax
+        .service
+        .list(&again)
+        .await?
+        .nodes
+        .into_iter()
+        .map(|node| node.spec.id)
+        .collect();
+    assert_eq!(ids, ["G", "g1", "g2", "T", "root"]);
+    // which the plan takes on when the book is imported over it
+    cx.reef(&repo, &["import", "book", "--plan", "central", "--replace"])
+        .await?;
+    draws_as_the_book(&cx, &book, "book/src").await
+}
+
+/// Runs an export over a directory that is to be refused, checking that it leaves the
+/// directory as it was, returning the error
+///
+/// # Arguments
+///
+/// * `cx` - The case, whose project's repo the directory is named from
+/// * `dir` - The directory, as the command line names it from the repo's root
+async fn refused_over(cx: &Cx, dir: &str) -> anyhow::Result<String> {
+    let path = cx.ax.repo.join(dir);
+    let before = read_tree(&path)?;
+    let (_, error) = cx
+        .failing(
+            &cx.ax.repo,
+            &["export", dir, "--replace", "--project", "reef"],
+        )
+        .await?;
+    assert_eq!(read_tree(&path)?, before, "{dir} changed");
+    Ok(error)
+}
+
+/// An export over a directory refuses one that holds no reef book, one briefed from sections
+/// of its own, one outside the project's repo, one whose files aren't all nodes or pages, a
+/// page at a node file's path, and a file or directory in the way, leaving each as it was
+#[tokio::test]
+async fn export_replace_refuses() -> anyhow::Result<()> {
+    let cx = Cx::new("replace-refuses").await?;
+    let repo = cx.ax.repo.clone();
+    cx.put("a.yml", &work("A", &[])).await?;
+    write_files(
+        &repo,
+        &[
+            // no book, and a book with no reef plan
+            ("notes/a.md", "# A\n"),
+            ("plain/book.toml", "[book]\ntitle = \"x\"\n"),
+            ("plain/src/a.md", "# A\n"),
+            // a book briefed from sections of its own
+            (
+                "own/book.toml",
+                "[preprocessor.reef]\nwhy-sections = [\"Why\"]\n",
+            ),
+            ("own/src/a.md", "# A\n"),
+            // a file that isn't a node, and a node heading two files
+            ("bad/book.toml", "[preprocessor.reef]\n"),
+            ("bad/src/a.md", "---\nid: a\nstatus: sideways\n---\n"),
+            ("twice/book.toml", "[preprocessor.reef]\n"),
+            ("twice/src/a.md", "---\nid: A\n---\n"),
+            ("twice/src/b.md", "---\nid: A\n---\n"),
+        ],
+    )?;
+    write_files(
+        &cx.ax.dir,
+        &[
+            ("outside/book.toml", "[preprocessor.reef]\n"),
+            ("outside/src/a.md", "# A\n"),
+        ],
+    )?;
+    assert_eq!(
+        refused_over(&cx, "notes").await?,
+        "notes holds no `book.toml`: `--replace` writes over a reef book, and an export without \
+         it writes a new one"
+    );
+    let error = refused_over(&cx, "plain").await?;
+    assert!(error.contains("has no `[preprocessor.reef]`"), "{error}");
+    let error = refused_over(&cx, "own").await?;
+    assert!(error.contains("names its own doc sections"), "{error}");
+    let error = refused_over(&cx, "../outside").await?;
+    assert!(error.contains("is not in project `reef`'s repo"), "{error}");
+    let error = refused_over(&cx, "bad").await?;
+    assert!(
+        error.starts_with("the book's files can't all be read as nodes"),
+        "{error}"
+    );
+    assert_eq!(
+        refused_over(&cx, "twice").await?,
+        "`A` heads both a.md and b.md in the book, so which file is its isn't known"
+    );
+    // a page at the path of a node's file in the book
+    cx.reef(&repo, &["export", "kept"]).await?;
+    write_files(&repo, &[("scratch/page.md", "# A page\n")])?;
+    cx.reef(&repo, &["page", "put", "001-a.md", "scratch/page.md"])
+        .await?;
+    assert_eq!(
+        refused_over(&cx, "kept").await?,
+        "page `001-a.md` has the path of node `A`'s file in the book: move the page, or the \
+         node's file"
+    );
+    cx.reef(&repo, &["page", "rm", "001-a.md"]).await?;
+    // a directory where a page goes, and a file where its directory goes
+    cx.reef(&repo, &["page", "put", "notes/new.md", "scratch/page.md"])
+        .await?;
+    write_files(&repo, &[("kept/src/notes/new.md/held.txt", "held\n")])?;
+    assert_eq!(
+        refused_over(&cx, "kept").await?,
+        "notes/new.md is a directory in the book's src, where the export would write a file"
+    );
+    std::fs::remove_dir_all(repo.join("kept/src/notes"))?;
+    write_files(&repo, &[("kept/src/notes", "a file\n")])?;
+    assert_eq!(
+        refused_over(&cx, "kept").await?,
+        "notes is a file in the book's src, where the export would make a directory for \
+         notes/new.md"
+    );
+    // and once out of the way, the plan is written over the book
+    std::fs::remove_file(repo.join("kept/src/notes"))?;
+    let out = cx.reef(&repo, &["export", "kept", "--replace"]).await?;
+    assert!(
+        out.starts_with("exported 1 node and 1 page of `reef/central` over the book in kept: ")
+            && out.ends_with("  added src/notes/new.md\n"),
+        "{out}"
+    );
     Ok(())
 }

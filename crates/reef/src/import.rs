@@ -100,6 +100,24 @@ pub fn open_book(dir: &Path) -> anyhow::Result<Book> {
     Ok(Book { dir, src, config })
 }
 
+/// Refuses a book that names its own doc sections, since a central plan briefs its nodes from
+/// the default sections, which would not be the book's
+///
+/// # Arguments
+///
+/// * `config` - The book's `[preprocessor.reef]`
+/// * `book` - The book's directory as it was given, for the message
+pub(crate) fn default_sections(config: &Config, book: &Path) -> anyhow::Result<()> {
+    if config.sections != Sections::default() {
+        anyhow::bail!(
+            "{} names its own doc sections in `[preprocessor.reef]`, which a central plan doesn't \
+             keep, so its nodes would be briefed from other sections than the book's",
+            book.display()
+        );
+    }
+    Ok(())
+}
+
 /// The root a project's stored links lead from, for a directory in its repo: the repo's own
 /// root, or the root of the linked worktree the directory is in
 ///
@@ -468,13 +486,7 @@ pub async fn import<W: Write>(
 ) -> anyhow::Result<()> {
     // the book, which must take its briefs from the sections a central plan does
     let opened = open_book(&cwd.join(book))?;
-    if opened.config.sections != Sections::default() {
-        anyhow::bail!(
-            "{} names its own doc sections in `[preprocessor.reef]`, which a central plan doesn't \
-             keep, so its nodes would be briefed from other sections than the book's",
-            book.display()
-        );
-    }
+    default_sections(&opened.config, book)?;
     // and whose nodes are checked as `mdbook-reef check` checks them, before anything is sent
     let checked = Plan::load(&opened.src, &opened.config);
     if !checked.diags.is_empty() {

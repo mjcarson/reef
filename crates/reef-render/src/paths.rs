@@ -147,7 +147,8 @@ pub fn relative(from_dir: &str, to: &str) -> String {
 ///
 /// A URL, a mail link or an absolute path leads to the same place from anywhere, and so is
 /// `None`: left as written. So is a link that names no file, such as `#x` written from the
-/// root itself, since there is no file for it to name from elsewhere.
+/// root itself, since there is no file for it to name from elsewhere. A link to a directory
+/// keeps the trailing `/` that says it is one.
 ///
 /// # Arguments
 ///
@@ -180,6 +181,11 @@ pub fn moved(from: &str, to_dir: &str, link: &str) -> Option<String> {
     let rel = match relative(to_dir, &path) {
         rel if rel.is_empty() => ".".to_string(),
         rel => rel,
+    };
+    // a link to a directory keeps the slash that says it is one
+    let rel = match link.trim().split('#').next().is_some_and(|path| path.ends_with('/')) {
+        true => format!("{rel}/"),
+        false => rel,
     };
     // with the heading it named, if it named one
     Some(match anchor {
@@ -242,7 +248,9 @@ mod tests {
         assert_eq!(moved(file, "", "#x").as_deref(), Some("book/src/plan/a.md#x"));
         assert_eq!(moved(file, "", "b.md").as_deref(), Some("book/src/plan/b.md"));
         assert_eq!(moved(file, "", "../../../README.md").as_deref(), Some("README.md"));
-        assert_eq!(moved(file, "", "./").as_deref(), Some("book/src/plan"));
+        assert_eq!(moved(file, "", "./").as_deref(), Some("book/src/plan/"));
+        assert_eq!(moved(file, "", "../../../out/x/#y").as_deref(), Some("out/x/#y"));
+        assert_eq!(moved("", "book/src", "book/src/").as_deref(), Some("./"));
         // a link above the root keeps its climb, for the repo's source to refuse
         assert_eq!(moved("a.md", "", "../x.md").as_deref(), Some("../x.md"));
         // what leads the same place from anywhere is left as written
@@ -253,7 +261,7 @@ mod tests {
         assert_eq!(moved("", "out/src", "#x"), None);
         assert_eq!(moved("", "out/src", "out/src").as_deref(), Some("."));
         // moved into another file and back to the root, each link is as it was rooted
-        for link in ["#x", "b.md#y", "../../../README.md", "../d/c.md", "./"] {
+        for link in ["#x", "b.md#y", "../../../README.md", "../d/c.md", "./", "../../../out/x/"] {
             let rooted = moved(file, "", link).unwrap();
             let exported = moved("", "out/src", &rooted).unwrap();
             assert_eq!(moved("out/src/001-a.md", "", &exported).as_deref(), Some(rooted.as_str()), "{link}");

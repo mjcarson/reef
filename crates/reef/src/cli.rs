@@ -23,7 +23,7 @@
 //! reef [--conf PATH] queue ls [--project NAME]
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
-//! reef [--conf PATH] export <DIR> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -177,11 +177,16 @@ pub enum Command {
     /// links leading from the book's files
     ///
     /// The directory must be new or empty, and in the project's repo. Importing the book gives
-    /// the plan back.
+    /// the plan back. With `--replace` it is a reef book instead, which the plan is written back
+    /// over, keeping the book's files, its summary and its `book.toml`.
     Export {
         /// The directory to write the book in
         #[arg(value_name = "DIR")]
         dir: PathBuf,
+        /// Write over the reef book in the directory, keeping its layout: each node's file, its
+        /// summary and its `book.toml`
+        #[arg(long)]
+        replace: bool,
         /// The plan to export, if not the project's only plan, and the project it is in, if not
         /// the one the directory belongs to
         #[command(flatten)]
@@ -521,7 +526,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             replace,
             pick,
         } => import::import(&client, cwd, &book, &pick, replace, out).await,
-        Command::Export { dir, pick } => export::export(&client, cwd, &dir, &pick, out).await,
+        Command::Export { dir, replace, pick } => {
+            export::export(&client, cwd, &dir, &pick, replace, out).await
+        }
         Command::Mcp { pick } => {
             // the protocol owns standard output, so nothing is printed to `out`
             let tools = Tools::new(client, cwd.to_path_buf(), pick);
