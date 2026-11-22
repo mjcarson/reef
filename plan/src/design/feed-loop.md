@@ -150,6 +150,12 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
   `reef queue ls` and next_task name the needs it waits on.
 - **When the queue runs out**, next falls back to ready work in plan order. A loop can be told to
   stop instead.
+- **Done and missing entries stay until taken off.** next passes over an entry that is done or
+  started without a word, and lists one that is blocked, or whose node or plan is gone, with the
+  waiting ones it skipped ([C22](../milestones/m5.md)).
+- **The report says when the queue ordered it.** next's report reads as it always has until the
+  queue puts something first or passes something over, and names nodes in full only across
+  several plans.
 - **Per project, spanning its plans**, with `--plan` to narrow a loop to one.
 - **The terminal first, then the app.** `reef queue` sets the order ([C24](../milestones/m5.md)),
   and the app's queue panel follows ([C25](../milestones/m5.md)).
