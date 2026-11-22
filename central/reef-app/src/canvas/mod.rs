@@ -466,6 +466,12 @@ pub fn Canvas(
 ) -> Element {
     let name = format!("{project}/{plan}");
     let view = use_view(name.clone());
+    // the plan's comment threads, which the toolbar counts and the sidebar shows
+    let (threads_project, threads_plan) = (project.clone(), plan.clone());
+    crate::side::threads::use_threads(
+        use_signal(move || threads_project).into(),
+        use_signal(move || threads_plan).into(),
+    );
     // take each payload of this plan as it comes, built into its graph
     use_effect(move || take(view, &payload.read()));
     // fit the view once there is a plan and a stage to fit it in

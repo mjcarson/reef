@@ -172,6 +172,17 @@ mod web {
         el.set_scroll_top(0);
     }
 
+    /// Scrolls whatever holds an element so the element is in view, at the middle if it moves
+    ///
+    /// # Arguments
+    ///
+    /// * `el` - The element
+    pub fn scroll_into_view(el: &El) {
+        let options = web_sys::ScrollIntoViewOptions::new();
+        options.set_block(web_sys::ScrollLogicalPosition::Center);
+        el.scroll_into_view_with_scroll_into_view_options(&options);
+    }
+
     /// Gives an element the keyboard's focus
     ///
     /// # Arguments
@@ -475,6 +486,9 @@ mod server {
 
     /// Nothing scrolls on the server
     pub fn scroll_to_top(_el: &El) {}
+
+    /// Nothing scrolls on the server
+    pub fn scroll_into_view(_el: &El) {}
 
     /// Nothing has focus on the server
     pub fn focus(_el: &El) {}

@@ -430,3 +430,90 @@ fn revisions_are_served_a_file_at_a_time() -> anyhow::Result<()> {
         anyhow::Ok(())
     })
 }
+
+/// Comments are kept and read through the app's server functions: a thread on the node and one
+/// on a line of its revision, a reply, and a mark over the version read, a stale one refused
+#[test]
+fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
+    use reef_api::{Anchor, Commented, Marked, Side, Target, ThreadState};
+    use reef_app::calls::{mark_thread, plan_threads, reply_to, start_thread};
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // A1 started and captured with one new file
+        let repo = fx.project("commented", &["central"]).await?;
+        fx.reef(&repo, &["start", "A1"]).await?;
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n")?;
+        let staged = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "a.txt"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .status()?;
+        anyhow::ensure!(staged.success(), "git add failed");
+        fx.reef(&repo, &["node", "capture"]).await?;
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        let (project, plan) = (|| "commented".to_string(), || "central".to_string());
+        // a general thread, and one on the file's second line, each kept
+        let general = start_thread(
+            project(),
+            plan(),
+            "A1".into(),
+            Target::Node,
+            "Looks *good*".into(),
+        )
+        .await
+        .map_err(failed)?;
+        assert!(
+            matches!(general, Commented::Added { comment: 1, .. }),
+            "{general:?}"
+        );
+        let line = Target::Line(Anchor {
+            revision: 1,
+            path: "a.txt".to_string(),
+            side: Side::New,
+            line: 2,
+        });
+        let on_line = start_thread(
+            project(),
+            plan(),
+            "A1".into(),
+            line.clone(),
+            "Why two?".into(),
+        )
+        .await
+        .map_err(failed)?;
+        assert!(
+            matches!(on_line, Commented::Added { comment: 2, .. }),
+            "{on_line:?}"
+        );
+        // a reply in the line's thread, then the plan's threads read back rendered
+        let replied = reply_to(project(), plan(), 2, "Because.".into())
+            .await
+            .map_err(failed)?;
+        assert!(
+            matches!(replied, Commented::Added { comment: 3, .. }),
+            "{replied:?}"
+        );
+        let threads = plan_threads(project(), plan()).await.map_err(failed)?;
+        let read: Vec<(u32, Target, usize)> = threads
+            .iter()
+            .map(|thread| (thread.number, thread.target.clone(), thread.comments.len()))
+            .collect();
+        assert_eq!(read, [(1, Target::Node, 1), (2, line, 2)]);
+        assert_eq!(threads[0].comments[0].html, "<p>Looks <em>good</em></p>\n");
+        // resolved over the version read, then stale over the same version
+        let resolved = mark_thread(project(), plan(), 2, ThreadState::Resolved, 1)
+            .await
+            .map_err(failed)?;
+        let Marked::Marked { thread } = resolved else {
+            anyhow::bail!("the mark was refused: {resolved:?}");
+        };
+        assert_eq!((thread.state, thread.version), (ThreadState::Resolved, 2));
+        let stale = mark_thread(project(), plan(), 2, ThreadState::Open, 1)
+            .await
+            .map_err(failed)?;
+        assert!(matches!(stale, Marked::Stale { .. }), "{stale:?}");
+        anyhow::Ok(())
+    })
+}

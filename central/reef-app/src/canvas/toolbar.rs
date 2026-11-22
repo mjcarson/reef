@@ -1,6 +1,9 @@
-//! The canvas's toolbar and legend: the search, the acceptance filter, and the view's buttons
+//! The canvas's toolbar and legend: the search, the acceptance filter, the plan's open comment
+//! threads, and the view's buttons
 
 use super::{View, dom};
+use crate::side::Tab;
+use crate::side::threads::{Threads, excerpt, target_label};
 use dioxus::prelude::*;
 use reef_draw::accept;
 use reef_draw::markup::status_class;
@@ -22,6 +25,7 @@ pub fn Toolbar(has_acc: bool) -> Element {
             if has_acc {
                 AccFilter {}
             }
+            OpenComments {}
             button {
                 "data-act": "expand",
                 title: "Open every group",
@@ -141,6 +145,68 @@ fn Search() -> Element {
                                 "{title} "
                                 code { "{id}" }
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The plan's open comment threads: how many, and a list of them that goes to each one
+///
+/// A canvas drawn outside a plan's page reads no threads, and shows nothing here.
+#[component]
+fn OpenComments() -> Element {
+    let mut view = use_context::<View>();
+    let Some(mut threads) = try_use_context::<Threads>() else {
+        return rsx! {};
+    };
+    // whether the list is open, and the threads still open, oldest first
+    let mut shown = use_signal(|| false);
+    let mut open = threads.now();
+    open.retain(|thread| thread.is_open());
+    let count = open.len();
+    rsx! {
+        div { class: "reef-app-open-box",
+            button {
+                class: if count > 0 { "reef-app-open-comments some" } else { "reef-app-open-comments" },
+                "data-act": "comments",
+                title: "The plan's open comment threads",
+                "aria-expanded": "{shown}",
+                onclick: move |_| {
+                    let now = *shown.peek();
+                    shown.set(!now);
+                },
+                "Comments "
+                span { class: "reef-app-count", "{count}" }
+                " ▾"
+            }
+            ul { class: "reef-results reef-app-open-list", hidden: !*shown.read(),
+                if open.is_empty() {
+                    li { class: "reef-app-muted reef-app-open-none", "No open threads." }
+                }
+                for thread in open {
+                    li { key: "{thread.number}",
+                        a {
+                            href: "javascript:void 0",
+                            "data-thread": "{thread.number}",
+                            onclick: {
+                                let (id, number) = (thread.node.id.clone(), thread.number);
+                                move |event: MouseEvent| {
+                                    // its node selected and shown, its thread in the Comments tab
+                                    event.prevent_default();
+                                    shown.set(false);
+                                    view.goto(&id);
+                                    view.tab.set(Tab::Comments);
+                                    threads.focus.set(Some(number));
+                                }
+                            },
+                            div { class: "reef-app-open-where",
+                                code { "{thread.node.id}" }
+                                " {target_label(&thread.target)}"
+                            }
+                            div { class: "reef-app-open-text", "{excerpt(&thread)}" }
                         }
                     }
                 }

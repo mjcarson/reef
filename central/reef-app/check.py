@@ -1,6 +1,6 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
-Each step checks one of M4's, M5's or M6's criteria in the browser, printing `ok` or `FAILED` and what
+Each step checks one of M4's to M7's criteria in the browser, printing `ok` or `FAILED` and what
 it saw; the script exits 1 if any failed.
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
@@ -698,6 +698,116 @@ def c33_changes_in_the_sidebar(page):
           figures)
 
 
+def open_counts(page):
+    """How many open threads the Comments tab and the toolbar each say there are."""
+    return page.evaluate("""() => [
+        document.querySelector('.reef-side .reef-app-tab:nth-child(3) .reef-app-count')?.textContent ?? null,
+        document.querySelector('.reef-app-open-comments .reef-app-count')?.textContent ?? null,
+    ]""")
+
+
+def wait_counts(page, counts):
+    """Waits for the tab and the toolbar to say `counts` open threads, then answers what they say."""
+    try:
+        page.wait_for_function(f"""() => [
+            document.querySelector('.reef-side .reef-app-tab:nth-child(3) .reef-app-count')?.textContent,
+            document.querySelector('.reef-app-open-comments .reef-app-count')?.textContent,
+        ].join() === '{counts},{counts}'""", timeout=10000)
+    except Exception:
+        pass
+    return open_counts(page)
+
+
+def c35_comment_threads_in_the_diff(page):
+    """C35: a line clicked in the diff starts a thread shown under it, the node takes a general
+    comment in its Comments tab, a reply shows in its thread, a resolve takes it off the open count,
+    and the toolbar lists and counts what is open. Runs after C33, on its plan."""
+    page.goto(URL + "/plans/check/changes")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
+    page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    page.wait_for_selector('.reef-app-file-head[data-path="src/keep.rs"]', timeout=10000)
+    seen = {"before": wait_counts(page, 0)}
+    # a click on the added line's numbers opens a box under it, which keeps a thread on it
+    page.click('.reef-app-file-head[data-path="src/keep.rs"]')
+    line = '.reef-app-diff[data-path="src/keep.rs"] tr.reef-app-line[data-side="new"][data-line="2"]'
+    page.wait_for_selector(line, timeout=10000)
+    page.click(f"{line} td.reef-app-ln >> nth=1")
+    page.fill(".reef-app-compose-row textarea", "**hi** <b>x</b>")
+    page.click(".reef-app-compose-row .reef-app-send")
+    page.wait_for_selector(".reef-app-thread-row .reef-app-thread", timeout=10000)
+    seen["under its line"] = page.evaluate(f"""() => {{
+        const row = document.querySelector('{line}').nextElementSibling;
+        const body = row?.querySelector('.reef-app-comment-body');
+        return [row?.className, body?.querySelector('strong')?.textContent, body?.textContent.trim(),
+                body?.querySelectorAll('b').length];
+    }}""")
+    seen["after a line comment"] = wait_counts(page, 1)
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-thread-inline.png"))
+    check("C35 clicking a diff line starts a comment, and its thread shows under the line",
+          seen["under its line"] == ["reef-app-thread-row", "hi", "hi <b>x</b>", 0], seen)
+    # a general comment from the Comments tab
+    page.click(".reef-side .reef-app-tab:nth-child(3)")
+    page.fill(".reef-app-comments > .reef-app-composer textarea", "Looks good *overall*.")
+    page.click(".reef-app-comments > .reef-app-composer .reef-app-send")
+    page.wait_for_function("() => [...document.querySelectorAll('.reef-app-comments .reef-app-thread')]"
+                           ".some(t => t.textContent.includes('Looks good overall.'))", timeout=10000)
+    general = page.evaluate("""() => [...document.querySelectorAll('.reef-app-comments > .reef-app-thread')]
+        .map(t => t.querySelector('.reef-app-comment-body').innerHTML.trim())""")
+    seen["after a general comment"] = wait_counts(page, 2)
+    check("C35 a general comment on the node shows in its Comments tab",
+          general == ["<p>Looks good <em>overall</em>.</p>"], {"general threads": general})
+    check("C35 a new comment bumps the open count, in the Comments tab and in the toolbar",
+          seen["before"] == ["0", "0"] and seen["after a line comment"] == ["1", "1"]
+          and seen["after a general comment"] == ["2", "2"], seen)
+    # a reply in the line's thread, then the thread resolved
+    thread = ".reef-app-line-thread .reef-app-thread"
+    page.click(f"{thread} .reef-app-reply-open")
+    page.fill(f"{thread} .reef-app-composer textarea", "Because.")
+    page.click(f"{thread} .reef-app-composer .reef-app-send")
+    page.wait_for_function(f"() => document.querySelectorAll('{thread} .reef-app-comment').length === 2",
+                           timeout=10000)
+    replies = page.eval_on_selector_all(f"{thread} .reef-app-comment-body", "bs => bs.map(b => b.textContent.trim())")
+    page.click(f"{thread} [data-act=resolve]")
+    page.wait_for_selector(".reef-app-line-thread .reef-app-thread.resolved", timeout=10000)
+    resolved = wait_counts(page, 1)
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-comments.png"))
+    page.emulate_media(color_scheme="dark")
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-comments-dark.png"))
+    page.emulate_media(color_scheme="light")
+    check("C35 a reply shows in its thread, and resolving it takes it off the open count",
+          replies == ["hi <b>x</b>", "Because."] and resolved == ["1", "1"],
+          {"thread": replies, "open after the resolve": resolved})
+    # a comment another writer makes shows in the toolbar without a reload
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    request = urllib.request.Request(
+        f"{URL}/api/v1/projects/check/plans/changes/nodes/K1/comments",
+        data=json.dumps({"target": {"on": "node"}, "body": "From the terminal"}).encode(),
+        headers={"content-type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as answer:
+        answer.read()
+    live = {"counts": wait_counts(page, 2), "no reload": page.evaluate("() => window.__kept")}
+    # the toolbar's list goes to a thread: the sidebar closed, then the entry clicked
+    page.click(".reef-side .reef-close")
+    page.click("[data-act=comments]")
+    entries = page.eval_on_selector_all(".reef-app-open-list a", "as => as.map(a => a.textContent)")
+    page.screenshot(path=str(SHOTS / "reef-app-open-list.png"))
+    page.click(".reef-app-open-list a >> nth=0")
+    page.wait_for_selector(".reef-side .reef-app-comments", timeout=10000)
+    went = page.evaluate("""() => [document.querySelector('.reef-side .reef-id')?.textContent,
+        document.querySelector('.reef-side .reef-app-tab.on')?.textContent]""")
+    # and Show in diff opens the line's file at the line
+    page.click(".reef-app-line-thread .reef-app-show-line")
+    page.wait_for_selector(".reef-app-line.focus", timeout=10000)
+    shown = page.evaluate("""() => { const l = document.querySelector('.reef-app-line.focus');
+        return [l.closest('.reef-app-diff').dataset.path, l.dataset.side, l.dataset.line]; }""")
+    check("C35 the toolbar lists the open threads, each going to its node, and a thread shows its line",
+          live == {"counts": ["2", "2"], "no reload": "same page"} and len(entries) == 2
+          and "K1" in entries[0] and went[0] == "K1" and went[1].startswith("Comments")
+          and shown == ["src/keep.rs", "new", "2"],
+          {"live": live, "entries": entries, "went to": went, "shown in diff": shown})
+
+
 def queue_order():
     """The check's queue as `reef queue ls` lists it: each entry's name, in order."""
     return [line.split()[1] for line in reef("queue", "ls").splitlines() if line[:1].isdigit()]
@@ -839,6 +949,7 @@ def main():
                 c68_a_node_link_opens_its_node,
                 c69_a_body_put_shows_in_the_sidebar,
                 c33_changes_in_the_sidebar,
+                c35_comment_threads_in_the_diff,
             ]
             for step in checks:
                 # every check, or those `--only` names

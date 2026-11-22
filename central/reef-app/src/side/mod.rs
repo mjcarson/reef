@@ -2,15 +2,18 @@
 //!
 //! **Details** is what reef-view's sidebar shows: why and what, acceptance, performance, docs,
 //! design choices and the nodes around it. **Changes** is the node's captured revisions, each
-//! file's diff drawn once it is opened. **Edit** is the node's YAML, saved as `reef node put`
-//! saves it. Inside a plan's page, its actions queue the node first or last in its project's
+//! file's diff drawn once it is opened, with the threads on its lines. **Comments** is the
+//! node's threads, general and on its lines, with how many are open. **Edit** is the node's
+//! YAML, saved as `reef node put` saves it. Inside a plan's page, its actions queue the node first or last in its project's
 //! queue, or take it off.
 
 mod changes;
+mod comments;
 mod details;
 pub mod diff;
 mod docs;
 mod perf;
+pub mod threads;
 
 pub use changes::when;
 
@@ -18,9 +21,10 @@ use crate::canvas::{View, dom};
 use crate::panel::NodeEditor;
 use crate::queue::Queue;
 use changes::Changes;
+use comments::Comments;
 use details::Details;
 use dioxus::prelude::*;
-use reef_api::{Place, QueueEdit};
+use reef_api::{Anchor, Place, QueueEdit};
 use reef_draw::markup::{status_class, status_label};
 use reef_model::PlanName;
 use std::collections::HashSet;
@@ -32,6 +36,8 @@ pub enum Tab {
     Details,
     /// The node's captured revisions, and their files' diffs
     Changes,
+    /// The node's comment threads
+    Comments,
     /// The node's YAML, to edit and save
     Edit,
 }
@@ -44,6 +50,8 @@ pub struct Review {
     pub revision: Signal<Option<u32>>,
     /// The files open, by the path each is shown under
     pub open: Signal<HashSet<String>>,
+    /// A line to bring into view once its file is drawn
+    pub focus: Signal<Option<Anchor>>,
 }
 
 /// The sidebar of the selected node
@@ -66,6 +74,15 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
     let mut review = use_context_provider(|| Review {
         revision: Signal::new(None),
         open: Signal::new(HashSet::new()),
+        focus: Signal::new(None),
+    });
+    // how many of the node's threads are open, which its tab says
+    let open_threads = try_use_context::<threads::Threads>().map(|threads| {
+        threads
+            .of(&id)
+            .iter()
+            .filter(|thread| thread.is_open())
+            .count()
     });
     // a newly selected node is read from its top, with none of its files open, while a newer
     // revision keeps the scroll
@@ -79,6 +96,7 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
             seen.set(id);
             review.revision.set(None);
             review.open.write().clear();
+            review.focus.set(None);
         }
     }));
     let Some(g) = view.graph() else {
@@ -97,7 +115,8 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
         .map(|&a| (g.node(a).id.clone(), g.node(a).title.clone()))
         .collect();
     let open = g.is_group(i).then(|| view.expanded.read().contains(&n.id));
-    let (center_id, edit_id, changes_id) = (id.clone(), id.clone(), id.clone());
+    let (center_id, edit_id, changes_id, comments_id) =
+        (id.clone(), id.clone(), id.clone(), id.clone());
     let (changes_project, changes_plan) = (project.clone(), plan.clone());
     // the node in full, as the queue names it, and whether it is queued
     let queued = PlanName::new(project.clone(), plan.clone())
@@ -234,6 +253,16 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
                     "Changes"
                 }
                 button {
+                    class: tab_class(Tab::Comments),
+                    role: "tab",
+                    "aria-selected": "{tab == Tab::Comments}",
+                    onclick: move |_| view.tab.set(Tab::Comments),
+                    "Comments"
+                    if let Some(open) = open_threads {
+                        span { class: if open > 0 { "reef-app-count some" } else { "reef-app-count" }, "{open}" }
+                    }
+                }
+                button {
                     class: tab_class(Tab::Edit),
                     role: "tab",
                     "aria-selected": "{tab == Tab::Edit}",
@@ -247,6 +276,9 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
                 },
                 Tab::Changes => rsx! {
                     Changes { project: changes_project, plan: changes_plan, id: changes_id }
+                },
+                Tab::Comments => rsx! {
+                    Comments { id: comments_id }
                 },
                 Tab::Edit => rsx! {
                     NodeEditor { project, plan, id: edit_id, changes }

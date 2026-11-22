@@ -33,7 +33,8 @@ reef-draw = { workspace = true }
 reef-layout = { workspace = true }
 web-sys = { version = "0.3", features = [
   "Document", "DomRect", "DomTokenList", "Element", "EventSource", "EventTarget", "HtmlElement", "NodeList",
-  "Performance", "PointerEvent", "Storage", "WheelEvent", "Window", "console",
+  "Performance", "PointerEvent", "ScrollIntoViewOptions", "ScrollLogicalPosition", "Storage",
+  "WheelEvent", "Window", "console",
 ], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 tokio = { workspace = true, features = ["net", "signal"], optional = true }

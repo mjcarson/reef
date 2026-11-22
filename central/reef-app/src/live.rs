@@ -6,7 +6,7 @@
 //! after a dropped connection. A project's queue spans its plans, and whether an entry is ready
 //! moves with any of them, so the queue follows the whole project's stream.
 //!
-//! A node's work, its captured revisions, changes apart from its plan. The plan's stream bumps
+//! A node's work, its captured revisions and its comments, changes apart from its plan. The plan's stream bumps
 //! a counter of its own for those, [`WorkChanges`], so a capture reads the Changes tab again
 //! without reading the plan's payload again.
 
@@ -67,8 +67,14 @@ type Follow = ();
 /// a gap
 const PLAN_KINDS: &[&str] = &["nodes-put", "pages-put", "plan-written", "missed"];
 
-/// The changes that mean reading a node's work again: a revision captured, or a gap
-const WORK_KINDS: &[&str] = &["revision-captured", "missed"];
+/// The changes that mean reading a node's work again: a revision captured, a comment kept, a
+/// thread marked, or a gap
+const WORK_KINDS: &[&str] = &[
+    "revision-captured",
+    "comment-added",
+    "thread-marked",
+    "missed",
+];
 
 /// How many changes to the work of a plan's nodes have come since its page opened it, which the
 /// plan's page provides to everything inside it
@@ -137,8 +143,9 @@ pub fn use_changes(project: ReadSignal<String>, plan: ReadSignal<String>) -> Rea
 
 /// How many changes to the work of the plan's nodes have come since its page opened it
 ///
-/// A resource that reads the count reads a node's revisions again after each capture. Outside
-/// a plan's page, nothing is followed, and the count stays at 0.
+/// A resource that reads the count reads a node's revisions, or the plan's comments, again after
+/// each capture, comment or mark. Outside a plan's page, nothing is followed, and the count
+/// stays at 0.
 pub fn use_work_changes() -> ReadSignal<u64> {
     // the plan's page's counter, else one nothing bumps
     let none = use_signal(|| 0u64);

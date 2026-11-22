@@ -102,6 +102,41 @@ code { font-size: 0.92em; }
 .reef-app-line.added .reef-app-sign { color: var(--add-fg); }
 .reef-app-line.removed .reef-app-sign { color: var(--del-fg); }
 .reef-app-eof td { color: var(--muted); font-style: italic; padding: 0 0.5rem; }
+.reef-app-diff.commenting .reef-app-ln { cursor: pointer; position: relative; }
+.reef-app-diff.commenting .reef-app-line:hover .reef-app-ln:first-child::before { content: "+"; position: absolute; left: 0.1rem; color: #fff; background: var(--links); border-radius: 3px; width: 1.1em; text-align: center; font-weight: 600; }
+.reef-app-line.focus td { box-shadow: inset 0 1px 0 var(--links), inset 0 -1px 0 var(--links); }
+.reef-app-thread-row > td, .reef-app-compose-row > td { padding: 0.35rem 0.5rem; background: var(--panel); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-family: system-ui, sans-serif; font-size: 0.85rem; white-space: normal; }
+.reef-app-count { display: inline-block; min-width: 1.1em; margin-left: 0.3rem; padding: 0 0.3rem; font-size: 0.72rem; text-align: center; border-radius: 9px; color: var(--muted); border: 1px solid var(--line); }
+.reef-app-count.some, .some > .reef-app-count { color: #fff; background: var(--links); border-color: var(--links); }
+.reef-app-comments { margin-top: 0.6rem; font-size: 0.85rem; display: grid; gap: 0.5rem; }
+.reef-app-comments-sum { margin: 0; }
+.reef-app-comments-head { margin: 0.4rem 0 0; font-size: 0.9rem; }
+.reef-app-thread { border: 1px solid var(--line); border-left: 3px solid var(--links); border-radius: 6px; padding: 0.4rem 0.55rem; background: var(--bg); }
+.reef-app-thread.resolved { border-left-color: var(--reef-done); opacity: 0.8; }
+.reef-app-thread.focus { box-shadow: 0 0 0 2px var(--links); }
+.reef-app-comment + .reef-app-comment { margin-top: 0.4rem; padding-top: 0.4rem; border-top: 1px dashed var(--line); }
+.reef-app-comment-head { color: var(--muted); font-size: 0.75rem; }
+.reef-app-comment-number { font-family: monospace; }
+.reef-app-comment-body { overflow-wrap: anywhere; }
+.reef-app-comment-body > :first-child { margin-top: 0.15rem; }
+.reef-app-comment-body > :last-child { margin-bottom: 0.15rem; }
+.reef-app-comment-body pre { overflow-x: auto; background: var(--panel); padding: 0.3rem 0.4rem; border-radius: 4px; }
+.reef-app-thread-foot { display: flex; gap: 0.4rem; align-items: center; margin-top: 0.35rem; }
+.reef-app-thread-state { font-size: 0.75rem; margin-right: auto; }
+.reef-app-thread-state.open { color: var(--links); }
+.reef-app-thread-state.resolved { color: var(--reef-done); }
+.reef-app-composer { margin-top: 0.35rem; }
+.reef-app-compose { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.45rem; }
+.reef-app-composer .reef-app-actions { margin: 0.3rem 0 0; }
+.reef-app-line-thread { display: grid; gap: 0.25rem; }
+.reef-app-line-thread-head { display: flex; gap: 0.5rem; align-items: center; justify-content: space-between; }
+.reef-app-line-thread-head code { overflow-wrap: anywhere; }
+.reef-app-open-box { position: relative; }
+.reef-app-open-comments .reef-app-count { margin-left: 0; }
+.reef-results.reef-app-open-list { left: auto; right: 0; width: min(380px, 80vw); }
+.reef-app-open-where { font-size: 0.8rem; color: var(--muted); }
+.reef-app-open-text { overflow-wrap: anywhere; }
+.reef-app-open-none { padding: 4px 10px; }
 "#;
 
 /// The app's pages, by path

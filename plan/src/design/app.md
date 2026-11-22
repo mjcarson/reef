@@ -111,8 +111,8 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
   plan, so another plan starts afresh. Together they do what `Handle::swap` and
   `Handle::swap_plan` did.
 - **One sidebar, with tabs.** The node's header, then **Details**, which is what reef-view's
-  sidebar shows, **Changes**, which is the node's captured revisions ([C33](../milestones/m7.md)), and
-  **Edit**, which is C20's editor. M7's Comments tab joins them.
+  sidebar shows, **Changes**, which is the node's captured revisions ([C33](../milestones/m7.md)),
+  **Comments**, which is its threads ([C35](../milestones/m7.md)), and **Edit**, which is C20's editor.
 - **The boxes say what was hit.** Each box, group head and toggle writes what a press or a move
   landed on to a signal, as the event bubbles, and the SVG's own handler takes it. Nothing reads
   the DOM to find the target, and nothing stops the event.
@@ -249,3 +249,29 @@ Changes tab shows them beside what the plan says of the node ([C33](../milestone
   revision.
 - **Kept across tabs, let go with the node.** The revision picked and the files open stay
   while another tab is shown, and are let go when another node is selected.
+
+## Comment threads
+
+The user reviews a node's work in the app as a merge request is reviewed: on the lines of its
+diff, and on the node as a whole ([C35](../milestones/m7.md)), over the threads C34 keeps.
+
+### Design choices
+
+- **The plan's threads, read once for the canvas.** The canvas reads every thread of the plan,
+  again after each comment or mark the plan's stream announces and after each write the page
+  makes, and gives them to the toolbar and the sidebar through context. The toolbar's list,
+  the Comments tab and the diff's threads show the same, from one read a change.
+- **A line's numbers start a thread on it.** One handler on the diff's table finds the line a
+  click on its numbers landed on, by its side and number, and opens a box under it. A line's
+  threads are drawn under it, in the diff of the revision they name. Two attributes a row and
+  a lookup a line moved X2's `Cargo.lock` from 83 ms to 92 ms to open.
+- **The Comments tab, general threads first.** Its count says how many of the node's threads
+  are open. The threads on the node come first, then a box for a new one, then those on its
+  lines, open before resolved, each with a way to its line: the Changes tab at the line's
+  revision, its file open and the line brought into view.
+- **A plan-wide list in the toolbar.** "Comments N" counts the plan's open threads, and lists
+  each by its node, where it is, and the first line of its text. An entry selects its node and
+  brings its thread into view in the Comments tab.
+- **Shown as the service rendered it.** A comment's body comes rendered, raw HTML escaped, so
+  the app shows its HTML as it is. A mark sends the version it read, and a stale one says so
+  and shows the thread as it now is.

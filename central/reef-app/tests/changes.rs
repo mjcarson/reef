@@ -5,8 +5,11 @@
 //! and text, not of how the renderer escapes or closes its tags.
 
 use dioxus::prelude::*;
-use reef_api::{FileDiff, FileStatus, Hunk, Line, LineKind};
+use reef_api::{
+    Anchor, Comment, FileDiff, FileStatus, Hunk, Line, LineKind, Side, Target, Thread, ThreadState,
+};
 use reef_app::side::diff::Diff;
+use reef_app::side::threads::{excerpt, target_label};
 
 /// A line of a kind, numbered on the sides that kind is on
 ///
@@ -196,4 +199,100 @@ fn files_without_lines_say_why() {
             .collect();
         assert_eq!(notes, [said]);
     }
+}
+
+/// A thread on a line of the file's revision, with its first comment's body
+///
+/// # Arguments
+///
+/// * `number` - The thread's number
+/// * `side` - The side its line is numbered on
+/// * `line` - Its line's number there
+/// * `body` - Its first comment's body
+fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
+    Thread {
+        node: "reef/central/C35".parse().unwrap(),
+        number,
+        version: 1,
+        target: Target::Line(Anchor {
+            revision: 3,
+            path: "src/new.rs".to_string(),
+            side,
+            line,
+        }),
+        state: ThreadState::Open,
+        comments: vec![Comment {
+            number,
+            at: 0,
+            body: body.to_string(),
+            html: format!("<p>{body}</p>"),
+        }],
+    }
+}
+
+/// A thread on a line draws under that line, numbered on its side, and a line names where a
+/// comment on it is anchored
+#[test]
+fn threads_show_under_their_lines() {
+    // one thread on the removed line, numbered in the base, and one on an added line
+    let threads = vec![
+        thread_on(4, Side::Old, 2, "Why gone?"),
+        thread_on(5, Side::New, 21, "Done?"),
+    ];
+    let html = dioxus_ssr::render_element(rsx! {
+        Diff { revision: 3, file: edited(), threads, node: Some("C35".to_string()) }
+    });
+    let doc = roxmltree::Document::parse(&html).expect("the diff is well formed");
+    let root = doc.root_element();
+    assert_eq!(class(root), "reef-app-diff commenting");
+    // each row in order: a line by where it is anchored, or a thread by its number
+    let rows: Vec<String> = root
+        .descendants()
+        .filter(|n| n.has_tag_name("tr") && !class(*n).starts_with("reef-app-hunk-head"))
+        .map(
+            |tr| match (tr.attribute("data-side"), tr.attribute("data-line")) {
+                (Some(side), Some(line)) => format!("{side}:{line}"),
+                _ => match tr.descendants().find_map(|n| n.attribute("data-thread")) {
+                    Some(thread) => format!("thread {thread}"),
+                    None => class(tr).to_string(),
+                },
+            },
+        )
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            "new:1",
+            "old:2",
+            "thread 4",
+            "new:2",
+            "new:20",
+            "new:21",
+            "reef-app-eof",
+            "thread 5",
+        ]
+    );
+    // and a thread's comment is drawn as the service rendered it
+    let body = root
+        .descendants()
+        .find(|n| class(*n) == "reef-app-comment-body")
+        .map(text);
+    assert_eq!(body.as_deref(), Some("Why gone?"));
+}
+
+/// A list names a thread by where it is, and by its first line cut short
+#[test]
+fn threads_are_named_by_where_and_what() {
+    // on a removed line, on an added one, and on the node as a whole
+    let old = thread_on(4, Side::Old, 2, "Why gone?");
+    assert_eq!(target_label(&old.target), "r3 · src/new.rs:2 (removed)");
+    assert_eq!(
+        target_label(&thread_on(5, Side::New, 21, "x").target),
+        "r3 · src/new.rs:21"
+    );
+    assert_eq!(target_label(&Target::Node), "general");
+    // the first line with anything on it, cut at 80 characters
+    let long = thread_on(6, Side::New, 1, &format!("\n  {}\nmore", "é".repeat(90)));
+    assert_eq!(excerpt(&long), format!("{}…", "é".repeat(80)));
+    assert_eq!(excerpt(&old), "Why gone?");
 }

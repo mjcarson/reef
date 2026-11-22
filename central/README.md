@@ -275,6 +275,10 @@ the pages and the JSON API alike.
   and a file's diff once it is opened, fetched then and drawn as a table of its hunks. A
   capture the plan's stream announces reads the tab again (`live::WorkChanges`) without
   reading the plan again.
+- **Comments are threads on a diff's lines or on the node.** A click on a line's numbers opens a
+  box under it, and its threads show under it. The Comments tab holds the node's threads, a box
+  for a general one, and how many are open, and the toolbar counts and lists the plan's open
+  threads. The canvas reads the plan's threads once a change, for all three.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under
@@ -296,7 +300,7 @@ env -u RUSTFLAGS dx build --release @server --platform server --features embedde
 REEF_CONFIG=reef.toml ../target/dx/reef-app/debug/web/server                 # serve the build
 cargo +nightly test -p reef-app --features embedded                          # the suite
 python check.py                                                              # the browser checks
-python check.py --release --only=c33                                         # C33's timing
+python check.py --release --only=c33,c35                                     # the diff's timing
 ```
 
 `tests/app.rs` serves the app's router over shoal in-process and puts plans through the CLI.

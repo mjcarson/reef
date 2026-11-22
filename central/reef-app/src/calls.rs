@@ -6,7 +6,12 @@
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
-use reef_api::{FileDiff, PlanInfo, Project, QueueEdit, QueueListing, Queued, Revision};
+use reef_api::{
+    Commented, FileDiff, Marked, PlanInfo, Project, QueueEdit, QueueListing, Queued, Revision,
+    Target, Thread, ThreadState,
+};
+#[cfg(feature = "server")]
+use reef_api::{MarkThread, NewReply, NewThread};
 use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
@@ -180,6 +185,113 @@ pub async fn revision_file(
         .map_err(|error| ServerFnError::new(error.to_string()))?;
     crate::server::service()
         .revision_file(&node, revision, &path)
+        .await
+        .map_err(failed)
+}
+
+/// A plan's comment threads, on every node of it, by number, each comment rendered
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+#[get("/app/threads?project&plan")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::plan_threads", skip_all, err(Debug))
+)]
+pub async fn plan_threads(project: String, plan: String) -> Result<Vec<Thread>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .threads(&name)
+        .await
+        .map_err(failed)
+}
+
+/// Starts a thread on a node, or on a line of one of its revisions
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+/// * `target` - What the thread is on
+/// * `body` - Its first comment's body, as markdown
+#[post("/app/thread")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::start_thread", skip_all, err(Debug))
+)]
+pub async fn start_thread(
+    project: String,
+    plan: String,
+    id: String,
+    target: Target,
+    body: String,
+) -> Result<Commented, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    crate::server::service()
+        .start_thread(&node, NewThread { target, body })
+        .await
+        .map_err(failed)
+}
+
+/// Replies in a thread of a plan
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `thread` - The thread's number
+/// * `body` - The reply's body, as markdown
+#[post("/app/reply")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::reply_to", skip_all, err(Debug))
+)]
+pub async fn reply_to(
+    project: String,
+    plan: String,
+    thread: u32,
+    body: String,
+) -> Result<Commented, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .reply(&name, thread, NewReply { body })
+        .await
+        .map_err(failed)
+}
+
+/// Marks a thread open or resolved, over the version it was read at
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `thread` - The thread's number
+/// * `state` - The state to mark it
+/// * `read` - The version of the thread the mark was made against
+#[post("/app/mark")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::mark_thread", skip_all, err(Debug))
+)]
+pub async fn mark_thread(
+    project: String,
+    plan: String,
+    thread: u32,
+    state: ThreadState,
+    read: u64,
+) -> Result<Marked, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .mark_thread(&name, thread, MarkThread { state, read })
         .await
         .map_err(failed)
 }
