@@ -19,8 +19,9 @@ The service's data types, and the JSON API's requests, answers, routes and chang
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
 add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
 status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, `reef start` and
-`reef work`, which record and show where a node's work happens, and `reef import` and `reef
-export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
+`reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
+a node's changes in its worktree as a revision, and `reef import` and `reef export`, which carry a
+book's nodes and pages in and out. `reef export --replace` writes
 a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
 the address `[api] address` names and say so when nothing answers there.
 
@@ -123,6 +124,11 @@ It reads and writes through a `Store`, and checks every write against the whole 
   start under `refs/reef/start/<plan>/<id>`, and sends what it read. The service keeps it, a
   node only if it is in its plan, and reads no checkout itself. A capture's SHAs
   (`Service::add_capture`) join the start whose pinned commit they name.
+- **A node's changes come from its checkout too.** `reef node capture` diffs the node's start,
+  carried over what its base branch brought in, to its worktree as a seal takes it: tracked
+  files as they are, untracked ones only where the base has them. gix takes every step but the
+  snapshot. The service keeps each capture as the node's next revision (`Service::add_capture`),
+  unless its latest already holds it, and tells the change stream of it (`revision-captured`).
 
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
@@ -155,7 +161,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
 | `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
 | `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
-| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200, 409 if started again since, 422 if not started |
+| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200 if kept or unchanged, 409 if started again since, 422 if not started |
+| `GET …/plans/{plan}/work/{id}/revisions` | every `Revision` of the node, oldest first, its files without their hunks |
+| `GET …/plans/{plan}/work/{id}/revisions/{n}` | the `Revision`, or 404 |
+| `GET …/plans/{plan}/work/{id}/revisions/{n}/files/{*path}` | the `FileDiff`, its hunks and lines, or 404 if the revision doesn't list it |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
@@ -316,6 +325,10 @@ is the twin's oracle.
   plans. A start is written where no record is, or over the version of the one it replaces, and
   is later than every start before it. A capture's SHAs (`Store::add_capture`) join the start
   its pinned commit names, and no other.
+- **A node's revisions are a row each, and their files a row each** (`Store::revisions`), the
+  files written first and the revision `if_absent` after them, so a revision that reads has
+  every file it lists. They count from 1 for the node, through restarts. A file whose row would
+  pass 32 MiB is kept without its hunks.
 
 ## The schema
 
@@ -327,6 +340,8 @@ is the twin's oracle.
 | `PageRow` | (project, plan, revision) | path | a `version`, and the page's markdown |
 | `QueueRow` | project | rank | the plan and id of the node queued, and the `seq` it was written at |
 | `WorkRow` | project | `plan/id` | a `version`, and the node's work record as JSON: its worktree, branch, base branch, start, start tree, fork and pin, and each capture's SHAs |
+| `RevisionRow` | (project, `plan/id`) | number, padded | a `version`, and the revision as JSON: its SHAs, conflicts and files without their hunks |
+| `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

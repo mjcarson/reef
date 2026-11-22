@@ -35,12 +35,19 @@
 //! - **A node's work record a row** ([`work`]): where its work happens, what it started from, and
 //!   what each capture since read, as JSON in its project's partition. A start is written where
 //!   no record is, or over the version of the one it replaces.
+//! - **A node's revisions in its own partition** ([`revision`]): each capture of its changes a
+//!   row listing its files, each file a row of its revision's with its hunks, the files written
+//!   first so a revision that reads has every file it lists.
 
+mod revision;
 mod work;
+
+pub use revision::FILE_ROW_MAX;
 
 // the store's data types are the JSON API's, so the service and its clients share them
 pub use reef_api::{
-    AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,
+    AddCapture, CaptureRead, CaptureShas, Captured, FileDiff, FileSummary, Revision, StartWork,
+    Started, WorkRecord, WorkStart,
 };
 pub use reef_api::{
     AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, PageEdit, PageEdited,

@@ -30,7 +30,10 @@
 //! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
 //! | `GET …/plans/{plan}/work/{id}` | `work_of` | the node's [`WorkRecord`], or 404 |
 //! | `POST …/plans/{plan}/work/{id}` | `start_work` | [`Started`]: 200, 409 if stale, 422 if not in its plan |
-//! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200, 409 if started again since, 422 if not started |
+//! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200 if kept or unchanged, 409 if started again since, 422 if not started |
+//! | `GET …/plans/{plan}/work/{id}/revisions` | `revisions` | every [`Revision`] of the node, oldest first |
+//! | `GET …/plans/{plan}/work/{id}/revisions/{revision}` | `node_revision` | the [`Revision`], or 404 |
+//! | `GET …/plans/{plan}/work/{id}/revisions/{revision}/files/{*path}` | `revision_file` | the [`FileDiff`] the revision lists, or 404 |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -42,8 +45,9 @@
 //!   served as the HTML page mdbook would write for it, so the viewer's *Read here* works as it
 //!   does in a book. A page opened on its own runs no script a doc holds. A plan's own pages,
 //!   read and edited as markdown under its `pages/`, are served there too, over its repo's.
-//! - **A whole plan or a page is a big body.** Those two routes take up to
-//!   [`WRITE_BODY_MAX`] bytes, since a plan's pages run past axum's default of 2 MiB.
+//! - **A whole plan, a page or a capture is a big body.** Those three routes take up to
+//!   [`WRITE_BODY_MAX`] bytes, since a plan's pages, or a node's diff, run past axum's default
+//!   of 2 MiB.
 //! - **The change stream is server-sent events,** one a change, its event named by its kind and
 //!   its data the change as JSON. It is live only, and narrowed by `project` and `plan`.
 //! - **Localhost only.** [`bind`] refuses any address but a loopback one until users sign in
@@ -59,10 +63,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, ErrorCode, Listing,
-    NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
-    QueueEdit, QueueListing, Queued, Rewrite, StartWork, Started, StoredNode, StoredPage,
-    WRITE_BODY_MAX, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, ErrorCode, FileDiff,
+    Listing, NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project,
+    Puts, QueueEdit, QueueListing, Queued, Revision, Rewrite, StartWork, Started, StoredNode,
+    StoredPage, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -155,7 +159,13 @@ pub fn router<S: Serves>(serves: S) -> Router {
         )
         .route(paths::PAGE, get(page::<S>))
         .route(paths::NODE_WORK, get(work_of::<S>).post(start_work::<S>))
-        .route(paths::CAPTURES, axum::routing::post(add_capture::<S>))
+        .route(
+            paths::CAPTURES,
+            axum::routing::post(add_capture::<S>).layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
+        .route(paths::REVISIONS, get(revisions::<S>))
+        .route(paths::NODE_REVISION, get(node_revision::<S>))
+        .route(paths::REVISION_FILE, get(revision_file::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -379,6 +389,42 @@ impl NodeSegments {
     fn name(self) -> Result<NodeName, Failure> {
         Ok(PlanName::new(self.project, self.plan)?.node(self.id)?)
     }
+}
+
+/// The segments of a route to one of a node's revisions
+#[derive(Deserialize)]
+struct RevisionSegments {
+    /// The project the node's plan belongs to
+    project: String,
+    /// The plan's name within its project
+    plan: String,
+    /// The node's id
+    id: String,
+    /// The revision's number
+    revision: u32,
+}
+
+impl RevisionSegments {
+    /// The node these segments name, refusing a name that breaks the rule
+    fn name(&self) -> Result<NodeName, Failure> {
+        let plan = PlanName::new(self.project.clone(), self.plan.clone())?;
+        Ok(plan.node(self.id.clone())?)
+    }
+}
+
+/// The segments of a route to one file of a node's revision
+#[derive(Deserialize)]
+struct RevisionFileSegments {
+    /// The project the node's plan belongs to
+    project: String,
+    /// The plan's name within its project
+    plan: String,
+    /// The node's id
+    id: String,
+    /// The revision's number
+    revision: u32,
+    /// The path the file is shown under
+    path: String,
 }
 
 /// The segments of a route to one of a plan's docs
@@ -962,11 +1008,83 @@ async fn add_capture<S: Serves>(
     // one row written, under the project's work lock
     let captured = serves.service().add_capture(&node, add).await?;
     let status = match captured {
-        Captured::Added { .. } => StatusCode::OK,
+        Captured::Added { .. } | Captured::Unchanged { .. } => StatusCode::OK,
         Captured::Restarted { .. } => StatusCode::CONFLICT,
         Captured::NotStarted { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };
     Ok((status, Json(captured)))
+}
+
+/// Lists a node's revisions, oldest first, each with its files but not their hunks
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+#[instrument(name = "api::revisions", skip_all, err(Debug))]
+async fn revisions<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+) -> Result<Json<Vec<Revision>>, Failure> {
+    let node = segments.name()?;
+    // every revision, none for a node never captured
+    let revisions = serves.service().revisions(&node).await?;
+    Ok(Json(revisions))
+}
+
+/// Gets one of a node's revisions, or a 404 if it has none of that number
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id, and the revision's number
+#[instrument(name = "api::node_revision", skip_all, err(Debug))]
+async fn node_revision<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<RevisionSegments>,
+) -> Result<Json<Revision>, Failure> {
+    let node = segments.name()?;
+    // the revision, or a 404 naming it
+    match serves
+        .service()
+        .node_revision(&node, segments.revision)
+        .await?
+    {
+        Some(revision) => Ok(Json(revision)),
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("node `{node}` has no revision {}", segments.revision),
+        )),
+    }
+}
+
+/// Gets one file of a node's revision, its hunks and all, or a 404 if the revision doesn't list
+/// it
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id, the revision's number and the file's path
+#[instrument(name = "api::revision_file", skip_all, err(Debug))]
+async fn revision_file<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<RevisionFileSegments>,
+) -> Result<Json<FileDiff>, Failure> {
+    let plan = PlanName::new(segments.project, segments.plan)?;
+    let node = plan.node(segments.id)?;
+    let (revision, path) = (segments.revision, segments.path);
+    // the file, or a 404 naming it
+    match serves
+        .service()
+        .revision_file(&node, revision, &path)
+        .await?
+    {
+        Some(file) => Ok(Json(file)),
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("revision {revision} of node `{node}` has no file `{path}`"),
+        )),
+    }
 }
 
 /// Follows the change stream: one server-sent event a change, from now on

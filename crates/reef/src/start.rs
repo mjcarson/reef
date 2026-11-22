@@ -20,12 +20,12 @@
 //! - **A worktree is on the node started there last**, which `reef work` shows without an id.
 
 use reef_api::work::on_worktree;
-use reef_api::{StartWork, Started, WorkRecord, WorkStart};
+use reef_api::{Project, StartWork, Started, WorkRecord, WorkStart};
 use reef_model::{NodeName, Status};
 use std::io::Write;
 use std::path::Path;
 
-use crate::cli::{self, PlanPick};
+use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
 use crate::git::{Checkout, pin_ref};
 use crate::work;
@@ -50,19 +50,8 @@ pub async fn start<W: Write>(
     restart: bool,
     out: &mut W,
 ) -> anyhow::Result<()> {
-    // the checkout first, so a directory outside git asks nothing of the service
-    let checkout = Checkout::open(cwd)?;
-    // the project, whose repo the checkout must be part of
-    let project = cli::picked(client, cwd, &pick.project).await?;
-    let main = checkout.main_root()?;
-    if main != project.repo {
-        anyhow::bail!(
-            "{} is not in project `{}`'s repo, {}: start its nodes from a checkout of it",
-            checkout.root().display(),
-            project.name,
-            project.repo.display()
-        );
-    }
+    // the checkout, which must be part of the project's repo
+    let (checkout, project) = checkout_in(client, cwd, &pick.project, "start").await?;
     let plan = cli::plan_in(client, project, pick.plan.as_deref()).await?;
     let node = plan.node(id)?;
     // the node must be in its plan, and be work, since a group's members are what is worked
@@ -171,6 +160,38 @@ pub async fn work<W: Write>(
     show(&record, out)
 }
 
+/// Opens the checkout the working directory is in, and the project whose repo it must be part of
+///
+/// The checkout is opened first, so a directory outside git asks nothing of the service.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `pick` - The project named, if one was
+/// * `verb` - What is done to the project's nodes from a checkout, for the refusal: `start`
+pub(crate) async fn checkout_in(
+    client: &Client,
+    cwd: &Path,
+    pick: &Pick,
+    verb: &str,
+) -> anyhow::Result<(Checkout, Project)> {
+    // the checkout first, so a directory outside git asks nothing of the service
+    let checkout = Checkout::open(cwd)?;
+    // the project, whose repo the checkout must be part of
+    let project = cli::picked(client, cwd, pick).await?;
+    let main = checkout.main_root()?;
+    if main != project.repo {
+        anyhow::bail!(
+            "{} is not in project `{}`'s repo, {}: {verb} its nodes from a checkout of it",
+            checkout.root().display(),
+            project.name,
+            project.repo.display()
+        );
+    }
+    Ok((checkout, project))
+}
+
 /// Reads a start from a checkout, its pin named but not yet written
 ///
 /// # Arguments
@@ -234,7 +255,7 @@ fn read_start(
 /// # Arguments
 ///
 /// * `record` - The record
-fn where_started(record: &WorkRecord) -> String {
+pub(crate) fn where_started(record: &WorkRecord) -> String {
     // the worktree, and the branch if one was checked out
     let branch = match &record.start.branch {
         Some(branch) => format!(" on `{branch}`"),

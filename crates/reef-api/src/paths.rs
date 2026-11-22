@@ -24,6 +24,9 @@
 //! | `GET` | [`PAGE`] |
 //! | `GET`, `POST` | [`NODE_WORK`] |
 //! | `POST` | [`CAPTURES`] |
+//! | `GET` | [`REVISIONS`] |
+//! | `GET` | [`NODE_REVISION`] |
+//! | `GET` | [`REVISION_FILE`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
 use reef_model::{NodeName, PlanName};
@@ -87,8 +90,20 @@ pub const PAGE: &str = "/api/v1/projects/{project}/plans/{plan}/pages/{*path}";
 /// One node's work record: read by `GET`, and recorded by `POST`, which starts the node
 pub const NODE_WORK: &str = "/api/v1/projects/{project}/plans/{plan}/work/{id}";
 
-/// The SHAs each capture of a node's changes read, added to by `POST`
+/// A node's captures: each one sent by `POST`, kept as a revision and its SHAs added to the
+/// node's record
 pub const CAPTURES: &str = "/api/v1/projects/{project}/plans/{plan}/work/{id}/captures";
+
+/// A node's revisions, oldest first, each listing its files without their hunks
+pub const REVISIONS: &str = "/api/v1/projects/{project}/plans/{plan}/work/{id}/revisions";
+
+/// One of a node's revisions, by its number
+pub const NODE_REVISION: &str =
+    "/api/v1/projects/{project}/plans/{plan}/work/{id}/revisions/{revision}";
+
+/// One file of a node's revision, its hunks and all, by the path it is shown under
+pub const REVISION_FILE: &str =
+    "/api/v1/projects/{project}/plans/{plan}/work/{id}/revisions/{revision}/files/{*path}";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
@@ -312,13 +327,63 @@ pub fn node_work(node: &NodeName) -> String {
     format!("{}/work/{}", self::plan(&node.plan), encode(&node.id))
 }
 
-/// The path of the SHAs each capture of a node's changes read
+/// The path a node's captures are sent to
 ///
 /// # Arguments
 ///
 /// * `node` - The node's full name
 pub fn captures(node: &NodeName) -> String {
     format!("{}/captures", node_work(node))
+}
+
+/// The path of a node's revisions
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+pub fn revisions(node: &NodeName) -> String {
+    format!("{}/revisions", node_work(node))
+}
+
+/// The path of one of a node's revisions
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+/// * `revision` - The revision's number
+pub fn node_revision(node: &NodeName, revision: u32) -> String {
+    format!("{}/{revision}", revisions(node))
+}
+
+/// The path of one file of a node's revision
+///
+/// Each part of the file's path is encoded on its own, and they stay apart, as a page's are.
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+/// * `revision` - The revision's number
+/// * `path` - The path the file is shown under
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::paths;
+///
+/// let node = "reef/central/C32".parse().unwrap();
+/// assert_eq!(
+///     paths::revision_file(&node, 2, "src/a b.rs"),
+///     "/api/v1/projects/reef/plans/central/work/C32/revisions/2/files/src/a%20b.rs"
+/// );
+/// ```
+pub fn revision_file(node: &NodeName, revision: u32, path: &str) -> String {
+    // each part is encoded, and the slashes between them kept
+    let parts: Vec<String> = path.split('/').map(encode).collect();
+    format!(
+        "{}/files/{}",
+        node_revision(node, revision),
+        parts.join("/")
+    )
 }
 
 /// The path of the change stream, narrowed to a project or to one plan
@@ -391,6 +456,25 @@ mod tests {
             .replace("{id}", "C30");
         assert_eq!(super::node_work(&node), work);
         assert_eq!(super::captures(&node), format!("{work}/captures"));
+        // and its revisions, one of them, and one of that one's files
+        let revisions = super::REVISIONS
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{id}", "C30");
+        assert_eq!(super::revisions(&node), revisions);
+        let revision = super::NODE_REVISION
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{id}", "C30")
+            .replace("{revision}", "3");
+        assert_eq!(super::node_revision(&node, 3), revision);
+        let file = super::REVISION_FILE
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{id}", "C30")
+            .replace("{revision}", "3")
+            .replace("{*path}", "src/lib.rs");
+        assert_eq!(super::revision_file(&node, 3, "src/lib.rs"), file);
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

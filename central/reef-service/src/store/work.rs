@@ -9,7 +9,10 @@
 //!   start's time is after every other start in its project, even within one millisecond.
 //! - **A capture adds to the start it was taken from.** It names that start by the commit its
 //!   pin points at, so the SHAs of a capture taken before a restart never join the new start's.
-//! - **Writes take a lock per project; reads take none.** Every write is one row's.
+//!   It is kept as the node's next [`revision`](super::revision), unless its base and tree are
+//!   the latest revision's, and its SHAs are added naming the revision either way.
+//! - **Writes take a lock per project; reads take none.** A start is one row's write, and a
+//!   capture its revision's rows, then the record's.
 
 use reef_api::{AddCapture, CaptureRead, Captured, StartWork, Started, WorkRecord, WorkStart};
 use reef_model::{NodeName, PlanName};
@@ -17,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
+use super::revision::check_files;
 use super::{Store, Unkeepable};
 use crate::backend::{Backend, Expect, Written};
 use crate::schema::WorkRow;
@@ -140,17 +144,22 @@ impl<B: Backend> Store<B> {
         }
     }
 
-    /// Adds the SHAs a capture read to its node's record
+    /// Keeps a capture as its node's next revision, and adds the SHAs it read to its record
     ///
     /// The capture names the start it was taken from by its pinned commit, so a capture of a
-    /// node started again since is [`Captured::Restarted`], and adds nothing.
+    /// node started again since is [`Captured::Restarted`], and keeps nothing. One whose base and
+    /// tree are the node's latest revision's is [`Captured::Unchanged`]: no revision is added,
+    /// and its SHAs are added naming the latest. Otherwise its files are kept as the revision
+    /// after the latest, whichever start that was taken from, and then its SHAs added.
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
-    /// * `add` - The start the capture was taken from, and what it read
+    /// * `add` - The start the capture was taken from, what it read, and its files
     #[instrument(name = "Store::add_capture", skip_all, err(Debug))]
     pub async fn add_capture(&self, node: &NodeName, add: AddCapture) -> anyhow::Result<Captured> {
+        // every file must be readable back by a path of its own
+        check_files(node, &add.files)?;
         // one write to a project's work records at a time
         let lock = self.work_lock(&node.plan.project);
         let _write = lock.lock().await;
@@ -162,6 +171,25 @@ impl<B: Backend> Store<B> {
         if current.start.pinned != add.pinned {
             return Ok(Captured::Restarted { record: current });
         }
+        // the node's latest revision, which a capture of the same base and tree only matches
+        let at = now_ms();
+        let latest = self.revisions(node).await?.pop();
+        let (revision, added) = match latest {
+            Some(latest)
+                if latest.shas.base == add.shas.base && latest.shas.tree == add.shas.tree =>
+            {
+                (latest, false)
+            }
+            latest => {
+                // the next number after the latest, whatever start it was taken from
+                let number = latest.map_or(1, |latest| latest.revision + 1);
+                let shas = add.shas.clone();
+                let kept = self
+                    .keep_revision(node, number, at, shas, add.conflicts, add.files)
+                    .await?;
+                (kept, true)
+            }
+        };
         // the record with the capture's SHAs after the others, over the version read
         let read = current.version;
         let mut kept = Kept {
@@ -170,14 +198,19 @@ impl<B: Backend> Store<B> {
             captures: current.captures,
         };
         kept.captures.push(CaptureRead {
-            at: now_ms(),
+            at,
+            revision: Some(revision.revision),
             shas: add.shas,
         });
         let row = work_row(node, read + 1, &kept)?;
         match self.backend.write_work(row, Expect::Version(read)).await? {
-            Written::Applied => Ok(Captured::Added {
-                record: recorded(node, read + 1, kept),
-            }),
+            Written::Applied => {
+                let record = recorded(node, read + 1, kept);
+                Ok(match added {
+                    true => Captured::Added { record, revision },
+                    false => Captured::Unchanged { record, revision },
+                })
+            }
             // under the lock, only a writer in another process could have moved it
             Written::Refused(refusal) => anyhow::bail!(
                 "a capture of `{node}` wasn't added, since its work record was written by another \

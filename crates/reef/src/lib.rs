@@ -17,6 +17,8 @@
 //! - **Starting work** ([`start`]): a node started in the working directory's checkout, its
 //!   worktree, branch, base branch and start recorded and the start pinned, and the record of
 //!   a node, or of the one a worktree is on, shown.
+//! - **Capturing changes** ([`capture`]): a node's diff read in its own worktree, from its start
+//!   carried forward to what is tracked there, and sent to be kept as a revision.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
 //! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
@@ -27,7 +29,8 @@
 //! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
 //! - **git** ([`git`]): the checkout a node's work happens in, read through gix, its worktree
-//!   written as a tree through git's CLI, and its start pinned under `refs/reef/start/`.
+//!   written as a tree through git's CLI, its start pinned under `refs/reef/start/`, and its
+//!   diff and the carry of its start taken through gix.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
 //! - **Config** ([`conf`]): `[api] address` alone, from the file the service reads.
@@ -35,6 +38,7 @@
 //! The binary is a thin `main` over [`run`], so the service's tests drive the same commands
 //! against a service they serve.
 
+pub mod capture;
 pub mod cli;
 pub mod client;
 pub mod conf;

@@ -85,6 +85,13 @@ pub enum Change {
         /// The version the record is now at
         version: u64,
     },
+    /// A capture of a node's changes was kept as a new revision
+    RevisionCaptured {
+        /// The node whose changes it holds
+        node: NodeName,
+        /// The revision's number
+        revision: u32,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -103,6 +110,7 @@ impl Change {
             Change::PlanWritten { .. } => "plan-written",
             Change::QueueChanged { .. } => "queue-changed",
             Change::WorkRecorded { .. } => "work-recorded",
+            Change::RevisionCaptured { .. } => "revision-captured",
             Change::Missed { .. } => "missed",
         }
     }
@@ -116,7 +124,9 @@ impl Change {
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
             Change::QueueChanged { project } => Some(project.as_str()),
-            Change::WorkRecorded { node, .. } => Some(node.plan.project.as_str()),
+            Change::WorkRecorded { node, .. } | Change::RevisionCaptured { node, .. } => {
+                Some(node.plan.project.as_str())
+            }
             Change::Missed { .. } => None,
         }
     }
@@ -130,7 +140,9 @@ impl Change {
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
-            Change::WorkRecorded { node, .. } => Some(&node.plan),
+            Change::WorkRecorded { node, .. } | Change::RevisionCaptured { node, .. } => {
+                Some(&node.plan)
+            }
             Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
                 None
             }
@@ -220,6 +232,10 @@ mod tests {
             Change::WorkRecorded {
                 node: "reef/central/C30".parse().unwrap(),
                 version: 2,
+            },
+            Change::RevisionCaptured {
+                node: "reef/central/C32".parse().unwrap(),
+                revision: 1,
             },
             Change::Missed { count: 3 },
         ];

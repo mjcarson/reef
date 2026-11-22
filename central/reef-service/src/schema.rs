@@ -1,12 +1,13 @@
 //! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
-//! and its nodes' work records
+//! its nodes' work records, and each node's captured revisions and their files
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
 //! plans sit in that project's, a plan's nodes and its pages each sit in a partition of their
-//! revision, and a project's queue and its work records each sit in a partition of their own.
-//! Sort keys are a single `String` there, so each table sorts by a name, an id, a path, a rank or
-//! a node's name within its project.
+//! revision, and a project's queue and its work records each sit in a partition of their own. A
+//! node's revisions sit in the node's partition, and each revision's files in the revision's.
+//! Sort keys are a single `String` there, so each table sorts by a name, an id, a path, a rank, a
+//! node's name within its project, or a revision's number padded to sort as a number does.
 //!
 //! This one module is both halves of the schema. Built with `embedded` it is the whole schema,
 //! which `reef-shoal` serves and an in-process pool runs. Built without it, only the client half
@@ -252,6 +253,62 @@ pub struct WorkRow {
     pub record: String,
 }
 
+/// One revision of a node's captured changes: what the capture read, and its files without their
+/// hunks
+///
+/// A node's revisions share its partition, so they are listed by reading one partition, oldest
+/// first. A revision is written once, `if_absent`, after its files, so a revision that reads
+/// has every file it lists. Its record is one JSON field, as a work record is, so what a revision
+/// keeps can change without changing this table.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct RevisionRow {
+    /// The project the node's plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The node's name within its project, `plan/id`
+    #[shoal(partition)]
+    pub node: String,
+    /// The revision's number, padded with zeros to ten digits so the partition sorts by it
+    #[shoal(sort)]
+    pub revision: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// The revision as JSON, its node and number left to the fields beside it
+    pub record: String,
+}
+
+/// One file of a node's captured revision, its hunks and lines
+///
+/// A revision's files share its partition, sorted by the path each is shown under, so a file is
+/// read alone when it is opened. A file's row is bounded by shoal's frame, so one whose hunks
+/// would pass the store's limit is kept without them.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct RevisionFileRow {
+    /// The project the node's plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The node's name within its project, `plan/id`
+    #[shoal(partition)]
+    pub node: String,
+    /// The revision's number
+    #[shoal(partition)]
+    pub revision: u64,
+    /// The path the file is shown under, which sorts the partition
+    #[shoal(sort)]
+    pub path: String,
+    /// The file's diff as JSON, its hunks and all
+    pub file: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -273,6 +330,10 @@ pub struct Reef {
     pub pages: PersistentSortedTable<PageRow, FileSystem>,
     /// Each project's work records, by node
     pub work: PersistentSortedTable<WorkRow, FileSystem>,
+    /// Each node's captured revisions, by number
+    pub revisions: PersistentSortedTable<RevisionRow, FileSystem>,
+    /// Each revision's files, by path
+    pub revision_files: PersistentSortedTable<RevisionFileRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -281,7 +342,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 18240001078674791654;
+    const SCHEMA_ID: u64 = 5784036979291396926;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -291,6 +352,8 @@ mod tests {
         ("QueueRow", 7438970626929457281),
         ("PageRow", 13886911418170667521),
         ("WorkRow", 606948397267046790),
+        ("RevisionRow", 17497476575540100941),
+        ("RevisionFileRow", 2270476186678581084),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

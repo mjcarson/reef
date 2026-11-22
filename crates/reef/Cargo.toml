@@ -26,7 +26,7 @@ tokio = { version = "1", features = ["rt", "macros", "io-std"] }
 rmcp = { version = "3.11", features = ["server", "transport-io", "macros"] }
 # each tool's arguments as the JSON schema its listing carries
 schemars = "1"
-# a node's checkout read in-process: HEAD, branches, merge-base and the pin, all but the snapshot,
-# which gix can't stage. Pinned, since it is 0.x and breaks often; X3 chose it over git2, which
-# builds libgit2 from C and runs no filter drivers
-gix = { version = "=0.90.0", default-features = false, features = ["revision", "sha1", "max-performance"] }
+# a node's checkout read in-process: HEAD, branches, merge-base, the pin, a node's diff and the
+# carry of its start, all but the snapshot, which gix can't stage. Pinned, since it is 0.x and
+# breaks often; X3 chose it over git2, which builds libgit2 from C and runs no filter drivers
+gix = { version = "=0.90.0", default-features = false, features = ["blob-diff", "merge", "revision", "sha1", "max-performance"] }

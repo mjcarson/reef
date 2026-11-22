@@ -6,7 +6,8 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, WorkRow,
+    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
+    RevisionRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +48,8 @@ pub struct Faults {
     refuse_work_write: AtomicBool,
     /// Refuse the next write of one page row as moved, without writing it
     refuse_page_write: AtomicBool,
+    /// Fail the next write of a revision row, before writing it, its files already written
+    fail_revision_write: AtomicBool,
 }
 
 impl Faults {
@@ -99,6 +102,12 @@ impl Faults {
     /// the store's read and its write would be
     pub fn refuse_next_work_write(&self) {
         self.refuse_work_write.store(true, Ordering::SeqCst);
+    }
+
+    /// Fails the next write of a revision row before it is written, as a capture killed after
+    /// its files would leave it
+    pub fn fail_next_revision_write(&self) {
+        self.fail_revision_write.store(true, Ordering::SeqCst);
     }
 
     /// Lets `writes` writes of a queue row through, then fails the next before writing it
@@ -445,5 +454,68 @@ impl<B: Backend> Backend for Faulty<B> {
             return Ok(Written::Refused(Refusal::Moved));
         }
         self.inner.write_work(row, expect).await
+    }
+
+    /// Reads a node's revision rows, or one of them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's `plan/id`
+    /// * `revision` - The one revision's sort key, or `None` for all of them
+    async fn revisions(
+        &self,
+        project: &str,
+        node: &str,
+        revision: Option<&str>,
+    ) -> anyhow::Result<Vec<RevisionRow>> {
+        self.inner.revisions(project, node, revision).await
+    }
+
+    /// Writes one revision row, if its condition holds, failing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_revision(&self, row: RevisionRow, expect: Expect) -> anyhow::Result<Written> {
+        // a fault armed for this write stops it before it is written
+        if self
+            .faults
+            .fail_revision_write
+            .swap(false, Ordering::SeqCst)
+        {
+            anyhow::bail!("killed before writing revision `{}`", row.revision);
+        }
+        self.inner.write_revision(row, expect).await
+    }
+
+    /// Reads a revision's file rows, or one of them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's `plan/id`
+    /// * `revision` - The revision's number
+    /// * `path` - The one file's path, or `None` for all of them
+    async fn revision_files(
+        &self,
+        project: &str,
+        node: &str,
+        revision: u64,
+        path: Option<&str>,
+    ) -> anyhow::Result<Vec<RevisionFileRow>> {
+        self.inner
+            .revision_files(project, node, revision, path)
+            .await
+    }
+
+    /// Writes revision file rows over whatever is stored under their keys
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_revision_files(&self, rows: Vec<RevisionFileRow>) -> anyhow::Result<()> {
+        self.inner.write_revision_files(rows).await
     }
 }

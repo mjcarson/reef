@@ -185,4 +185,31 @@ the node it is on, across the project's plans, with no secondary index to ask.
   latest start in a worktree is never a tie.
 - **A capture names its start** by the commit its pin points at, so the SHAs of a capture
   taken before a restart never join the new start's.
-- **Writes take a lock per project; reads take none**, since each write is one row's.
+- **A capture adds to its record after its revision**, naming the revision it kept or the
+  latest one it matched.
+- **Writes take a lock per project; reads take none.** A start is one row's write, and a
+  capture its revision's rows, then the record's.
+
+## Revisions
+
+Each capture of a node's changes is kept as a revision of its files, hunks and lines
+([C32](../milestones/m7.md)), which the Changes tab lists, and a file's diff is opened from.
+
+### Design choices
+
+- **A row a revision, in its node's partition**, keyed by project and `plan/id` and sorted by
+  its number padded to ten digits. It lists its files without their hunks, so a node's
+  revisions are listed by reading one partition. Its record is one JSON field, beside a
+  version a later write can name.
+- **A row a file, in its revision's partition**, keyed by project, `plan/id` and the revision's
+  number, sorted by the path it is shown under. It holds the file's hunks and lines as JSON, so
+  opening a file reads one row.
+- **Files first, then the revision.** A capture's file rows go in bundles, as a bulk write's
+  do, and its revision's row then goes `if_absent`. A revision that reads has every file it
+  lists. A capture killed between the two leaves file rows no revision lists, which a read of
+  a file never serves, since it reads the revision's listing first. The next capture is kept
+  under the same number, over them.
+- **A file row is held under half a frame.** A file whose JSON would pass 32 MiB is kept
+  without its hunks, marked too large, with its counts still said.
+- **Every row checked against its full key on read**, its project, node and number, so a hash
+  collision is caught rather than served as another node's changes.

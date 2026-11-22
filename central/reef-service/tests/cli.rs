@@ -2372,3 +2372,363 @@ async fn start_takes_its_base_and_refuses_what_it_cant_record() -> anyhow::Resul
     );
     Ok(())
 }
+
+#[path = "../../../crates/reef/tests/support/oracle.rs"]
+mod oracle;
+
+/// A node's changes as the service keeps them: each revision, and each of its files fetched
+///
+/// # Arguments
+///
+/// * `cx` - The served twin
+/// * `id` - The node's id in `cli/docs`
+async fn changes_of(
+    cx: &Cx,
+    id: &str,
+) -> anyhow::Result<Vec<(reef_api::Revision, Vec<reef_api::FileDiff>)>> {
+    // a client of the case's service, as the CLI makes one
+    let conf = reef::Conf::load(Some(&cx.conf))?;
+    let client = reef::Client::new(&conf)?;
+    let node = PlanName::new("cli", "docs")?.node(id)?;
+    // every revision, then every file each lists
+    let mut changes = Vec::new();
+    for revision in client.revisions(&node).await? {
+        let mut files = Vec::with_capacity(revision.files.len());
+        for file in &revision.files {
+            let read = client
+                .revision_file(&node, revision.revision, file.path())
+                .await?;
+            files.push(read.expect("a file its revision lists reads"));
+        }
+        changes.push((revision, files));
+    }
+    Ok(changes)
+}
+
+/// Writes files into a worktree, making their directories
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `files` - Each file's path and what it holds
+fn write_files_in(dir: &Path, files: &[(&str, &[u8])]) -> anyhow::Result<()> {
+    for (path, bytes) in files {
+        // its directory first, as git would check it out
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("a file is in a directory"))?;
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
+}
+
+/// Commits everything in a worktree, returning the commit
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `message` - The commit's message
+fn commit_all(dir: &Path, message: &str) -> anyhow::Result<String> {
+    // stage it all, then commit it
+    git::run(dir, &["add", "-A"])?;
+    git::run(dir, &["commit", "-q", "-m", message])?;
+    git::run(dir, &["rev-parse", "HEAD"])
+}
+
+/// A file of numbered lines, each `line N`, for edits that leave most of it alone
+///
+/// # Arguments
+///
+/// * `count` - How many lines
+fn numbered(count: usize) -> String {
+    (1..=count).map(|n| format!("line {n}\n")).collect()
+}
+
+/// A captured diff matches `git diff` of its base and head when it is taken: committed and
+/// uncommitted changes of every kind, each file as the service serves it, and a capture taken
+/// again of the same work is unchanged
+#[tokio::test]
+async fn a_capture_matches_git_diff_when_taken() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let cx = Cx::new("capture-diff").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    // a base on main holding every kind of file a change can touch
+    write_files_in(
+        &repo,
+        &[
+            ("edited.txt", numbered(40).as_bytes()),
+            ("gone.txt", b"to be deleted\n"),
+            ("renamed.txt", numbered(20).as_bytes()),
+            ("run.sh", b"#!/bin/sh\necho hi\n"),
+            ("blob.bin", b"\x00\x01 binary\n"),
+            ("crlf.txt", b"one\r\ntwo\r\n"),
+            ("no newline.txt", b"first\nlast"),
+        ],
+    )?;
+    commit_all(&repo, "base")?;
+    // A started on a branch off it
+    git::run(&repo, &["checkout", "-q", "-b", "work"])?;
+    cx.reef(&repo, &["start", "A"]).await?;
+    // some of A's work committed: an edit, a delete, a rename and a mode change
+    let edited = numbered(40).replace("line 3\n", "line three\n");
+    write_files_in(&repo, &[("edited.txt", edited.as_bytes())])?;
+    std::fs::remove_file(repo.join("gone.txt"))?;
+    std::fs::rename(repo.join("renamed.txt"), repo.join("now named.txt"))?;
+    let mut mode = std::fs::metadata(repo.join("run.sh"))?.permissions();
+    mode.set_mode(0o755);
+    std::fs::set_permissions(repo.join("run.sh"), mode)?;
+    commit_all(&repo, "A, part one")?;
+    // and some left uncommitted: binary, CRLF and no-final-newline edits, and a staged new file
+    write_files_in(
+        &repo,
+        &[
+            ("blob.bin", b"\x00\x02 binary, changed\n"),
+            ("crlf.txt", b"one\r\n2\r\n"),
+            ("no newline.txt", b"first\nlast, edited"),
+            ("src/new.rs", b"fn main() {}\n"),
+        ],
+    )?;
+    git::run(&repo, &["add", "src/new.rs"])?;
+    // captured from the worktree, as revision 1
+    let out = cx.reef(&repo, &["node", "capture"]).await?;
+    assert!(
+        out.starts_with(&format!(
+            "captured `A` as revision 1 in {}\n",
+            repo.display()
+        )),
+        "{out}"
+    );
+    assert!(out.contains(", the start\n"), "{out}");
+    // what the service keeps is git's diff of the capture's base and tree, file for file
+    let changes = changes_of(&cx, "A").await?;
+    let [(revision, files)] = &changes[..] else {
+        panic!("one capture kept {} revisions", changes.len());
+    };
+    assert_eq!(field(&out, "tree"), revision.shas.tree);
+    assert_eq!(
+        field(&out, "head"),
+        git::run(&repo, &["rev-parse", "HEAD"])?
+    );
+    let expected = oracle::git_diff(&repo, &revision.shas.base, &revision.shas.tree);
+    assert_eq!(files, &expected);
+    let paths: Vec<&str> = files.iter().map(|file| file.path()).collect();
+    assert_eq!(
+        paths,
+        [
+            "blob.bin",
+            "crlf.txt",
+            "edited.txt",
+            "gone.txt",
+            "no newline.txt",
+            "now named.txt",
+            "run.sh",
+            "src/new.rs"
+        ]
+    );
+    // and the summary it lists is each file's own
+    let summaries: Vec<reef_api::FileSummary> = files.iter().map(|file| file.summary()).collect();
+    assert_eq!(revision.files, summaries);
+    // the same work captured again, by id too, is unchanged and adds no revision
+    let again = cx.reef(&repo, &["node", "capture", "A"]).await?;
+    assert!(
+        again.starts_with("`A` is unchanged since revision 1\n"),
+        "{again}"
+    );
+    assert_eq!(changes_of(&cx, "A").await?.len(), 1);
+    let record = cx.reef(&repo, &["work", "A"]).await?;
+    assert_eq!(field(&record, "captures"), "2");
+    // and capturing left the user's own staging as it was
+    let status = git::run(&repo, &["status", "--porcelain"])?;
+    let lines: Vec<&str> = status.lines().map(str::trim).collect();
+    assert!(lines.contains(&"A  src/new.rs"), "{status}");
+    assert!(lines.contains(&"M blob.bin"), "{status}");
+    Ok(())
+}
+
+/// A seal leaves out untracked files no commit or add took, and keeps those its base has: a
+/// `__pycache__` the node's run left stays out, a staged file goes in, and what the start left
+/// untracked is the start's, not shown as deleted
+#[tokio::test]
+async fn a_seal_leaves_out_untracked_files() -> anyhow::Result<()> {
+    let cx = Cx::new("capture-untracked").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    git::commit(&repo, "a.py", "print(1)\n", "base")?;
+    // an earlier node's work left untracked, which A's start takes along
+    git::run(&repo, &["checkout", "-q", "-b", "work"])?;
+    write_files_in(&repo, &[("left.txt", b"left by an earlier node\n")])?;
+    cx.reef(&repo, &["start", "A"]).await?;
+    // A edits what is tracked and what was left, stages one new file and runs its code
+    write_files_in(
+        &repo,
+        &[
+            ("a.py", b"print(2)\n"),
+            ("left.txt", b"left, then edited\n"),
+            ("b.py", b"print(3)\n"),
+            ("__pycache__/a.cpython-312.pyc", b"\x00bytecode"),
+            ("notes.txt", b"never added\n"),
+        ],
+    )?;
+    git::run(&repo, &["add", "b.py"])?;
+    cx.reef(&repo, &["node", "capture"]).await?;
+    // the revision holds the tracked, the staged and the start's own, and no other
+    let changes = changes_of(&cx, "A").await?;
+    let (revision, files) = &changes[0];
+    let paths: Vec<(&str, reef_api::FileStatus)> = files
+        .iter()
+        .map(|file| (file.path(), file.status))
+        .collect();
+    use reef_api::FileStatus::{Added, Modified};
+    assert_eq!(
+        paths,
+        [("a.py", Modified), ("b.py", Added), ("left.txt", Modified)]
+    );
+    // and it is still git's diff of its base and tree
+    let expected = oracle::git_diff(&repo, &revision.shas.base, &revision.shas.tree);
+    assert_eq!(files, &expected);
+    Ok(())
+}
+
+/// A node's changes still read after its commits are squashed and its branch deleted: its
+/// worktree, branch and pin gone, every reflog expired and git pruned, the heads it read no
+/// longer resolve, and every revision and file reads back as it was
+#[tokio::test]
+async fn changes_read_after_a_squash_and_a_deleted_branch() -> anyhow::Result<()> {
+    let cx = Cx::new("capture-squash").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    git::commit(&repo, "base.txt", "base\n", "base")?;
+    // A worked in a worktree of its own, two commits of it, then captured
+    let a = git::worktree(&repo, &cx.ax.dir.join("cli-a"))?;
+    cx.reef(&a, &["start", "A"]).await?;
+    let first = git::commit(&a, "a.txt", "A's first\n", "A one")?;
+    let second = git::commit(&a, "a.txt", "A's first\nA's second\n", "A two")?;
+    cx.reef(&a, &["node", "capture"]).await?;
+    let before = changes_of(&cx, "A").await?;
+    assert_eq!(before[0].0.shas.head, second);
+    // A squash-merged into main, then its worktree, branch and pin deleted
+    git::run(&repo, &["merge", "--squash", "-q", "cli-a"])?;
+    git::run(&repo, &["commit", "-q", "-m", "A, squashed"])?;
+    git::run(
+        &repo,
+        &["worktree", "remove", "--force", a.to_str().expect("utf-8")],
+    )?;
+    git::run(&repo, &["branch", "-q", "-D", "cli-a"])?;
+    git::run(&repo, &["update-ref", "-d", "refs/reef/start/docs/A"])?;
+    // every reflog expired and git pruned, so the commits A's capture read are gone, and only
+    // its tree is left, as the squash's own
+    git::run(&repo, &["reflog", "expire", "--expire=now", "--all"])?;
+    git::run(&repo, &["gc", "-q", "--prune=now"])?;
+    for gone in [&first, &second] {
+        assert!(
+            !git::succeeds(&repo, &["cat-file", "-e", gone])?,
+            "{gone} survived the prune"
+        );
+    }
+    let squashed = git::run(&repo, &["rev-parse", "main^{tree}"])?;
+    assert_eq!(before[0].0.shas.tree, squashed);
+    // and every revision and file reads back byte for byte
+    let after = changes_of(&cx, "A").await?;
+    assert_eq!(
+        serde_json::to_string(&after)?,
+        serde_json::to_string(&before)?
+    );
+    Ok(())
+}
+
+/// A node's diff holds only its own changes after its branch is rebased onto a newer base: in a
+/// row on one branch, its start is carried over what main brought in, and a rebase conflict in
+/// an earlier node's file is named on the revision
+#[tokio::test]
+async fn a_rebased_node_holds_only_its_own_changes() -> anyhow::Result<()> {
+    let cx = Cx::new("capture-rebase").await?;
+    let repo = cli_project(&cx, &["A", "B"]).await?;
+    // rebases make commits, so the repo names who makes them
+    git::run(&repo, &["config", "user.name", "reef"])?;
+    git::run(&repo, &["config", "user.email", "reef@example.invalid"])?;
+    git::commit(&repo, "shared.txt", "one\ntwo\nthree\n", "base")?;
+    // an earlier node's commit on a branch of nodes in a row, then A's start and work
+    git::run(&repo, &["checkout", "-q", "-b", "nodes"])?;
+    git::commit(&repo, "earlier.txt", "an earlier node\n", "earlier")?;
+    cx.reef(&repo, &["start", "A"]).await?;
+    git::commit(&repo, "a.txt", "A's work\n", "A")?;
+    // main moves on with another node's change, and the branch is rebased onto it
+    git::run(&repo, &["checkout", "-q", "main"])?;
+    git::commit(&repo, "main.txt", "main moved on\n", "main")?;
+    git::run(&repo, &["checkout", "-q", "nodes"])?;
+    git::run(&repo, &["rebase", "-q", "main"])?;
+    // A's capture holds A's file alone, its start carried over what main brought in
+    let out = cx.reef(&repo, &["node", "capture", "A"]).await?;
+    assert!(out.contains(", the start carried forward\n"), "{out}");
+    assert!(!out.contains("conflicts"), "{out}");
+    let changes = changes_of(&cx, "A").await?;
+    let (revision, files) = &changes[0];
+    let paths: Vec<&str> = files.iter().map(|file| file.path()).collect();
+    assert_eq!(paths, ["a.txt"]);
+    assert_eq!(
+        files,
+        &oracle::git_diff(&repo, &revision.shas.base, &revision.shas.tree)
+    );
+    assert_eq!(
+        revision.shas.merge_base.as_deref(),
+        Some(git::run(&repo, &["rev-parse", "main"])?.as_str())
+    );
+    // B starts where A left off, after an earlier node's edit of the shared file
+    git::commit(
+        &repo,
+        "shared.txt",
+        "one\nours\nthree\n",
+        "A's last, in the shared file",
+    )?;
+    cx.reef(&repo, &["start", "B"]).await?;
+    git::commit(&repo, "b.txt", "B's work\n", "B")?;
+    // main changes the same line, and the rebase's conflict is resolved by hand
+    git::run(&repo, &["checkout", "-q", "main"])?;
+    git::commit(&repo, "shared.txt", "one\ntheirs\nthree\n", "main's edit")?;
+    git::run(&repo, &["checkout", "-q", "nodes"])?;
+    assert!(!git::succeeds(&repo, &["rebase", "-q", "main"])?);
+    std::fs::write(repo.join("shared.txt"), "one\nresolved\nthree\n")?;
+    git::run(&repo, &["add", "shared.txt"])?;
+    git::run(&repo, &["-c", "core.editor=true", "rebase", "--continue"])?;
+    // B's revision names the conflicted file, whose resolution its diff holds beside B's file
+    let out = cx.reef(&repo, &["node", "capture", "B"]).await?;
+    assert_eq!(field(&out, "conflicts"), "shared.txt");
+    let changes = changes_of(&cx, "B").await?;
+    let (revision, files) = &changes[0];
+    assert_eq!(revision.conflicts, ["shared.txt"]);
+    let paths: Vec<&str> = files.iter().map(|file| file.path()).collect();
+    assert_eq!(paths, ["b.txt", "shared.txt"]);
+    Ok(())
+}
+
+/// A capture is refused, saying why, where nothing was started, for a node worked elsewhere or
+/// never started, and once its start's tree is pruned
+#[tokio::test]
+async fn capture_refuses_what_it_cant_take() -> anyhow::Result<()> {
+    let cx = Cx::new("capture-refused").await?;
+    let repo = cli_project(&cx, &["A", "B"]).await?;
+    // nothing started in the repo yet
+    let (_, none) = cx.failing(&repo, &["node", "capture"]).await?;
+    assert!(
+        none.contains("no node of `cli` has been started in"),
+        "{none}"
+    );
+    // A started in a worktree of its own is captured there, not here
+    let a = git::worktree(&repo, &cx.ax.dir.join("cli-a"))?;
+    std::fs::write(a.join("wip.txt"), "A's, uncommitted\n")?;
+    cx.reef(&a, &["start", "A"]).await?;
+    let (_, elsewhere) = cx.failing(&repo, &["node", "capture", "A"]).await?;
+    assert!(
+        elsewhere.contains(&format!("`A` is worked in {}, not here", a.display())),
+        "{elsewhere}"
+    );
+    // B was never started
+    let (_, never) = cx.failing(&a, &["node", "capture", "B"]).await?;
+    assert!(never.contains("`B` has not been started"), "{never}");
+    // A's pin deleted and git pruned takes its start's tree, which is said
+    git::run(&repo, &["update-ref", "-d", "refs/reef/start/docs/A"])?;
+    git::run(&repo, &["reflog", "expire", "--expire=now", "--all"])?;
+    git::run(&repo, &["gc", "-q", "--prune=now"])?;
+    let (_, pruned) = cx.failing(&a, &["node", "capture"]).await?;
+    assert!(pruned.contains("is gone from"), "{pruned}");
+    assert!(pruned.contains("--restart"), "{pruned}");
+    assert!(changes_of(&cx, "A").await?.is_empty());
+    Ok(())
+}

@@ -16,7 +16,8 @@ use crate::schema::{
     NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow,
     PageRowDelete, PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate,
     ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient,
-    ReefQueryKinds, WorkRow, WorkRowFilter, WorkRowGet,
+    ReefQueryKinds, RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter,
+    RevisionRowGet, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -640,6 +641,98 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Reads the revision rows stored in a node's partition, oldest first, or the one of a number
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's name within its project, `plan/id`
+    /// * `revision` - The one revision's sort key, or `None` for all of them
+    #[instrument(name = "ShoalBackend::revisions", skip_all, err(Debug))]
+    async fn revisions(
+        &self,
+        project: &str,
+        node: &str,
+        revision: Option<&str>,
+    ) -> anyhow::Result<Vec<RevisionRow>> {
+        // a node's revisions sit in the node's partition
+        let mut get = RevisionRowGet::new(vec![(project.to_string(), node.to_string())]);
+        if let Some(revision) = revision {
+            get = get.sort_keys(vec![revision.to_string()]);
+        }
+        self.read::<_, RevisionRow>(get).await
+    }
+
+    /// Writes one revision row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_revision", skip_all, err(Debug))]
+    async fn write_revision(&self, row: RevisionRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = RevisionRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
+    }
+
+    /// Reads the file rows stored in a revision's partition, in path order, or the one at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's name within its project, `plan/id`
+    /// * `revision` - The revision's number
+    /// * `path` - The one file's path, or `None` for all of them
+    #[instrument(name = "ShoalBackend::revision_files", skip_all, err(Debug))]
+    async fn revision_files(
+        &self,
+        project: &str,
+        node: &str,
+        revision: u64,
+        path: Option<&str>,
+    ) -> anyhow::Result<Vec<RevisionFileRow>> {
+        // a revision's files sit in the revision's partition
+        let partition = (project.to_string(), node.to_string(), revision);
+        let mut get = RevisionFileRowGet::new(vec![partition]);
+        if let Some(path) = path {
+            get = get.sort_keys(vec![path.to_string()]);
+        }
+        self.read::<_, RevisionFileRow>(get).await
+    }
+
+    /// Writes revision file rows over whatever is stored under their keys, every answer checked
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    #[instrument(name = "ShoalBackend::write_revision_files", skip_all, err(Debug))]
+    async fn write_revision_files(&self, rows: Vec<RevisionFileRow>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // one bundle, whose every answer `exec` checks, which draining its stream would not
+        let mut bundle = self.client.query();
+        for row in rows {
+            bundle.add_mut(row);
+        }
+        self.client
+            .exec(bundle)
+            .await
+            .map_err(|error| anyhow::anyhow!("writing revision file rows failed: {error:?}"))?;
+        Ok(())
     }
 }
 

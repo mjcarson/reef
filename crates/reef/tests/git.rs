@@ -432,3 +432,288 @@ fn pin_reads_back_through_the_cli_and_unpin_puts_it_back() {
     );
     assert!(!checkout.has_ref(name).unwrap());
 }
+
+#[path = "support/oracle.rs"]
+mod oracle;
+
+/// Writes files into a worktree, making their directories, each from its path and its bytes
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `files` - Each file's path and what it holds
+fn write_all(dir: &Path, files: &[(&str, &[u8])]) {
+    for (path, bytes) in files {
+        // its directory first, as git would check it out
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
+/// Commits everything in a worktree, returning the commit
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `message` - The commit's message
+fn commit_all(dir: &Path, message: &str) -> String {
+    // stage it all, then commit it
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", message]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+/// A file of numbered lines, each `line N`, for edits that leave most of it alone
+///
+/// # Arguments
+///
+/// * `count` - How many lines
+fn numbered(count: usize) -> String {
+    (1..=count).map(|n| format!("line {n}\n")).collect()
+}
+
+/// The diff gix takes is the one git's CLI shows: every kind of change, between commits and
+/// between trees, hunk by hunk and line by line
+#[test]
+fn diff_matches_git_diff() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = fresh("diff");
+    let repo = repo(&dir.join("repo"));
+    // a base holding every kind of file a change can touch
+    let functions = "fn a() {\n    1\n}\n\nfn b() {\n    2\n}\n";
+    write_all(
+        &repo,
+        &[
+            ("edited.txt", numbered(40).as_bytes()),
+            ("gone.txt", b"to be deleted\n"),
+            ("renamed.txt", numbered(20).as_bytes()),
+            ("moved/edited.txt", numbered(30).as_bytes()),
+            ("run.sh", b"#!/bin/sh\necho hi\n"),
+            ("blob.bin", b"\x00\x01\x02 binary\n"),
+            ("crlf.txt", b"one\r\ntwo\r\nthree\r\n"),
+            ("no newline.txt", b"first\nlast"),
+            ("slide.rs", functions.as_bytes()),
+            ("deep/er/still/é.txt", b"unicode\n"),
+        ],
+    );
+    symlink("edited.txt", repo.join("link")).unwrap();
+    let base = commit_all(&repo, "base");
+    // then a change of every kind
+    let mut edited = numbered(40).replace("line 3\n", "line three\n");
+    edited = edited.replace("line 30\n", "line 30\nline 30.5\n");
+    let slid = "fn a() {\n    1\n}\n\nfn c() {\n    3\n}\n\nfn b() {\n    2\n}\n";
+    write_all(
+        &repo,
+        &[
+            ("edited.txt", edited.as_bytes()),
+            (
+                "moved/edited.txt",
+                numbered(30).replace("line 2\n", "line two\n").as_bytes(),
+            ),
+            ("blob.bin", b"\x00\x01\x03 binary, changed\n"),
+            ("crlf.txt", b"one\r\n2\r\nthree\r\n"),
+            ("no newline.txt", b"first\nlast, still no newline"),
+            ("slide.rs", slid.as_bytes()),
+            ("new/added.txt", b"a new file\n"),
+            ("deep/er/still/é.txt", b"unicode, edited\n"),
+        ],
+    );
+    std::fs::remove_file(repo.join("gone.txt")).unwrap();
+    std::fs::rename(repo.join("renamed.txt"), repo.join("now named.txt")).unwrap();
+    std::fs::rename(
+        repo.join("moved/edited.txt"),
+        repo.join("moved/edited too.txt"),
+    )
+    .unwrap();
+    let mut mode = std::fs::metadata(repo.join("run.sh"))
+        .unwrap()
+        .permissions();
+    mode.set_mode(0o755);
+    std::fs::set_permissions(repo.join("run.sh"), mode).unwrap();
+    std::fs::remove_file(repo.join("link")).unwrap();
+    symlink("now named.txt", repo.join("link")).unwrap();
+    let head = commit_all(&repo, "head");
+    // between the commits, and between their trees, gix's diff is git's
+    let checkout = Checkout::open(&repo).unwrap();
+    let ours = checkout.diff(&base, &head).unwrap();
+    let theirs = oracle::git_diff(&repo, &base, &head);
+    assert_eq!(ours, theirs);
+    let base_tree = checkout.tree_of(&base).unwrap();
+    let head_tree = checkout.tree_of(&head).unwrap();
+    assert_eq!(checkout.diff(&base_tree, &head_tree).unwrap(), theirs);
+    // and it holds every kind of change it was given
+    let path = |path: &str| ours.iter().find(|file| file.path() == path).unwrap();
+    assert_eq!(path("gone.txt").status, reef_api::FileStatus::Deleted);
+    assert_eq!(path("now named.txt").status, reef_api::FileStatus::Renamed);
+    assert_eq!(
+        path("moved/edited too.txt").status,
+        reef_api::FileStatus::Renamed
+    );
+    assert_eq!(path("new/added.txt").status, reef_api::FileStatus::Added);
+    assert_eq!(path("run.sh").new_mode.as_deref(), Some("100755"));
+    assert_eq!(path("link").new_mode.as_deref(), Some("120000"));
+    assert!(path("blob.bin").binary && path("blob.bin").hunks.is_empty());
+    assert_eq!(path("edited.txt").hunks.len(), 2);
+    assert!(
+        path("crlf.txt").hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.text == "2\r")
+    );
+    let last = path("no newline.txt").hunks[0].lines.last().unwrap();
+    assert!(last.no_newline, "{last:?}");
+    // a diff of a tree with itself is empty
+    assert!(checkout.diff(&head, &head).unwrap().is_empty());
+}
+
+/// A merge of trees through gix writes the tree `git merge-tree --write-tree` writes, and names
+/// the same conflicted files: a clean merge, a conflict on one line, a delete against an edit,
+/// an add on both sides, and a rename against an edit
+#[test]
+fn merge_trees_writes_git_merge_trees_tree() {
+    let dir = fresh("merge");
+    let repo = repo(&dir.join("repo"));
+    write_all(
+        &repo,
+        &[
+            ("shared.txt", numbered(20).as_bytes()),
+            ("conflict.txt", b"one\ntwo\nthree\n"),
+            ("deleted.txt", b"keep me\n"),
+            ("renamed.txt", numbered(20).as_bytes()),
+        ],
+    );
+    let base = commit_all(&repo, "base");
+    // each case: what our side and their side change, from the same base, `None` deleting
+    type Side = Vec<(&'static str, Option<Vec<u8>>)>;
+    let lines = |from: &str, to: &str| Some(numbered(20).replace(from, to).into_bytes());
+    let text = |text: &str| Some(text.as_bytes().to_vec());
+    let cases: [(&str, Side, Side); 5] = [
+        (
+            "clean",
+            vec![("shared.txt", lines("line 2\n", "two\n"))],
+            vec![("shared.txt", lines("line 19\n", "nineteen\n"))],
+        ),
+        (
+            "one-line",
+            vec![("conflict.txt", text("one\nours\nthree\n"))],
+            vec![("conflict.txt", text("one\ntheirs\nthree\n"))],
+        ),
+        (
+            "delete-edit",
+            vec![("deleted.txt", None)],
+            vec![("deleted.txt", text("edited\n"))],
+        ),
+        (
+            "add-add",
+            vec![("both.txt", text("ours\n"))],
+            vec![("both.txt", text("theirs\n"))],
+        ),
+        (
+            "rename-edit",
+            vec![
+                ("renamed.txt", None),
+                ("now renamed.txt", Some(numbered(20).into_bytes())),
+            ],
+            vec![("renamed.txt", lines("line 10\n", "ten\n"))],
+        ),
+    ];
+    let checkout = Checkout::open(&repo).unwrap();
+    let base_tree = checkout.tree_of(&base).unwrap();
+    for (name, ours, theirs) in cases {
+        // each side a commit off the base, read as its tree
+        let side = |files: Side, label: &str| -> String {
+            git(&repo, &["checkout", "-q", "--detach", &base]);
+            for (path, bytes) in files {
+                match bytes {
+                    Some(bytes) => write_all(&repo, &[(path, bytes.as_slice())]),
+                    None => std::fs::remove_file(repo.join(path)).unwrap(),
+                }
+            }
+            let commit = commit_all(&repo, &format!("{name}: {label}"));
+            checkout.tree_of(&commit).unwrap()
+        };
+        let ours = side(ours, "ours");
+        let theirs = side(theirs, "theirs");
+        let merged = checkout.merge_trees(&base_tree, &ours, &theirs).unwrap();
+        let (tree, conflicts) = oracle::git_merge_tree(&repo, &base_tree, &ours, &theirs);
+        assert_eq!(merged.tree, tree, "{name}: gix wrote another tree");
+        assert_eq!(
+            merged.conflicts, conflicts,
+            "{name}: gix named other conflicts"
+        );
+        // only the clean merge and the rename against an edit merged cleanly
+        let clean = matches!(name, "clean" | "rename-edit");
+        assert_eq!(
+            merged.conflicts.is_empty(),
+            clean,
+            "{name}: {:?}",
+            merged.conflicts
+        );
+    }
+}
+
+/// A seal takes every tracked file as the worktree has it and a staged new one, leaves out
+/// untracked files unless its base holds them, and leaves the user's index as it was
+#[test]
+fn seal_snapshot_takes_what_is_tracked() {
+    let dir = fresh("seal");
+    let repo = repo(&dir.join("repo"));
+    write_all(
+        &repo,
+        &[(".gitignore", b"*.log\n"), ("b.txt", b"to be deleted\n")],
+    );
+    commit_all(&repo, "base");
+    // a start that took untracked files along, one named like a pattern
+    write_all(
+        &repo,
+        &[
+            ("left.txt", b"left by an earlier node\n"),
+            ("w*.txt", b"a star in its name\n"),
+        ],
+    );
+    let checkout = Checkout::open(&repo).unwrap();
+    let base = checkout.snapshot().unwrap();
+    // then the node's work: tracked files edited and deleted, a new file staged, the start's
+    // leftovers edited, and untracked and ignored files it never added
+    write_all(
+        &repo,
+        &[
+            ("a.txt", b"one, edited\n"),
+            ("c.txt", b"staged\n"),
+            ("left.txt", b"left, and edited\n"),
+            ("wild.txt", b"matches w*.txt as a pattern\n"),
+            ("__pycache__/x.cpython-312.pyc", b"\x00bytecode"),
+            ("debug.log", b"ignored\n"),
+        ],
+    );
+    std::fs::remove_file(repo.join("b.txt")).unwrap();
+    git(&repo, &["add", "c.txt"]);
+    let status = git(&repo, &["status", "--porcelain", "--untracked-files=all"]);
+    // the seal holds what is tracked and what the base held, as the worktree has them
+    let sealed = checkout.seal_snapshot(&base).unwrap();
+    let files = git(&repo, &["ls-tree", "-r", "--name-only", &sealed]);
+    assert_eq!(
+        files.lines().collect::<Vec<_>>(),
+        [".gitignore", "a.txt", "c.txt", "left.txt", "w*.txt"]
+    );
+    let blob = |path: &str| git(&repo, &["cat-file", "blob", &format!("{sealed}:{path}")]);
+    assert_eq!(blob("a.txt"), "one, edited");
+    assert_eq!(blob("left.txt"), "left, and edited");
+    // so its diff from the base is the node's own, and git's CLI shows the same
+    let diff = checkout.diff(&base, &sealed).unwrap();
+    let paths: Vec<&str> = diff.iter().map(|file| file.path()).collect();
+    assert_eq!(paths, ["a.txt", "b.txt", "c.txt", "left.txt"]);
+    assert_eq!(diff, oracle::git_diff(&repo, &base, &sealed));
+    // and the user's index and staging are as they were, with no copy left behind
+    assert_eq!(
+        git(&repo, &["status", "--porcelain", "--untracked-files=all"]),
+        status
+    );
+    let left = std::fs::read_dir(repo.join(".git")).unwrap();
+    assert!(
+        !left
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("reef-"))
+    );
+}

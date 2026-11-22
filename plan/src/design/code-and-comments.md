@@ -28,14 +28,21 @@ on and when it is completed, and keeps what it read. That needs four things reef
 - **A node's diff runs from its start, carried forward, to its worktree as it is.**
   - `reef start` records two things: the worktree as a tree, uncommitted changes included, and
     where it left its base branch.
-  - A capture snapshots the worktree the same way: a copy of the index, `git add -A` and
-    `git write-tree`. It diffs that from the start.
+  - A capture snapshots the worktree as a seal takes it, on a copy of the index: `git add -u`
+    takes every tracked file as it is, an untracked file is added only where the diff's base
+    holds it, and `git write-tree` writes the copy out. It diffs that from the start.
   - Sometimes the base branch has brought something in since, by a rebase or a merge. Then the
     start is first carried over it with a three-way `git merge-tree` of trees, the merge a
     rebase does.
   - Nothing depends on commits a squash removes, or on trailers.
 - **The start is pinned** under `refs/reef/start/<node>`, so a gc after a rebase can't prune it.
   The ref is local, and no push sends it.
+- **A seal leaves out untracked files no commit or add took** ([C32](../milestones/m7.md)). A node's work is
+  what it commits or stages, so a `__pycache__` its run left, which no ignore file names, stays
+  out of its changes, and a new file counts once it is added.
+  - A start still takes untracked files, so work an earlier node left is the start's. An
+    untracked file the base holds is kept, so a start's leftover isn't shown as deleted, and an
+    edit of one shows as an edit.
 - **One draft, sealed at Stop** ([C56](../milestones/m7.md)).
   - git's post-commit and post-rewrite hooks, and PostToolUse on reef's status tool, keep a
     node's latest revision current as its draft.
@@ -161,10 +168,6 @@ The rules:
 
 ### Open questions
 
-- **Untracked files that aren't ignored are captured**, as `git add -A` would commit them. In
-  every live run, Python's `__pycache__` landed in the revision though no commit took it.
-  Whether a seal leaves out untracked files the node's commits never took is
-  [C32](../milestones/m7.md)'s to decide.
 - **A node with two needs done but not merged** would start from a merge of their heads, which
   `reef start` would make. That wasn't tried.
 - **A round of fixes after the node's work has landed** on its base branch, and its branch was
@@ -176,18 +179,29 @@ The rules:
 ### Design choices
 
 - **Stored as revisions.** Each capture is a revision of the node's changes: files, hunks and
-  lines. Each line has an anchor a comment can name: its revision, file and line. The latest
-  revision is a draft until it is sealed.
+  lines. Each line has an anchor a comment can name: its revision, its file, and its number on
+  the side it is on, the base for a removed line and the worktree for any other. The latest
+  revision is a draft until it is sealed. Until git's hooks keep a draft ([C56](../milestones/m7.md)),
+  every capture `reef node capture` takes is sealed.
+- **Rows, not bucket objects** ([C32](../milestones/m7.md)). A revision is a row in its node's partition,
+  listing its files without their hunks, and each file is a row in the revision's partition,
+  sorted by path, holding its hunks and lines as JSON. Listing a node's revisions reads one
+  partition, and opening a file reads one row. A bucket would need `ScanSupport`'s client,
+  which nothing in reef uses yet, and a second store for the twin.
+  - A file whose row would pass 32 MiB, half a frame, is kept without its hunks and says so,
+    as a binary file is kept, its line counts still taken.
+  - The capture's request carries every file, so it takes up to 48 MiB, as a plan's write does.
+- **Numbered for the node, and never reset.** Revisions count from 1, and a node started again
+  keeps the ones it had, since comments name them, so its next is numbered after its latest.
+- **A capture its latest revision holds adds none.** One whose base and tree are the latest
+  revision's adds its SHAs to the work record, naming that revision, and nothing else.
 - **Loaded when opened.** The Changes tab lists revisions and files, and a file's diff is
   fetched and drawn only when it is opened, so a large node doesn't freeze the app.
+- **Served as JSON and through server functions.** `…/work/{id}/revisions` lists a node's
+  revisions, `…/revisions/{n}` reads one, and `…/revisions/{n}/files/{*path}` one file. The
+  app's `revisions` and `revision_file` server functions read the same.
 - **Checked against git when captured.** A captured diff must match `git diff` of the same base
   and head at the time it is taken.
-
-### Open questions
-
-- Whether a revision's files are rows, one per file, or objects in a shoal bucket. A row is
-  bounded by a frame, 64 MiB by default, and the client on `ScanSupport` can put and get a
-  bucket's objects.
 
 ## Comments
 

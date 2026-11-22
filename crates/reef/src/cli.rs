@@ -9,6 +9,7 @@
 //! reef [--conf PATH] node put [FILE] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node get <ID> [--md] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node rm <ID>... [--project NAME] [--plan NAME]
+//! reef [--conf PATH] node capture [ID] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page ls [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page get <PATH> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page put <PATH> [FILE] [--project NAME] [--plan NAME]
@@ -30,8 +31,9 @@
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
-//! only plan, unless `--plan` names one, and so is a page's. `start` reads the checkout it runs
-//! in, which must be the project's repo or a linked worktree of it. `next` and the queue span the project's plans, and
+//! only plan, unless `--plan` names one, and so is a page's. `start` and `node capture` read the
+//! checkout they run in, which must be the project's repo or a linked worktree of it, and a
+//! capture's node must be worked there. `next` and the queue span the project's plans, and
 //! `--plan` narrows `next` to one. `import` picks the project the book is in, and lists the
 //! plan `--plan` names if it isn't listed. `export` picks the project the new book's directory
 //! is in.
@@ -43,6 +45,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::capture;
 use crate::client::Client;
 use crate::conf::Conf;
 use crate::export;
@@ -320,6 +323,18 @@ pub enum NodeCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
+    /// Capture a node's changes in this worktree, and keep them as a revision of its own
+    ///
+    /// The diff runs from the node's start, carried over whatever its base branch brought in
+    /// since, to this worktree: every tracked file as it is, staged new ones included, and
+    /// untracked files left out unless its start had them. Only this checkout is read.
+    Capture {
+        /// The node's id, else the node this worktree is on: the one started here last
+        id: Option<String>,
+        /// The plan a node named is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
 }
 
 /// What can be done with a plan's own pages
@@ -491,6 +506,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Node(NodeCommand::Rm { ids, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             node::rm(&client, &plan, &ids, out).await
+        }
+        Command::Node(NodeCommand::Capture { id, pick }) => {
+            capture::capture(&client, cwd, id.as_deref(), &pick, out).await
         }
         Command::Page(PageCommand::Ls { pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;

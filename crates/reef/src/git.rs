@@ -6,10 +6,16 @@
 //!   `refs/reef/start/<plan>/<id>`, so no gc prunes either. reef writes it as `reef`, whatever the
 //!   user's config says, so no identity needs setting up first. The ref is local, and no push
 //!   sends it, since push sends branches.
-//! - **The snapshot through git's CLI.** gix 0.90 can't stage a worktree, so the worktree's index
-//!   is copied, and `git add -A` and `git write-tree` run against the copy. The user's own index
-//!   and staging are left as they were. Every step meets at tree ids in the one object store, so
-//!   gix reads the tree git wrote.
+//! - **A node's diff through gix:** a tree-to-tree diff with renames at 50%, each changed blob
+//!   diffed with Myers and git's slider heuristics, cut into hunks with three lines of context,
+//!   as `git diff` would show it.
+//! - **The carry through gix:** a three-way merge of trees, its conflicted files marked as
+//!   `git merge-tree --write-tree` marks them, so it writes git's own tree.
+//! - **The snapshots through git's CLI.** gix 0.90 can't stage a worktree, so the worktree's index
+//!   is copied, and git adds to the copy and writes it out as a tree. The user's own index and
+//!   staging are left as they were. A start takes everything `git add -A` would, and a seal only
+//!   what is tracked, and what its base already holds. Every step meets at tree ids in the one
+//!   object store, so gix reads the tree git wrote.
 //!
 //! Nothing here fetches, pushes or names a remote. gix is opened from the directory alone, and
 //! git's CLI runs with the variables that would point it at another repo or index removed, as
@@ -17,10 +23,16 @@
 //! step is tested against git's CLI, which stays its oracle.
 
 use anyhow::Context;
-use gix::bstr::BString;
+use gix::bstr::{BString, ByteSlice};
+use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
+use gix::diff::blob::{Algorithm, InternedInput, UnifiedDiff, diff_with_slider_heuristics};
+use gix::object::tree::diff::ChangeDetached;
+use gix::objs::tree::EntryMode;
 use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 use gix::refs::{FullName, Target};
+use reef_api::revision::{FileDiff, FileStatus, Hunk, Line, LineKind};
 use reef_model::NodeName;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -40,6 +52,12 @@ const DEFAULT_BRANCHES: &[&str] = &["main", "master"];
 
 /// The name and email reef writes its own commits as
 const REEF: (&str, &str) = ("reef", "reef@localhost");
+
+/// How many bytes git looks through for a NUL to call a blob binary
+const BINARY_PROBE: usize = 8000;
+
+/// How many paths a seal adds in one `git add`, well under any system's limit on arguments
+const ADD_CHUNK: usize = 500;
 
 /// The ref that pins a node's start, within its project's repo: `refs/reef/start/<plan>/<id>`
 ///
@@ -68,6 +86,15 @@ pub struct Pinned {
     pub id: String,
     /// What it pointed at before, or `None` if it didn't exist
     pub previous: Option<String>,
+}
+
+/// A three-way merge of trees: the tree it wrote, and the files it couldn't resolve
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    /// The merged tree, conflicted files holding git's markers
+    pub tree: String,
+    /// The paths that still conflict, sorted
+    pub conflicts: Vec<String>,
 }
 
 /// One checkout: a worktree and the repo it is in
@@ -257,11 +284,72 @@ impl Checkout {
         Ok(commit.tree_id()?.detach().to_string())
     }
 
-    /// Writes the worktree as it is now, committed or not, as one tree
+    /// Writes the worktree as it is now, committed or not, as one tree: a start's snapshot
     ///
     /// The worktree's index is copied and everything is added to the copy, untracked files too
     /// and ignored ones not, so the user's own index and staging are left as they were.
     pub fn snapshot(&self) -> anyhow::Result<String> {
+        // add everything from the worktree's root, then write the copy out as a tree
+        self.on_index_copy(|copy| {
+            self.git(&["add", "-A"], Some(copy))?;
+            self.git(&["write-tree"], Some(copy))
+        })
+    }
+
+    /// Writes the worktree as a seal takes it, as one tree: what is tracked, and what its base
+    /// already holds
+    ///
+    /// Every tracked file is taken as it is in the worktree, a deleted one gone and a staged new
+    /// one in. An untracked file that no commit or add took is left out, such as a `__pycache__`
+    /// no ignore file names, unless the base holds it already: a start takes untracked files, so
+    /// one it took that is still there is kept rather than shown as deleted. The user's own index
+    /// and staging are left as they were.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The tree the node's diff starts from
+    pub fn seal_snapshot(&self, base: &str) -> anyhow::Result<String> {
+        // the base's tree, which says which untracked files to keep
+        let base = self.repo.find_object(id(base)?)?.peel_to_tree()?;
+        self.on_index_copy(|copy| {
+            // every tracked file as the worktree has it
+            self.git(&["add", "-u"], Some(copy))?;
+            // the untracked files that aren't ignored, of which only the base's are kept
+            let others = self.git_bytes(
+                ["ls-files", "--others", "--exclude-standard", "-z"].map(OsStr::new),
+                Some(copy),
+            )?;
+            let mut kept = Vec::new();
+            for path in others
+                .split(|byte| *byte == 0)
+                .filter(|path| !path.is_empty())
+            {
+                let path = gix::path::from_bstr(path.as_bstr())?;
+                if base.lookup_entry_by_path(&path)?.is_some() {
+                    kept.push(path.into_owned());
+                }
+            }
+            // added as the paths they are, never as patterns
+            for chunk in kept.chunks(ADD_CHUNK) {
+                let mut args: Vec<&OsStr> = ["--literal-pathspecs", "add", "--"]
+                    .map(OsStr::new)
+                    .to_vec();
+                args.extend(chunk.iter().map(|path| path.as_os_str()));
+                self.git_bytes(args, Some(copy))?;
+            }
+            self.git(&["write-tree"], Some(copy))
+        })
+    }
+
+    /// Runs a step against a copy of the worktree's index, which goes once the step is done
+    ///
+    /// # Arguments
+    ///
+    /// * `step` - What to run, given the copy's path
+    fn on_index_copy<T, F>(&self, step: F) -> anyhow::Result<T>
+    where
+        F: FnOnce(&Path) -> anyhow::Result<T>,
+    {
         // the copy lives beside the worktree's own index, in its own git dir
         let index = self.repo.index_path();
         let copy = self
@@ -272,13 +360,86 @@ impl Checkout {
         if index.exists() {
             std::fs::copy(&index, &copy).with_context(|| format!("copying {}", index.display()))?;
         }
-        // add everything from the worktree's root, then write the copy out as a tree
-        let tree = self
-            .git(&["add", "-A"], Some(&copy))
-            .and_then(|_| self.git(&["write-tree"], Some(&copy)));
-        // the copy goes whether or not the tree was written
+        let done = step(&copy);
+        // the copy goes whether or not the step worked
         let _ = std::fs::remove_file(&copy);
-        tree
+        done
+    }
+
+    /// The diff between two trees or commits, as `git diff` would show it, files sorted by path
+    ///
+    /// Renames are found at 50% similarity, as git finds them by default, and copies are not.
+    /// Trees are walked into and submodules left out, and a file with a NUL in its first 8000
+    /// bytes on either side is binary, with no hunks.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The full id of the tree or commit the diff starts from
+    /// * `head` - The full id of the tree or commit it ends at
+    pub fn diff(&self, base: &str, head: &str) -> anyhow::Result<Vec<FileDiff>> {
+        // either side may be a commit, which is peeled to its tree
+        let tree = |object: &str| -> anyhow::Result<gix::Tree<'_>> {
+            Ok(self.repo.find_object(id(object)?)?.peel_to_tree()?)
+        };
+        let base = tree(base)?;
+        let head = tree(head)?;
+        // paths tracked in full, and renames found as git finds them by default
+        let mut options = gix::diff::Options::default();
+        options
+            .track_path()
+            .track_rewrites(Some(gix::diff::Rewrites {
+                copies: None,
+                percentage: Some(0.5),
+                limit: 1000,
+                track_empty: false,
+            }));
+        let changes = self.repo.diff_tree_to_tree(&base, &head, options)?;
+        // each change that is a file, sorted by the path it is shown under
+        let mut files = Vec::with_capacity(changes.len());
+        for change in changes {
+            if let Some(file) = file_diff(&self.repo, change)? {
+                files.push(file);
+            }
+        }
+        files.sort_by(|a, b| a.path().cmp(b.path()));
+        Ok(files)
+    }
+
+    /// Merges two trees against the tree both started from, as
+    /// `git merge-tree --write-tree --merge-base` does
+    ///
+    /// Conflicted files hold markers labelled with each side's tree id and no ancestor label, as
+    /// git's do, so a conflicted merge writes the same tree git would.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The tree both sides started from
+    /// * `ours` - One side
+    /// * `theirs` - The other side
+    pub fn merge_trees(&self, base: &str, ours: &str, theirs: &str) -> anyhow::Result<Merged> {
+        // label each side with its tree id, as git labels a merge of bare trees
+        let labels = gix::merge::blob::builtin_driver::text::Labels {
+            ancestor: None,
+            current: Some(ours.into()),
+            other: Some(theirs.into()),
+        };
+        let options = self.repo.tree_merge_options()?;
+        let mut outcome =
+            self.repo
+                .merge_trees(id(base)?, id(ours)?, id(theirs)?, labels, options)?;
+        let tree = outcome.tree.write()?.detach().to_string();
+        // the files that still hold markers, or whose change to the tree couldn't be resolved
+        let how = gix::merge::tree::TreatAsUnresolved::default();
+        let mut conflicts: Vec<String> = outcome
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.is_unresolved(how))
+            .flat_map(|conflict| [conflict.ours.location(), conflict.theirs.location()])
+            .map(|path| path.to_string())
+            .collect();
+        conflicts.sort();
+        conflicts.dedup();
+        Ok(Merged { tree, conflicts })
     }
 
     /// Pins a start: a commit of its tree whose parent is its commit, under a ref
@@ -404,9 +565,35 @@ impl Checkout {
     /// * `args` - The arguments after `git -C <root>`
     /// * `index` - The index file to use instead of the worktree's own, if any
     fn git(&self, args: &[&str], index: Option<&Path>) -> anyhow::Result<String> {
+        // its output as text, trimmed
+        let out = self.git_bytes(args.iter().map(OsStr::new), index)?;
+        Ok(String::from_utf8_lossy(&out).trim().to_string())
+    }
+
+    /// Runs git's CLI in the worktree's root, returning its output as it wrote it
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The arguments after `git -C <root>`, which may be paths that aren't utf-8
+    /// * `index` - The index file to use instead of the worktree's own, if any
+    fn git_bytes<'a, I>(&self, args: I, index: Option<&Path>) -> anyhow::Result<Vec<u8>>
+    where
+        I: IntoIterator<Item = &'a OsStr>,
+    {
+        // what is run, for a message, with at most a few of its arguments
+        let args: Vec<&OsStr> = args.into_iter().collect();
+        let named = || {
+            let shown: Vec<String> = args
+                .iter()
+                .take(4)
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let more = if args.len() > 4 { " …" } else { "" };
+            format!("{}{more}", shown.join(" "))
+        };
         // from the worktree alone, in the C locale so its messages read the same everywhere
         let mut git = Command::new("git");
-        git.arg("-C").arg(&self.root).args(args).env("LC_ALL", "C");
+        git.arg("-C").arg(&self.root).args(&args).env("LC_ALL", "C");
         for var in GIT_ENV {
             git.env_remove(var);
         }
@@ -416,18 +603,241 @@ impl Checkout {
         let output = git
             .stdin(Stdio::null())
             .output()
-            .with_context(|| format!("running git {}", args.join(" ")))?;
+            .with_context(|| format!("running git {}", named()))?;
         // a failure carries git's own message
         if !output.status.success() {
             anyhow::bail!(
                 "git {} failed in {}: {}",
-                args.join(" "),
+                named(),
                 self.root.display(),
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        Ok(output.stdout)
     }
+}
+
+/// Gathers the hunks gix's unified diff hands over, each line numbered on its sides
+#[derive(Default)]
+struct Hunks {
+    /// The hunks so far
+    hunks: Vec<Hunk>,
+}
+
+impl ConsumeHunk for Hunks {
+    type Out = Vec<Hunk>;
+
+    /// Numbers one hunk's lines on each side and keeps it
+    ///
+    /// # Arguments
+    ///
+    /// * `header` - Where the hunk starts and how long it is on each side
+    /// * `lines` - Its lines, each with its kind and its bytes, newline included
+    fn consume_hunk(
+        &mut self,
+        header: HunkHeader,
+        lines: &[(DiffLineKind, &[u8])],
+    ) -> std::io::Result<()> {
+        // git starts an empty side at the line before it
+        let start = |start: u32, len: u32| {
+            if len == 0 {
+                start.saturating_sub(1)
+            } else {
+                start
+            }
+        };
+        let old_start = start(header.before_hunk_start, header.before_hunk_len);
+        let new_start = start(header.after_hunk_start, header.after_hunk_len);
+        // number each line from where its sides start
+        let mut old_no = old_start.max(1);
+        let mut new_no = new_start.max(1);
+        let mut out = Vec::with_capacity(lines.len());
+        for (kind, bytes) in lines {
+            let kind = match kind {
+                DiffLineKind::Context => LineKind::Context,
+                DiffLineKind::Add => LineKind::Added,
+                DiffLineKind::Remove => LineKind::Removed,
+            };
+            // a line is on the sides its kind says, and moves each one's count on
+            let (old, new) = match kind {
+                LineKind::Context => (Some(old_no), Some(new_no)),
+                LineKind::Added => (None, Some(new_no)),
+                LineKind::Removed => (Some(old_no), None),
+            };
+            if old.is_some() {
+                old_no += 1;
+            }
+            if new.is_some() {
+                new_no += 1;
+            }
+            // a token keeps its newline, and the last line of a file may have none
+            let no_newline = !bytes.ends_with(b"\n");
+            let text = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+            out.push(Line {
+                kind,
+                old,
+                new,
+                text: String::from_utf8_lossy(text).into_owned(),
+                no_newline,
+            });
+        }
+        self.hunks.push(Hunk {
+            old_start,
+            old_lines: header.before_hunk_len,
+            new_start,
+            new_lines: header.after_hunk_len,
+            lines: out,
+        });
+        Ok(())
+    }
+
+    /// Hands back every hunk
+    fn finish(self) -> Self::Out {
+        self.hunks
+    }
+}
+
+/// One side of a changed entry: its mode and its blob
+struct Side {
+    /// The entry's mode
+    mode: EntryMode,
+    /// The blob it held
+    id: gix::ObjectId,
+}
+
+/// Whether git would call a blob binary: a NUL in its first 8000 bytes
+///
+/// # Arguments
+///
+/// * `data` - The blob's contents
+fn is_binary(data: &[u8]) -> bool {
+    data[..data.len().min(BINARY_PROBE)].contains(&0)
+}
+
+/// Diffs one file's two sides into hunks, or into none when either side is binary
+///
+/// # Arguments
+///
+/// * `repo` - The repo the blobs are in
+/// * `old` - The base side, if any
+/// * `new` - The head side, if any
+fn hunks(
+    repo: &gix::Repository,
+    old: Option<&Side>,
+    new: Option<&Side>,
+) -> anyhow::Result<(bool, Vec<Hunk>)> {
+    // a missing side is empty
+    let read = |side: Option<&Side>| -> anyhow::Result<Vec<u8>> {
+        match side {
+            Some(side) => Ok(repo.find_blob(side.id)?.detach().data),
+            None => Ok(Vec::new()),
+        }
+    };
+    let before = read(old)?;
+    let after = read(new)?;
+    // git shows a binary file as a line saying it changed, and no hunks
+    if is_binary(&before) || is_binary(&after) {
+        return Ok((true, Vec::new()));
+    }
+    // identical contents, as a mode change or a pure rename leaves, have no hunks
+    if before == after {
+        return Ok((false, Vec::new()));
+    }
+    // a line diff, with git's slider heuristics, cut into hunks with three lines around each
+    let input = InternedInput::new(before.as_slice(), after.as_slice());
+    let diff = diff_with_slider_heuristics(Algorithm::Myers, &input);
+    let hunks =
+        UnifiedDiff::new(&diff, &input, Hunks::default(), ContextSize::symmetrical(3)).consume()?;
+    Ok((false, hunks))
+}
+
+/// Turns one of gix's tree changes into a file's diff, if it is a file at all
+///
+/// # Arguments
+///
+/// * `repo` - The repo the blobs are in
+/// * `change` - The change to turn
+fn file_diff(repo: &gix::Repository, change: ChangeDetached) -> anyhow::Result<Option<FileDiff>> {
+    // a side as the change names it
+    let side = |mode: EntryMode, id: gix::ObjectId| Some(Side { mode, id });
+    // the change's kind, paths and sides
+    let (status, old_path, new_path, old, new) = match change {
+        ChangeDetached::Addition {
+            location,
+            entry_mode,
+            id,
+            ..
+        } => (
+            FileStatus::Added,
+            None,
+            Some(location.to_string()),
+            None,
+            side(entry_mode, id),
+        ),
+        ChangeDetached::Deletion {
+            location,
+            entry_mode,
+            id,
+            ..
+        } => (
+            FileStatus::Deleted,
+            Some(location.to_string()),
+            None,
+            side(entry_mode, id),
+            None,
+        ),
+        ChangeDetached::Modification {
+            location,
+            previous_entry_mode,
+            previous_id,
+            entry_mode,
+            id,
+        } => (
+            FileStatus::Modified,
+            Some(location.to_string()),
+            Some(location.to_string()),
+            side(previous_entry_mode, previous_id),
+            side(entry_mode, id),
+        ),
+        ChangeDetached::Rewrite {
+            source_location,
+            source_entry_mode,
+            source_id,
+            entry_mode,
+            id,
+            location,
+            ..
+        } => (
+            FileStatus::Renamed,
+            Some(source_location.to_string()),
+            Some(location.to_string()),
+            side(source_entry_mode, source_id),
+            side(entry_mode, id),
+        ),
+    };
+    // trees are walked into and submodules left alone, as git's diff of files does
+    let is_file = |side: &Option<Side>| {
+        side.as_ref()
+            .is_none_or(|side| side.mode.is_blob_or_symlink())
+    };
+    if !is_file(&old) || !is_file(&new) {
+        return Ok(None);
+    }
+    let (binary, hunks) = hunks(repo, old.as_ref(), new.as_ref())?;
+    // the mode git writes, such as 100644
+    let octal = |side: &Side| side.mode.kind().as_octal_str().to_string();
+    Ok(Some(FileDiff {
+        status,
+        old_path,
+        new_path,
+        old_mode: old.as_ref().map(octal),
+        new_mode: new.as_ref().map(octal),
+        old_id: old.as_ref().map(|side| side.id.to_string()),
+        new_id: new.as_ref().map(|side| side.id.to_string()),
+        binary,
+        too_large: false,
+        hunks,
+    }))
 }
 
 /// Parses a full object id

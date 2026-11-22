@@ -8,7 +8,10 @@
 use reef_model::PlanName;
 use std::future::Future;
 
-use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, WorkRow};
+use crate::schema::{
+    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
+    RevisionRow, WorkRow,
+};
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
 pub use reef_api::Refusal;
@@ -328,4 +331,56 @@ pub trait Backend: Send + Sync {
         row: WorkRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads the revision rows stored in a node's partition, oldest first, or the one of a number
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's name within its project, `plan/id`
+    /// * `revision` - The one revision's sort key, its number padded, or `None` for all of them
+    fn revisions(
+        &self,
+        project: &str,
+        node: &str,
+        revision: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<RevisionRow>>> + Send;
+
+    /// Writes one revision row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_revision(
+        &self,
+        row: RevisionRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads the file rows stored in a revision's partition, in path order, or the one at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's name within its project, `plan/id`
+    /// * `revision` - The revision's number
+    /// * `path` - The one file's path, or `None` for all of them
+    fn revision_files(
+        &self,
+        project: &str,
+        node: &str,
+        revision: u64,
+        path: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<RevisionFileRow>>> + Send;
+
+    /// Writes revision file rows over whatever is stored under their keys, every answer checked
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write, one bundle's worth
+    fn write_revision_files(
+        &self,
+        rows: Vec<RevisionFileRow>,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }

@@ -5,12 +5,15 @@
 //! worktree, its branch, the base branch other work comes in on, the start as a commit and as a
 //! tree, where the start left the base branch, and the ref that pins it. The service keeps one
 //! record a node, which a start names the version of to replace it. Each capture of the node's
-//! changes then adds the SHAs it read, as provenance only: they may stop resolving once squashed.
-//! The service never reads a checkout, so everything here is what a client read in one.
+//! changes then sends its files, which the service keeps as a [`Revision`], and adds the SHAs it
+//! read, as provenance only: they may stop resolving once squashed. The service never reads a
+//! checkout, so everything here is what a client read in one.
 
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+use crate::revision::{FileDiff, Revision};
 
 /// Where a node's work happens and what it started from, as read from its own checkout
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +57,9 @@ pub struct CaptureShas {
 pub struct CaptureRead {
     /// When the service added it, in milliseconds since the epoch
     pub at: u64,
+    /// The revision it stored, or the one it found unchanged
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u32>,
     /// What the capture read
     #[serde(flatten)]
     pub shas: CaptureShas,
@@ -109,23 +115,39 @@ pub enum Started {
     },
 }
 
-/// The SHAs a capture read, sent to be added to its node's record
+/// One capture of a node's changes, sent to be kept as a revision, its SHAs added to its record
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddCapture {
     /// The commit the start the capture was taken from is pinned at, which names that start
     pub pinned: String,
     /// What the capture read
     pub shas: CaptureShas,
+    /// The files that conflicted carrying the start forward
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+    /// Every changed file from the base to the worktree's tree, its hunks and all
+    #[serde(default)]
+    pub files: Vec<FileDiff>,
 }
 
-/// What came of adding a capture's SHAs
+/// What came of a capture
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Captured {
-    /// The SHAs were added
+    /// The capture was kept as a new revision, and its SHAs added
     Added {
         /// The node's record as it now stands
         record: WorkRecord,
+        /// The revision it was kept as
+        revision: Revision,
+    },
+    /// The capture's base and tree are its node's latest revision's, so no revision was added,
+    /// and its SHAs were added naming that one
+    Unchanged {
+        /// The node's record as it now stands
+        record: WorkRecord,
+        /// The latest revision, which it matched
+        revision: Revision,
     },
     /// The node has no record, so nothing was added
     NotStarted {
@@ -215,6 +237,7 @@ mod tests {
         let mut kept = record("C30", "/src/reef", 7);
         kept.captures.push(CaptureRead {
             at: 9,
+            revision: Some(1),
             shas: CaptureShas {
                 head: "d".repeat(40),
                 tree: "e".repeat(40),
@@ -228,6 +251,7 @@ mod tests {
         assert_eq!(json["worktree"], "/src/reef");
         assert_eq!(json["pin"], "refs/reef/start/central/C30");
         assert_eq!(json["captures"][0]["at"], 9);
+        assert_eq!(json["captures"][0]["revision"], 1);
         assert_eq!(json["captures"][0]["head"], "d".repeat(40));
         // and it reads back as it was
         assert_eq!(serde_json::from_value::<WorkRecord>(json).unwrap(), kept);
@@ -269,9 +293,14 @@ mod tests {
                 merge_base: Some("f".repeat(40)),
                 base: "b".repeat(40),
             },
+            conflicts: Vec::new(),
+            files: Vec::new(),
         };
         let json = serde_json::to_string(&add).unwrap();
         assert_eq!(serde_json::from_str::<AddCapture>(&json).unwrap(), add);
+        // one sent with no files or conflicts, as C30's were, reads as a capture of nothing
+        let bare = serde_json::json!({ "pinned": add.pinned, "shas": add.shas });
+        assert_eq!(serde_json::from_value::<AddCapture>(bare).unwrap(), add);
     }
 
     /// A worktree is on the node started there last, and on none where nothing started

@@ -7,9 +7,10 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, ErrorCode, Listing, NewPlan,
-    NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit,
-    QueueListing, Queued, Rewrite, StartWork, Started, StoredNode, StoredPage, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, ErrorCode, FileDiff, Listing,
+    NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
+    QueueEdit, QueueListing, Queued, Revision, Rewrite, StartWork, Started, StoredNode, StoredPage,
+    WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -319,19 +320,73 @@ impl Client {
         self.send(request, &path).await
     }
 
-    /// Adds the SHAs a capture read to its node's record
+    /// Sends a capture of a node's changes, to be kept as a revision with its SHAs added to the
+    /// node's record
     ///
     /// A node never started, or started again since the capture's start, is an answer, not an
-    /// error, and adds nothing.
+    /// error, and keeps nothing. So is a capture its node's latest revision already holds.
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
-    /// * `add` - The start the capture was taken from, and what it read
+    /// * `add` - The start the capture was taken from, what it read, and its files
     pub async fn add_capture(&self, node: &NodeName, add: &AddCapture) -> anyhow::Result<Captured> {
         let path = paths::captures(node);
         let request = self.http.post(self.url(&path)).json(add);
         self.send(request, &path).await
+    }
+
+    /// Lists a node's revisions, oldest first, each with its files but not their hunks
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub async fn revisions(&self, node: &NodeName) -> anyhow::Result<Vec<Revision>> {
+        let path = paths::revisions(node);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Gets one of a node's revisions, or `None` if it has no such revision
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `revision` - The revision's number
+    pub async fn revision(
+        &self,
+        node: &NodeName,
+        revision: u32,
+    ) -> anyhow::Result<Option<Revision>> {
+        let path = paths::node_revision(node, revision);
+        // a revision that isn't there is an answer here, not an error
+        match self.send(self.http.get(self.url(&path)), &path).await {
+            Ok(revision) => Ok(Some(revision)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Gets one file of a node's revision, its hunks and all, or `None` if the revision doesn't
+    /// list it
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `revision` - The revision's number
+    /// * `file` - The path the file is shown under
+    pub async fn revision_file(
+        &self,
+        node: &NodeName,
+        revision: u32,
+        file: &str,
+    ) -> anyhow::Result<Option<FileDiff>> {
+        let path = paths::revision_file(node, revision, file);
+        // a file the revision doesn't list is an answer here, not an error
+        match self.send(self.http.get(self.url(&path)), &path).await {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// The full URL of a route's path

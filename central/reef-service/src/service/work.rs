@@ -6,7 +6,10 @@
 //! - **The service reads no checkout.** What a start or a capture read comes from the client
 //!   that read it, in the node's own checkout, so the service is the same once it is shared.
 //! - **Each record written is a change**, [`Change::WorkRecorded`], naming its node and the
-//!   version it is now at. A start or a capture that wrote nothing sends none.
+//!   version it is now at. A start or a capture that wrote nothing sends none. A capture kept as
+//!   a revision is [`Change::RevisionCaptured`] too, naming the revision.
+//! - **A node's revisions are read where its plan is listed,** as its record is, whether or not
+//!   the node is still in its plan.
 
 use reef_api::Change;
 use reef_model::NodeName;
@@ -15,7 +18,8 @@ use tracing::instrument;
 use super::Service;
 use crate::backend::Backend;
 use crate::store::{
-    AddCapture, Captured, NotListed, NotRegistered, StartWork, Started, WorkRecord,
+    AddCapture, Captured, FileDiff, NotListed, NotRegistered, Revision, StartWork, Started,
+    WorkRecord,
 };
 
 impl<B: Backend> Service<B> {
@@ -73,25 +77,85 @@ impl<B: Backend> Service<B> {
         Ok(started)
     }
 
-    /// Adds the SHAs a capture read to its node's record, if it was taken from the node's start
+    /// Keeps a capture as its node's next revision, if it was taken from the node's start and
+    /// changed anything, and adds the SHAs it read to the node's record
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
-    /// * `add` - The start the capture was taken from, and what it read
+    /// * `add` - The start the capture was taken from, what it read, and its files
     #[instrument(name = "Service::add_capture", skip_all, err(Debug))]
     pub async fn add_capture(&self, node: &NodeName, add: AddCapture) -> anyhow::Result<Captured> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(node).await?;
         // written under the project's work lock, and told to the change stream once it is
         let captured = self.store.add_capture(node, add).await?;
-        if let Captured::Added { record } = &captured {
-            self.publish(Change::WorkRecorded {
+        match &captured {
+            Captured::Added { record, revision } => {
+                self.publish(Change::RevisionCaptured {
+                    node: node.clone(),
+                    revision: revision.revision,
+                });
+                self.publish(Change::WorkRecorded {
+                    node: node.clone(),
+                    version: record.version,
+                });
+            }
+            Captured::Unchanged { record, .. } => self.publish(Change::WorkRecorded {
                 node: node.clone(),
                 version: record.version,
-            });
+            }),
+            Captured::NotStarted { .. } | Captured::Restarted { .. } => {}
         }
         Ok(captured)
+    }
+
+    /// Lists a node's revisions, oldest first, each with its files but not their hunks
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    #[instrument(name = "Service::revisions", skip_all, err(Debug))]
+    pub async fn revisions(&self, node: &NodeName) -> anyhow::Result<Vec<Revision>> {
+        // refused if the project isn't registered, or its plan isn't listed
+        self.listed(node).await?;
+        self.store.revisions(node).await
+    }
+
+    /// Gets one of a node's revisions, if it has one of that number
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `revision` - The revision's number
+    #[instrument(name = "Service::node_revision", skip_all, err(Debug))]
+    pub async fn node_revision(
+        &self,
+        node: &NodeName,
+        revision: u32,
+    ) -> anyhow::Result<Option<Revision>> {
+        // refused if the project isn't registered, or its plan isn't listed
+        self.listed(node).await?;
+        self.store.node_revision(node, revision).await
+    }
+
+    /// Gets one file of a node's revision, its hunks and all, if the revision lists it
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `revision` - The revision's number
+    /// * `path` - The path the file is shown under
+    #[instrument(name = "Service::revision_file", skip_all, err(Debug))]
+    pub async fn revision_file(
+        &self,
+        node: &NodeName,
+        revision: u32,
+        path: &str,
+    ) -> anyhow::Result<Option<FileDiff>> {
+        // refused if the project isn't registered, or its plan isn't listed
+        self.listed(node).await?;
+        self.store.revision_file(node, revision, path).await
     }
 
     /// Refuses a node whose project isn't registered, or whose plan isn't listed

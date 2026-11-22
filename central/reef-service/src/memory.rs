@@ -10,7 +10,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::PROJECTS;
-use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, WorkRow};
+use crate::schema::{
+    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
+    RevisionRow, WorkRow,
+};
+
+/// A node's partition of revisions: its project and its `plan/id`
+type NodePartition = (String, String);
+
+/// A revision's partition of files: its project, its node's `plan/id` and its number
+type RevisionFilesKey = (String, String, u64);
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -27,6 +36,10 @@ struct Tables {
     pages: BTreeMap<RevisionKey, BTreeMap<String, PageRow>>,
     /// Each project's work records, by node
     work: BTreeMap<String, BTreeMap<String, WorkRow>>,
+    /// Each node's revisions, by padded number
+    revisions: BTreeMap<NodePartition, BTreeMap<String, RevisionRow>>,
+    /// Each revision's files, by path
+    revision_files: BTreeMap<RevisionFilesKey, BTreeMap<String, RevisionFileRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -115,6 +128,46 @@ impl MemoryBackend {
             .entry(partition.to_string())
             .or_default()
             .insert(row.node.clone(), row);
+    }
+
+    /// Stores a revision row in a node's partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project of the node whose partition the row lands in
+    /// * `node` - That node's `plan/id`
+    /// * `row` - The row, keyed by its own number as any other
+    pub fn plant_revision(&self, project: &str, node: &str, row: RevisionRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .revisions
+            .entry((project.to_string(), node.to_string()))
+            .or_default()
+            .insert(row.revision.clone(), row);
+    }
+
+    /// Stores a revision file row in a revision's partition other than its own, as a hash
+    /// collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project of the node whose revision's partition the row lands in
+    /// * `node` - That node's `plan/id`
+    /// * `revision` - That revision's number
+    /// * `row` - The row, keyed by its own path as any other
+    pub fn plant_revision_file(
+        &self,
+        project: &str,
+        node: &str,
+        revision: u64,
+        row: RevisionFileRow,
+    ) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .revision_files
+            .entry((project.to_string(), node.to_string(), revision))
+            .or_default()
+            .insert(row.path.clone(), row);
     }
 }
 
@@ -576,5 +629,96 @@ impl Backend for MemoryBackend {
         }
         partition.insert(row.node.clone(), row);
         Ok(Written::Applied)
+    }
+
+    /// Reads the revision rows stored in a node's partition, oldest first, or the one of a number
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's name within its project, `plan/id`
+    /// * `revision` - The one revision's sort key, or `None` for all of them
+    async fn revisions(
+        &self,
+        project: &str,
+        node: &str,
+        revision: Option<&str>,
+    ) -> anyhow::Result<Vec<RevisionRow>> {
+        let tables = self.tables();
+        // the node's partition, whole or the one row of it
+        let key = (project.to_string(), node.to_string());
+        let Some(partition) = tables.revisions.get(&key) else {
+            return Ok(Vec::new());
+        };
+        Ok(match revision {
+            Some(revision) => partition.get(revision).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes one revision row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_revision(&self, row: RevisionRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its keys hash
+        let key = (row.project.clone(), row.node.clone());
+        let partition = tables.revisions.entry(key).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.revision).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.revision.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Reads the file rows stored in a revision's partition, in path order, or the one at a path
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The node's name within its project, `plan/id`
+    /// * `revision` - The revision's number
+    /// * `path` - The one file's path, or `None` for all of them
+    async fn revision_files(
+        &self,
+        project: &str,
+        node: &str,
+        revision: u64,
+        path: Option<&str>,
+    ) -> anyhow::Result<Vec<RevisionFileRow>> {
+        let tables = self.tables();
+        // the revision's partition, whole or the one row of it
+        let key = (project.to_string(), node.to_string(), revision);
+        let Some(partition) = tables.revision_files.get(&key) else {
+            return Ok(Vec::new());
+        };
+        Ok(match path {
+            Some(path) => partition.get(path).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes revision file rows over whatever is stored under their keys
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_revision_files(&self, rows: Vec<RevisionFileRow>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        // each row in its own partition, over whatever is stored under its path
+        for row in rows {
+            let key = (row.project.clone(), row.node.clone(), row.revision);
+            tables
+                .revision_files
+                .entry(key)
+                .or_default()
+                .insert(row.path.clone(), row);
+        }
+        Ok(())
     }
 }

@@ -7,9 +7,10 @@
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, CaptureShas, Captured, Change, Checked,
-    ErrorCode, Listing, NewPlan, NewProject, NodePut, NodeWrite, PageEdit, PageEdited, PageListing,
-    PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued,
-    Refusal, Rewrite, StalePut, StartWork, Started, StoredNode, StoredPage, WorkRecord, paths,
+    ErrorCode, FileDiff, Listing, NewPlan, NewProject, NodePut, NodeWrite, PageEdit, PageEdited,
+    PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit,
+    QueueListing, Queued, Refusal, Revision, Rewrite, StalePut, StartWork, Started, StoredNode,
+    StoredPage, WorkRecord, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -18,7 +19,7 @@ use reef_service::Backend;
 use reqwest::StatusCode;
 
 use super::http::{Ax, Events};
-use super::work_cases::start_in;
+use super::work_cases::{added_file, start_in};
 use super::{doc, git};
 
 /// A piece of work that says why it is needed and what it does, needing what it names
@@ -757,8 +758,9 @@ pub async fn whole_plan_write_over_two_mebibytes_is_taken<B: Backend + 'static>(
     Ok(())
 }
 
-/// The work routes start a node, read its record and add a capture's SHAs, each outcome said
-/// by its status, and each record written is a change to the node's plan
+/// The work routes start a node, read its record, keep a capture as a revision and serve it a
+/// file at a time, each outcome said by its status, and each record and revision written is a
+/// change to the node's plan
 ///
 /// # Arguments
 ///
@@ -817,28 +819,73 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
             node: stray.clone()
         }
     );
-    // a capture of its start is added, 200, one of another start is a conflict, 409, and one of
-    // a node never started, 422
+    // a capture of its start is kept as revision 1, 200, one of another start is a conflict,
+    // 409, and one of a node never started, 422
     let shas = CaptureShas {
         head: "d".repeat(40),
         tree: "e".repeat(40),
         merge_base: None,
         base: record.start.start_tree.clone(),
     };
+    let file = added_file("src/a file.rs", "fn main() {}\n");
     let add = AddCapture {
         pinned: record.start.pinned.clone(),
         shas: shas.clone(),
+        conflicts: Vec::new(),
+        files: vec![file.clone()],
     };
     let (status, added): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
-    let Captured::Added { record: captured } = added else {
+    let Captured::Added {
+        record: captured,
+        revision,
+    } = added
+    else {
         anyhow::bail!("the capture wasn't added: {added:?}");
     };
     assert_eq!(captured.captures.len(), 1);
     assert_eq!(captured.captures[0].shas, shas);
+    assert_eq!(captured.captures[0].revision, Some(1));
+    assert_eq!((revision.revision, revision.files.len()), (1, 1));
+    // the revision reads back listed, by its number, and its file by its path
+    let (status, listed): (_, Vec<Revision>) = ax.client.get(&paths::revisions(&node)).await?;
+    assert_eq!((status, listed), (StatusCode::OK, vec![revision.clone()]));
+    let (_, one): (_, Revision) = ax.client.get(&paths::node_revision(&node, 1)).await?;
+    assert_eq!(one, revision);
+    let path = paths::revision_file(&node, 1, "src/a file.rs");
+    let (status, read): (_, FileDiff) = ax.client.get(&path).await?;
+    assert_eq!((status, read), (StatusCode::OK, file));
+    // a revision it doesn't have, or a file its revision doesn't list, is not found
+    for path in [
+        paths::node_revision(&node, 2),
+        paths::revision_file(&node, 1, "src/other.rs"),
+        paths::revision_file(&node, 2, "src/a file.rs"),
+    ] {
+        let (status, error): (_, ApiError) = ax.client.get(&path).await?;
+        assert_eq!(
+            (status, error.code),
+            (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            "{path}"
+        );
+    }
+    // the same capture again is unchanged, 200, and adds its SHAs naming revision 1
+    let (status, again): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
+    assert_eq!(status, StatusCode::OK);
+    let Captured::Unchanged {
+        record: captured,
+        revision: same,
+    } = again
+    else {
+        anyhow::bail!("the same capture wasn't unchanged: {again:?}");
+    };
+    assert_eq!(same, revision);
+    assert_eq!(captured.captures.len(), 2);
+    assert_eq!(captured.captures[1].revision, Some(1));
     let other = AddCapture {
         pinned: "f".repeat(40),
         shas: shas.clone(),
+        conflicts: Vec::new(),
+        files: Vec::new(),
     };
     let (status, late): (_, Captured) = ax.client.post(&paths::captures(&node), &other).await?;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -874,18 +921,24 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         (status, error.code),
         (StatusCode::NOT_FOUND, ErrorCode::NotListed)
     );
-    // and the plan's followers were told of the start and the capture, each at its version
-    for version in [1, 2] {
-        let event = events
-            .next()
-            .await?
-            .expect("the stream sent the record written");
-        assert_eq!(event.event, "work-recorded");
-        let change: Change = serde_json::from_str(&event.data)?;
-        let expected = Change::WorkRecorded {
+    // and the plan's followers were told of the start, the revision and each capture's SHAs
+    let recorded = |version| Change::WorkRecorded {
+        node: node.clone(),
+        version,
+    };
+    let expected = [
+        recorded(1),
+        Change::RevisionCaptured {
             node: node.clone(),
-            version,
-        };
+            revision: 1,
+        },
+        recorded(2),
+        recorded(3),
+    ];
+    for expected in expected {
+        let event = events.next().await?.expect("the stream sent the write");
+        assert_eq!(event.event, expected.kind());
+        let change: Change = serde_json::from_str(&event.data)?;
         assert_eq!(change, expected);
     }
     Ok(())

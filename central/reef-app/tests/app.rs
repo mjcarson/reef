@@ -375,3 +375,58 @@ fn the_queue_moves_an_entry_with_one_row() -> anyhow::Result<()> {
         anyhow::Ok(())
     })
 }
+
+/// A node's captured revisions are served by the app's server functions, each listing its files,
+/// and each file's hunks fetched alone, as the Changes tab opens it
+#[test]
+fn revisions_are_served_a_file_at_a_time() -> anyhow::Result<()> {
+    use reef_app::calls::{revision_file, revisions};
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // A1 started in its project's repo, a file written there and staged, and captured
+        let repo = fx.project("captured", &["central"]).await?;
+        fx.reef(&repo, &["start", "A1"]).await?;
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n")?;
+        let staged = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "a.txt"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .status()?;
+        anyhow::ensure!(staged.success(), "git add failed");
+        let out = fx.reef(&repo, &["node", "capture"]).await?;
+        assert!(out.starts_with("captured `A1` as revision 1"), "{out}");
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        // the revision lists its file without its hunks
+        let listed = revisions("captured".into(), "central".into(), "A1".into())
+            .await
+            .map_err(failed)?;
+        let [revision] = &listed[..] else {
+            anyhow::bail!("one capture listed {} revisions", listed.len());
+        };
+        assert_eq!(revision.revision, 1);
+        assert_eq!(revision.files[0].path(), "a.txt");
+        assert_eq!((revision.files[0].added, revision.files[0].removed), (2, 0));
+        // and the file is fetched alone, its lines numbered, or none for a path not listed
+        let file = |path: &str| {
+            revision_file(
+                "captured".into(),
+                "central".into(),
+                "A1".into(),
+                1,
+                path.into(),
+            )
+        };
+        let read = file("a.txt").await.map_err(failed)?;
+        let read = read.ok_or_else(|| anyhow::anyhow!("the listed file wasn't served"))?;
+        let lines: Vec<(Option<u32>, &str)> = read.hunks[0]
+            .lines
+            .iter()
+            .map(|line| (line.new, line.text.as_str()))
+            .collect();
+        assert_eq!(lines, [(Some(1), "one"), (Some(2), "two")]);
+        assert!(file("b.txt").await.map_err(failed)?.is_none());
+        anyhow::Ok(())
+    })
+}

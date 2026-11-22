@@ -93,4 +93,7 @@ suite!(
     captures_add_to_their_own_start,
     refused_and_unkeepable_starts_write_nothing,
     each_project_has_its_own_work,
+    captures_are_kept_as_numbered_revisions,
+    killed_capture_serves_none_of_its_files,
+    captures_keep_what_fits_and_refuse_what_cant_be_read,
 );

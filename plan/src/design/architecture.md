@@ -215,7 +215,12 @@ app.
   second start says where the first was, and `--restart` replaces it. A node to do goes in
   progress, as `reef status` would put it.
 - **`reef work` shows a record**, of a node named or of the one the worktree is on: the one
-  started there last, in any of the project's plans, as a capture will find it.
+  started there last, in any of the project's plans, as a capture finds it.
+- **`reef node capture` reads the node's changes where it is worked** ([C32](../milestones/m7.md)). Without
+  an id it captures the node the worktree is on, and a node named must be worked there. It
+  takes the diff from the node's start, carried over what its base branch brought in, to the
+  worktree as a seal takes it, through gix for every step but the snapshot, and sends every
+  file with its hunks for the service to keep as a revision. Only the local checkout is read.
 - **Import and export are the CLI's** ([C26, C27](../milestones/m6.md)). `reef import` reads
   and checks the book where it is, moves each link to lead from the repo's root, and sends the
   service one whole-plan write, so the service never reads or writes a book. A plan that has

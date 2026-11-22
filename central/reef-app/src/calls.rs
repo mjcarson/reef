@@ -6,7 +6,7 @@
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
-use reef_api::{PlanInfo, Project, QueueEdit, QueueListing, Queued};
+use reef_api::{FileDiff, PlanInfo, Project, QueueEdit, QueueListing, Queued, Revision};
 use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
@@ -121,6 +121,65 @@ pub async fn edit_queue(project: String, edit: QueueEdit) -> Result<Queued, Serv
     // under the queue's lock, told to the change stream once it is made
     crate::server::service()
         .edit_queue(&project, edit)
+        .await
+        .map_err(failed)
+}
+
+/// A node's captured revisions, oldest first, each listing its files without their hunks
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+#[get("/app/revisions?project&plan&id")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::revisions", skip_all, err(Debug))
+)]
+pub async fn revisions(
+    project: String,
+    plan: String,
+    id: String,
+) -> Result<Vec<Revision>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    crate::server::service()
+        .revisions(&node)
+        .await
+        .map_err(failed)
+}
+
+/// One file of a node's revision, its hunks and all, fetched when it is opened, or `None` if the
+/// revision doesn't list it
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+/// * `revision` - The revision's number
+/// * `path` - The path the file is shown under
+#[get("/app/revision-file?project&plan&id&revision&path")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::revision_file", skip_all, err(Debug))
+)]
+pub async fn revision_file(
+    project: String,
+    plan: String,
+    id: String,
+    revision: u32,
+    path: String,
+) -> Result<Option<FileDiff>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    crate::server::service()
+        .revision_file(&node, revision, &path)
         .await
         .map_err(failed)
 }
