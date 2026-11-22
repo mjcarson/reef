@@ -10,8 +10,9 @@ use reef_api::{
     Commented, ErrorCode, FileDiff, FollowedThread, Listing, MarkThread, Marked, NewPlan,
     NewProject, NewReply, NewThread, NodePut, NodeWrite, PageEdit, PageEdited, PageListing,
     PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued,
-    Refusal, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode, StoredPage, Target,
-    Thread, ThreadState, WorkRecord, paths,
+    Refusal, ResolveThread, Resolved, Resolves, ResolvingCommit, Revision, Rewrite, Side, StalePut,
+    StartWork, Started, StoredNode, StoredPage, Target, Thread, ThreadState, TrailerOutcome,
+    TrailerRead, WorkRecord, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -834,12 +835,14 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         shas: shas.clone(),
         conflicts: Vec::new(),
         files: vec![file.clone()],
+        resolves: Vec::new(),
     };
     let (status, added): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
     let Captured::Added {
         record: captured,
         revision,
+        ..
     } = added
     else {
         anyhow::bail!("the capture wasn't added: {added:?}");
@@ -875,6 +878,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
     let Captured::Unchanged {
         record: captured,
         revision: same,
+        ..
     } = again
     else {
         anyhow::bail!("the same capture wasn't unchanged: {again:?}");
@@ -887,6 +891,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         shas: shas.clone(),
         conflicts: Vec::new(),
         files: Vec::new(),
+        resolves: Vec::new(),
     };
     let (status, late): (_, Captured) = ax.client.post(&paths::captures(&node), &other).await?;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -979,6 +984,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         },
         conflicts: Vec::new(),
         files: vec![added_file("src/a.rs", "one\ntwo\n")],
+        resolves: Vec::new(),
     };
     let (status, _): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
@@ -1189,6 +1195,7 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
             new_id: Some(tree.to_string().repeat(40)),
             ..added_file("src/a.rs", text)
         }],
+        resolves: Vec::new(),
     };
     let (status, _): (_, Captured) = ax
         .client
@@ -1282,6 +1289,192 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
             ],
         },
         recorded(4),
+    ];
+    for expected in expected {
+        let event = events.next().await?.expect("the stream sent the write");
+        assert_eq!(event.event, expected.kind());
+        let change: Change = serde_json::from_str(&event.data)?;
+        assert_eq!(change, expected);
+    }
+    Ok(())
+}
+
+/// A capture resolves the threads its trailers name and says what came of each, a thread is
+/// resolved by hand at its resolution route, and each thread written is told to the stream
+///
+/// # Arguments
+///
+/// * `ax` - The served service and a client of it
+pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // C37 started and captured once, with two general threads on it
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C37", &[], 0), None))
+        .await?;
+    let node = ax.plan.node("C37")?;
+    let start = StartWork {
+        start: start_in(&ax.repo, "C37", 'a'),
+        replaces: None,
+    };
+    let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
+    let Started::Recorded { record } = started else {
+        anyhow::bail!("the start wasn't recorded: {started:?}");
+    };
+    let capture = |tree: char, resolves: Vec<Resolves>| AddCapture {
+        pinned: record.start.pinned.clone(),
+        shas: CaptureShas {
+            head: "d".repeat(40),
+            tree: tree.to_string().repeat(40),
+            merge_base: None,
+            base: record.start.start_tree.clone(),
+        },
+        conflicts: Vec::new(),
+        files: vec![FileDiff {
+            new_id: Some(tree.to_string().repeat(40)),
+            ..added_file("src/a.rs", "one\n")
+        }],
+        resolves,
+    };
+    let (status, _): (_, Captured) = ax
+        .client
+        .post(&paths::captures(&node), &capture('e', Vec::new()))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    for body in ["Take the lock first", "And the docs?"] {
+        let new = NewThread {
+            target: Target::Node,
+            body: body.to_string(),
+        };
+        let (status, _): (_, Commented) =
+            ax.client.post(&paths::node_comments(&node), &new).await?;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let response = ax
+        .client
+        .open(&paths::changes(Some("reef"), Some("central")))
+        .await?;
+    let mut events = Events::new(response);
+    // a capture whose commit names thread 1 and one no comment has resolves the first, 200
+    let commit = ResolvingCommit {
+        commit: "f".repeat(40),
+        summary: "Take the lock first".to_string(),
+        author: "dev@example.invalid".to_string(),
+        authored: 100,
+    };
+    let named = |thread| Resolves {
+        thread,
+        commit: commit.clone(),
+    };
+    let (status, captured): (_, Captured) = ax
+        .client
+        .post(
+            &paths::captures(&node),
+            &capture('g', vec![named(1), named(7)]),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let Captured::Added {
+        revision, trailers, ..
+    } = captured
+    else {
+        anyhow::bail!("the capture wasn't added: {captured:?}");
+    };
+    let read = |thread, outcome| TrailerRead {
+        thread,
+        commit: commit.commit.clone(),
+        outcome,
+    };
+    assert_eq!(
+        trailers,
+        [
+            read(1, TrailerOutcome::Resolved),
+            read(7, TrailerOutcome::NoThread)
+        ]
+    );
+    // the thread is resolved, the capture's revision linked with its commit
+    let (_, one): (_, Thread) = ax.client.get(&paths::thread(&ax.plan, 1)).await?;
+    assert_eq!((one.state, one.version), (ThreadState::Resolved, 2));
+    let linked = one.resolved_by().expect("the thread was linked");
+    assert_eq!((&linked.node, linked.revision), (&node, revision.revision));
+    assert_eq!(linked.commit.as_ref(), Some(&commit));
+    // the same capture again is unchanged, and its trailer, read again, writes nothing
+    let (status, again): (_, Captured) = ax
+        .client
+        .post(&paths::captures(&node), &capture('g', vec![named(1)]))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let Captured::Unchanged { trailers, .. } = again else {
+        anyhow::bail!("the same capture wasn't unchanged: {again:?}");
+    };
+    assert_eq!(trailers, [read(1, TrailerOutcome::Seen)]);
+    // thread 2 resolved by hand: a revision the node lacks is 422, one it has is 200
+    let resolve = |revision, read| ResolveThread {
+        node: node.clone(),
+        revision,
+        read,
+    };
+    let path = paths::thread_resolution(&ax.plan, 2);
+    let (status, refused): (_, Resolved) = ax.client.post(&path, &resolve(9, 1)).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        refused,
+        Resolved::NoRevision {
+            node: node.clone(),
+            revision: 9
+        }
+    );
+    let (status, resolved): (_, Resolved) = ax.client.post(&path, &resolve(1, 1)).await?;
+    assert_eq!(status, StatusCode::OK);
+    let Resolved::Resolved { thread: two } = resolved else {
+        anyhow::bail!("the resolve was refused: {resolved:?}");
+    };
+    assert_eq!((two.state, two.version), (ThreadState::Resolved, 2));
+    assert_eq!(two.resolutions[0].commit, None);
+    assert!(!two.comments[0].html.is_empty());
+    // over the same version again it is stale, 409, and a thread not there is 422
+    let (status, stale): (_, Resolved) = ax.client.post(&path, &resolve(1, 1)).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(matches!(stale, Resolved::Stale { .. }), "{stale:?}");
+    let missing = paths::thread_resolution(&ax.plan, 9);
+    let (status, refused): (_, Resolved) = ax.client.post(&missing, &resolve(1, 1)).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused, Resolved::NoThread { thread: 9 });
+    // a revision of another project's node answers none of this one's threads
+    let elsewhere = ResolveThread {
+        node: "other/central/C37".parse()?,
+        revision: 1,
+        read: 2,
+    };
+    let (status, refused): (_, Resolved) = ax.client.post(&path, &elsewhere).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        matches!(refused, Resolved::NoRevision { .. }),
+        "{refused:?}"
+    );
+    // and the stream heard the capture, then each thread resolved, as it now stands
+    let marked = |thread| Change::ThreadMarked {
+        node: node.clone(),
+        thread,
+        state: ThreadState::Resolved,
+        version: 2,
+    };
+    let expected = [
+        Change::RevisionCaptured {
+            node: node.clone(),
+            revision: 2,
+        },
+        Change::WorkRecorded {
+            node: node.clone(),
+            version: 3,
+        },
+        marked(1),
+        Change::WorkRecorded {
+            node: node.clone(),
+            version: 4,
+        },
+        marked(2),
     ];
     for expected in expected {
         let event = events.next().await?.expect("the stream sent the write");

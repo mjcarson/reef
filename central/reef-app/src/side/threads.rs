@@ -96,6 +96,37 @@ pub fn place_label(thread: &Thread) -> String {
     }
 }
 
+/// The change linked to a thread last, as its foot names it: answering it if it is resolved, or
+/// what it was reopened after, or `None` if no change was linked
+///
+/// A revision of the thread's own node is named by its number alone, and one of another node by
+/// that node's id too. A commit whose trailer named the thread follows, by its short id and its
+/// summary.
+///
+/// # Arguments
+///
+/// * `thread` - The thread
+pub fn resolution_label(thread: &Thread) -> Option<String> {
+    // the change linked last
+    let linked = thread.resolved_by()?;
+    let revision = match linked.node == thread.node {
+        true => format!("r{}", linked.revision),
+        false => format!("{} r{}", linked.node.id, linked.revision),
+    };
+    let change = match &linked.commit {
+        Some(commit) => {
+            let short = &commit.commit[..commit.commit.len().min(8)];
+            format!("{revision} · {short} {}", commit.summary)
+        }
+        None => revision,
+    };
+    // a thread reopened since says what it was reopened after
+    Some(match thread.is_open() {
+        true => format!("reopened after {change}"),
+        false => format!("answered by {change}"),
+    })
+}
+
 /// Where a line is, as a list names it: its revision, its file and its number
 ///
 /// # Arguments
@@ -132,8 +163,8 @@ pub fn excerpt(thread: &Thread) -> String {
     }
 }
 
-/// One thread: its comments, rendered, then whether it is outdated, its state, a reply box and
-/// a resolve or reopen button
+/// One thread: its comments, rendered, then whether it is outdated, its state, a reply box, a
+/// resolve or reopen button, and the change that answered it
 ///
 /// # Arguments
 ///
@@ -148,6 +179,13 @@ pub fn ThreadView(thread: Thread) -> Element {
     let focused = threads.is_some_and(|threads| *threads.focus.read() == Some(thread.number));
     let open = thread.is_open();
     let (number, read, outdated) = (thread.number, thread.version, thread.outdated);
+    // the change that answered it, its full commit id on hover
+    let resolution = resolution_label(&thread);
+    let commit = thread
+        .resolved_by()
+        .and_then(|linked| linked.commit.as_ref())
+        .map(|commit| commit.commit.clone())
+        .unwrap_or_default();
     let class = format!(
         "reef-app-thread {}{}{}",
         if open { "open" } else { "resolved" },
@@ -235,6 +273,9 @@ pub fn ThreadView(thread: Thread) -> Element {
                         "Reopen"
                     }
                 }
+            }
+            if let Some(resolution) = resolution {
+                p { class: "reef-app-thread-resolution", title: "{commit}", "{resolution}" }
             }
             if let Some(problem) = problem.read().clone() {
                 p { class: "reef-app-error", "{problem}" }

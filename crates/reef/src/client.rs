@@ -9,8 +9,8 @@
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, ErrorCode, FileDiff, Listing,
     NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
-    QueueEdit, QueueListing, Queued, Revision, Rewrite, StartWork, Started, StoredNode, StoredPage,
-    WorkRecord, paths,
+    QueueEdit, QueueListing, Queued, ResolveThread, Resolved, Revision, Rewrite, StartWork,
+    Started, StoredNode, StoredPage, Thread, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -387,6 +387,42 @@ impl Client {
             Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Gets one comment thread of a plan, or `None` if no thread starts at that number
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `thread` - The thread's number
+    pub async fn thread(&self, plan: &PlanName, thread: u32) -> anyhow::Result<Option<Thread>> {
+        let path = paths::thread(plan, thread);
+        // a thread that isn't there is an answer here, not an error
+        match self.send(self.http.get(self.url(&path)), &path).await {
+            Ok(thread) => Ok(Some(thread)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolves a thread by hand, a revision linked to it, over the version read
+    ///
+    /// A thread changed since, or a revision that isn't stored, is an answer, not an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `thread` - The thread's number
+    /// * `resolve` - The revision that answered it, and the version it was resolved against
+    pub async fn resolve_thread(
+        &self,
+        plan: &PlanName,
+        thread: u32,
+        resolve: &ResolveThread,
+    ) -> anyhow::Result<Resolved> {
+        let path = paths::thread_resolution(plan, thread);
+        let request = self.http.post(self.url(&path)).json(resolve);
+        self.send(request, &path).await
     }
 
     /// The full URL of a route's path

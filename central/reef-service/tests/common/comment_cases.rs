@@ -3,7 +3,8 @@
 
 use reef_api::{
     Anchor, COMMENT_BODY_MAX, Commented, FileStatus, FollowedThread, Hunk, Line, LineKind,
-    MarkThread, Marked, NewReply, NewThread, Side, Target, Thread, ThreadState,
+    MarkThread, Marked, NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves,
+    ResolvingCommit, Side, Target, Thread, ThreadState, TrailerOutcome,
 };
 use reef_model::NodeName;
 use reef_service::{Backend, FileDiff, Unkeepable};
@@ -501,5 +502,212 @@ pub async fn captures_follow_their_nodes_threads<B: Reopen>(fx: Fx<B>) -> anyhow
     // and all of it reads back once the store is reopened
     let fx = fx.reopen().await?;
     assert_eq!(fx.store.threads(&fx.plan).await?, threads);
+    Ok(())
+}
+
+/// A commit by the suite's author, its id made of a letter, authored at a time
+///
+/// # Arguments
+///
+/// * `sha` - The letter its id is made of
+/// * `authored` - When it was authored, in seconds since the epoch
+fn commit_by(sha: char, authored: i64) -> ResolvingCommit {
+    ResolvingCommit {
+        commit: sha.to_string().repeat(40),
+        summary: format!("Answer {sha}"),
+        author: "dev@example.invalid".to_string(),
+        authored,
+    }
+}
+
+/// Resolves the threads named by one commit's trailers, as a capture of a node's revision does,
+/// and hands back what came of each
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `node` - The node captured
+/// * `revision` - The revision the capture kept
+/// * `commit` - The commit whose trailers named them
+/// * `threads` - The threads named
+async fn trailed<B: Backend>(
+    fx: &Fx<B>,
+    node: &NodeName,
+    revision: u32,
+    commit: &ResolvingCommit,
+    threads: &[u32],
+) -> anyhow::Result<Vec<TrailerOutcome>> {
+    // each thread named by the one commit
+    let resolves = threads
+        .iter()
+        .map(|thread| Resolves {
+            thread: *thread,
+            commit: commit.clone(),
+        })
+        .collect();
+    let read = fx
+        .store
+        .resolve_by_trailers(node, revision, resolves)
+        .await?;
+    Ok(read.into_iter().map(|(read, _)| read.outcome).collect())
+}
+
+/// Reads a thread that must be there
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `number` - The thread's number
+async fn thread_of<B: Backend>(fx: &Fx<B>, number: u32) -> anyhow::Result<Thread> {
+    match fx.store.thread(&fx.plan, number).await? {
+        Some(thread) => Ok(thread),
+        None => panic!("thread {number} isn't there"),
+    }
+}
+
+/// A trailer resolves its open thread and links its revision, once for each change: its change
+/// read again, or rewritten by a rebase, writes nothing, so a thread reopened stays open, while
+/// a new change resolves it again, and one naming a thread resolved already only links
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn trailers_resolve_each_thread_once_a_change<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // A captured once, with a general thread and a line thread on it, and a reply in the first
+    let a = captured(&fx, "A", vec![added_file("src/a.rs", "one\n")]).await?;
+    started(&fx, &a, Target::Node, "Take the lock first").await?;
+    started(&fx, &a, on_line(1, "src/a.rs", Side::New, 1), "Why one?").await?;
+    replied(&fx, 1, "Which lock?").await?;
+    // one commit naming both threads, the reply and a number no comment has
+    let first = commit_by('f', 100);
+    let read = trailed(&fx, &a, 1, &first, &[1, 2, 3, 9]).await?;
+    use TrailerOutcome::{Linked, NoThread, Reopened, Seen};
+    assert_eq!(
+        read,
+        [
+            TrailerOutcome::Resolved,
+            TrailerOutcome::Resolved,
+            NoThread,
+            NoThread
+        ]
+    );
+    // each thread resolved, a version on, the commit's revision linked
+    let one = thread_of(&fx, 1).await?;
+    assert_eq!((one.state, one.version), (ThreadState::Resolved, 2));
+    let linked = Resolution {
+        node: a.clone(),
+        revision: 1,
+        at: one.resolutions[0].at,
+        commit: Some(first.clone()),
+    };
+    assert_eq!(one.resolutions, std::slice::from_ref(&linked));
+    assert_eq!(one.resolved_by(), Some(&linked));
+    assert_eq!(one.comments.len(), 2);
+    // the same change read again, by the next capture or rewritten by a rebase, writes nothing
+    let rebased = ResolvingCommit {
+        commit: "r".repeat(40),
+        ..first.clone()
+    };
+    assert_eq!(trailed(&fx, &a, 1, &first, &[1]).await?, [Seen]);
+    assert_eq!(trailed(&fx, &a, 2, &rebased, &[1]).await?, [Seen]);
+    assert_eq!(thread_of(&fx, 1).await?, one);
+    // reopened, the same change still writes nothing, and the thread stays open
+    let Marked::Marked { thread: reopened } = mark(&fx, 1, ThreadState::Open, 2).await? else {
+        panic!("a mark over the version read was refused");
+    };
+    assert_eq!(trailed(&fx, &a, 2, &rebased, &[1]).await?, [Reopened]);
+    assert_eq!(thread_of(&fx, 1).await?, reopened);
+    // a new change resolves it again, its revision linked after the first
+    let second = commit_by('s', 200);
+    let read = trailed(&fx, &a, 2, &second, &[1, 2]).await?;
+    assert_eq!(read, [TrailerOutcome::Resolved, Linked]);
+    let one = thread_of(&fx, 1).await?;
+    assert_eq!((one.state, one.version), (ThreadState::Resolved, 4));
+    let revisions: Vec<(u32, &str)> = one
+        .resolutions
+        .iter()
+        .map(|linked| {
+            (
+                linked.revision,
+                linked.commit.as_ref().unwrap().commit.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        revisions,
+        [(1, first.commit.as_str()), (2, second.commit.as_str())]
+    );
+    // the thread resolved already only had the revision linked, a version on
+    let two = thread_of(&fx, 2).await?;
+    assert_eq!((two.state, two.version), (ThreadState::Resolved, 3));
+    assert_eq!(two.resolutions.len(), 2);
+    // a capture of another node of the plan resolves a thread on this one, linking its own
+    let b = captured(&fx, "B", vec![added_file("src/b.rs", "two\n")]).await?;
+    started(&fx, &a, Target::Node, "And the docs?").await?;
+    let third = commit_by('t', 300);
+    let read = trailed(&fx, &b, 1, &third, &[4]).await?;
+    assert_eq!(read, [TrailerOutcome::Resolved]);
+    let four = thread_of(&fx, 4).await?;
+    assert_eq!(four.node, a);
+    assert_eq!(four.resolutions[0].node, b);
+    // and everything reads back the same once the store is reopened
+    let before = fx.store.threads(&fx.plan).await?;
+    let fx = fx.reopen().await?;
+    assert_eq!(fx.store.threads(&fx.plan).await?, before);
+    Ok(())
+}
+
+/// A thread resolved by hand over the version it is at links the revision named, and one over
+/// an older version, or one another writer beat, is stale and changes nothing
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn resolving_by_hand_is_over_the_version_read<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // a general thread on A, and B's revision 1 that answered it
+    let a = named(&fx, "A");
+    let (thread, _) = started(&fx, &a, Target::Node, "Is this done?").await?;
+    let b = captured(&fx, "B", vec![added_file("src/b.rs", "two\n")]).await?;
+    let resolve = |read| ResolveThread {
+        node: b.clone(),
+        revision: 1,
+        read,
+    };
+    // over the version read, it is resolved, the revision linked with no commit
+    let Resolved::Resolved { thread: resolved } = fx
+        .store
+        .resolve_thread(&fx.plan, 1, resolve(thread.version))
+        .await?
+    else {
+        panic!("a resolve over the version read was refused");
+    };
+    assert_eq!(
+        (resolved.state, resolved.version),
+        (ThreadState::Resolved, 2)
+    );
+    let linked = &resolved.resolutions[0];
+    assert_eq!(
+        (&linked.node, linked.revision, &linked.commit),
+        (&b, 1, &None)
+    );
+    // over the version it was at before, it is stale, and nothing changes
+    let stale = fx.store.resolve_thread(&fx.plan, 1, resolve(1)).await?;
+    assert_eq!(
+        stale,
+        Resolved::Stale {
+            thread: resolved.clone()
+        }
+    );
+    // one another writer beat to the row is stale too
+    fx.faults.refuse_next_comment_write();
+    let beaten = fx.store.resolve_thread(&fx.plan, 1, resolve(2)).await?;
+    assert_eq!(beaten, Resolved::Stale { thread: resolved });
+    // and a thread that isn't there is named
+    let missing = fx.store.resolve_thread(&fx.plan, 9, resolve(1)).await?;
+    assert_eq!(missing, Resolved::NoThread { thread: 9 });
     Ok(())
 }

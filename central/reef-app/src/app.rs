@@ -126,6 +126,7 @@ code { font-size: 0.92em; }
 .reef-app-thread-state { font-size: 0.75rem; margin-right: auto; }
 .reef-app-thread-state.open { color: var(--links); }
 .reef-app-thread-state.resolved { color: var(--reef-done); }
+.reef-app-thread-resolution { margin: 0.25rem 0 0; font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; }
 .reef-app-composer { margin-top: 0.35rem; }
 .reef-app-compose { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.45rem; }
 .reef-app-composer .reef-app-actions { margin: 0.3rem 0 0; }

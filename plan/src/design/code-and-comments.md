@@ -247,8 +247,23 @@ The rules:
     change stream hears of it, a capture that keeps no revision included, so one a failed
     follow left behind catches up. Each thread it writes moves on a version, so a mark made
     before it is stale, and the stream names them in a `threads-followed` change.
-- **Resolved by a change.** A `Reef-Resolves: <comment>` trailer, read when its commit is
-  captured, resolves the comment and links it to that revision, so the user sees which change
-  answered which comment. `reef comment resolve` does the same by hand.
+- **Resolved by a change** ([C37](../milestones/m7.md)). A commit's `Reef-Resolves: <n>` trailer, read
+  when the commit is captured, resolves thread `n` and links it to the revision the capture
+  kept, or the latest one it matched. The user sees which change answered which comment.
+  `reef comment resolve <n>` links a revision by hand: the latest of the node its worktree is
+  on, unless `--node` and `--revision` name another.
+  - **Read from the node's own commits.** A capture reads the trailers on each commit HEAD
+    reaches that the node's start and its merge-base with the base branch don't. gix parses
+    them as `git log` does, from the message's last paragraph, whatever the token's case.
+  - **A number names a thread of the captured node's plan**, whichever node it is on. A value
+    may name several, split by commas or spaces, each with a `#` or without. One that names no
+    thread, or no number, is said, and resolves nothing.
+  - **The link is reef's.** A thread keeps each revision linked to it, with the commit's id,
+    summary, author and author date. The link outlives a squash, though the id stops resolving.
+  - **Once a change.** Each capture reads its node's commits again, so a change never resolves
+    a thread twice. A commit is a change linked already when its author, author date and
+    summary match, as a rebase or an amend that keeps the message leaves them. A thread the
+    user reopened stays open until a new commit names it, or it is resolved by hand.
+  - **A thread resolved already** is linked to the new revision, and stays resolved.
 - **Claude takes open comments between nodes.** After it finishes a node, next_task hands back
   the open comments before the next node ([C43](../milestones/m8.md)).

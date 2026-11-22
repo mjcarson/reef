@@ -19,8 +19,8 @@
 //! - **Revisions** ([`revision`]): each capture of a node's changes, its files, hunks and lines,
 //!   and the anchor a comment names a line by.
 //! - **Comments** ([`comment`]): threads on a line of a node's revision or on the node as a
-//!   whole, each open or resolved, where a line's thread followed it to in later revisions, and
-//!   what came of a comment or a mark.
+//!   whole, each open or resolved, where a line's thread followed it to in later revisions, the
+//!   changes that resolved it, and what came of a comment, a mark or a resolve.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -43,8 +43,9 @@ pub mod work;
 
 pub use change::{Change, FollowedThread, PutNode, PutPage};
 pub use comment::{
-    COMMENT_BODY_MAX, Comment, Commented, MarkThread, Marked, NewReply, NewThread, Target, Thread,
-    ThreadState,
+    COMMENT_BODY_MAX, Comment, Commented, MarkThread, Marked, NewReply, NewThread,
+    RESOLVES_TRAILER, Resolution, ResolveThread, Resolved, Resolves, ResolvingCommit, Target,
+    Thread, ThreadState, TrailerOutcome, TrailerRead,
 };
 pub use error::{ApiError, ErrorCode};
 pub use node::{

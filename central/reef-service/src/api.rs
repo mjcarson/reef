@@ -30,7 +30,7 @@
 //! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
 //! | `GET …/plans/{plan}/work/{id}` | `work_of` | the node's [`WorkRecord`], or 404 |
 //! | `POST …/plans/{plan}/work/{id}` | `start_work` | [`Started`]: 200, 409 if stale, 422 if not in its plan |
-//! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200 if kept or unchanged, 409 if started again since, 422 if not started |
+//! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200 if kept or unchanged, its trailers' threads resolved, 409 if started again since, 422 if not started |
 //! | `GET …/plans/{plan}/work/{id}/revisions` | `revisions` | every [`Revision`] of the node, oldest first |
 //! | `GET …/plans/{plan}/work/{id}/revisions/{revision}` | `node_revision` | the [`Revision`], or 404 |
 //! | `GET …/plans/{plan}/work/{id}/revisions/{revision}/files/{*path}` | `revision_file` | the [`FileDiff`] the revision lists, or 404 |
@@ -40,6 +40,7 @@
 //! | `GET …/plans/{plan}/comments/{thread}` | `thread` | the [`Thread`], or 404 |
 //! | `POST …/plans/{plan}/comments/{thread}/replies` | `reply` | [`Commented`]: 200, or 422 if no thread starts there |
 //! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there |
+//! | `POST …/plans/{plan}/comments/{thread}/resolution` | `resolve_thread` | [`Resolved`]: 200, 409 if stale, 422 if no thread starts there or the revision isn't stored |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -72,8 +73,8 @@ use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, Commented, ErrorCode,
     FileDiff, Listing, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, PageEdit,
     PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
-    Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread, WRITE_BODY_MAX,
-    WorkRecord, paths,
+    ResolveThread, Resolved, Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread,
+    WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -181,6 +182,10 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::THREAD, get(thread::<S>))
         .route(paths::REPLIES, axum::routing::post(reply::<S>))
         .route(paths::THREAD_STATE, axum::routing::put(mark_thread::<S>))
+        .route(
+            paths::THREAD_RESOLUTION,
+            axum::routing::post(resolve_thread::<S>),
+        )
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -1244,6 +1249,34 @@ async fn mark_thread<S: Serves>(
         Marked::NoThread { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };
     Ok((status, Json(marked)))
+}
+
+/// Resolves a thread by hand, a revision linked to it: 200 if resolved, 409 if stale, 422 if no
+/// thread starts at that number or the revision isn't stored
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the thread's number
+/// * `resolve` - The revision that answered it, and the version it was resolved against
+#[instrument(name = "api::resolve_thread", skip_all, err(Debug))]
+async fn resolve_thread<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ThreadSegments>,
+    Body(resolve): Body<ResolveThread>,
+) -> Result<(StatusCode, Json<Resolved>), Failure> {
+    let plan = segments.name()?;
+    // the thread's first row written again, under the project's comment lock
+    let resolved = serves
+        .service()
+        .resolve_thread(&plan, segments.thread, resolve)
+        .await?;
+    let status = match resolved {
+        Resolved::Resolved { .. } => StatusCode::OK,
+        Resolved::Stale { .. } => StatusCode::CONFLICT,
+        Resolved::NoThread { .. } | Resolved::NoRevision { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(resolved)))
 }
 
 /// The status a comment's outcome answers with: 200 if kept, else 422

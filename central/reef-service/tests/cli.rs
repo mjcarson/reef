@@ -2732,3 +2732,258 @@ async fn capture_refuses_what_it_cant_take() -> anyhow::Result<()> {
     assert!(changes_of(&cx, "A").await?.is_empty());
     Ok(())
 }
+
+/// Starts a general thread on a node of `cli/docs` through the JSON API, as the app does, and
+/// hands back its number
+///
+/// # Arguments
+///
+/// * `cx` - The served twin
+/// * `id` - The node's id
+/// * `body` - The thread's first comment
+async fn comment_on(cx: &Cx, id: &str, body: &str) -> anyhow::Result<u32> {
+    // a thread on the node as a whole
+    let node = PlanName::new("cli", "docs")?.node(id)?;
+    let new = reef_api::NewThread {
+        target: reef_api::Target::Node,
+        body: body.to_string(),
+    };
+    let path = reef_api::paths::node_comments(&node);
+    let (_, commented): (_, reef_api::Commented) = cx.ax.client.post(&path, &new).await?;
+    match commented {
+        reef_api::Commented::Added { thread, .. } => Ok(thread.number),
+        other => panic!("a thread on `{node}` wasn't kept: {other:?}"),
+    }
+}
+
+/// Reads a thread of `cli/docs` as the CLI's client does, which must be there
+///
+/// # Arguments
+///
+/// * `cx` - The served twin
+/// * `number` - The thread's number
+async fn thread_of(cx: &Cx, number: u32) -> anyhow::Result<reef_api::Thread> {
+    // a client of the case's service, as the CLI makes one
+    let conf = reef::Conf::load(Some(&cx.conf))?;
+    let client = reef::Client::new(&conf)?;
+    let plan = PlanName::new("cli", "docs")?;
+    Ok(client
+        .thread(&plan, number)
+        .await?
+        .expect("the thread is there"))
+}
+
+/// Commits what is staged and a file, with a message as written, returning the commit
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `path` - The file's path in it
+/// * `text` - What it holds
+/// * `message` - The whole message, trailers and all
+fn commit_with(dir: &Path, path: &str, text: &str, message: &str) -> anyhow::Result<String> {
+    // write it, stage it, commit it with the message as it is
+    std::fs::write(dir.join(path), text)?;
+    git::run(dir, &["add", path])?;
+    git::run(dir, &["commit", "-q", "-m", message])?;
+    git::run(dir, &["rev-parse", "HEAD"])
+}
+
+/// A commit's `Reef-Resolves` trailer resolves its comment once the commit is captured, the
+/// revision it was captured in linked to it, and `reef comment resolve` links one by hand; both
+/// links read the same once the node's commits are squashed, its branch deleted and git pruned
+#[tokio::test]
+async fn a_trailer_resolves_its_comment_and_the_link_survives_a_squash() -> anyhow::Result<()> {
+    let cx = Cx::new("resolve-squash").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    git::commit(&repo, "base.txt", "base\n", "base")?;
+    // A worked in a worktree of its own, captured once, then commented on twice
+    let a = git::worktree(&repo, &cx.ax.dir.join("cli-a"))?;
+    cx.reef(&a, &["start", "A"]).await?;
+    git::commit(&a, "a.txt", "A's first\n", "A one")?;
+    cx.reef(&a, &["node", "capture"]).await?;
+    let lock = comment_on(&cx, "A", "Take the lock first").await?;
+    let docs = comment_on(&cx, "A", "And the docs?").await?;
+    assert_eq!((lock, docs), (1, 2));
+    // the fix committed naming the first thread, and captured as revision 2
+    let fix = commit_with(
+        &a,
+        "a.txt",
+        "A's first, locked\n",
+        "Take the lock\n\nIt raced the reader.\n\nReef-Resolves: 1",
+    )?;
+    let out = cx.reef(&a, &["node", "capture"]).await?;
+    assert!(out.starts_with("captured `A` as revision 2 in "), "{out}");
+    assert!(
+        out.contains(&format!(
+            "resolved #1, answered by {} Take the lock\n",
+            &fix[..12]
+        )),
+        "{out}"
+    );
+    // the thread is resolved, revision 2 linked with the commit that answered it
+    let resolved = thread_of(&cx, lock).await?;
+    assert_eq!(resolved.state, reef_api::ThreadState::Resolved);
+    let linked = resolved.resolved_by().expect("a revision was linked");
+    assert_eq!(
+        (linked.node.to_string(), linked.revision),
+        ("cli/docs/A".to_string(), 2)
+    );
+    let commit = linked
+        .commit
+        .as_ref()
+        .expect("the trailer's commit was kept");
+    assert_eq!(
+        (commit.commit.as_str(), commit.summary.as_str()),
+        (fix.as_str(), "Take the lock")
+    );
+    // a capture with nothing new reads the trailer again, and says and writes nothing of it
+    let again = cx.reef(&a, &["node", "capture"]).await?;
+    assert!(
+        again.starts_with("`A` is unchanged since revision 2\n"),
+        "{again}"
+    );
+    assert!(!again.contains("#1"), "{again}");
+    assert_eq!(thread_of(&cx, lock).await?, resolved);
+    // the second resolved by hand from the worktree, linking A's latest revision
+    let out = cx.reef(&a, &["comment", "resolve", "2"]).await?;
+    assert_eq!(
+        out,
+        "resolved #2 of `cli/docs`, answered by revision 2 of `cli/docs/A`\n"
+    );
+    let by_hand = thread_of(&cx, docs).await?;
+    assert_eq!(by_hand.state, reef_api::ThreadState::Resolved);
+    assert_eq!(by_hand.resolved_by().map(|linked| linked.revision), Some(2));
+    assert!(
+        by_hand
+            .resolved_by()
+            .is_some_and(|linked| linked.commit.is_none())
+    );
+    let before = changes_of(&cx, "A").await?;
+    // A squash-merged into main, then its worktree, branch and pin deleted
+    git::run(&repo, &["merge", "--squash", "-q", "cli-a"])?;
+    git::run(&repo, &["commit", "-q", "-m", "A, squashed"])?;
+    git::run(
+        &repo,
+        &["worktree", "remove", "--force", a.to_str().expect("utf-8")],
+    )?;
+    git::run(&repo, &["branch", "-q", "-D", "cli-a"])?;
+    git::run(&repo, &["update-ref", "-d", "refs/reef/start/docs/A"])?;
+    git::run(&repo, &["reflog", "expire", "--expire=now", "--all"])?;
+    git::run(&repo, &["gc", "-q", "--prune=now"])?;
+    // the commit that answered the thread is gone from git
+    assert!(
+        !git::succeeds(&repo, &["cat-file", "-e", &fix])?,
+        "{fix} survived the prune"
+    );
+    // and both threads still name the revision that answered them, which reads as it did
+    assert_eq!(thread_of(&cx, lock).await?, resolved);
+    assert_eq!(thread_of(&cx, docs).await?, by_hand);
+    let after = changes_of(&cx, "A").await?;
+    assert_eq!(
+        serde_json::to_string(&after)?,
+        serde_json::to_string(&before)?
+    );
+    assert_eq!(after[1].0.revision, 2);
+    Ok(())
+}
+
+/// A trailer that names no thread, or no number, is said and resolves nothing; one whose change
+/// resolved its thread before it was reopened leaves it open; and `reef comment resolve` refuses
+/// a thread, node or revision that isn't there, saying what to do
+#[tokio::test]
+async fn trailers_and_resolve_say_what_they_cant_resolve() -> anyhow::Result<()> {
+    let cx = Cx::new("resolve-refused").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    git::commit(&repo, "base.txt", "base\n", "base")?;
+    // A worked on a branch of the main worktree, commented on before anything was captured
+    git::run(&repo, &["checkout", "-q", "-b", "nodes"])?;
+    cx.reef(&repo, &["start", "A"]).await?;
+    let lock = comment_on(&cx, "A", "Take the lock first").await?;
+    // a commit naming a thread that isn't there, and no number at all
+    let stray = commit_with(
+        &repo,
+        "a.txt",
+        "A\n",
+        "Stray\n\nReef-Resolves: 9\nReef-Resolves: the lock",
+    )?;
+    let out = cx.reef(&repo, &["node", "capture"]).await?;
+    let short = &stray[..12];
+    assert!(
+        out.contains(&format!(
+            "Reef-Resolves: 9 in {short} names no thread of `cli/docs`\n"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "Reef-Resolves: the lock in {short} names no thread: give it"
+        )),
+        "{out}"
+    );
+    assert!(thread_of(&cx, lock).await?.is_open());
+    // the thread resolved by a commit, then reopened, as the user does in the app
+    let fix = commit_with(&repo, "a.txt", "A, locked\n", "Lock\n\nReef-Resolves: #1")?;
+    let out = cx.reef(&repo, &["node", "capture"]).await?;
+    assert!(out.contains("resolved #1, answered by"), "{out}");
+    let resolved = thread_of(&cx, lock).await?;
+    let mark = reef_api::MarkThread {
+        state: reef_api::ThreadState::Open,
+        read: resolved.version,
+    };
+    let path = reef_api::paths::thread_state(&PlanName::new("cli", "docs")?, lock);
+    let (_, _): (_, reef_api::Marked) = cx.ax.client.put(&path, &mark).await?;
+    // the commit amended, its message kept, is the same change, and the thread stays open
+    std::fs::write(repo.join("a.txt"), "A, locked, amended\n")?;
+    git::run(&repo, &["commit", "-q", "-a", "--amend", "--no-edit"])?;
+    let amended = git::run(&repo, &["rev-parse", "HEAD"])?;
+    assert_ne!(amended, fix);
+    let out = cx.reef(&repo, &["node", "capture"]).await?;
+    assert!(
+        out.contains(&format!(
+            "left #1 open: {} resolved it before it was reopened",
+            &amended[..12]
+        )),
+        "{out}"
+    );
+    assert!(thread_of(&cx, lock).await?.is_open());
+    // a new commit naming it resolves it again
+    commit_with(
+        &repo,
+        "a.txt",
+        "A, locked twice\n",
+        "Lock again\n\nReef-Resolves: 1",
+    )?;
+    let out = cx.reef(&repo, &["node", "capture"]).await?;
+    assert!(out.contains("resolved #1, answered by"), "{out}");
+    assert_eq!(thread_of(&cx, lock).await?.resolutions.len(), 2);
+    // a thread that isn't there, a revision the node lacks, a node the plan lacks
+    let (_, none) = cx.failing(&repo, &["comment", "resolve", "9"]).await?;
+    assert!(
+        none.contains("`cli/docs` has no comment thread 9"),
+        "{none}"
+    );
+    let (_, revision) = cx
+        .failing(&repo, &["comment", "resolve", "1", "--revision", "9"])
+        .await?;
+    assert!(
+        revision.contains("`cli/docs/A` has no revision 9"),
+        "{revision}"
+    );
+    let (_, uncaptured) = cx
+        .failing(&repo, &["comment", "resolve", "1", "--node", "B"])
+        .await?;
+    assert!(
+        uncaptured.contains("`cli/docs/B` has no captured revision to link"),
+        "{uncaptured}"
+    );
+    // and a worktree no node was started in names none
+    let other = git::worktree(&repo, &cx.ax.dir.join("cli-other"))?;
+    let (_, unstarted) = cx.failing(&other, &["comment", "resolve", "1"]).await?;
+    assert!(
+        unstarted.contains("no node of `cli` has been started in")
+            && unstarted.contains("with `--node`"),
+        "{unstarted}"
+    );
+    Ok(())
+}

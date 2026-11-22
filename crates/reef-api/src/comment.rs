@@ -14,6 +14,11 @@
 //! the revision the line was last in with the next, and the thread keeps where the line went in
 //! each, its target staying where it was started. Once a revision no longer holds the line, the
 //! thread is outdated from that revision on, and is followed no further.
+//!
+//! A thread is resolved by a change. A commit's `Reef-Resolves: <n>` trailer, read when the commit
+//! is captured, resolves thread `n` of the capture's plan and links it to the revision the capture
+//! kept, as a [`Resolution`]. `reef comment resolve` links a revision by hand. The link names the
+//! revision, which reef keeps, so it outlives the commit once that is squashed away.
 
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
@@ -22,6 +27,47 @@ use crate::revision::Anchor;
 
 /// The most bytes a comment's body may hold
 pub const COMMENT_BODY_MAX: usize = 64 << 10;
+
+/// The trailer a commit names the threads it answers with, such as `Reef-Resolves: 12`
+pub const RESOLVES_TRAILER: &str = "Reef-Resolves";
+
+/// The thread numbers a `Reef-Resolves` trailer's value names, or `None` if any part of it isn't
+/// one
+///
+/// A value names one thread or several, split by commas or spaces, each number with or without
+/// a `#` before it.
+///
+/// # Arguments
+///
+/// * `value` - The trailer's value, after its `:`
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::comment::trailer_threads;
+///
+/// assert_eq!(trailer_threads("12"), Some(vec![12]));
+/// assert_eq!(trailer_threads("#12, 14 #15"), Some(vec![12, 14, 15]));
+/// assert_eq!(trailer_threads("the lock"), None);
+/// assert_eq!(trailer_threads(" "), None);
+/// ```
+pub fn trailer_threads(value: &str) -> Option<Vec<u32>> {
+    // each part split off by commas or spaces, a `#` before it allowed
+    let threads = value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let digits = part.strip_prefix('#').unwrap_or(part);
+            // a sign or anything else but digits is no number of a thread
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            digits.parse().ok()
+        })
+        .collect::<Option<Vec<u32>>>()?;
+    // a value naming nothing names no thread either
+    (!threads.is_empty()).then_some(threads)
+}
 
 /// What a thread is on
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +144,9 @@ pub struct Thread {
     pub outdated: Option<u32>,
     /// Whether it is open or resolved
     pub state: ThreadState,
+    /// Each change linked to it as one that answered it, oldest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolutions: Vec<Resolution>,
     /// Its comments, the first one first
     pub comments: Vec<Comment>,
 }
@@ -106,6 +155,11 @@ impl Thread {
     /// Whether it still wants an answer
     pub fn is_open(&self) -> bool {
         self.state == ThreadState::Open
+    }
+
+    /// The change linked to it last as the one that answered it, if one was
+    pub fn resolved_by(&self) -> Option<&Resolution> {
+        self.resolutions.last()
     }
 
     /// Whether a later revision no longer held its line
@@ -147,6 +201,7 @@ impl Thread {
     ///     followed: vec![at(2, 15)],
     ///     outdated: Some(3),
     ///     state: ThreadState::Open,
+    ///     resolutions: Vec::new(),
     ///     comments: Vec::new(),
     /// };
     /// assert_eq!(thread.anchor_in(2).map(|anchor| anchor.line), Some(15));
@@ -185,6 +240,147 @@ pub struct MarkThread {
     pub state: ThreadState,
     /// The version of the thread this mark was made against
     pub read: u64,
+}
+
+/// A commit whose `Reef-Resolves` trailer named a thread, as the capture that read it found it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvingCommit {
+    /// The commit's id, which may stop resolving once it is squashed
+    pub commit: String,
+    /// Its message's first line
+    pub summary: String,
+    /// Its author's email
+    pub author: String,
+    /// When it was authored, in seconds since the epoch, which a rebase, a cherry-pick and an
+    /// amend all keep
+    pub authored: i64,
+}
+
+impl ResolvingCommit {
+    /// Whether two commits are one change: by one author, authored at one time, under one
+    /// summary, as a rebase, a cherry-pick or an amend that keeps the message leaves a commit it
+    /// rewrites
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other commit
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::ResolvingCommit;
+    ///
+    /// let picked = ResolvingCommit {
+    ///     commit: "a".repeat(40),
+    ///     summary: "Take the lock first".to_string(),
+    ///     author: "dev@example.com".to_string(),
+    ///     authored: 1_700_000_000,
+    /// };
+    /// let rebased = ResolvingCommit { commit: "b".repeat(40), ..picked.clone() };
+    /// assert!(picked.same_change(&rebased));
+    /// ```
+    pub fn same_change(&self, other: &ResolvingCommit) -> bool {
+        // a commit rewritten keeps its author, when it was authored and its summary, whatever
+        // its id
+        self.author == other.author
+            && self.authored == other.authored
+            && self.summary == other.summary
+    }
+}
+
+/// A change linked to a thread as one that answered it: a revision of a node's changes, and the
+/// commit that named the thread, if one did
+///
+/// reef keeps the revision, so the link outlives the commit once that is squashed away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolution {
+    /// The node whose revision answered it, which may be another than the thread's
+    pub node: NodeName,
+    /// That revision's number
+    pub revision: u32,
+    /// When it was linked, in milliseconds since the epoch
+    pub at: u64,
+    /// The commit whose trailer named the thread, or `None` for one resolved by hand
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<ResolvingCommit>,
+}
+
+/// A thread a commit's `Reef-Resolves` trailer names, sent with the capture that read it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Resolves {
+    /// The thread's number in the plan of the node captured
+    pub thread: u32,
+    /// The commit whose trailer named it
+    pub commit: ResolvingCommit,
+}
+
+/// What one trailer read at a capture did to the thread it names
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrailerOutcome {
+    /// It resolved its thread, which was open, and linked the capture's revision to it
+    Resolved,
+    /// Its thread was resolved already, so the capture's revision was only linked to it
+    Linked,
+    /// Its change was linked to the thread already, which is still resolved, so nothing was
+    /// written
+    Seen,
+    /// Its change resolved the thread once already, and the thread was reopened since, so the
+    /// trailer was passed over and the thread left open
+    Reopened,
+    /// No thread starts at its number, so nothing was written
+    NoThread,
+}
+
+/// One thread a capture's trailers named, and what came of it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrailerRead {
+    /// The thread's number
+    pub thread: u32,
+    /// The commit whose trailer named it
+    pub commit: String,
+    /// What came of it
+    pub outcome: TrailerOutcome,
+}
+
+/// A thread resolved by hand, a revision linked to it as the one that answered it, over the
+/// version its writer read
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolveThread {
+    /// The node whose revision answered it, in the thread's project
+    pub node: NodeName,
+    /// That revision's number
+    pub revision: u32,
+    /// The version of the thread this was made against
+    pub read: u64,
+}
+
+/// What came of resolving a thread by hand
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Resolved {
+    /// The thread was resolved, and the revision linked to it
+    Resolved {
+        /// The thread as it now stands
+        thread: Thread,
+    },
+    /// The thread has changed since the version named, so nothing was written
+    Stale {
+        /// The thread as it stands
+        thread: Thread,
+    },
+    /// The thread isn't in the plan, so nothing was written
+    NoThread {
+        /// The thread's number
+        thread: u32,
+    },
+    /// The node has no revision of that number in the thread's project, so nothing was written
+    NoRevision {
+        /// The node named
+        node: NodeName,
+        /// The revision's number
+        revision: u32,
+    },
 }
 
 /// What came of a new thread or a reply
@@ -238,7 +434,10 @@ pub enum Marked {
 
 #[cfg(test)]
 mod tests {
-    use super::{Comment, Commented, Marked, NewThread, Target, Thread, ThreadState};
+    use super::{
+        Comment, Commented, Marked, NewThread, Resolution, Resolved, ResolvingCommit, Target,
+        Thread, ThreadState, TrailerOutcome, TrailerRead, trailer_threads,
+    };
     use crate::revision::{Anchor, Side};
     use serde_json::json;
 
@@ -293,6 +492,7 @@ mod tests {
             followed: Vec::new(),
             outdated: None,
             state: ThreadState::Resolved,
+            resolutions: Vec::new(),
             comments: vec![
                 Comment {
                     number: 4,
@@ -382,5 +582,106 @@ mod tests {
             r#"{"no-thread":{"thread":7}}"#
         );
         assert_eq!(ThreadState::Resolved.as_str(), "resolved");
+    }
+
+    /// A trailer's value names its threads, and nothing else
+    #[test]
+    fn trailers_name_thread_numbers() {
+        // one number, several split by commas or spaces, each with a `#` or not
+        assert_eq!(trailer_threads("4"), Some(vec![4]));
+        assert_eq!(trailer_threads(" #4,#5  6 "), Some(vec![4, 5, 6]));
+        // anything that isn't a number names nothing, and spoils the rest
+        assert_eq!(trailer_threads("4, the lock"), None);
+        assert_eq!(trailer_threads("+4"), None);
+        assert_eq!(trailer_threads("#"), None);
+        assert_eq!(trailer_threads("99999999999"), None);
+        assert_eq!(trailer_threads(""), None);
+    }
+
+    /// A thread's resolutions read back as they were, a hand's leaving its commit out, and the
+    /// last is the one it was resolved by
+    #[test]
+    fn resolutions_read_back_as_linked() {
+        // a commit that named the thread, and a revision linked by hand after it
+        let commit = ResolvingCommit {
+            commit: "a".repeat(40),
+            summary: "Take the lock first".to_string(),
+            author: "dev@example.com".to_string(),
+            authored: 1_700_000_000,
+        };
+        let by_trailer = Resolution {
+            node: "reef/central/C37".parse().unwrap(),
+            revision: 2,
+            at: 10,
+            commit: Some(commit.clone()),
+        };
+        let by_hand = Resolution {
+            node: "reef/central/C38".parse().unwrap(),
+            revision: 1,
+            at: 12,
+            commit: None,
+        };
+        let thread = Thread {
+            node: "reef/central/C37".parse().unwrap(),
+            number: 4,
+            version: 3,
+            target: Target::Node,
+            followed: Vec::new(),
+            outdated: None,
+            state: ThreadState::Resolved,
+            resolutions: vec![by_trailer.clone(), by_hand.clone()],
+            comments: Vec::new(),
+        };
+        let value = serde_json::to_value(&thread).unwrap();
+        assert_eq!(value["resolutions"][0]["node"], "reef/central/C37");
+        assert_eq!(value["resolutions"][0]["commit"]["authored"], 1_700_000_000);
+        assert!(value["resolutions"][1].get("commit").is_none());
+        assert_eq!(serde_json::from_value::<Thread>(value).unwrap(), thread);
+        assert_eq!(thread.resolved_by(), Some(&by_hand));
+        // a thread never resolved by a change leaves them out
+        let open = Thread {
+            resolutions: Vec::new(),
+            ..thread.clone()
+        };
+        assert!(
+            serde_json::to_value(&open)
+                .unwrap()
+                .get("resolutions")
+                .is_none()
+        );
+        assert_eq!(open.resolved_by(), None);
+        // a commit rewritten is the same change, and another of the same author isn't, even
+        // within the same second
+        let amended = ResolvingCommit {
+            commit: "b".repeat(40),
+            ..commit.clone()
+        };
+        let later = ResolvingCommit {
+            authored: commit.authored + 1,
+            ..commit.clone()
+        };
+        let reworded = ResolvingCommit {
+            commit: "c".repeat(40),
+            summary: "Take the lock first, always".to_string(),
+            ..commit.clone()
+        };
+        assert!(commit.same_change(&amended));
+        assert!(!commit.same_change(&later));
+        assert!(!commit.same_change(&reworded));
+        // and what a trailer did, and a hand's resolve, are tagged in kebab-case
+        let read = TrailerRead {
+            thread: 4,
+            commit: "a".repeat(40),
+            outcome: TrailerOutcome::NoThread,
+        };
+        assert_eq!(serde_json::to_value(&read).unwrap()["outcome"], "no-thread");
+        let missing = Resolved::NoRevision {
+            node: "reef/central/C37".parse().unwrap(),
+            revision: 9,
+        };
+        assert_eq!(
+            serde_json::to_string(&missing).unwrap(),
+            r#"{"no-revision":{"node":"reef/central/C37","revision":9}}"#
+        );
     }
 }

@@ -11,6 +11,9 @@
 //!   as `git diff` would show it.
 //! - **The carry through gix:** a three-way merge of trees, its conflicted files marked as
 //!   `git merge-tree --write-tree` marks them, so it writes git's own tree.
+//! - **Trailers through gix:** one trailer's values on each commit HEAD reaches past the commits
+//!   hidden, as `git log --format=%(trailers)` parses them, with each commit's author and when it
+//!   was authored.
 //! - **The snapshots through git's CLI.** gix 0.90 can't stage a worktree, so the worktree's index
 //!   is copied, and git adds to the copy and writes it out as a tree. The user's own index and
 //!   staging are left as they were. A start takes everything `git add -A` would, and a seal only
@@ -30,6 +33,7 @@ use gix::object::tree::diff::ChangeDetached;
 use gix::objs::tree::EntryMode;
 use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
 use gix::refs::{FullName, Target};
+use reef_api::ResolvingCommit;
 use reef_api::revision::{FileDiff, FileStatus, Hunk, Line, LineKind};
 use reef_model::NodeName;
 use std::ffi::OsStr;
@@ -95,6 +99,15 @@ pub struct Merged {
     pub tree: String,
     /// The paths that still conflict, sorted
     pub conflicts: Vec<String>,
+}
+
+/// A commit carrying a trailer, and the values the trailer has on it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trailed {
+    /// The commit, its summary, its author and when it was authored
+    pub commit: ResolvingCommit,
+    /// Each of the trailer's values on it, in the order written
+    pub values: Vec<String>,
 }
 
 /// One checkout: a worktree and the repo it is in
@@ -263,6 +276,63 @@ impl Checkout {
             .repo
             .merge_base(id(a)?, id(b)?)?
             .map(|base| base.detach().to_string()))
+    }
+
+    /// Reads one trailer off each commit a head reaches and none of the hidden commits do,
+    /// oldest first, leaving out commits that don't carry it
+    ///
+    /// A trailer is read as git reads one: from the message's last paragraph, its token matched
+    /// whatever its case.
+    ///
+    /// # Arguments
+    ///
+    /// * `head` - The commit to walk back from
+    /// * `hidden` - The commits whose history is left out, such as a start and a merge-base
+    /// * `token` - The trailer's token, such as `Reef-Resolves`
+    pub fn trailers(
+        &self,
+        head: &str,
+        hidden: &[&str],
+        token: &str,
+    ) -> anyhow::Result<Vec<Trailed>> {
+        // every commit the head reaches past the hidden ones, as `git log head ^hidden` lists
+        let hidden = hidden
+            .iter()
+            .map(|commit| id(commit))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let walk = self.repo.rev_walk([id(head)?]).with_hidden(hidden).all()?;
+        let mut trailed = Vec::new();
+        for info in walk {
+            let commit = info?.object()?;
+            let message = commit.message()?;
+            // the trailer's values in the message's last paragraph, if it has a body
+            let values: Vec<String> = message
+                .body()
+                .map(|body| {
+                    body.trailers()
+                        .filter(|trailer| trailer.token.eq_ignore_ascii_case(token.as_bytes()))
+                        .map(|trailer| trailer.value.to_str_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if values.is_empty() {
+                continue;
+            }
+            // who wrote it, and when, which a rebase or an amend keeps
+            let author = commit.author()?;
+            trailed.push(Trailed {
+                commit: ResolvingCommit {
+                    commit: commit.id.to_string(),
+                    summary: message.summary().to_str_lossy().into_owned(),
+                    author: author.email.to_str_lossy().into_owned(),
+                    authored: author.time()?.seconds,
+                },
+                values,
+            });
+        }
+        // the walk comes newest first, and the oldest commit answers first
+        trailed.reverse();
+        Ok(trailed)
     }
 
     /// Whether an object is in the repo's store

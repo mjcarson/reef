@@ -17,9 +17,19 @@
 //!   the service is sent what was read, since it reads no checkout.
 //! - **A capture the node's latest revision already holds** adds no revision. Its SHAs are still
 //!   added to the node's record, naming that revision.
+//! - **A capture reads its node's `Reef-Resolves` trailers.** Each commit HEAD reaches past the
+//!   node's start and the base branch is read for them, and each thread one names is sent to be
+//!   resolved, linked to the revision the capture keeps or matches. A value that names no thread
+//!   number is said, and sent nowhere.
 
+use reef_api::comment::trailer_threads;
 use reef_api::work::on_worktree;
-use reef_api::{AddCapture, CaptureShas, Captured, FileDiff, Revision, WorkStart};
+use reef_api::{
+    AddCapture, CaptureShas, Captured, FileDiff, RESOLVES_TRAILER, Resolves, Revision,
+    TrailerOutcome, TrailerRead, WorkStart,
+};
+use reef_model::PlanName;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
@@ -27,6 +37,9 @@ use crate::cli::{self, PlanPick};
 use crate::client::Client;
 use crate::git::Checkout;
 use crate::start::{checkout_in, where_started};
+
+/// Each trailer value that names no thread number: its commit and the value
+pub type Unreadable = Vec<(String, String)>;
 
 /// A capture taken from a checkout but not yet sent
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +52,10 @@ pub struct Taken {
     pub conflicts: Vec<String>,
     /// Every changed file from the base to the worktree's tree
     pub files: Vec<FileDiff>,
+    /// Each thread a `Reef-Resolves` trailer names, on the node's commits, oldest first
+    pub resolves: Vec<Resolves>,
+    /// Each trailer value that names no thread number: its commit and the value
+    pub unreadable: Unreadable,
 }
 
 /// The tree a node's diff starts from, and how it was found
@@ -106,25 +123,48 @@ pub async fn capture<W: Write>(
         shas: taken.shas.clone(),
         conflicts: taken.conflicts.clone(),
         files: taken.files,
+        resolves: taken.resolves.clone(),
     };
     let id = &record.node.id;
+    // each commit the trailers were read from, by id, for its summary
+    let summaries: HashMap<&str, &str> = taken
+        .resolves
+        .iter()
+        .map(|resolves| {
+            (
+                resolves.commit.commit.as_str(),
+                resolves.commit.summary.as_str(),
+            )
+        })
+        .collect();
+    let read = Read {
+        plan: &record.node.plan,
+        summaries: &summaries,
+        unreadable: &taken.unreadable,
+    };
     match client.add_capture(&record.node, &add).await? {
-        Captured::Added { revision, .. } => {
+        Captured::Added {
+            revision, trailers, ..
+        } => {
             writeln!(
                 out,
                 "captured `{id}` as revision {} in {}",
                 revision.revision,
                 record.start.worktree.display()
             )?;
-            show(&revision, taken.carried, out)
+            show(&revision, taken.carried, out)?;
+            read.show(&trailers, out)
         }
-        Captured::Unchanged { revision, .. } => {
+        Captured::Unchanged {
+            revision, trailers, ..
+        } => {
             writeln!(
                 out,
                 "`{id}` is unchanged since revision {}",
                 revision.revision
             )?;
-            show(&revision, taken.carried, out)
+            show(&revision, taken.carried, out)?;
+            read.show(&trailers, out)
         }
         Captured::NotStarted { .. } => {
             anyhow::bail!("`{id}`'s record went meanwhile: nothing was captured")
@@ -171,6 +211,10 @@ pub fn take(checkout: &Checkout, start: &WorkStart) -> anyhow::Result<Taken> {
     // the worktree as a seal takes it, and the diff from the base to it
     let tree = checkout.seal_snapshot(&carry.tree)?;
     let files = checkout.diff(&carry.tree, &tree)?;
+    // the threads the node's own commits name: past its start, and not the base branch's
+    let mut hidden = vec![start.start.as_str()];
+    hidden.extend(merge_base.as_deref());
+    let (resolves, unreadable) = resolving(checkout, &head, &hidden)?;
     Ok(Taken {
         shas: CaptureShas {
             head,
@@ -181,7 +225,112 @@ pub fn take(checkout: &Checkout, start: &WorkStart) -> anyhow::Result<Taken> {
         carried: carry.carried,
         conflicts: carry.conflicts,
         files,
+        resolves,
+        unreadable,
     })
+}
+
+/// Reads the threads the `Reef-Resolves` trailers on a head's commits name, past the commits
+/// hidden, oldest first, and each value that names no thread number
+///
+/// # Arguments
+///
+/// * `checkout` - The checkout the node's work happens in
+/// * `head` - The commit HEAD is at
+/// * `hidden` - The commits whose history is none of the node's
+fn resolving(
+    checkout: &Checkout,
+    head: &str,
+    hidden: &[&str],
+) -> anyhow::Result<(Vec<Resolves>, Unreadable)> {
+    let mut resolves = Vec::new();
+    let mut unreadable = Vec::new();
+    for trailed in checkout.trailers(head, hidden, RESOLVES_TRAILER)? {
+        // each thread once a commit, however often its trailers name it
+        let mut named = Vec::new();
+        for value in &trailed.values {
+            match trailer_threads(value) {
+                Some(threads) => named.extend(threads),
+                None => unreadable.push((trailed.commit.commit.clone(), value.clone())),
+            }
+        }
+        let mut seen = Vec::with_capacity(named.len());
+        for thread in named {
+            if seen.contains(&thread) {
+                continue;
+            }
+            seen.push(thread);
+            resolves.push(Resolves {
+                thread,
+                commit: trailed.commit.clone(),
+            });
+        }
+    }
+    Ok((resolves, unreadable))
+}
+
+/// What a capture's trailers named, for saying what came of each
+struct Read<'a> {
+    /// The plan the threads are in
+    plan: &'a PlanName,
+    /// Each commit's summary, by its id
+    summaries: &'a HashMap<&'a str, &'a str>,
+    /// Each trailer value that names no thread number: its commit and the value
+    unreadable: &'a [(String, String)],
+}
+
+impl Read<'_> {
+    /// Prints what each thread a trailer named came to, and each value that named none
+    ///
+    /// A trailer whose change resolved its thread already, which is still resolved, says
+    /// nothing, since every capture reads it again.
+    ///
+    /// # Arguments
+    ///
+    /// * `trailers` - What the service did with each thread named
+    /// * `out` - Where to print it
+    fn show<W: Write>(&self, trailers: &[TrailerRead], out: &mut W) -> anyhow::Result<()> {
+        for read in trailers {
+            // a commit is named by its short id and its summary
+            let short = &read.commit[..read.commit.len().min(12)];
+            let summary = self
+                .summaries
+                .get(read.commit.as_str())
+                .copied()
+                .unwrap_or_default();
+            let thread = read.thread;
+            match read.outcome {
+                TrailerOutcome::Resolved => {
+                    writeln!(out, "resolved #{thread}, answered by {short} {summary}")?
+                }
+                TrailerOutcome::Linked => writeln!(
+                    out,
+                    "linked {short} {summary} to #{thread}, which was resolved already"
+                )?,
+                TrailerOutcome::Reopened => writeln!(
+                    out,
+                    "left #{thread} open: {short} resolved it before it was reopened, so a new \
+                     commit naming it resolves it again"
+                )?,
+                TrailerOutcome::NoThread => writeln!(
+                    out,
+                    "{RESOLVES_TRAILER}: {thread} in {short} names no thread of `{}`",
+                    self.plan
+                )?,
+                TrailerOutcome::Seen => {}
+            }
+        }
+        // then each value that named no number
+        for (commit, value) in self.unreadable {
+            let short = &commit[..commit.len().min(12)];
+            writeln!(
+                out,
+                "{RESOLVES_TRAILER}: {value} in {short} names no thread: give it the thread's \
+                 number, such as `{RESOLVES_TRAILER}: 12`"
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Carries a node's start over what its base branch brought in since, as a rebase would

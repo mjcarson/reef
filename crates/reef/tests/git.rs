@@ -717,3 +717,101 @@ fn seal_snapshot_takes_what_is_tracked() {
             .any(|e| e.file_name().to_string_lossy().starts_with("reef-"))
     );
 }
+
+/// Commits a message as written, nothing staged, returning the commit
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `message` - The whole message, its paragraphs split by blank lines
+fn commit_message(dir: &Path, message: &str) -> String {
+    // an empty commit keeps the message as the case wrote it, cleaned up as git cleans one
+    git(dir, &["commit", "-q", "--allow-empty", "-m", message]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+/// A trailer's values are read off the commits a head reaches past those hidden, as `git log`
+/// parses them: from the last paragraph alone, the token whatever its case, a merged branch's
+/// commits included, with each commit's author and when it was authored
+#[test]
+fn trailers_match_git_log() {
+    let dir = fresh("trailers");
+    let repo = repo(&dir.join("repo"));
+    // a commit on main naming a thread, which the walk hides
+    let hidden = commit_message(&repo, "Earlier\n\nReef-Resolves: 1");
+    git(&repo, &["checkout", "-q", "-b", "node"]);
+    // one trailer, several in one, another token beside them, and its case changed
+    let one = commit_message(&repo, "Take the lock\n\nWhy it raced.\n\nReef-Resolves: 4");
+    let many = commit_message(
+        &repo,
+        "Fix two\n\nReef-Resolves: 5, 6\nreef-resolves: #7\nSigned-off-by: test <t@example.invalid>",
+    );
+    // a trailer's token in a paragraph before the last is prose, and a subject is no trailer
+    commit_message(
+        &repo,
+        "Prose\n\nReef-Resolves: 8 sits here\n\nThen more prose.",
+    );
+    commit_message(&repo, "Reef-Resolves: 9");
+    // a side branch merged in, its commit's trailer read too
+    git(&repo, &["checkout", "-q", "-b", "side", &hidden]);
+    let side = commit_message(&repo, "From the side\n\nReef-Resolves: 10");
+    git(&repo, &["checkout", "-q", "node"]);
+    git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "side"]);
+    let head = git(&repo, &["rev-parse", "HEAD"]);
+    // read through gix, past the hidden commit
+    let checkout = Checkout::open(&repo).unwrap();
+    let trailed = checkout
+        .trailers(&head, &[&hidden], "Reef-Resolves")
+        .unwrap();
+    let mut read: Vec<(String, Vec<String>)> = trailed
+        .iter()
+        .map(|trailed| (trailed.commit.commit.clone(), trailed.values.clone()))
+        .collect();
+    read.sort();
+    // and what git's log parses, a commit carrying none left out
+    let format = "--format=%H%x00%(trailers:key=Reef-Resolves,valueonly,separator=%x01)%x02";
+    let range = format!("^{hidden}");
+    let log = git(&repo, &["log", format, &head, &range]);
+    let mut expected: Vec<(String, Vec<String>)> = log
+        .split('\u{2}')
+        .filter_map(|entry| {
+            let (commit, values) = entry.trim().split_once('\0')?;
+            let values: Vec<String> = values
+                .split('\u{1}')
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+            (!values.is_empty()).then(|| (commit.to_string(), values))
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(read, expected);
+    let commits: Vec<&str> = read.iter().map(|(commit, _)| commit.as_str()).collect();
+    let mut named = vec![one.as_str(), many.as_str(), side.as_str()];
+    named.sort();
+    assert_eq!(commits, named);
+    // the node's own line of commits comes oldest first
+    let order: Vec<&str> = trailed
+        .iter()
+        .map(|trailed| trailed.commit.commit.as_str())
+        .filter(|commit| *commit != side)
+        .collect();
+    assert_eq!(order, [one.as_str(), many.as_str()]);
+    // each with its summary, its author and when it was authored, as git shows them
+    for trailed in &trailed {
+        let commit = &trailed.commit;
+        let shown = git(
+            &repo,
+            &["show", "-s", "--format=%s%x00%ae%x00%at", &commit.commit],
+        );
+        let expected = format!("{}\0{}\0{}", commit.summary, commit.author, commit.authored);
+        assert_eq!(shown, expected);
+    }
+    // a head the hidden commit holds reads nothing
+    assert!(
+        checkout
+            .trailers(&hidden, &[&hidden], "Reef-Resolves")
+            .unwrap()
+            .is_empty()
+    );
+}

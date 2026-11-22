@@ -62,7 +62,10 @@ pub use reef_api::{
     PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Puts, QueueEdit, Queued, Ranked,
     Rewrite, Rewritten, StalePut, StoredNode, StoredPage, records,
 };
-pub use reef_api::{Comment, Commented, MarkThread, Marked, NewReply, NewThread, Thread};
+pub use reef_api::{
+    Comment, Commented, MarkThread, Marked, NewReply, NewThread, Resolution, ResolveThread,
+    Resolved, Resolves, Thread, TrailerRead,
+};
 use reef_api::{PLAN_PAGES_MAX_BYTES, check_page_path};
 use reef_model::{Diagnostic, NodeName, PlanName, Record};
 use std::collections::{HashMap, HashSet};

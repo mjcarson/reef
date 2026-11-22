@@ -20,8 +20,9 @@ shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's clien
 add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
 status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, `reef start` and
 `reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
-a node's changes in its worktree as a revision, and `reef import` and `reef export`, which carry a
-book's nodes and pages in and out. `reef export --replace` writes
+a node's changes in its worktree as a revision and resolves the comments its commits'
+`Reef-Resolves` trailers name, `reef comment resolve`, which resolves one by hand, and `reef
+import` and `reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
 a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
 the address `[api] address` names and say so when nothing answers there.
 
@@ -139,6 +140,13 @@ It reads and writes through a `Store`, and checks every write against the whole 
   stored hunks, and a thread keeps where its line went in each. One whose line a revision
   deleted, edited or no longer shows is outdated from it on. The threads a capture moved are a
   change of their own (`threads-followed`).
+- **A change resolves a thread** (`Store::resolve_by_trailers`). `reef node capture` reads the
+  `Reef-Resolves: <n>` trailers on the node's commits past its start and the base branch, and
+  each thread of the plan one names is resolved and linked to the revision the capture kept, or
+  the latest it matched. A commit's change, by its author, author date and summary, resolves a
+  thread once, so a rebase never resolves one the user reopened. `reef comment resolve <n>`
+  links a revision by hand (`Service::resolve_thread`), over the version it read. Each thread
+  written is `thread-marked`.
 
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
@@ -171,7 +179,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
 | `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
 | `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
-| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200 if kept or unchanged, the node's threads followed to its latest revision, 409 if started again since, 422 if not started |
+| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200 if kept or unchanged, the node's threads followed to its latest revision and its trailers' threads resolved, 409 if started again since, 422 if not started |
 | `GET …/plans/{plan}/work/{id}/revisions` | every `Revision` of the node, oldest first, its files without their hunks |
 | `GET …/plans/{plan}/work/{id}/revisions/{n}` | the `Revision`, or 404 |
 | `GET …/plans/{plan}/work/{id}/revisions/{n}/files/{*path}` | the `FileDiff`, its hunks and lines, or 404 if the revision doesn't list it |
@@ -181,6 +189,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/comments/{n}` | the `Thread`, or 404 |
 | `POST …/plans/{plan}/comments/{n}/replies` `NewReply` | `Commented`: 200, or 422 if no thread starts at `n` |
 | `PUT …/plans/{plan}/comments/{n}/state` `MarkThread` | `Marked`: 200, 409 if stale, 422 if no thread starts at `n` |
+| `POST …/plans/{plan}/comments/{n}/resolution` `ResolveThread` | `Resolved`: 200, 409 if stale, 422 if no thread starts at `n` or the project has no such revision |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
@@ -262,7 +271,8 @@ reef import plan --plan central            # the plan, from its book
   `reef import plan --plan central` again. Export first if the book is behind. A table added
   needed none when C30 added `WorkRow`: its binary opened a data directory the one before it
   wrote, read the imported plan back, and kept work records beside it. C32's two tables and
-  C34's `CommentRow` needed none either.
+  C34's `CommentRow` needed none either, nor did C37's resolutions, which a thread's row keeps
+  only once it has one, so a row kept before reads back with none.
 
 ## The app
 
@@ -284,7 +294,8 @@ the pages and the JSON API alike.
   box under it, and its threads show under it, in each revision their line was followed to.
   The Comments tab holds the node's threads, a box for a general one, and how many are open,
   and the toolbar counts and lists the plan's open threads, each named where its line is now
-  and marked if it is outdated. The canvas reads the plan's threads once a change, for all
+  and marked if it is outdated. A thread a change resolved names that revision and its commit,
+  or what it was reopened after. The canvas reads the plan's threads once a change, for all
   three.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
@@ -362,7 +373,8 @@ is the twin's oracle.
   so a node's threads and the plan's are each one read. Every comment, a reply included, takes
   the number after the plan's last, through restarts. A thread's first comment holds its target
   and state, and a mark writes it again by version; a reply is a row of its own. Where a line's
-  thread was followed to sits on that row too, which a capture's follow writes by version.
+  thread was followed to sits on that row too, which a capture's follow writes by version, and
+  so does each revision linked to it as one that answered it, which a resolve writes.
 
 ## The schema
 
@@ -376,7 +388,7 @@ is the twin's oracle.
 | `WorkRow` | project | `plan/id` | a `version`, and the node's work record as JSON: its worktree, branch, base branch, start, start tree, fork and pin, and each capture's SHAs |
 | `RevisionRow` | (project, `plan/id`) | number, padded | a `version`, and the revision as JSON: its SHAs, conflicts and files without their hunks |
 | `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
-| `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target, trail and state or a reply's thread |
+| `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target, trail, state and resolutions or a reply's thread |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

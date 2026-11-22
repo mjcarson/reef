@@ -15,6 +15,11 @@
 //!   revisions' hunks ([`follow`](super::follow)), and writes each one's row again over the
 //!   version read. A thread keeps where its line was in each revision, and the revision that
 //!   lost it, which outdates it. A thread started on an older revision is followed at once.
+//! - **A change resolves a thread, and stays linked.** A resolve, by a commit's trailer at its
+//!   capture or by hand, marks the thread resolved and links a revision to it, kept on its first
+//!   row, so the link outlives the commit once it is squashed. A trailer whose change resolved
+//!   the thread once already, by its author, when it was authored and its summary, which a
+//!   rebase keeps, never resolves it again, so a thread reopened stays open.
 //! - **Writes take a lock per project; reads take none.** Each comment is one row's write, so
 //!   every step leaves the plan's comments reading whole.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
@@ -22,7 +27,8 @@
 
 use reef_api::{
     Anchor, COMMENT_BODY_MAX, Comment, Commented, FileDiff, FollowedThread, MarkThread, Marked,
-    NewReply, NewThread, Revision, Target, Thread, ThreadState,
+    NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves, Revision, Target, Thread,
+    ThreadState, TrailerOutcome, TrailerRead,
 };
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
@@ -64,6 +70,9 @@ enum KeptOn {
         outdated: Option<u32>,
         /// Whether the thread is open or resolved
         state: ThreadState,
+        /// Each change linked to it as one that answered it, oldest first
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        resolutions: Vec<Resolution>,
     },
     /// A reply in a thread
     Reply {
@@ -186,6 +195,7 @@ impl<B: Backend> Store<B> {
                 followed,
                 outdated,
                 state: ThreadState::Open,
+                resolutions: Vec::new(),
             },
         };
         self.keep_comment(&node.plan, number, kept).await?;
@@ -280,6 +290,155 @@ impl<B: Backend> Store<B> {
             Written::Applied => Ok(Marked::Marked { thread }),
             Written::Refused(_) => Ok(Marked::Stale { thread }),
         }
+    }
+
+    /// Resolves a thread by hand, over the version its writer read, linking a revision to it
+    ///
+    /// The caller has found the revision linked among its node's.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `thread` - The thread's number
+    /// * `resolve` - The revision that answered it, and the version it was resolved against
+    #[instrument(name = "Store::resolve_thread", skip_all, err(Debug))]
+    pub async fn resolve_thread(
+        &self,
+        plan: &PlanName,
+        thread: u32,
+        resolve: ResolveThread,
+    ) -> anyhow::Result<Resolved> {
+        // the thread's first row, which holds its state, under the project's comment lock
+        let lock = self.comment_lock(&plan.project);
+        let _held = lock.lock().await;
+        let Some((version, mut kept)) = self.thread_row(plan, thread).await? else {
+            return Ok(Resolved::NoThread { thread });
+        };
+        // a resolve made against another version than the one stored never saw what changed
+        if version != resolve.read {
+            let thread = self.kept_thread(plan, thread).await?;
+            return Ok(Resolved::Stale { thread });
+        }
+        // resolved, the revision linked after any before it, written over the version read
+        if let KeptOn::Thread {
+            state, resolutions, ..
+        } = &mut kept.on
+        {
+            *state = ThreadState::Resolved;
+            resolutions.push(Resolution {
+                node: resolve.node,
+                revision: resolve.revision,
+                at: now_ms(),
+                commit: None,
+            });
+        }
+        let row = comment_row(plan, thread, version + 1, &kept)?;
+        let written = self
+            .backend
+            .write_comment(row, Expect::Version(version))
+            .await?;
+        // a refusal means another process wrote it since the read, so this resolve is stale
+        let thread = self.kept_thread(plan, thread).await?;
+        match written {
+            Written::Applied => Ok(Resolved::Resolved { thread }),
+            Written::Refused(_) => Ok(Resolved::Stale { thread }),
+        }
+    }
+
+    /// Resolves the threads a capture's trailers name, linking the revision it kept or matched,
+    /// and answers what came of each, in the order they were named
+    ///
+    /// A thread is named in the plan of the node captured, whichever node it is on. An open one
+    /// is resolved, and one resolved already only linked. A trailer whose change, by its author,
+    /// when it was authored and its summary, is linked to the thread already writes nothing: a
+    /// thread reopened since stays open, so a rebase that rewrites the commit never undoes the
+    /// reopen. Each thread written is moved on a version.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node captured
+    /// * `revision` - The revision the capture kept, or the latest it matched
+    /// * `resolves` - Each thread a trailer named, with its commit
+    #[instrument(name = "Store::resolve_by_trailers", skip_all, err(Debug))]
+    pub async fn resolve_by_trailers(
+        &self,
+        node: &NodeName,
+        revision: u32,
+        resolves: Vec<Resolves>,
+    ) -> anyhow::Result<Vec<(TrailerRead, Option<Thread>)>> {
+        // under the project's comment lock, so no mark lands between a read and its write
+        let plan = &node.plan;
+        let lock = self.comment_lock(&plan.project);
+        let _held = lock.lock().await;
+        let at = now_ms();
+        let mut read = Vec::with_capacity(resolves.len());
+        for resolves in resolves {
+            // each thread read again, so two commits naming one see each other's write
+            let outcome = |outcome| TrailerRead {
+                thread: resolves.thread,
+                commit: resolves.commit.commit.clone(),
+                outcome,
+            };
+            let Some((version, mut kept)) = self.thread_row(plan, resolves.thread).await? else {
+                read.push((outcome(TrailerOutcome::NoThread), None));
+                continue;
+            };
+            let KeptOn::Thread {
+                state, resolutions, ..
+            } = &mut kept.on
+            else {
+                read.push((outcome(TrailerOutcome::NoThread), None));
+                continue;
+            };
+            // a change linked already resolves nothing again, whether or not it was reopened
+            let seen = resolutions.iter().any(|linked| {
+                linked
+                    .commit
+                    .as_ref()
+                    .is_some_and(|commit| commit.same_change(&resolves.commit))
+            });
+            if seen {
+                let reopened = *state == ThreadState::Open;
+                let kind = match reopened {
+                    true => TrailerOutcome::Reopened,
+                    false => TrailerOutcome::Seen,
+                };
+                read.push((outcome(kind), None));
+                continue;
+            }
+            // else resolved if it was open, and the revision linked either way
+            let kind = match *state {
+                ThreadState::Open => TrailerOutcome::Resolved,
+                ThreadState::Resolved => TrailerOutcome::Linked,
+            };
+            *state = ThreadState::Resolved;
+            resolutions.push(Resolution {
+                node: node.clone(),
+                revision,
+                at,
+                commit: Some(resolves.commit.clone()),
+            });
+            let row = comment_row(plan, resolves.thread, version + 1, &kept)?;
+            match self
+                .backend
+                .write_comment(row, Expect::Version(version))
+                .await?
+            {
+                Written::Applied => {
+                    let thread = self.kept_thread(plan, resolves.thread).await?;
+                    read.push((outcome(kind), Some(thread)));
+                }
+                // under the lock, only a writer in another process could have moved it
+                Written::Refused(refusal) => anyhow::bail!(
+                    "thread {} of `{plan}` wasn't resolved by {}, since another writer wrote it \
+                     meanwhile: {}",
+                    resolves.thread,
+                    resolves.commit.commit,
+                    refusal.describe()
+                ),
+            }
+        }
+        Ok(read)
     }
 
     /// Follows the threads on a node's lines to its latest revision, and answers what it wrote
@@ -652,6 +811,7 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
                 followed,
                 outdated,
                 state,
+                resolutions,
             } => {
                 let node = plan.node(kept.node)?;
                 threads.insert(
@@ -664,6 +824,7 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
                         followed,
                         outdated,
                         state,
+                        resolutions,
                         comments: vec![comment],
                     },
                 );
@@ -702,6 +863,7 @@ mod tests {
                 followed: Vec::new(),
                 outdated: None,
                 state: ThreadState::Open,
+                resolutions: Vec::new(),
             },
         }
     }
@@ -717,6 +879,32 @@ mod tests {
         assert_eq!(next_number(&[]).unwrap(), 1);
         assert_eq!(next_number(&[(7, 1, general("C34"))]).unwrap(), 8);
         assert!(next_number(&[(u32::MAX, 1, general("C34"))]).is_err());
+    }
+
+    /// A thread's row kept before threads were resolved by changes reads back with none linked,
+    /// so its table needs no fresh data directory
+    #[tokio::test]
+    async fn rows_kept_before_resolutions_read_back() -> anyhow::Result<()> {
+        // a resolved general thread as C36's binary kept it, with no resolutions in its JSON
+        let store = Store::memory();
+        let plan = PlanName::new("reef", "central")?;
+        let row = crate::schema::CommentRow {
+            project: "reef".to_string(),
+            plan: "central".to_string(),
+            number: sort_key(1),
+            version: 2,
+            record: r#"{"node":"C34","at":1,"body":"Looks good","on":{"thread":{"target":{"on":"node"},"state":"resolved"}}}"#.to_string(),
+        };
+        store.backend().plant_comment("reef", "central", row);
+        // it reads as it was, linked to no change
+        let threads = store.threads(&plan).await?;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].state, ThreadState::Resolved);
+        assert!(threads[0].resolutions.is_empty());
+        // and a thread with none linked is kept without the key, as the old binary wrote it
+        let kept = serde_json::to_string(&general("C34"))?;
+        assert!(!kept.contains("resolutions"), "{kept}");
+        Ok(())
     }
 
     /// Rows stored in a plan's partition under another plan's key are an error, never served

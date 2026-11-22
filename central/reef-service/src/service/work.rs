@@ -12,6 +12,10 @@
 //!   the threads on its lines to its latest revision before any of it is told, so a reader told
 //!   of the revision finds them on it, and the threads it wrote are [`Change::ThreadsFollowed`].
 //!   One that kept no revision still follows any thread an earlier capture left behind.
+//! - **A capture resolves the threads its trailers name.** Each thread of the node's plan a
+//!   `Reef-Resolves` trailer names is resolved once the capture is kept and its threads followed,
+//!   linking the revision it kept, or the latest it matched, and each one written is
+//!   [`Change::ThreadMarked`]. A capture that kept nothing resolves nothing.
 //! - **A node's revisions are read where its plan is listed,** as its record is, whether or not
 //!   the node is still in its plan.
 
@@ -82,21 +86,28 @@ impl<B: Backend> Service<B> {
     }
 
     /// Keeps a capture as its node's next revision, if it was taken from the node's start and
-    /// changed anything, adds the SHAs it read to the node's record, and follows the threads on
-    /// the node's lines to its latest revision
+    /// changed anything, adds the SHAs it read to the node's record, follows the threads on the
+    /// node's lines to its latest revision, and resolves the threads its trailers name
     ///
-    /// A follow that fails comes back as the error, once what the capture kept is told.
+    /// A follow that fails comes back as the error, once what the capture kept is told, and no
+    /// trailer is read.
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
     /// * `add` - The start the capture was taken from, what it read, and its files
     #[instrument(name = "Service::add_capture", skip_all, err(Debug))]
-    pub async fn add_capture(&self, node: &NodeName, add: AddCapture) -> anyhow::Result<Captured> {
+    pub async fn add_capture(
+        &self,
+        node: &NodeName,
+        mut add: AddCapture,
+    ) -> anyhow::Result<Captured> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(&node.plan).await?;
+        // the trailers are the comments', so the work record never sees them
+        let resolves = std::mem::take(&mut add.resolves);
         // written under the project's work lock
-        let captured = self.store.add_capture(node, add).await?;
+        let mut captured = self.store.add_capture(node, add).await?;
         // the node's threads follow it before anything is told, under the comment lock
         let followed = match &captured {
             Captured::Added { .. } | Captured::Unchanged { .. } => {
@@ -106,7 +117,9 @@ impl<B: Backend> Service<B> {
         };
         // then told to the change stream, the threads last
         match &captured {
-            Captured::Added { record, revision } => {
+            Captured::Added {
+                record, revision, ..
+            } => {
                 self.publish(Change::RevisionCaptured {
                     node: node.clone(),
                     revision: revision.revision,
@@ -128,6 +141,32 @@ impl<B: Backend> Service<B> {
                 revision: followed.revision,
                 threads: followed.threads,
             });
+        }
+        // then the threads its trailers name, the revision it kept or matched linked to each
+        if let Captured::Added {
+            revision, trailers, ..
+        }
+        | Captured::Unchanged {
+            revision, trailers, ..
+        } = &mut captured
+            && !resolves.is_empty()
+        {
+            let read = self
+                .store
+                .resolve_by_trailers(node, revision.revision, resolves)
+                .await?;
+            for (trailer, thread) in read {
+                // each thread written is told as it now stands
+                if let Some(thread) = thread {
+                    self.publish(Change::ThreadMarked {
+                        node: thread.node.clone(),
+                        thread: thread.number,
+                        state: thread.state,
+                        version: thread.version,
+                    });
+                }
+                trailers.push(trailer);
+            }
         }
         Ok(captured)
     }

@@ -101,4 +101,6 @@ suite!(
     marking_over_an_older_version_is_stale,
     deleting_a_commented_line_outdates_its_thread,
     captures_follow_their_nodes_threads,
+    trailers_resolve_each_thread_once_a_change,
+    resolving_by_hand_is_over_the_version_read,
 );

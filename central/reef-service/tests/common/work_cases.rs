@@ -146,6 +146,7 @@ pub fn capture(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
         shas: shas(sha),
         conflicts: Vec::new(),
         files,
+        resolves: Vec::new(),
     }
 }
 
@@ -425,7 +426,10 @@ pub async fn captures_are_kept_as_numbered_revisions<B: Reopen>(fx: Fx<B>) -> an
         .store
         .add_capture(&node, capture(&pinned, 'd', Vec::new()))
         .await?;
-    let Captured::Unchanged { record, revision } = again else {
+    let Captured::Unchanged {
+        record, revision, ..
+    } = again
+    else {
         panic!("a capture of the latest's base and tree was {again:?}");
     };
     assert_eq!(revision, r2);

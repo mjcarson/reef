@@ -18,7 +18,10 @@
 //!   worktree, branch, base branch and start recorded and the start pinned, and the record of
 //!   a node, or of the one a worktree is on, shown.
 //! - **Capturing changes** ([`capture`]): a node's diff read in its own worktree, from its start
-//!   carried forward to what is tracked there, and sent to be kept as a revision.
+//!   carried forward to what is tracked there, and sent to be kept as a revision, with the
+//!   threads its commits' `Reef-Resolves` trailers name.
+//! - **Comments** ([`comment`]): a thread resolved by hand, the revision that answered it
+//!   linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
 //! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
@@ -30,7 +33,7 @@
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
 //! - **git** ([`git`]): the checkout a node's work happens in, read through gix, its worktree
 //!   written as a tree through git's CLI, its start pinned under `refs/reef/start/`, and its
-//!   diff and the carry of its start taken through gix.
+//!   diff, the carry of its start and its commits' trailers taken through gix.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
 //! - **Config** ([`conf`]): `[api] address` alone, from the file the service reads.
@@ -41,6 +44,7 @@
 pub mod capture;
 pub mod cli;
 pub mod client;
+pub mod comment;
 pub mod conf;
 pub mod export;
 pub mod git;

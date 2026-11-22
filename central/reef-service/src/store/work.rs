@@ -207,8 +207,16 @@ impl<B: Backend> Store<B> {
             Written::Applied => {
                 let record = recorded(node, read + 1, kept);
                 Ok(match added {
-                    true => Captured::Added { record, revision },
-                    false => Captured::Unchanged { record, revision },
+                    true => Captured::Added {
+                        record,
+                        revision,
+                        trailers: Vec::new(),
+                    },
+                    false => Captured::Unchanged {
+                        record,
+                        revision,
+                        trailers: Vec::new(),
+                    },
                 })
             }
             // under the lock, only a writer in another process could have moved it

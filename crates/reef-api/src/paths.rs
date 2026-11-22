@@ -125,6 +125,10 @@ pub const REPLIES: &str = "/api/v1/projects/{project}/plans/{plan}/comments/{thr
 /// A thread's state, marked open or resolved by `PUT`
 pub const THREAD_STATE: &str = "/api/v1/projects/{project}/plans/{plan}/comments/{thread}/state";
 
+/// A thread resolved by hand by `POST`, a revision linked to it as the one that answered it
+pub const THREAD_RESOLUTION: &str =
+    "/api/v1/projects/{project}/plans/{plan}/comments/{thread}/resolution";
+
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
 
@@ -466,6 +470,16 @@ pub fn thread_state(plan: &PlanName, thread: u32) -> String {
     format!("{}/state", self::thread(plan, thread))
 }
 
+/// The path a thread is resolved by hand at, a revision linked to it
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `thread` - The thread's number
+pub fn thread_resolution(plan: &PlanName, thread: u32) -> String {
+    format!("{}/resolution", self::thread(plan, thread))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -555,7 +569,7 @@ mod tests {
             .replace("{revision}", "3")
             .replace("{*path}", "src/lib.rs");
         assert_eq!(super::revision_file(&node, 3, "src/lib.rs"), file);
-        // and the plan's comment threads, a node's, one thread, and its replies and state
+        // and the plan's comment threads, a node's, one thread, and its replies, state and resolution
         let fill = |template: &str| {
             template
                 .replace("{project}", "reef")
@@ -568,6 +582,10 @@ mod tests {
         assert_eq!(super::thread(&plan, 7), fill(super::THREAD));
         assert_eq!(super::replies(&plan, 7), fill(super::REPLIES));
         assert_eq!(super::thread_state(&plan, 7), fill(super::THREAD_STATE));
+        assert_eq!(
+            super::thread_resolution(&plan, 7),
+            fill(super::THREAD_RESOLUTION)
+        );
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

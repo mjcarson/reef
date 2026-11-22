@@ -6,10 +6,11 @@
 
 use dioxus::prelude::*;
 use reef_api::{
-    Anchor, Comment, FileDiff, FileStatus, Hunk, Line, LineKind, Side, Target, Thread, ThreadState,
+    Anchor, Comment, FileDiff, FileStatus, Hunk, Line, LineKind, Resolution, ResolvingCommit, Side,
+    Target, Thread, ThreadState,
 };
 use reef_app::side::diff::Diff;
-use reef_app::side::threads::{ThreadView, excerpt, place_label};
+use reef_app::side::threads::{ThreadView, excerpt, place_label, resolution_label};
 
 /// A line of a kind, numbered on the sides that kind is on
 ///
@@ -223,6 +224,7 @@ fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
         followed: Vec::new(),
         outdated: None,
         state: ThreadState::Open,
+        resolutions: Vec::new(),
         comments: vec![Comment {
             number,
             at: 0,
@@ -365,4 +367,69 @@ fn outdated_threads_say_so() {
             assert_eq!(tag, ["outdated"]);
         }
     }
+}
+
+/// A thread resolved by a change names it under its foot: its revision, another node's by that
+/// node's id, and the commit whose trailer named it; one reopened since says what it was
+/// reopened after, and one no change answered says nothing
+#[test]
+fn resolved_threads_name_the_change_that_answered_them() {
+    // resolved by its own node's revision 4, through a commit's trailer
+    let commit = ResolvingCommit {
+        commit: "0123456789abcdef".repeat(2) + "01234567",
+        summary: "Take the lock first".to_string(),
+        author: "dev@example.invalid".to_string(),
+        authored: 100,
+    };
+    let mut thread = thread_on(8, Side::New, 3, "Lock?");
+    thread.state = ThreadState::Resolved;
+    thread.resolutions.push(Resolution {
+        node: thread.node.clone(),
+        revision: 4,
+        at: 1,
+        commit: Some(commit.clone()),
+    });
+    assert_eq!(
+        resolution_label(&thread).as_deref(),
+        Some("answered by r4 · 01234567 Take the lock first")
+    );
+    // drawn under the foot, its full commit on hover
+    let html = dioxus_ssr::render_element(rsx! {
+        ThreadView { thread: thread.clone() }
+    });
+    let doc = roxmltree::Document::parse(&html).expect("the thread is well formed");
+    let line: Vec<_> = doc
+        .root_element()
+        .descendants()
+        .filter(|n| class(*n).contains("reef-app-thread-resolution"))
+        .collect();
+    assert_eq!(line.len(), 1, "{html}");
+    assert_eq!(
+        text(line[0]),
+        "answered by r4 · 01234567 Take the lock first"
+    );
+    assert_eq!(line[0].attribute("title"), Some(commit.commit.as_str()));
+    // another node's revision linked by hand names that node, and a reopen says so
+    thread.resolutions.push(Resolution {
+        node: "reef/central/C38".parse().unwrap(),
+        revision: 1,
+        at: 2,
+        commit: None,
+    });
+    assert_eq!(
+        resolution_label(&thread).as_deref(),
+        Some("answered by C38 r1")
+    );
+    thread.state = ThreadState::Open;
+    assert_eq!(
+        resolution_label(&thread).as_deref(),
+        Some("reopened after C38 r1")
+    );
+    // and a thread no change answered shows no line
+    let plain = thread_on(9, Side::New, 3, "Lock?");
+    assert_eq!(resolution_label(&plain), None);
+    let html = dioxus_ssr::render_element(rsx! {
+        ThreadView { thread: plain }
+    });
+    assert!(!html.contains("reef-app-thread-resolution"), "{html}");
 }

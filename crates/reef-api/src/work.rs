@@ -6,13 +6,16 @@
 //! tree, where the start left the base branch, and the ref that pins it. The service keeps one
 //! record a node, which a start names the version of to replace it. Each capture of the node's
 //! changes then sends its files, which the service keeps as a [`Revision`], and adds the SHAs it
-//! read, as provenance only: they may stop resolving once squashed. The service never reads a
-//! checkout, so everything here is what a client read in one.
+//! read, as provenance only: they may stop resolving once squashed. A capture also sends each
+//! thread a `Reef-Resolves` trailer on the node's commits names, which the service resolves,
+//! linking the revision. The service never reads a checkout, so everything here is what a client
+//! read in one.
 
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::comment::{Resolves, TrailerRead};
 use crate::revision::{FileDiff, Revision};
 
 /// Where a node's work happens and what it started from, as read from its own checkout
@@ -128,6 +131,10 @@ pub struct AddCapture {
     /// Every changed file from the base to the worktree's tree, its hunks and all
     #[serde(default)]
     pub files: Vec<FileDiff>,
+    /// Each thread a `Reef-Resolves` trailer names, on the node's commits since its start that
+    /// its base branch doesn't hold
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolves: Vec<Resolves>,
 }
 
 /// What came of a capture
@@ -140,6 +147,9 @@ pub enum Captured {
         record: WorkRecord,
         /// The revision it was kept as
         revision: Revision,
+        /// What each thread its trailers named came to, the revision linked to those resolved
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trailers: Vec<TrailerRead>,
     },
     /// The capture's base and tree are its node's latest revision's, so no revision was added,
     /// and its SHAs were added naming that one
@@ -148,6 +158,10 @@ pub enum Captured {
         record: WorkRecord,
         /// The latest revision, which it matched
         revision: Revision,
+        /// What each thread its trailers named came to, the latest revision linked to those
+        /// resolved
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trailers: Vec<TrailerRead>,
     },
     /// The node has no record, so nothing was added
     NotStarted {
@@ -295,6 +309,7 @@ mod tests {
             },
             conflicts: Vec::new(),
             files: Vec::new(),
+            resolves: Vec::new(),
         };
         let json = serde_json::to_string(&add).unwrap();
         assert_eq!(serde_json::from_str::<AddCapture>(&json).unwrap(), add);
