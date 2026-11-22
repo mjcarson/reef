@@ -9,9 +9,11 @@ use dioxus::prelude::*;
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
 /// mdbook lacks, and the shell's own layout
 const THEME: &str = r#"
-:root { --fg: #333; --bg: #fff; --links: #2b79a2; --muted: #6b6b6b; --line: #ddd; --panel: #f6f6f6; }
+:root { --fg: #333; --bg: #fff; --links: #2b79a2; --muted: #6b6b6b; --line: #ddd; --panel: #f6f6f6;
+  --add-bg: #e6ffec; --add-fg: #1a7f37; --del-bg: #ffebe9; --del-fg: #cf222e; --hunk-bg: #ddf4ff; }
 @media (prefers-color-scheme: dark) {
-  :root { --fg: #ddd; --bg: #1f1f23; --links: #6fb3d9; --muted: #9a9a9a; --line: #3a3a40; --panel: #26262b; }
+  :root { --fg: #ddd; --bg: #1f1f23; --links: #6fb3d9; --muted: #9a9a9a; --line: #3a3a40; --panel: #26262b;
+    --add-bg: #12301d; --add-fg: #56d364; --del-bg: #3a1618; --del-fg: #f85149; --hunk-bg: #172a3d; }
 }
 html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; color: var(--fg); background: var(--bg); }
 a { color: var(--links); }
@@ -66,6 +68,40 @@ code { font-size: 0.92em; }
 .reef-app-queue-off { flex: none; font: inherit; line-height: 1; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 0.15rem; }
 .reef-app-queue-off:hover { color: var(--fg); }
 .reef-app-queue-problem { margin: 0 0 0.5rem; }
+.reef-app-changes { margin-top: 0.6rem; font-size: 0.85rem; }
+.reef-app-revision-pick { display: flex; gap: 0.4rem; align-items: center; }
+.reef-app-revision { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.2rem 0.3rem; }
+.reef-app-revision-sum { margin: 0.4rem 0; }
+.reef-app-plus { color: var(--add-fg); }
+.reef-app-minus { color: var(--del-fg); }
+.reef-app-conflicts { margin: 0.4rem 0; color: var(--reef-blocked); }
+.reef-app-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
+.reef-app-file { border: 1px solid var(--line); border-radius: 6px; background: var(--bg); min-width: 0; }
+.reef-app-file-head { display: flex; gap: 0.45rem; align-items: baseline; width: 100%; box-sizing: border-box; font: inherit; color: inherit; text-align: left; background: var(--panel); border: 0; border-radius: 6px; padding: 0.3rem 0.45rem; cursor: pointer; }
+.reef-app-file.open > .reef-app-file-head { border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; }
+.reef-app-file-head:hover .reef-app-file-path { text-decoration: underline; }
+.reef-app-status { flex: none; font-family: monospace; font-weight: 600; width: 1ch; }
+.reef-app-status.s-added { color: var(--add-fg); }
+.reef-app-status.s-deleted { color: var(--del-fg); }
+.reef-app-status.s-modified { color: var(--reef-progress); }
+.reef-app-status.s-renamed { color: var(--links); }
+.reef-app-file-path { flex: 1; min-width: 0; font-family: monospace; overflow-wrap: anywhere; }
+.reef-app-file-counts { flex: none; font-family: monospace; font-size: 0.8rem; }
+.reef-app-tag { flex: none; font-size: 0.72rem; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 0.3rem; }
+.reef-app-tag.conflicted { color: var(--reef-blocked); border-color: var(--reef-blocked); }
+.reef-app-diff { overflow-x: auto; }
+.reef-app-diff-note { margin: 0.4rem 0.5rem; }
+.reef-app-diff-wait { margin: 0.4rem 0.5rem; }
+.reef-app-hunks { border-collapse: collapse; width: 100%; font-family: monospace; font-size: 0.78rem; line-height: 1.45; }
+.reef-app-hunk-head td { background: var(--hunk-bg); color: var(--muted); padding: 0.1rem 0.5rem; white-space: pre; }
+.reef-app-ln { width: 1%; min-width: 2.5ch; padding: 0 0.4rem; text-align: right; color: var(--muted); user-select: none; vertical-align: top; }
+.reef-app-code { padding: 0 0.5rem 0 0.2rem; white-space: pre; }
+.reef-app-sign { display: inline-block; width: 1.4ch; user-select: none; }
+.reef-app-line.added { background: var(--add-bg); }
+.reef-app-line.removed { background: var(--del-bg); }
+.reef-app-line.added .reef-app-sign { color: var(--add-fg); }
+.reef-app-line.removed .reef-app-sign { color: var(--del-fg); }
+.reef-app-eof td { color: var(--muted); font-style: italic; padding: 0 0.5rem; }
 "#;
 
 /// The app's pages, by path

@@ -271,6 +271,10 @@ the pages and the JSON API alike.
 - **The editor saves as `reef node put` does,** through `reef_api::puts_for`, at the version it
   read: another writer's change since comes back stale with the newer version, and a save that
   would add a problem comes back with check's messages.
+- **The Changes tab shows a node's captured revisions,** the latest unless another is picked,
+  and a file's diff once it is opened, fetched then and drawn as a table of its hunks. A
+  capture the plan's stream announces reads the tab again (`live::WorkChanges`) without
+  reading the plan again.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under
@@ -288,9 +292,11 @@ the pages and the JSON API alike.
 cd reef-app
 env -u RUSTFLAGS dx serve @server --platform server --features embedded     # develop
 env -u RUSTFLAGS dx build @server --platform server --features embedded     # build
+env -u RUSTFLAGS dx build --release @server --platform server --features embedded   # timed
 REEF_CONFIG=reef.toml ../target/dx/reef-app/debug/web/server                 # serve the build
 cargo +nightly test -p reef-app --features embedded                          # the suite
 python check.py                                                              # the browser checks
+python check.py --release --only=c33                                         # C33's timing
 ```
 
 `tests/app.rs` serves the app's router over shoal in-process and puts plans through the CLI.

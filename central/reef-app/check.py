@@ -14,7 +14,10 @@ Build the app first, from central/reef-app, with no `RUSTFLAGS` exported:
 
 then, with Playwright installed:
 
-    python check.py [screenshot dir]
+    python check.py [screenshot dir] [--release] [--only=c33,c35]
+
+`--release` runs the server `dx build ... --release` built instead, which the timings in the
+plan's figures are taken on. `--only` runs the checks whose names start with one of those given.
 """
 
 import json
@@ -32,12 +35,16 @@ from playwright.sync_api import sync_playwright
 # reef's checkout, the app's crate, and where dx put the server it built
 APP = Path(__file__).resolve().parent
 REEF = APP.parent.parent
-SERVER = REEF / "central/target/dx/reef-app/debug/web/server"
+FLAGS = [arg for arg in sys.argv[1:] if arg.startswith("--")]
+ARGS = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
+RELEASE = "--release" in FLAGS
+ONLY = [name for flag in FLAGS if flag.startswith("--only=") for name in flag[len("--only="):].split(",")]
+SERVER = REEF / f"central/target/dx/reef-app/{'release' if RELEASE else 'debug'}/web/server"
 # where the check keeps its config, repo and shoal's data: under target, never a tmpfs /tmp
 WORK = REEF / "central/target/tmp/reef-app-check"
 ADDRESS = "127.0.0.1:12190"
 URL = f"http://{ADDRESS}"
-SHOTS = Path(sys.argv[1]) if len(sys.argv) > 1 else WORK
+SHOTS = Path(ARGS[0]) if ARGS else WORK
 # the checks that failed, and everything the page logged
 failed = []
 logs = []
@@ -565,6 +572,132 @@ def c69_a_body_put_shows_in_the_sidebar(page):
           {"body": body, "no reload": kept})
 
 
+def rows_of(page, path):
+    """Each line of an open file's diff as drawn: its class, its two numbers, and its sign and text."""
+    return page.evaluate(
+        """(path) => [...document.querySelectorAll(`.reef-app-diff[data-path="${path}"] tr.reef-app-line`)]
+            .map(tr => [tr.className.replace('reef-app-line ', ''), ...[...tr.cells].map(td => td.textContent)])""",
+        path)
+
+
+# opens a file of the Changes tab and waits for every line of its diff to be drawn and painted,
+# answering how long that took, and the longest task the main thread ran meanwhile
+OPEN_TIMED = """async ([path, lines]) => {
+    const longest = { ms: 0 };
+    const observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) longest.ms = Math.max(longest.ms, entry.duration);
+    });
+    try { observer.observe({ type: 'longtask' }); } catch (e) {}
+    const head = document.querySelector(`.reef-app-file-head[data-path="${path}"]`);
+    const started = performance.now();
+    head.click();
+    await new Promise(resolve => {
+        const tick = () => document.querySelector(`.reef-app-diff[data-path="${path}"]`)
+            ? resolve() : requestAnimationFrame(tick);
+        requestAnimationFrame(tick);
+    });
+    // a frame after the rows are in, so they are painted
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    const ms = performance.now() - started;
+    observer.disconnect();
+    const drawn = document.querySelectorAll(`.reef-app-diff[data-path="${path}"] tr.reef-app-line`).length;
+    return { ms, drawn, longest: longest.ms, wanted: lines };
+}"""
+
+
+def c33_changes_in_the_sidebar(page):
+    """C33: the Changes tab lists a node's revisions and files, draws an opened file's diff as it was
+    captured, shows a capture without a reload, and opens a large file without freezing the app."""
+    repo = WORK / "repo"
+    # a file the base holds, then a plan of its own, so the other checks' plans are as they were
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "keep.rs").write_text("a\nb\nc\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "keep")
+    reef("plan", "new", "changes")
+    put("changes", node_yaml("K1", "K1 Change the code"))
+    # K1 started, then an edit, a new file and X2's commit's Cargo.lock, all captured
+    reef("start", "K1", "--plan", "changes")
+    (repo / "src" / "keep.rs").write_text("a\nB\nc\n")
+    (repo / "src" / "small.rs").write_text('fn main() {\n    println!("<hi> & bye");\n}')
+    lock = run("git", "-C", REEF, "show", "31155d8:spikes/x2-rows/Cargo.lock")
+    (repo / "Cargo.lock").write_text(lock)
+    git("add", "-A")
+    reef("node", "capture")
+    page.goto(URL + "/plans/check/changes")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
+    page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    page.wait_for_selector(".reef-app-file-head", timeout=10000)
+    seen = {}
+    seen["files"] = page.eval_on_selector_all(
+        ".reef-app-file-head",
+        "heads => heads.map(h => [h.dataset.path, h.querySelector('.reef-app-status').textContent,"
+        " h.querySelector('.reef-app-file-counts').textContent])")
+    seen["revisions"] = page.eval_on_selector_all(".reef-app-revision option", "os => os.map(o => o.value)")
+    # the edited file and the new one draw as git numbers their lines
+    for path in ["src/keep.rs", "src/small.rs"]:
+        page.click(f'.reef-app-file-head[data-path="{path}"]')
+        page.wait_for_selector(f'.reef-app-diff[data-path="{path}"] tr.reef-app-line', timeout=10000)
+        seen[path] = rows_of(page, path)
+    seen["no newline"] = page.locator('.reef-app-diff[data-path="src/small.rs"] .reef-app-eof').count()
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-changes.png"))
+    page.emulate_media(color_scheme="dark")
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-changes-dark.png"))
+    page.emulate_media(color_scheme="light")
+    wanted_files = [["Cargo.lock", "A", f"+{lock.count(chr(10))} −0"], ["src/keep.rs", "M", "+1 −1"],
+                    ["src/small.rs", "A", "+3 −0"]]
+    wanted_keep = [["context", "1", "1", " a"], ["removed", "2", "", "-b"], ["added", "", "2", "+B"],
+                   ["context", "3", "3", " c"]]
+    wanted_small = [["added", "", "1", "+fn main() {"], ["added", "", "2", '+    println!("<hi> & bye");'],
+                    ["added", "", "3", "+}"]]
+    check("C33 the Changes tab lists revisions and files, and draws a file's diff as captured",
+          seen["files"] == wanted_files and seen["revisions"] == ["1"] and seen["src/keep.rs"] == wanted_keep
+          and seen["src/small.rs"] == wanted_small and seen["no newline"] == 1, seen)
+    # a capture from the terminal shows up in the open tab, the file still open
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    (repo / "src" / "small.rs").write_text('fn main() {\n    println!("<hi> & bye");\n}\n// more\n')
+    git("add", "-A")
+    reef("node", "capture")
+    try:
+        page.wait_for_function("() => document.querySelectorAll('.reef-app-revision option').length === 2",
+                               timeout=10000)
+        page.wait_for_function("() => document.querySelector('.reef-app-diff[data-path=\"src/small.rs\"]')"
+                               "?.dataset.revision === '2'", timeout=10000)
+    except Exception:
+        pass
+    live = {
+        "revisions": page.eval_on_selector_all(".reef-app-revision option", "os => os.map(o => o.value)"),
+        "picked": page.eval_on_selector(".reef-app-revision", "s => s.value"),
+        "open file's revision": page.get_attribute('.reef-app-diff[data-path="src/small.rs"]', "data-revision"),
+        "no reload": page.evaluate("() => window.__kept"),
+    }
+    check("C33 a capture shows in an open Changes tab without a reload",
+          live == {"revisions": ["2", "1"], "picked": "2", "open file's revision": "2", "no reload": "same page"},
+          live)
+    # the large file, opened again and again, each time from its click to its rows painted
+    lines = lock.count("\n")
+    page.click('.reef-app-file-head[data-path="src/keep.rs"]')
+    page.click('.reef-app-file-head[data-path="src/small.rs"]')
+    rounds = []
+    for k in range(13):
+        timed = page.evaluate(OPEN_TIMED, ["Cargo.lock", lines])
+        if k >= 3:
+            rounds.append(timed)
+        page.click('.reef-app-file-head[data-path="Cargo.lock"]')
+        page.wait_for_function("() => !document.querySelector('.reef-app-diff[data-path=\"Cargo.lock\"]')",
+                               timeout=10000)
+    times = sorted(r["ms"] for r in rounds)
+    figures = {"panel-diff-ms": [round(times[len(times) // 2], 1), round(times[0], 1), round(times[-1], 1)],
+               "longest task ms": max(r["longest"] for r in rounds),
+               "lines drawn": sorted({r["drawn"] for r in rounds}), "lines": lines,
+               "build": "release" if RELEASE else "debug"}
+    # the figures are the plan's only from a release build
+    in_time = figures["panel-diff-ms"][0] <= 200 if RELEASE else True
+    check("C33 a large diff opens without freezing the app", figures["lines drawn"] == [lines] and in_time,
+          figures)
+
+
 def queue_order():
     """The check's queue as `reef queue ls` lists it: each entry's name, in order."""
     return [line.split()[1] for line in reef("queue", "ls").splitlines() if line[:1].isdigit()]
@@ -690,20 +823,27 @@ def main():
             # a debug client looks for dx's hot-reload socket, which only `dx serve` answers
             page.on("console", lambda m: "/_dioxus" in m.text or logs.append(f"console.{m.type}: {m.text}"))
             page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
-            c13_every_plan_opens(page)
-            c54_draws_as_in_mdbook(page)
-            c54_selecting_opens_the_panel(page)
-            c54_one_viewer_listens(page)
-            c55_matches_the_viewer(page)
-            c55_answers_the_pointer(page)
-            c15_a_put_shows_live(page)
-            c20_a_stale_save_shows_the_newer(page)
-            c25_a_drag_writes_one_row(page)
-            c25_keys_and_the_sidebar_queue(page)
-            c28_a_linked_page_shows_in_the_sidebar(page)
-            c28_an_edited_page_shows_live(page)
-            c68_a_node_link_opens_its_node(page)
-            c69_a_body_put_shows_in_the_sidebar(page)
+            checks = [
+                c13_every_plan_opens,
+                c54_draws_as_in_mdbook,
+                c54_selecting_opens_the_panel,
+                c54_one_viewer_listens,
+                c55_matches_the_viewer,
+                c55_answers_the_pointer,
+                c15_a_put_shows_live,
+                c20_a_stale_save_shows_the_newer,
+                c25_a_drag_writes_one_row,
+                c25_keys_and_the_sidebar_queue,
+                c28_a_linked_page_shows_in_the_sidebar,
+                c28_an_edited_page_shows_live,
+                c68_a_node_link_opens_its_node,
+                c69_a_body_put_shows_in_the_sidebar,
+                c33_changes_in_the_sidebar,
+            ]
+            for step in checks:
+                # every check, or those `--only` names
+                if not ONLY or any(step.__name__.startswith(name) for name in ONLY):
+                    step(page)
             browser.close()
     finally:
         stop(server)

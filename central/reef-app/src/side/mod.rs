@@ -1,30 +1,49 @@
 //! The sidebar: the selected node's header, then its tabs
 //!
 //! **Details** is what reef-view's sidebar shows: why and what, acceptance, performance, docs,
-//! design choices and the nodes around it. **Edit** is the node's YAML, saved as `reef node put`
-//! saves it. M7's Changes and Comments tabs go beside them. Inside a plan's page, its actions
-//! queue the node first or last in its project's queue, or take it off.
+//! design choices and the nodes around it. **Changes** is the node's captured revisions, each
+//! file's diff drawn once it is opened. **Edit** is the node's YAML, saved as `reef node put`
+//! saves it. Inside a plan's page, its actions queue the node first or last in its project's
+//! queue, or take it off.
 
+mod changes;
 mod details;
+pub mod diff;
 mod docs;
 mod perf;
+
+pub use changes::when;
 
 use crate::canvas::{View, dom};
 use crate::panel::NodeEditor;
 use crate::queue::Queue;
+use changes::Changes;
 use details::Details;
 use dioxus::prelude::*;
 use reef_api::{Place, QueueEdit};
 use reef_draw::markup::{status_class, status_label};
 use reef_model::PlanName;
+use std::collections::HashSet;
 
 /// The sidebar's tabs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     /// What the plan says about the node
     Details,
+    /// The node's captured revisions, and their files' diffs
+    Changes,
     /// The node's YAML, to edit and save
     Edit,
+}
+
+/// What the Changes tab shows of the selected node, kept while another tab is open and let go
+/// when another node is selected
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Review {
+    /// The revision picked, or `None` for the latest
+    pub revision: Signal<Option<u32>>,
+    /// The files open, by the path each is shown under
+    pub open: Signal<HashSet<String>>,
 }
 
 /// The sidebar of the selected node
@@ -43,12 +62,23 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
     use_context_provider(|| docs::DocChanges(changes));
     // the project's queue, which a plan's page shares and a sidebar drawn alone lacks
     let queue = try_use_context::<Queue>();
-    // a newly selected node is read from its top, while a newer revision keeps the scroll
+    // what the Changes tab shows, which the tabs share
+    let mut review = use_context_provider(|| Review {
+        revision: Signal::new(None),
+        open: Signal::new(HashSet::new()),
+    });
+    // a newly selected node is read from its top, with none of its files open, while a newer
+    // revision keeps the scroll
     let mut aside = use_signal(|| None::<dom::El>);
+    let mut seen = use_signal(|| id.clone());
     use_effect(use_reactive!(|id| {
-        let _ = id;
         if let Some(el) = aside.peek().as_ref() {
             dom::scroll_to_top(el);
+        }
+        if *seen.peek() != id {
+            seen.set(id);
+            review.revision.set(None);
+            review.open.write().clear();
         }
     }));
     let Some(g) = view.graph() else {
@@ -67,7 +97,8 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
         .map(|&a| (g.node(a).id.clone(), g.node(a).title.clone()))
         .collect();
     let open = g.is_group(i).then(|| view.expanded.read().contains(&n.id));
-    let (center_id, edit_id) = (id.clone(), id.clone());
+    let (center_id, edit_id, changes_id) = (id.clone(), id.clone(), id.clone());
+    let (changes_project, changes_plan) = (project.clone(), plan.clone());
     // the node in full, as the queue names it, and whether it is queued
     let queued = PlanName::new(project.clone(), plan.clone())
         .ok()
@@ -196,6 +227,13 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
                     "Details"
                 }
                 button {
+                    class: tab_class(Tab::Changes),
+                    role: "tab",
+                    "aria-selected": "{tab == Tab::Changes}",
+                    onclick: move |_| view.tab.set(Tab::Changes),
+                    "Changes"
+                }
+                button {
                     class: tab_class(Tab::Edit),
                     role: "tab",
                     "aria-selected": "{tab == Tab::Edit}",
@@ -206,6 +244,9 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
             match tab {
                 Tab::Details => rsx! {
                     Details { i }
+                },
+                Tab::Changes => rsx! {
+                    Changes { project: changes_project, plan: changes_plan, id: changes_id }
                 },
                 Tab::Edit => rsx! {
                     NodeEditor { project, plan, id: edit_id, changes }

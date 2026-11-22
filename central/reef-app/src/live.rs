@@ -5,6 +5,10 @@
 //! plan written, a gap the stream says it left, and a reconnect, since nothing is sent again
 //! after a dropped connection. A project's queue spans its plans, and whether an entry is ready
 //! moves with any of them, so the queue follows the whole project's stream.
+//!
+//! A node's work, its captured revisions, changes apart from its plan. The plan's stream bumps
+//! a counter of its own for those, [`WorkChanges`], so a capture reads the Changes tab again
+//! without reading the plan's payload again.
 
 use dioxus::prelude::*;
 
@@ -63,6 +67,27 @@ type Follow = ();
 /// a gap
 const PLAN_KINDS: &[&str] = &["nodes-put", "pages-put", "plan-written", "missed"];
 
+/// The changes that mean reading a node's work again: a revision captured, or a gap
+const WORK_KINDS: &[&str] = &["revision-captured", "missed"];
+
+/// How many changes to the work of a plan's nodes have come since its page opened it, which the
+/// plan's page provides to everything inside it
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WorkChanges(pub ReadSignal<u64>);
+
+/// One counter a stream bumps, and the kinds of change that bump it
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+struct Counter {
+    /// The kinds of change that bump it
+    kinds: &'static [&'static str],
+    /// What to bump
+    count: Signal<u64>,
+    /// Whether a bump forgets the doc sections read first, since the plan's pages may have
+    /// changed under them
+    docs: bool,
+}
+
 /// The changes that mean reading a project's queue again: an edit of it, a plan listed, or any
 /// change to a plan, which can make an entry ready or waiting
 const PROJECT_KINDS: &[&str] = &[
@@ -76,22 +101,51 @@ const PROJECT_KINDS: &[&str] = &[
 /// Counts the changes to a plan announced since the page opened it, following its stream again
 /// when the route names another plan
 ///
-/// A resource that reads the count reads the plan again after each change.
+/// A resource that reads the count reads the plan again after each change. The changes to its
+/// nodes' work are counted apart, and provided to everything inside the page as
+/// [`WorkChanges`].
 ///
 /// # Arguments
 ///
 /// * `project` - The project the plan belongs to
 /// * `plan` - The plan's name within it
 pub fn use_changes(project: ReadSignal<String>, plan: ReadSignal<String>) -> ReadSignal<u64> {
-    // how many changes have come, and the stream they come on
+    // how many changes have come to the plan and to its nodes' work, and the stream they come on
     let count = use_signal(|| 0u64);
+    let work = use_signal(|| 0u64);
+    use_context_provider(|| WorkChanges(work.into()));
     let mut stream = use_signal(|| None::<Follow>);
     // follow the plan the route names; the stream it replaces closes as it is dropped
     use_effect(move || {
         let url = reef_api::paths::changes(Some(&project()), Some(&plan()));
-        stream.set(follow(&url, PLAN_KINDS, count));
+        let counters = [
+            Counter {
+                kinds: PLAN_KINDS,
+                count,
+                docs: true,
+            },
+            Counter {
+                kinds: WORK_KINDS,
+                count: work,
+                docs: false,
+            },
+        ];
+        stream.set(follow(&url, &counters));
     });
     count.into()
+}
+
+/// How many changes to the work of the plan's nodes have come since its page opened it
+///
+/// A resource that reads the count reads a node's revisions again after each capture. Outside
+/// a plan's page, nothing is followed, and the count stays at 0.
+pub fn use_work_changes() -> ReadSignal<u64> {
+    // the plan's page's counter, else one nothing bumps
+    let none = use_signal(|| 0u64);
+    match try_use_context::<WorkChanges>() {
+        Some(WorkChanges(work)) => work,
+        None => none.into(),
+    }
 }
 
 /// Counts the changes to a project announced since the page opened, its queue's and every
@@ -109,24 +163,28 @@ pub fn use_project_changes(project: ReadSignal<String>) -> ReadSignal<u64> {
     // follow the project the route names, every plan of it
     use_effect(move || {
         let url = reef_api::paths::changes(Some(&project()), None);
-        stream.set(follow(&url, PROJECT_KINDS, count));
+        let counters = [Counter {
+            kinds: PROJECT_KINDS,
+            count,
+            docs: true,
+        }];
+        stream.set(follow(&url, &counters));
     });
     count.into()
 }
 
-/// Opens a change stream, bumping `count` for each change of the kinds given, and for a
-/// reconnect
+/// Opens a change stream, bumping each counter for each change of its kinds, and every counter
+/// for a reconnect
 ///
-/// Each bump forgets the doc sections read first, since a change can change the page one is cut
-/// from, so a section shown again after it is fetched again.
+/// A counter that follows the plan forgets the doc sections read first, since a change can
+/// change the page one is cut from, so a section shown again after it is fetched again.
 ///
 /// # Arguments
 ///
 /// * `url` - The stream's path, narrowed to what is followed
-/// * `kinds` - The kinds of change that mean reading again
-/// * `count` - What to bump
+/// * `counters` - What to bump, and the kinds of change that bump each
 #[cfg(feature = "web")]
-fn follow(url: &str, kinds: &[&'static str], count: Signal<u64>) -> Option<Follow> {
+fn follow(url: &str, counters: &[Counter]) -> Option<Follow> {
     use std::cell::Cell;
     use std::rc::Rc;
     // the changes asked for, from the JSON API on this page's own server
@@ -136,22 +194,32 @@ fn follow(url: &str, kinds: &[&'static str], count: Signal<u64>) -> Option<Follo
         listeners: Vec::new(),
     };
     // each change of a kind that means reading again, the docs read before it forgotten first
-    for kind in kinds {
-        let mut count = count;
-        follow.listen(kind, move |_| {
-            crate::canvas::dom::forget_docs();
-            *count.write() += 1;
-        });
+    // where the counter follows the plan
+    for counter in counters {
+        for kind in counter.kinds {
+            let Counter {
+                mut count, docs, ..
+            } = *counter;
+            follow.listen(kind, move |_| {
+                if docs {
+                    crate::canvas::dom::forget_docs();
+                }
+                *count.write() += 1;
+            });
+        }
     }
     // the browser reconnects a dropped stream itself, but what changed meanwhile isn't sent again
     let dropped = Rc::new(Cell::new(false));
     let on_error = dropped.clone();
     follow.listen("error", move |_| on_error.set(true));
-    let mut reconnected = count;
+    let reconnected: Vec<Counter> = counters.to_vec();
     follow.listen("open", move |_| {
         if dropped.replace(false) {
             crate::canvas::dom::forget_docs();
-            *reconnected.write() += 1;
+            for counter in &reconnected {
+                let mut count = counter.count;
+                *count.write() += 1;
+            }
         }
     });
     Some(follow)
@@ -159,6 +227,6 @@ fn follow(url: &str, kinds: &[&'static str], count: Signal<u64>) -> Option<Follo
 
 /// Nothing is followed on the server, where effects never run
 #[cfg(not(feature = "web"))]
-fn follow(_url: &str, _kinds: &[&'static str], _count: Signal<u64>) -> Option<Follow> {
+fn follow(_url: &str, _counters: &[Counter]) -> Option<Follow> {
     None
 }

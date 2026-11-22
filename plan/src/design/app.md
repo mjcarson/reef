@@ -111,7 +111,8 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
   plan, so another plan starts afresh. Together they do what `Handle::swap` and
   `Handle::swap_plan` did.
 - **One sidebar, with tabs.** The node's header, then **Details**, which is what reef-view's
-  sidebar shows, and **Edit**, which is C20's editor. M7's Changes and Comments tabs join them.
+  sidebar shows, **Changes**, which is the node's captured revisions ([C33](../milestones/m7.md)), and
+  **Edit**, which is C20's editor. M7's Comments tab joins them.
 - **The boxes say what was hit.** Each box, group head and toggle writes what a press or a move
   landed on to a signal, as the event bubbles, and the SVG's own handler takes it. Nothing reads
   the DOM to find the target, and nothing stops the event.
@@ -223,3 +224,28 @@ The user orders a project's ready work, and the terminal sets that order first
   arrow keys move a focused entry a place, Home and End to either end, and Delete takes it off.
 - **The sidebar queues the selected node** first or last, moving it if it is queued already, and
   takes it off. A sidebar drawn outside a plan's page has no queue, and no buttons.
+
+## The Changes tab
+
+A node's changes are kept as revisions of its files, hunks and lines ([C32](../milestones/m7.md)). The
+Changes tab shows them beside what the plan says of the node ([C33](../milestones/m7.md)).
+
+### Design choices
+
+- **A revision's files, then a file's lines when it opens.** The tab reads the node's
+  revisions, each listing its files without their hunks, and shows the latest unless another
+  is picked. A file's hunks are fetched and drawn only once it is opened, so a node with many
+  changes opens at once.
+- **A table a file, as git shows it.** Each hunk is headed `@@ -a,b +c,d @@`, and each line
+  is a row numbered on the sides it is on, with git's sign and its text as written. A missing
+  final newline, a mode change, a binary file and one too large to keep its lines are said in
+  words.
+- **Drawn whole.** X2's commit's `Cargo.lock`, 3,609 lines, opens in 83 ms in a release build,
+  so a file is drawn whole, each line a plain function's rows rather than a component's scope.
+  Time grows with a file's lines, so a much larger file is where a line budget would go.
+- **Followed apart from the plan.** The plan's stream bumps a counter of its own for a
+  revision captured, which the tab reads its revisions again on, so a capture neither reads
+  the plan's payload again nor forgets the docs read. A file left open stays open in the newer
+  revision.
+- **Kept across tabs, let go with the node.** The revision picked and the files open stay
+  while another tab is shown, and are let go when another node is selected.

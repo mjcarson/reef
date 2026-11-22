@@ -1,0 +1,199 @@
+//! A file's diff draws as git shows it: a header a hunk, a row a line numbered on the sides it
+//! is on, and a note where git says one
+//!
+//! The `Diff` component is rendered natively and parsed, so each check is of elements, classes
+//! and text, not of how the renderer escapes or closes its tags.
+
+use dioxus::prelude::*;
+use reef_api::{FileDiff, FileStatus, Hunk, Line, LineKind};
+use reef_app::side::diff::Diff;
+
+/// A line of a kind, numbered on the sides that kind is on
+///
+/// # Arguments
+///
+/// * `kind` - Its kind
+/// * `old` - Its number in the base
+/// * `new` - Its number in the worktree
+/// * `text` - What it holds
+fn line(kind: LineKind, old: Option<u32>, new: Option<u32>, text: &str) -> Line {
+    Line {
+        kind,
+        old,
+        new,
+        text: text.to_string(),
+        no_newline: false,
+    }
+}
+
+/// A file renamed and edited: two hunks, a line removed and two added, the last with no newline
+fn edited() -> FileDiff {
+    // its last line ends the file with no newline
+    let mut last = line(LineKind::Added, None, Some(21), "    x < y && \"done\"");
+    last.no_newline = true;
+    FileDiff {
+        status: FileStatus::Renamed,
+        old_path: Some("src/old.rs".to_string()),
+        new_path: Some("src/new.rs".to_string()),
+        old_mode: Some("100644".to_string()),
+        new_mode: Some("100755".to_string()),
+        old_id: Some("1".repeat(40)),
+        new_id: Some("2".repeat(40)),
+        binary: false,
+        too_large: false,
+        hunks: vec![
+            Hunk {
+                old_start: 1,
+                old_lines: 2,
+                new_start: 1,
+                new_lines: 2,
+                lines: vec![
+                    line(LineKind::Context, Some(1), Some(1), "fn main() {"),
+                    line(LineKind::Removed, Some(2), None, "    old();"),
+                    line(LineKind::Added, None, Some(2), "    new();"),
+                ],
+            },
+            Hunk {
+                old_start: 20,
+                old_lines: 1,
+                new_start: 20,
+                new_lines: 2,
+                lines: vec![line(LineKind::Context, Some(20), Some(20), ""), last],
+            },
+        ],
+    }
+}
+
+/// The Dioxus diff of a file, rendered natively
+///
+/// # Arguments
+///
+/// * `file` - The file to draw
+fn native(file: FileDiff) -> String {
+    dioxus_ssr::render_element(rsx! {
+        Diff { revision: 3, file }
+    })
+}
+
+/// An element's class, or nothing
+///
+/// # Arguments
+///
+/// * `node` - The element
+fn class<'a>(node: roxmltree::Node<'a, 'a>) -> &'a str {
+    node.attribute("class").unwrap_or_default()
+}
+
+/// The text an element holds, its children's included
+///
+/// # Arguments
+///
+/// * `node` - The element
+fn text(node: roxmltree::Node) -> String {
+    node.descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .collect()
+}
+
+/// Each hunk heads its lines, each line is numbered on its sides with its sign and its text,
+/// and a file ending with no newline says so after its last line
+#[test]
+fn a_diff_draws_its_hunks_and_lines() {
+    // the drawing, parsed
+    let html = native(edited());
+    let doc = roxmltree::Document::parse(&html).expect("the diff is well formed");
+    let root = doc.root_element();
+    assert_eq!(class(root), "reef-app-diff");
+    assert_eq!(root.attribute("data-revision"), Some("3"));
+    assert_eq!(root.attribute("data-path"), Some("src/new.rs"));
+    assert_eq!(root.attribute("data-lines"), Some("5"));
+    // the mode change is said above the lines
+    let notes: Vec<String> = root
+        .descendants()
+        .filter(|n| class(*n).contains("reef-app-diff-note"))
+        .map(text)
+        .collect();
+    assert_eq!(notes, ["Mode 100644 → 100755"]);
+    // a header a hunk, as git writes it
+    let heads: Vec<String> = root
+        .descendants()
+        .filter(|n| class(*n) == "reef-app-hunk-head")
+        .map(text)
+        .collect();
+    assert_eq!(heads, ["@@ -1,2 +1,2 @@", "@@ -20,1 +20,2 @@"]);
+    // a row a line: its class, its numbers on each side, its sign and its text, escaped as it
+    // was written
+    let rows: Vec<(String, Vec<String>)> = root
+        .descendants()
+        .filter(|n| n.has_tag_name("tr") && class(*n).starts_with("reef-app-line"))
+        .map(|tr| {
+            let cells = tr.children().filter(|n| n.is_element()).map(text).collect();
+            (class(tr).to_string(), cells)
+        })
+        .collect();
+    let row = |class: &str, old: &str, new: &str, code: &str| {
+        (
+            format!("reef-app-line {class}"),
+            vec![old.to_string(), new.to_string(), code.to_string()],
+        )
+    };
+    assert_eq!(
+        rows,
+        [
+            row("context", "1", "1", " fn main() {"),
+            row("removed", "2", "", "-    old();"),
+            row("added", "", "2", "+    new();"),
+            row("context", "20", "20", " "),
+            row("added", "", "21", "+    x < y && \"done\""),
+        ]
+    );
+    // and the last line is followed by git's note that the file ends without a newline
+    let after_last = root
+        .descendants()
+        .filter(|n| n.has_tag_name("tr"))
+        .last()
+        .expect("the diff has rows");
+    assert_eq!(class(after_last), "reef-app-eof");
+    assert_eq!(text(after_last), "No newline at end of file");
+}
+
+/// A binary file, one too large to keep its lines, and one with no lines say so instead of
+/// drawing hunks
+#[test]
+fn files_without_lines_say_why() {
+    // a binary file, one too large, and an empty one added
+    let mut binary = edited();
+    binary.binary = true;
+    binary.old_mode = binary.new_mode.clone();
+    binary.hunks.clear();
+    let mut large = edited();
+    large.too_large = true;
+    large.old_mode = large.new_mode.clone();
+    large.hunks.clear();
+    let mut empty = edited();
+    empty.status = FileStatus::Added;
+    empty.old_mode = empty.new_mode.clone();
+    empty.hunks.clear();
+    for (file, said) in [
+        (binary, "Binary file, not shown."),
+        (large, "Too large to keep its lines: +0 −0."),
+        (empty, "No lines changed."),
+    ] {
+        let html = native(file);
+        let doc = roxmltree::Document::parse(&html).expect("the diff is well formed");
+        let root = doc.root_element();
+        // no table of lines, and the note in its place
+        assert!(
+            !root.descendants().any(|n| n.has_tag_name("table")),
+            "{html}"
+        );
+        assert_eq!(root.attribute("data-lines"), Some("0"));
+        let notes: Vec<String> = root
+            .descendants()
+            .filter(|n| class(*n).contains("reef-app-diff-note"))
+            .map(text)
+            .collect();
+        assert_eq!(notes, [said]);
+    }
+}
