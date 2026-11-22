@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use x3_capture::capture::{self, Options, Reader, pin_ref};
+use x3_capture::capture::{self, Backend, Options, pin_ref};
 use x3_capture::rule::Rule;
 use x3_capture::scenario::{Scratch, lines};
 use x3_capture::store::Capture;
@@ -126,11 +126,12 @@ fn a_dead_remote_is_never_touched() {
     for rule in Rule::ALL {
         let options = Options {
             rule,
-            reader: Reader::Cli,
+            backend: Backend::Cli,
             trigger: "test".to_owned(),
             seal: false,
+            patch_id: false,
         };
-        let taken = capture::take(&s.store, "A", options.rule, options.reader).unwrap();
+        let taken = capture::take(&s.store, "A", options.rule, options.backend).unwrap();
         assert_eq!(
             taken.diff.sides().into_keys().collect::<BTreeSet<_>>(),
             set(&["a/one.txt", "a/two.txt"]),
@@ -177,7 +178,7 @@ fn the_pin_keeps_the_start() {
         .unwrap();
     git.run(&["gc", "-q", "--prune=now"]).unwrap();
     // pinned, the start's tree survives, and D's changes are its own
-    let taken = capture::take(&s.store, "D", Rule::Carried, Reader::Cli).unwrap();
+    let taken = capture::take(&s.store, "D", Rule::Carried, Backend::Cli).unwrap();
     assert_eq!(
         taken.diff.sides().into_keys().collect::<BTreeSet<_>>(),
         set(&["d/one.txt"])
@@ -186,7 +187,7 @@ fn the_pin_keeps_the_start() {
     git.delete_ref(&pin_ref("D")).unwrap();
     git.delete_ref(&pin_ref("C")).unwrap();
     git.run(&["gc", "-q", "--prune=now"]).unwrap();
-    assert!(capture::take(&s.store, "D", Rule::Carried, Reader::Cli).is_err());
+    assert!(capture::take(&s.store, "D", Rule::Carried, Backend::Cli).is_err());
 }
 
 /// The files gix and the CLI are compared on, beyond what the cases cover
@@ -257,4 +258,185 @@ fn gix_matches_cli() {
         assert_eq!(cli, gix, "{}", cli.path());
     }
     assert_eq!(cli.sorted(), gix.sorted());
+}
+
+/// The three trees of one merge: a base, and each side's changes to it
+///
+/// # Arguments
+///
+/// * `s` - The scratch repo
+/// * `ours` - Our side's changes, made in the worktree
+/// * `theirs` - Their side's changes, made in the worktree
+fn merge_case(
+    s: &Scratch,
+    ours: &dyn Fn(&Scratch, &Path),
+    theirs: &dyn Fn(&Scratch, &Path),
+) -> (String, String, String) {
+    let main = s.main.clone();
+    let git = s.git(&main);
+    // the base is the scratch repo's first commit
+    let base = git.tree("HEAD").unwrap();
+    // each side is the worktree after its changes, snapshotted, then put back
+    let side = |change: &dyn Fn(&Scratch, &Path)| {
+        change(s, &main);
+        let tree = git.snapshot().unwrap();
+        git.run(&["reset", "-q", "--hard"]).unwrap();
+        git.run(&["clean", "-q", "-fd"]).unwrap();
+        tree
+    };
+    let ours = side(ours);
+    let theirs = side(theirs);
+    (base, ours, theirs)
+}
+
+/// gix's three-way merge of trees writes the tree `git merge-tree` writes, conflicts and their
+/// markers included, and names the same conflicted files
+#[test]
+fn gix_merges_trees_as_git_does() {
+    // each case: its name, the files it must conflict on, then our change and their change
+    type Change = Box<dyn Fn(&Scratch, &Path)>;
+    let shared = lines("shared", 10);
+    let cases: Vec<(&str, &[&str], Change, Change)> = vec![
+        (
+            "apart",
+            &[],
+            Box::new(|s, d| s.write(d, "a/new.txt", b"ours\n").unwrap()),
+            Box::new(|s, d| s.write(d, "b/new.txt", b"theirs\n").unwrap()),
+        ),
+        (
+            "same line",
+            &["shared.txt"],
+            Box::new({
+                let shared = shared.clone();
+                move |s, d| {
+                    let ours = shared.replace("shared 5", "shared five, ours");
+                    s.write(d, "shared.txt", ours.as_bytes()).unwrap()
+                }
+            }),
+            Box::new({
+                let shared = shared.clone();
+                move |s, d| {
+                    let theirs = shared.replace("shared 5", "shared five, theirs");
+                    s.write(d, "shared.txt", theirs.as_bytes()).unwrap()
+                }
+            }),
+        ),
+        (
+            "both the same",
+            &[],
+            Box::new({
+                let shared = shared.clone();
+                move |s, d| {
+                    let both = shared.replace("shared 2", "shared two");
+                    s.write(d, "shared.txt", both.as_bytes()).unwrap()
+                }
+            }),
+            Box::new({
+                let shared = shared.clone();
+                move |s, d| {
+                    let both = shared.replace("shared 2", "shared two");
+                    s.write(d, "shared.txt", both.as_bytes()).unwrap()
+                }
+            }),
+        ),
+        (
+            "lines apart in one file",
+            &[],
+            Box::new({
+                let shared = shared.clone();
+                move |s, d| {
+                    let ours = shared.replace("shared 1\n", "shared one\n");
+                    s.write(d, "shared.txt", ours.as_bytes()).unwrap()
+                }
+            }),
+            Box::new({
+                let shared = shared.clone();
+                move |s, d| {
+                    let theirs = shared.replace("shared 9", "shared nine");
+                    s.write(d, "shared.txt", theirs.as_bytes()).unwrap()
+                }
+            }),
+        ),
+        (
+            "renamed by ours, edited by theirs",
+            &[],
+            Box::new(|s, d| {
+                let old = lines("a old", 12);
+                s.rename(d, "a/old.txt", "a/moved.txt", old.as_bytes())
+                    .unwrap()
+            }),
+            Box::new(|s, d| {
+                let edited = lines("a old", 12).replace("a old 7", "a old seven");
+                s.write(d, "a/old.txt", edited.as_bytes()).unwrap()
+            }),
+        ),
+        (
+            "deleted by ours, edited by theirs",
+            &["b/gone.txt"],
+            Box::new(|s, d| s.remove(d, "b/gone.txt").unwrap()),
+            Box::new(|s, d| s.write(d, "b/gone.txt", b"b kept and changed\n").unwrap()),
+        ),
+        (
+            "added by both, apart",
+            &["c/both.txt"],
+            Box::new(|s, d| s.write(d, "c/both.txt", b"ours\n").unwrap()),
+            Box::new(|s, d| s.write(d, "c/both.txt", b"theirs\n").unwrap()),
+        ),
+    ];
+    for (name, conflicts, ours, theirs) in cases {
+        let s = Scratch::new().unwrap();
+        let (base, ours, theirs) = merge_case(&s, ours.as_ref(), theirs.as_ref());
+        let cli = s.git(&s.main).merge_trees(&base, &ours, &theirs).unwrap();
+        let repo = x3_capture::gix::open(&s.main).unwrap();
+        let gix = x3_capture::gix::merge_trees(&repo, &base, &ours, &theirs).unwrap();
+        // git conflicted where the case says, and gix agrees on the files and the whole tree
+        assert_eq!(cli.conflicts, conflicts, "{name}: git's conflicts");
+        assert_eq!(cli.conflicts, gix.conflicts, "{name}: conflicts");
+        assert_eq!(cli.tree, gix.tree, "{name}: tree");
+    }
+}
+
+/// gix finds the same merge-bases and ancestors as git's CLI, across every pair of commits in
+/// a history with branches and a merge
+#[test]
+fn gix_walks_history_as_git_does() {
+    let s = Scratch::new().unwrap();
+    // a branch off main, main moving on, and the branch merging main in
+    let wb = s.worktree("wt-b", "reef/B", "main").unwrap();
+    s.write(&wb, "b/one.txt", b"b1\n").unwrap();
+    s.commit(&wb, "B: one", None).unwrap();
+    s.write(&s.main, "upstream/1.txt", b"up\n").unwrap();
+    s.commit(&s.main, "upstream", None).unwrap();
+    s.git(&wb)
+        .run(&["merge", "-q", "--no-edit", "main"])
+        .unwrap();
+    s.write(&wb, "b/two.txt", b"b2\n").unwrap();
+    s.commit(&wb, "B: two", None).unwrap();
+    s.write(&s.main, "upstream/2.txt", b"up2\n").unwrap();
+    s.commit(&s.main, "upstream again", None).unwrap();
+    // every commit in either branch
+    let git = s.git(&s.main);
+    let all = git.run(&["rev-list", "--all"]).unwrap();
+    let commits: Vec<&str> = all.lines().collect();
+    assert!(commits.len() >= 6, "{commits:?}");
+    let repo = x3_capture::gix::open(&s.main).unwrap();
+    for a in &commits {
+        for b in &commits {
+            assert_eq!(
+                git.merge_base(a, b).unwrap(),
+                x3_capture::gix::merge_base(&repo, a, b).unwrap(),
+                "merge-base of {a} and {b}"
+            );
+            assert_eq!(
+                git.is_ancestor(a, b).unwrap(),
+                x3_capture::gix::is_ancestor(&repo, a, b).unwrap(),
+                "is {a} an ancestor of {b}"
+            );
+        }
+    }
+    // and a branch's name resolves to the commit git resolves it to
+    assert_eq!(
+        git.commit("main").unwrap(),
+        x3_capture::gix::commit(&repo, "main").unwrap()
+    );
 }

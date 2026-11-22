@@ -1,8 +1,14 @@
-//! The same diff through gix, to weigh against git's CLI
+//! Every step of a capture but the snapshot, through gix, to weigh against git's CLI
 //!
-//! A tree-to-tree diff with renames at 50%, then each changed blob is diffed with imara's
-//! Myers and git's slider heuristics, cut into hunks with three lines of context. Hunk starts
-//! follow git's convention: an empty side starts at the line before it, 0 at a file's top.
+//! - **The diff**: a tree-to-tree diff with renames at 50%, then each changed blob is diffed
+//!   with imara's Myers and git's slider heuristics, cut into hunks with three lines of
+//!   context. Hunk starts follow git's convention: an empty side starts at the line before
+//!   it, 0 at a file's top.
+//! - **The carry**: a three-way merge of trees, labelled as `git merge-tree` labels it.
+//! - **merge-base and ancestry**, from gix's revision walk.
+//!
+//! gix 0.90 can't stage a worktree, so the snapshot stays `git add -A` and `git write-tree`.
+//! Everything meets at tree ids in the one object store, so gix reads the tree git wrote.
 
 use gix::diff::blob::unified_diff::{ConsumeHunk, ContextSize, DiffLineKind, HunkHeader};
 use gix::diff::blob::{Algorithm, InternedInput, UnifiedDiff, diff_with_slider_heuristics};
@@ -12,6 +18,7 @@ use std::path::Path;
 use tracing::instrument;
 
 use crate::diff::{Diff, FileDiff, FileStatus, Hunk, Line, LineKind};
+use crate::git::Merged;
 
 /// How many bytes git looks through for a NUL to call a blob binary
 const BINARY_PROBE: usize = 8000;
@@ -299,4 +306,121 @@ pub fn diff(repo: &gix::Repository, base: &str, head: &str) -> anyhow::Result<Di
     }
     files.sort_by(|a, b| a.path().cmp(b.path()));
     Ok(Diff { files })
+}
+
+/// Parses a full id
+///
+/// # Arguments
+///
+/// * `id` - The id, in hex
+fn id(id: &str) -> anyhow::Result<gix::ObjectId> {
+    Ok(gix::ObjectId::from_hex(id.trim().as_bytes())?)
+}
+
+/// The commit HEAD is at, if any
+///
+/// # Arguments
+///
+/// * `repo` - The checkout's repo
+pub fn head(repo: &gix::Repository) -> anyhow::Result<Option<String>> {
+    // an unborn HEAD has no commit to name
+    match repo.head_id() {
+        Ok(head) => Ok(Some(head.detach().to_string())),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The commit a revision such as a branch's name resolves to, if it resolves
+///
+/// # Arguments
+///
+/// * `repo` - The repo it is in
+/// * `rev` - The revision, such as `main`
+pub fn commit(repo: &gix::Repository, rev: &str) -> anyhow::Result<Option<String>> {
+    // a name that resolves to nothing is an answer, not a failure
+    let Ok(found) = repo.rev_parse_single(rev) else {
+        return Ok(None);
+    };
+    Ok(Some(found.object()?.peel_to_commit()?.id.to_string()))
+}
+
+/// The tree a commit or tree holds
+///
+/// # Arguments
+///
+/// * `repo` - The repo it is in
+/// * `rev` - The full id of the commit or tree
+pub fn tree(repo: &gix::Repository, rev: &str) -> anyhow::Result<String> {
+    Ok(repo.find_object(id(rev)?)?.peel_to_tree()?.id.to_string())
+}
+
+/// The best common ancestor of two commits, if they have one
+///
+/// # Arguments
+///
+/// * `repo` - The repo both are in
+/// * `a` - One commit's full id
+/// * `b` - The other's
+pub fn merge_base(repo: &gix::Repository, a: &str, b: &str) -> anyhow::Result<Option<String>> {
+    Ok(repo
+        .merge_base(id(a)?, id(b)?)?
+        .map(|base| base.detach().to_string()))
+}
+
+/// Whether `ancestor` is `head` or one of its ancestors
+///
+/// An ancestor of the head is the one best common ancestor of the two, so this asks whether
+/// their merge-base is the ancestor itself.
+///
+/// # Arguments
+///
+/// * `repo` - The repo both are in
+/// * `ancestor` - The commit that may be an ancestor
+/// * `head` - The commit whose history is searched
+pub fn is_ancestor(repo: &gix::Repository, ancestor: &str, head: &str) -> anyhow::Result<bool> {
+    let ancestor = id(ancestor)?;
+    Ok(repo
+        .merge_base(ancestor, id(head)?)?
+        .is_some_and(|base| base.detach() == ancestor))
+}
+
+/// Merges two trees against a base tree, as `git merge-tree --write-tree --merge-base` does
+///
+/// Conflicted files hold markers labelled with each side's tree id and no ancestor label, as
+/// git's do, so a conflicted merge writes the same tree.
+///
+/// # Arguments
+///
+/// * `repo` - The repo the trees are in
+/// * `base` - The tree both sides started from
+/// * `ours` - One side
+/// * `theirs` - The other side
+#[instrument(name = "gix::merge_trees", skip(repo), err(Debug))]
+pub fn merge_trees(
+    repo: &gix::Repository,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> anyhow::Result<Merged> {
+    // label each side with its tree id, as git labels a merge of bare trees
+    let labels = gix::merge::blob::builtin_driver::text::Labels {
+        ancestor: None,
+        current: Some(ours.into()),
+        other: Some(theirs.into()),
+    };
+    let options = repo.tree_merge_options()?;
+    let mut outcome = repo.merge_trees(id(base)?, id(ours)?, id(theirs)?, labels, options)?;
+    let tree = outcome.tree.write()?.detach().to_string();
+    // the files that still hold markers, or whose tree change couldn't be resolved
+    let how = gix::merge::tree::TreatAsUnresolved::default();
+    let mut conflicts: Vec<String> = outcome
+        .conflicts
+        .iter()
+        .filter(|conflict| conflict.is_unresolved(how))
+        .flat_map(|conflict| [conflict.ours.location(), conflict.theirs.location()])
+        .map(|path| path.to_string())
+        .collect();
+    conflicts.sort();
+    conflicts.dedup();
+    Ok(Merged { tree, conflicts })
 }

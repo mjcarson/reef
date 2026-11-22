@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use std::io::Read;
 use std::path::PathBuf;
 
-use x3_capture::capture::{self, Options, Reader};
+use x3_capture::capture::{self, Backend, Options};
 use x3_capture::rule::Rule;
 use x3_capture::store::{Status, Store};
 use x3_capture::{bench, hook, matrix, mcp};
@@ -48,9 +48,9 @@ enum Cmd {
         /// The rule that finds the base
         #[arg(long, value_enum, default_value_t = Rule::CHOSEN)]
         rule: Rule,
-        /// The reader that extracts the diff
-        #[arg(long, value_enum, default_value_t = Reader::Cli)]
-        reader: Reader,
+        /// The backend that runs its steps
+        #[arg(long, value_enum, default_value_t = Backend::CHOSEN)]
+        backend: Backend,
         /// The checkout, if not this directory
         #[arg(long, default_value = ".")]
         dir: PathBuf,
@@ -145,7 +145,7 @@ fn run(args: Args) -> anyhow::Result<()> {
         Cmd::Capture {
             node,
             rule,
-            reader,
+            backend,
             dir,
         } => {
             let store = store(&args.state)?;
@@ -164,9 +164,10 @@ fn run(args: Args) -> anyhow::Result<()> {
             // a capture asked for by hand seals the node's revision
             let options = Options {
                 rule,
-                reader,
+                backend,
                 trigger: "cli".to_owned(),
                 seal: true,
+                patch_id: false,
             };
             match capture::capture(&store, &node, &options)? {
                 Some(capture) => {

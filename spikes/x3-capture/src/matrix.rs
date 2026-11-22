@@ -27,7 +27,7 @@ pub fn table(outcomes: &[Outcome]) -> String {
     for rule in Rule::ALL {
         out.push_str(&format!(" {} |", rule.name()));
     }
-    out.push_str(" gix = CLI |\n|---|");
+    out.push_str(" hybrid = CLI |\n|---|");
     for _ in Rule::ALL {
         out.push_str(":---:|");
     }
@@ -42,7 +42,7 @@ pub fn table(outcomes: &[Outcome]) -> String {
                 " ✗ |"
             });
         }
-        out.push_str(if outcome.gix_agrees() {
+        out.push_str(if outcome.hybrid_agrees() {
             " ✓ |\n"
         } else {
             " ✗ |\n"

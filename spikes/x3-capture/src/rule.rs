@@ -92,6 +92,10 @@ pub struct Inputs<'a> {
     pub state: &'a State,
     /// The commit HEAD is at
     pub head: &'a str,
+    /// gix's view of the repo, when the chosen rule's steps go through gix instead of the CLI
+    ///
+    /// Only *carried*, the rule reef keeps, uses it. The rejected rules stay on the CLI.
+    pub gix: Option<&'a gix::Repository>,
 }
 
 /// The empty tree's id, the base of a diff that starts before the first commit
@@ -113,9 +117,29 @@ fn names(value: &str, node: &str) -> bool {
 ///
 /// * `inputs` - What the rule has to go on
 fn merge_base(inputs: &Inputs) -> anyhow::Result<Option<String>> {
-    match &inputs.work.base_branch {
-        Some(branch) => inputs.git.merge_base(inputs.head, branch),
-        None => Ok(None),
+    let Some(branch) = &inputs.work.base_branch else {
+        return Ok(None);
+    };
+    match inputs.gix {
+        // gix resolves the branch's name itself, then walks to the merge-base
+        Some(repo) => match crate::gix::commit(repo, branch)? {
+            Some(branch) => crate::gix::merge_base(repo, inputs.head, &branch),
+            None => Ok(None),
+        },
+        None => inputs.git.merge_base(inputs.head, branch),
+    }
+}
+
+/// The tree a commit holds, through gix when the inputs have it
+///
+/// # Arguments
+///
+/// * `inputs` - What the rule has to go on
+/// * `rev` - The commit's full id
+fn tree(inputs: &Inputs, rev: &str) -> anyhow::Result<String> {
+    match inputs.gix {
+        Some(repo) => crate::gix::tree(repo, rev),
+        None => inputs.git.tree(rev),
     }
 }
 
@@ -278,11 +302,13 @@ fn carried(inputs: &Inputs) -> anyhow::Result<Base> {
         return Ok(Base::plain(work.start_tree.clone(), "the start"));
     }
     // carry the start over what came in between the fork and the new merge-base
-    let merged = inputs.git.merge_trees(
-        &inputs.git.tree(fork)?,
-        &work.start_tree,
-        &inputs.git.tree(&now)?,
-    )?;
+    let (fork_tree, now_tree) = (tree(inputs, fork)?, tree(inputs, &now)?);
+    let merged = match inputs.gix {
+        Some(repo) => crate::gix::merge_trees(repo, &fork_tree, &work.start_tree, &now_tree)?,
+        None => inputs
+            .git
+            .merge_trees(&fork_tree, &work.start_tree, &now_tree)?,
+    };
     Ok(Base {
         base: merged.tree,
         how: if merged.conflicts.is_empty() {

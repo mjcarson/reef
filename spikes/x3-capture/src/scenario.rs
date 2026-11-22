@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::capture::{self, Options, Reader};
+use crate::capture::{self, Backend, Options};
 use crate::diff::Sides;
 use crate::git::{Git, NODE_TRAILER};
 use crate::rule::Rule;
@@ -175,8 +175,9 @@ pub struct Checked {
     pub node: String,
     /// Each rule's verdict
     pub verdicts: BTreeMap<Rule, Verdict>,
-    /// Whether gix read the chosen rule's diff exactly as git's CLI did
-    pub gix_agrees: bool,
+    /// Whether the hybrid backend took the chosen rule's capture exactly as git's CLI did:
+    /// the same base, the same conflicts and the same diff
+    pub hybrid_agrees: bool,
 }
 
 /// A scratch repo with a main worktree, linked worktrees beside it, and a state dir
@@ -379,7 +380,7 @@ impl Scratch {
         // every rule, against the repo as it is now
         let mut verdicts = BTreeMap::new();
         for rule in Rule::ALL {
-            let verdict = match capture::take_in(&git, &state, work, rule, Reader::Cli) {
+            let verdict = match capture::take_in(&git, &state, work, rule, Backend::Cli) {
                 Ok(taken) => match expect.compare(&taken.diff.sides()) {
                     None => Verdict {
                         pass: true,
@@ -397,20 +398,29 @@ impl Scratch {
             };
             verdicts.insert(rule, verdict);
         }
-        // gix must read the chosen rule's diff exactly as the CLI did
-        let gix_agrees = match (
-            capture::take_in(&git, &state, work, Rule::CHOSEN, Reader::Cli),
-            capture::take_in(&git, &state, work, Rule::CHOSEN, Reader::Gix),
+        // the hybrid must take the chosen rule's capture exactly as the CLI did
+        let hybrid_agrees = match (
+            capture::take_in(&git, &state, work, Rule::CHOSEN, Backend::Cli),
+            capture::take_in(&git, &state, work, Rule::CHOSEN, Backend::Hybrid),
         ) {
-            (Ok(cli), Ok(gix)) => cli.diff.sorted() == gix.diff.sorted(),
+            (Ok(cli), Ok(hybrid)) => {
+                cli.base == hybrid.base
+                    && cli.head == hybrid.head
+                    && cli.diff.sorted() == hybrid.diff.sorted()
+            }
             _ => false,
         };
-        // store it as a hook would, so later nodes see this one's capture
-        capture::capture(&self.store, node, &Options::chosen("scenario"))?;
+        // store it as a hook would, so later nodes see this one's capture, with the patch-id
+        // the rejected patch-id rule reads
+        let options = Options {
+            patch_id: true,
+            ..Options::chosen("scenario")
+        };
+        capture::capture(&self.store, node, &options)?;
         self.checks.push(Checked {
             node: node.to_owned(),
             verdicts,
-            gix_agrees,
+            hybrid_agrees,
         });
         Ok(())
     }
@@ -910,9 +920,9 @@ impl Outcome {
         })
     }
 
-    /// Whether gix agreed with the CLI at every check
-    pub fn gix_agrees(&self) -> bool {
-        self.checks.iter().all(|check| check.gix_agrees)
+    /// Whether the hybrid backend agreed with the CLI at every check
+    pub fn hybrid_agrees(&self) -> bool {
+        self.checks.iter().all(|check| check.hybrid_agrees)
     }
 }
 

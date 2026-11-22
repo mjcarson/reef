@@ -14,13 +14,18 @@ use crate::git::Git;
 use crate::rule::{self, Inputs, Rule};
 use crate::store::{Capture, Status, Store, Work, now_ms};
 
-/// Which reader extracts the diff
+/// Which backend runs a capture's steps
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Reader {
-    /// git's CLI, one `git diff` a capture
+pub enum Backend {
+    /// git's CLI for every step
     Cli,
-    /// gix, in this process
-    Gix,
+    /// gix for every step but the snapshot, which gix can't stage, and git's CLI for that
+    Hybrid,
+}
+
+impl Backend {
+    /// The backend reef keeps: gix wherever it matched the CLI, so only the snapshot needs git
+    pub const CHOSEN: Backend = Backend::Hybrid;
 }
 
 /// How a capture is taken
@@ -28,12 +33,15 @@ pub enum Reader {
 pub struct Options {
     /// The rule that finds the base
     pub rule: Rule,
-    /// The reader that extracts the diff
-    pub reader: Reader,
+    /// The backend that runs its steps
+    pub backend: Backend,
     /// What started the capture, for its record
     pub trigger: String,
     /// Whether this capture seals the node's revision, or only keeps its draft current
     pub seal: bool,
+    /// Whether to record HEAD's patch-id through the CLI, which only the rejected patch-id rule
+    /// reads, so only the scenarios ask for it
+    pub patch_id: bool,
 }
 
 /// The triggers that seal a revision: the end of Claude's turn on a done node, and a capture
@@ -41,7 +49,7 @@ pub struct Options {
 const SEALING: &[&str] = &["Stop", "cli", "scenario"];
 
 impl Options {
-    /// The chosen rule through git's CLI, started by this trigger
+    /// The chosen rule through the chosen backend, started by this trigger
     ///
     /// Stop and the CLI seal a revision; every other trigger, PostToolUse and git's hooks,
     /// keeps the node's draft revision current.
@@ -52,9 +60,10 @@ impl Options {
     pub fn chosen(trigger: &str) -> Self {
         Options {
             rule: Rule::CHOSEN,
-            reader: Reader::Cli,
+            backend: Backend::CHOSEN,
             trigger: trigger.to_owned(),
             seal: SEALING.contains(&trigger),
+            patch_id: false,
         }
     }
 }
@@ -171,21 +180,23 @@ fn upstream(git: &Git, branch: &str) -> anyhow::Result<Option<String>> {
     }
 }
 
-/// Reads the diff between a base and a tree with the reader asked for
+/// Reads the diff between a base and a tree, through gix if its repo is open, else the CLI
 ///
 /// # Arguments
 ///
 /// * `git` - git in the checkout
-/// * `reader` - Which reader to use
+/// * `repo` - gix's view of the repo, for the hybrid backend
 /// * `base` - The base tree or commit
 /// * `tree` - The tree it ends at
-pub fn read_diff(git: &Git, reader: Reader, base: &str, tree: &str) -> anyhow::Result<Diff> {
-    match reader {
-        Reader::Cli => git.diff(base, tree),
-        Reader::Gix => {
-            let repo = crate::gix::open(git.dir())?;
-            crate::gix::diff(&repo, base, tree)
-        }
+pub fn read_diff(
+    git: &Git,
+    repo: Option<&gix::Repository>,
+    base: &str,
+    tree: &str,
+) -> anyhow::Result<Diff> {
+    match repo {
+        Some(repo) => crate::gix::diff(repo, base, tree),
+        None => git.diff(base, tree),
     }
 }
 
@@ -193,8 +204,6 @@ pub fn read_diff(git: &Git, reader: Reader, base: &str, tree: &str) -> anyhow::R
 pub struct Taken {
     /// The commit HEAD was at
     pub head: Option<String>,
-    /// HEAD's patch-id
-    pub head_patch_id: Option<String>,
     /// The worktree as one tree
     pub tree: String,
     /// The base the rule found
@@ -210,16 +219,16 @@ pub struct Taken {
 /// * `store` - The state dir
 /// * `node` - The node
 /// * `rule` - The rule that finds the base
-/// * `reader` - The reader that extracts the diff
+/// * `backend` - The backend that runs its steps
 #[instrument(name = "capture::take", skip(store), err(Debug))]
-pub fn take(store: &Store, node: &str, rule: Rule, reader: Reader) -> anyhow::Result<Taken> {
+pub fn take(store: &Store, node: &str, rule: Rule, backend: Backend) -> anyhow::Result<Taken> {
     // the node's work record says where its changes are
     let state = store.load()?;
     let work = state.work.get(node).ok_or_else(|| {
         anyhow::anyhow!("{node} hasn't been started, so nothing says where it is")
     })?;
     let git = store.git(&work.worktree);
-    take_in(&git, &state, work, rule, reader)
+    take_in(&git, &state, work, rule, backend)
 }
 
 /// Works out a node's changes in a checkout, from a state already read
@@ -230,18 +239,26 @@ pub fn take(store: &Store, node: &str, rule: Rule, reader: Reader) -> anyhow::Re
 /// * `state` - Everything captured so far
 /// * `work` - The node's work record
 /// * `rule` - The rule that finds the base
-/// * `reader` - The reader that extracts the diff
+/// * `backend` - The backend that runs its steps
 pub fn take_in(
     git: &Git,
     state: &crate::store::State,
     work: &Work,
     rule: Rule,
-    reader: Reader,
+    backend: Backend,
 ) -> anyhow::Result<Taken> {
-    // the head commit, and the worktree as it is, uncommitted changes and all
-    let head = git
-        .commit("HEAD")?
-        .ok_or_else(|| anyhow::anyhow!("{} has no commit", work.worktree.display()))?;
+    // the hybrid opens the repo once in gix, for every step but the snapshot
+    let repo = match backend {
+        Backend::Hybrid => Some(crate::gix::open(git.dir())?),
+        Backend::Cli => None,
+    };
+    // the head commit
+    let head = match &repo {
+        Some(repo) => crate::gix::head(repo)?,
+        None => git.commit("HEAD")?,
+    }
+    .ok_or_else(|| anyhow::anyhow!("{} has no commit", work.worktree.display()))?;
+    // the worktree as it is, uncommitted changes and all: git's CLI with either backend
     let tree = git.snapshot()?;
     // the base, by the rule
     let base = rule::base(
@@ -251,18 +268,12 @@ pub fn take_in(
             work,
             state,
             head: &head,
+            gix: repo.as_ref(),
         },
     )?;
-    let diff = read_diff(git, reader, &base.base, &tree)?;
-    // the head's own patch, unless it is the start, which isn't the node's
-    let head_patch_id = if head == work.start {
-        None
-    } else {
-        git.patch_ids(std::slice::from_ref(&head))?.remove(&head)
-    };
+    let diff = read_diff(git, repo.as_ref(), &base.base, &tree)?;
     Ok(Taken {
         head: Some(head),
-        head_patch_id,
         tree,
         base,
         diff,
@@ -280,11 +291,16 @@ pub fn take_in(
 ///
 /// * `store` - The state dir
 /// * `node` - The node
-/// * `options` - The rule, the reader and the trigger
+/// * `options` - The rule, the backend and the trigger
 #[instrument(name = "capture::capture", skip(store, options), fields(trigger = %options.trigger), err(Debug))]
 pub fn capture(store: &Store, node: &str, options: &Options) -> anyhow::Result<Option<Capture>> {
     // work it out, then fit it into the node's revisions
-    let taken = take(store, node, options.rule, options.reader)?;
+    let taken = take(store, node, options.rule, options.backend)?;
+    let head_patch_id = if options.patch_id {
+        head_patch_id(store, node, taken.head.as_deref())?
+    } else {
+        None
+    };
     let rule = options.rule.name().to_owned();
     let trigger = options.trigger.clone();
     let seal = options.seal;
@@ -320,7 +336,7 @@ pub fn capture(store: &Store, node: &str, options: &Options) -> anyhow::Result<O
             && let Some(last) = captures.last_mut()
         {
             last.head = taken.head.clone();
-            last.head_patch_id = taken.head_patch_id.clone();
+            last.head_patch_id = head_patch_id.clone();
         }
         match stored {
             Stored::Sealed => {
@@ -343,7 +359,7 @@ pub fn capture(store: &Store, node: &str, options: &Options) -> anyhow::Result<O
                     at: now_ms(),
                     worktree,
                     head: taken.head,
-                    head_patch_id: taken.head_patch_id,
+                    head_patch_id,
                     tree: taken.tree,
                     base: taken.base.base,
                     how: taken.base.how,
@@ -386,6 +402,29 @@ pub fn capture(store: &Store, node: &str, options: &Options) -> anyhow::Result<O
         Stored::Unchanged => None,
         _ => latest,
     })
+}
+
+/// The patch-id of HEAD's own change, unless HEAD is still the node's start
+///
+/// Only the rejected patch-id rule reads it, and gix has no patch-id, so it is the CLI's and
+/// only the scenarios record it.
+///
+/// # Arguments
+///
+/// * `store` - The state dir
+/// * `node` - The node
+/// * `head` - The commit HEAD was at
+fn head_patch_id(store: &Store, node: &str, head: Option<&str>) -> anyhow::Result<Option<String>> {
+    let state = store.load()?;
+    let (Some(work), Some(head)) = (state.work.get(node), head) else {
+        return Ok(None);
+    };
+    // the start's commit isn't the node's change
+    if head == work.start {
+        return Ok(None);
+    }
+    let git = store.git(&work.worktree);
+    Ok(git.patch_ids(&[head.to_owned()])?.remove(head))
 }
 
 /// The root of the worktree a directory is in

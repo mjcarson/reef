@@ -20,15 +20,19 @@ The crate is a workspace of its own on stable, which reef's root workspace exclu
   - `snapshot` writes the worktree as one tree, uncommitted changes and untracked files
     included. It copies the worktree's index, then runs `git add -A` and `git write-tree`
     against the copy, so the user's own index is never touched.
-- **`src/gix.rs`** reads the same diff through gix 0.90. It does a tree-to-tree diff with
-  renames at 50%, then a Myers line diff with git's slider heuristics, cut into three-line
-  hunks.
+- **`src/gix.rs`** does every step but the snapshot through gix 0.90:
+  - the diff: a tree-to-tree diff with renames at 50%, then a Myers line diff with git's slider
+    heuristics, cut into three-line hunks
+  - the carry: a three-way tree merge, its conflicts labelled as `git merge-tree` labels them
+  - merge-base, ancestry, HEAD and resolving a branch's name
 - **`src/rule.rs`** holds the six candidate rules for the base a node's diff starts from.
 - **`src/scenario.rs`** builds 13 scratch repos with no remote and works nodes in them with real
   git. Every rule is tried at each check, against what the node really changed: each path, with
   its blob before the node and after.
   - **`src/matrix.rs`** prints how each rule did.
-- **`src/capture.rs`** has `start` and `capture`.
+- **`src/capture.rs`** has `start` and `capture`. Each capture runs on one of two backends:
+  - `cli`: git's CLI for every step
+  - `hybrid`, the default: gix for every step but the snapshot, which gix 0.90 can't stage
   - `start` is `reef start`. It records the work and pins the start under `refs/reef/start/<node>`.
   - `capture` snapshots the worktree, finds the base, diffs the two and stores the result as
     the node's draft revision, or seals it.
@@ -36,7 +40,7 @@ The crate is a workspace of its own on stable, which reef's root workspace exclu
   WorktreeRemove, and git's post-commit and post-rewrite.
 - **`src/mcp.rs`** is a stub reef MCP server named `reef`. Its `status` tool takes reef's own
   arguments, so the PostToolUse hook sees `mcp__reef__status` as it would for real.
-- **`src/bench.rs`** times the CLI against gix on real commits.
+- **`src/bench.rs`** times the CLI's diff against gix's on real commits.
 - **`setup.sh`, `drive.sh` and `runs.py`** run live headless Claude Code sessions against a
   scratch repo and write their timelines into [`runs/`](runs).
 
@@ -45,6 +49,7 @@ The crate is a workspace of its own on stable, which reef's root workspace exclu
 ```sh
 cargo build --release && cargo test
 ./target/release/x3-capture matrix --notes          # every rule on every case, and why
+./target/release/x3-capture capture X --backend cli # one capture through git's CLI alone
 # the bench, in a clone with no remote rather than a live repo
 git clone -q --no-hardlinks ../.. /tmp/x3/reef && git -C /tmp/x3/reef remote remove origin
 ./target/release/x3-capture bench --repo /tmp/x3/reef \
@@ -88,7 +93,7 @@ the start.
 
 ## The matrix
 
-| Case | merge-base | start | captured | trailers | patch-id | carried | gix = CLI |
+| Case | merge-base | start | captured | trailers | patch-id | carried | hybrid = CLI |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | Two worktrees at once, main moving on | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Amending its own commit | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -104,7 +109,9 @@ the start.
 | Two at once in one worktree | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✓ |
 | In a row, a rebase conflict in the last node's file | ✗ | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 
-`tests/rules.rs` pins every cell, and `matrix --notes` says what each rule got wrong.
+`tests/rules.rs` pins every cell, and `matrix --notes` says what each rule got wrong. The last
+column checks the chosen rule at every check through both backends: the same base, conflicts
+included, the same head and the same diff.
 
 - **merge-base** takes in every earlier node's commits when nodes run in a row, or when a node
   starts from a need that isn't merged yet.
@@ -176,34 +183,38 @@ The three runs cost $1.52 in all, $0.17 to $0.21 a session.
 
 ## The timings
 
-`bench`, ten timed rounds after three warm-up rounds, with a release build. It ran on a Ryzen 9
-9950X (32 threads), in a clone of reef on tmpfs with no remote. Each figure is a commit's diff
-from its parent, read as a capture would:
+All figures come from one sitting on a Ryzen 9 9950X (32 threads), with a release build. They
+ran in a clone of reef on tmpfs with no remote, checked out at X2's commit. The same steps'
+medians moved 20 to 30% between sittings an hour apart, so only figures from the same sitting
+compare.
+
+`bench` reads each commit's diff from its parent, as a capture would, over ten timed rounds
+after three warm-up rounds:
 - the CLI starts a process each round
 - gix opens the repo each round
 - *gix, repo open* reuses one open repo
 
 | Step | Median, ms | Lowest | Highest |
 |---|---:|---:|---:|
-| X2's `31155d8` (16 files, +5886 -20): git CLI | 2.62 | 2.56 | 2.98 |
-| `31155d8`: gix | 1.05 | 1.03 | 1.15 |
-| `31155d8`: gix, repo open | 0.87 | 0.86 | 1.24 |
-| X4's `37f44f1` (19 files, +3741 -35): git CLI | 2.40 | 2.36 | 2.67 |
-| `37f44f1`: gix | 0.98 | 0.95 | 1.01 |
-| `37f44f1`: gix, repo open | 0.80 | 0.79 | 0.81 |
-| `bf5b248` (8 files, three copies of the 816 KiB `reef.js`): git CLI | 18.31 | 17.69 | 18.97 |
-| `bf5b248`: gix | 7.04 | 6.95 | 8.30 |
-| `bf5b248`: gix, repo open | 6.84 | 6.81 | 6.95 |
-| Snapshot of the clone (336 files, 2 edited, 1 untracked) | 2.78 | 2.66 | 3.16 |
+| X2's `31155d8` (16 files, +5886 -20): git CLI | 2.78 | 2.64 | 3.02 |
+| `31155d8`: gix | 0.99 | 0.98 | 1.03 |
+| `31155d8`: gix, repo open | 0.87 | 0.86 | 1.42 |
+| X4's `37f44f1` (19 files, +3741 -35): git CLI | 2.38 | 2.35 | 2.86 |
+| `37f44f1`: gix | 0.94 | 0.93 | 1.04 |
+| `37f44f1`: gix, repo open | 0.80 | 0.79 | 0.80 |
+| `bf5b248` (8 files, three copies of the 816 KiB `reef.js`): git CLI | 18.76 | 17.74 | 24.63 |
+| `bf5b248`: gix | 7.00 | 6.98 | 7.01 |
+| `bf5b248`: gix, repo open | 6.92 | 6.91 | 7.05 |
+| Snapshot of the clone (215 files, 1 edited, 1 untracked) | 2.54 | 2.45 | 3.22 |
 
 A whole capture of X2's commit is `x3-capture capture`, from its process start to a stored
-revision. It covers the snapshot, the rule, the diff, the patch-id and writing 5,887 lines of
-diff to the state file, over ten runs after three warm-up runs:
+revision. It covers HEAD, the snapshot, the rule, the diff and writing 5,887 lines of diff to
+the state file, over ten runs after three warm-up runs, minutes before the bench:
 
-| Reader | Median, ms | Lowest | Highest |
+| Backend | Median, ms | Lowest | Highest |
 |---|---:|---:|---:|
-| git CLI | 19.95 | 16.26 | 20.96 |
-| gix | 18.00 | 17.63 | 18.74 |
+| git CLI | 11.76 | 11.56 | 12.49 |
+| hybrid | 9.77 | 9.49 | 10.04 |
 
 ## What it found
 
@@ -255,15 +266,33 @@ The plan records these in `plan/src/design/code-and-comments.md`, under *What X3
   - it fetches the default branch first if it hasn't in a day
 
   reef's hook fetches nothing.
-- **The CLI, not gix.**
+- **gix for every step but the snapshot.**
   - gix read every case's diff exactly as the CLI did. That covers renames, a rename with an
     edit, mode changes, binary files, CRLF, a file with no final newline, emptied and filled
     files, and several hunks in one file.
-  - gix took 2.5 to 2.7 times less time per diff, but the diff is a small share of a capture:
-    19.95 ms against 18.00 ms whole.
-  - The snapshot and the carry are git's CLI either way: `add -A` against a copy of the
-    index, and `merge-tree`.
-  - The CLI is what users run, and gix would add 50 gix crates to reef's CLI.
+  - Its tree merge wrote git's own tree in each case, conflict markers included:
+    - both sides changing the same line
+    - a delete against an edit
+    - adds of one path on both sides
+    - a rename against an edit
+    - changes apart, in one file or in two
+  - Its merge-bases and ancestry matched git's for every pair of commits in a history with
+    branches and a merge.
+  - In every case, the hybrid took the same capture as the CLI.
+  - gix 0.90 can't stage a worktree, so the snapshot stays `git add -A` and `git write-tree` on
+    a copy of the index. Any git version can do that, so the 2.38+ that `merge-tree
+    --write-tree` needs goes away.
+  - gix read a diff 2.8 times faster, but a whole capture took only 17% less: 9.77 ms against
+    11.76 ms.
+  - gix adds 51 gix crates and no C: its zlib is `zlib-rs` and its SHA-1 is `sha1dc`.
+  - Everything meets at tree ids in the one object store, so gix reads the tree git just wrote.
+    The snapshot can move to gix later without touching anything else.
+- **Not git2.** libgit2 can stage a worktree, but git2 0.20 builds libgit2 1.9.7 and zlib from
+  C, even with every feature off. It also falls short of git in three places:
+  - It runs only its own `crlf` and `ident` filters, never a `filter.<driver>.clean` or a
+    long-running filter process such as git-lfs. gix's filter crate runs both.
+  - It fails on a split or sparse index, as mandatory extensions it can't read.
+  - It refuses repo extensions outside its five, reftable's `refStorage` included.
 - **Untracked files that aren't ignored are captured.** That is what `git add -A` would commit,
   so the repo's `.gitignore` decides. In the live runs, Python's `__pycache__` landed in every
   node's revision, though no session committed it.

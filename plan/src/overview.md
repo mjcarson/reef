@@ -132,7 +132,7 @@ nodes:
   description:
     why: Commits are squashed regularly, so git can't hold a node's changes, and nobody knows how reef picks out one node's changes while several are worked on at once.
     what: A node's diff runs from its start, carried over what its base branch brought in, to its worktree. Nodes at once get worktrees, and Stop seals the draft git's hooks keep.
-    details: Tried in `spikes/x3-capture`. Six rules for the base of a node's diff ran on 13 scratch repos with no remote, worked with real git. Real git hooks ran in two worktrees. Three headless Claude Code 2.1.330 sessions ran at once, one through `claude -w`. The captures were extracted from each local checkout by the CLI, never pushed or fetched. The findings are in the code-and-comments page's *What X3 found*.
+    details: Tried in `spikes/x3-capture`. Six rules for the base of a node's diff ran on 13 scratch repos with no remote, worked with real git. Real git hooks ran in two worktrees. Three headless Claude Code 2.1.330 sessions ran at once, one through `claude -w`. The captures were extracted from each local checkout by the CLI, never pushed or fetched. gix runs every step but the snapshot, which stays `git add -A` and `git write-tree`. The findings are in the code-and-comments page's *What X3 found*.
   performance:
     labels:
     - git CLI
@@ -142,32 +142,32 @@ nodes:
       key: git-diff-ms
       unit: ms
       before:
-      - 2.62
-      - 2.56
-      - 2.98
+      - 2.78
+      - 2.64
+      - 3.02
       after:
-      - 1.05
+      - 0.99
+      - 0.98
       - 1.03
-      - 1.15
     - name: Capture a node, process start to stored, ms
       key: node-capture-ms
       unit: ms
       before:
-      - 19.95
-      - 16.26
-      - 20.96
+      - 11.76
+      - 11.56
+      - 12.49
       after:
-      - 18.0
-      - 17.63
-      - 18.74
-    - name: Snapshot reef's worktree as a tree, ms
+      - 9.77
+      - 9.49
+      - 10.04
+    - name: Snapshot a worktree as a tree, ms
       key: snapshot-ms
       unit: ms
       before:
-      - 2.78
-      - 2.66
-      - 3.16
-    note: '`x3-capture bench`: ten timed rounds after three warm-up rounds, release build, on a Ryzen 9 9950X, in a clone of reef on tmpfs with no remote. A diff is X2''s commit `31155d8` (16 files, +5886 -20) from its parent. The CLI starts a process each round and gix opens the repo each round. A capture is `x3-capture capture` of X2''s commit and one edit, from its process start to a stored revision, over ten runs after three. The snapshot is the clone''s 336 files with two edits and one untracked file, and is git''s CLI with either reader.'
+      - 2.54
+      - 2.45
+      - 3.22
+    note: One sitting on a Ryzen 9 9950X, release build, in a clone of reef on tmpfs with no remote, checked out at X2's commit. The same steps' medians moved 20 to 30% between sittings, so only one sitting's figures compare. A diff is `x3-capture bench` reading X2's commit `31155d8` (16 files, +5886 -20) from its parent, ten timed rounds after three warm-up rounds. The CLI starts a process each round, and gix opens the repo each round. A capture is `x3-capture capture` of X2's commit and one edit, from its process start to a stored revision, over ten runs after three. Its gix side is the hybrid, gix for every step but the snapshot. The snapshot is the clone's 215 files with one edit and one untracked file, through git's CLI with either backend.
   acceptance:
   - feature: Two nodes worked at once in two worktrees each capture only their own changes
     status: met
@@ -181,6 +181,9 @@ nodes:
   - feature: A capture reads only the local checkout, with nothing pushed, fetched or read from a remote
     status: met
     test: spikes/x3-capture/tests/capture.rs::a_dead_remote_is_never_touched
+  - integration: The hybrid, gix for every step but the snapshot, takes every case's capture exactly as git's CLI does
+    status: met
+    test: spikes/x3-capture/tests/rules.rs::hybrid_agrees_on_every_case
   - perf: A capture is timed through the CLI and through gix
     status: met
     metric: node-capture-ms

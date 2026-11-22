@@ -12,7 +12,7 @@ publish = false
 
 [dependencies]
 # the same diff read through gix, to weigh against git's CLI
-gix = { version = "0.90", default-features = false, features = ["blob-diff", "sha1", "max-performance"] }
+gix = { version = "0.90", default-features = false, features = ["blob-diff", "merge", "revision", "sha1", "max-performance"] }
 # the stub reef MCP server whose status tool marks a node done
 rmcp = { version = "3.11", features = ["server", "transport-io", "macros"] }
 schemars = "1"

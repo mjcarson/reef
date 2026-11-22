@@ -104,10 +104,11 @@ fn a_conflicted_carry_names_its_files() {
     );
 }
 
-/// gix reads every case's diff exactly as git's CLI does
+/// The hybrid, gix for every step but the snapshot, takes every case's capture exactly as
+/// git's CLI does: the same base, conflicts included, the same head and the same diff
 #[test]
-fn gix_agrees_on_every_case() {
+fn hybrid_agrees_on_every_case() {
     for outcome in outcomes() {
-        assert!(outcome.gix_agrees(), "{} disagrees", outcome.case.name);
+        assert!(outcome.hybrid_agrees(), "{} disagrees", outcome.case.name);
     }
 }

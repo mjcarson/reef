@@ -630,6 +630,7 @@ dependencies = [
  "gix-ignore",
  "gix-index",
  "gix-lock",
+ "gix-merge",
  "gix-note",
  "gix-object",
  "gix-odb",
@@ -972,6 +973,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "gix-merge"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cf6d8a0724d529adb7f4b1db8cb8408b829298a1e5f7ea167be4e36d113059b"
+dependencies = [
+ "bstr",
+ "gix-command",
+ "gix-diff",
+ "gix-error",
+ "gix-filter",
+ "gix-fs",
+ "gix-hash",
+ "gix-imara-diff",
+ "gix-index",
+ "gix-object",
+ "gix-path",
+ "gix-quote",
+ "gix-revision",
+ "gix-revwalk",
+ "gix-tempfile",
+ "gix-trace",
+ "gix-worktree",
+ "nonempty",
+]
+
+[[package]]
 name = "gix-note"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1171,13 +1198,16 @@ version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "241465fc73530f41d0a1c18320c5e291365b7c2c2a3dfd07afe2a5d6265085c8"
 dependencies = [
+ "bitflags 2.13.2",
  "bstr",
  "gix-commitgraph",
  "gix-date",
  "gix-error",
  "gix-hash",
+ "gix-hashtable",
  "gix-object",
  "gix-revwalk",
+ "gix-trace",
  "nonempty",
 ]
 

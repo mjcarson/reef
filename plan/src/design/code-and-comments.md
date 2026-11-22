@@ -51,9 +51,17 @@ on and when it is completed, and keeps what it read. That needs four things reef
     start.
   - Each capture records the SHAs it read. The SHAs are provenance only, and may stop resolving
     once squashed.
-- **git through its CLI.** gix reads the same diffs faster, but the diff is a small part of a
-  capture. The snapshot and the carry are the CLI's either way, and the CLI is what users run
-  ([What X3 found](#what-x3-found)).
+- **gix for every step but the snapshot.** The diff, the carry, merge-base and ancestry run
+  in-process through gix, behind reef's own git module.
+  - The snapshot stays `git add -A` and `git write-tree`, since gix can't stage a worktree. Any
+    git version can do that, so reef needs a git binary but no recent one.
+  - Every step meets at tree ids in the one object store, so gix reads the tree git just wrote.
+  - Each gix step is tested against the CLI, which stays as its oracle. gix is pinned, since it
+    is 0.x and breaks often.
+  - Moving the snapshot to gix as well, so no git binary is needed, is [C70](../milestones/m7.md), and
+    optional.
+  - Not git2: it builds libgit2 from C, and falls short of git on filter drivers and newer
+    index and repo formats ([What X3 found](#what-x3-found)).
 
 ### Nodes worked on at once (X3)
 
@@ -127,10 +135,22 @@ The rules:
 - **A squash loses nothing.** Three nodes were squash-merged, their branches, worktrees and pins
   deleted, every reflog expired and git pruned. The heads the captures read were gone, and every
   capture read back byte for byte.
-- **gix matched the CLI** on every case's diff, renames, mode changes, binary files, CRLF and
-  missing final newlines included.
-  - It read X2's commit (+5886 -20) in 1.05 ms against the CLI's 2.62 ms.
-  - A whole capture, from process start to stored, took 18.00 ms against 19.95 ms.
+- **gix matched the CLI on every step it took over.**
+  - Every case's diff matched, renames, mode changes, binary files, CRLF and missing final
+    newlines included.
+  - Its tree merge wrote git's own tree, conflict markers included, for a conflict on one line,
+    a delete against an edit, an add on both sides, and a rename against an edit.
+  - Its merge-bases and ancestry matched for every pair of commits in a history with a merge.
+  - In every case, the hybrid took the same capture as the CLI.
+  - It read X2's commit (+5886 -20) in 0.99 ms against the CLI's 2.78 ms.
+  - A whole capture, from process start to stored, took 9.77 ms against 11.76 ms.
+  - It adds 51 gix crates and no C.
+- **git2 would need no git binary, but brings its own gaps.**
+  - git2 0.20 builds libgit2 1.9.7 and zlib from C, even with every feature off.
+  - libgit2 runs only its `crlf` and `ident` filters, never git-lfs's clean filter, which
+    gix's filter crate does run.
+  - It fails on a split or sparse index.
+  - It refuses repo extensions it doesn't know, reftable's `refStorage` included.
 
 ### Open questions
 
