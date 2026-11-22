@@ -19,13 +19,15 @@
 //! reef [--conf PATH] queue ls [--project NAME]
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] export <DIR> [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
 //! only plan, unless `--plan` names one. `next` and the queue span the project's plans, and
 //! `--plan` narrows `next` to one. `import` picks the project the book is in, and lists the
-//! plan `--plan` names if it isn't listed.
+//! plan `--plan` names if it isn't listed. `export` picks the project the new book's directory
+//! is in.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -36,6 +38,7 @@ use std::path::{Path, PathBuf};
 
 use crate::client::Client;
 use crate::conf::Conf;
+use crate::export;
 use crate::import;
 use crate::mcp::{self, Tools};
 use crate::node;
@@ -157,6 +160,20 @@ pub enum Command {
         replace: bool,
         /// The plan to import into, if not the project's only plan, and the project the book
         /// is in, if not the one its directory belongs to
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Export a plan to a new book: a file for each group, its members listed inline, with its
+    /// links leading from the book's files
+    ///
+    /// The directory must be new or empty, and in the project's repo. Importing the book gives
+    /// the plan back.
+    Export {
+        /// The directory to write the book in
+        #[arg(value_name = "DIR")]
+        dir: PathBuf,
+        /// The plan to export, if not the project's only plan, and the project it is in, if not
+        /// the one the directory belongs to
         #[command(flatten)]
         pick: PlanPick,
     },
@@ -435,6 +452,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             replace,
             pick,
         } => import::import(&client, cwd, &book, &pick, replace, out).await,
+        Command::Export { dir, pick } => export::export(&client, cwd, &dir, &pick, out).await,
         Command::Mcp { pick } => {
             // the protocol owns standard output, so nothing is printed to `out`
             let tools = Tools::new(client, cwd.to_path_buf(), pick);

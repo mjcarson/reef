@@ -9,7 +9,7 @@
 
 mod common;
 
-use reef_model::Payload;
+use reef_model::{Payload, PlanName};
 use reef_render::ROOT;
 use reef_render::book::Plan;
 use reef_render::paths;
@@ -1039,5 +1039,115 @@ async fn import_refuses() -> anyhow::Result<()> {
     );
     // and none of them wrote anything
     assert_eq!(cx.ax.service.list(&cx.ax.plan).await?.revision, revision);
+    Ok(())
+}
+
+/// Copies the example book's `book.toml` and `src` into a directory
+///
+/// # Arguments
+///
+/// * `to` - The directory to copy it to
+fn example_book(to: &Path) -> anyhow::Result<()> {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../example-book");
+    copy_dir(&example.join("src"), &to.join("src"))?;
+    std::fs::copy(example.join("book.toml"), to.join("book.toml"))?;
+    Ok(())
+}
+
+/// Every file under a directory, by its path from it, with its text
+///
+/// # Arguments
+///
+/// * `dir` - The directory to read
+fn read_tree(dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let rel = path.strip_prefix(dir)?.to_string_lossy().to_string();
+                out.push((rel, std::fs::read_to_string(&path)?));
+            }
+        }
+    }
+    // in an order that doesn't hang on the order they were read in
+    out.sort();
+    Ok(out)
+}
+
+/// A plan exported to a book and imported again gives the same specs, bodies and order, and
+/// the book exports again to the same files
+#[tokio::test]
+async fn export_then_import_gives_equal_specs() -> anyhow::Result<()> {
+    let cx = Cx::new("export-round-trip").await?;
+    let repo = cx.ax.repo.clone();
+    // the example book, imported
+    example_book(&repo.join("example-book"))?;
+    cx.reef(&repo, &["import", "example-book"]).await?;
+    // exported to a new book in the repo, a file for each of the book's node files
+    let out = cx
+        .reef(&repo, &["export", "out", "--plan", "central"])
+        .await?;
+    assert!(
+        out.starts_with("exported 202 nodes of `reef/central` to out in 12 files:"),
+        "{out}"
+    );
+    // which mdbook-reef finds no problems in
+    let opened = reef::import::open_book(&repo.join("out"))?;
+    let plan = Plan::load(&opened.src, &opened.config);
+    assert!(plan.diags.is_empty(), "{}", plan.errors());
+    // imported again, into a plan of its own
+    cx.reef(&repo, &["import", "out", "--plan", "again"])
+        .await?;
+    let again = PlanName::new("reef", "again")?;
+    let first = cx.ax.service.list(&cx.ax.plan).await?.nodes;
+    let second = cx.ax.service.list(&again).await?.nodes;
+    // each node its spec, its body and its place, as the first import wrote it
+    assert_eq!(first.len(), second.len());
+    for (a, b) in first.iter().zip(&second) {
+        assert_eq!(
+            (&a.spec, &a.body, a.order),
+            (&b.spec, &b.body, b.order),
+            "`{}` differs",
+            a.spec.id
+        );
+    }
+    // and exported again, it writes the same files, titled by its own plan
+    cx.reef(&repo, &["export", "out2", "--plan", "again"])
+        .await?;
+    let retitled: Vec<(String, String)> = read_tree(&repo.join("out"))?
+        .into_iter()
+        .map(|(path, text)| (path, text.replace("reef/central", "reef/again")))
+        .collect();
+    assert_eq!(retitled, read_tree(&repo.join("out2"))?);
+    Ok(())
+}
+
+/// An export refuses a directory that holds anything, and one outside the project's repo,
+/// leaving no directory it made behind
+#[tokio::test]
+async fn export_refuses() -> anyhow::Result<()> {
+    let cx = Cx::new("export-refuses").await?;
+    let repo = cx.ax.repo.clone();
+    cx.put("a.yml", &work("A", &[])).await?;
+    // a directory with anything in it
+    write_files(&repo, &[("full/notes.md", "# Notes\n")])?;
+    let (_, error) = cx.failing(&repo, &["export", "full"]).await?;
+    assert_eq!(error, "full isn't empty: export writes a new book");
+    // a directory outside the project's repo, which the export takes away again
+    let (_, error) = cx
+        .failing(&repo, &["export", "../outside", "--project", "reef"])
+        .await?;
+    assert!(error.contains("is not in project `reef`'s repo"), "{error}");
+    assert!(!cx.ax.dir.join("outside").exists());
+    // and the plan exports where it may
+    let out = cx.reef(&repo, &["export", "book"]).await?;
+    assert!(
+        out.starts_with("exported 1 node of `reef/central` to book in 1 file:"),
+        "{out}"
+    );
     Ok(())
 }

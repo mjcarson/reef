@@ -207,7 +207,9 @@ app.
   CLI that started a nightly server from another workspace would own a process nobody stops.
 - **A library under a thin binary.** `reef::run` takes the command line, the working directory
   and where to print, so the service's tests drive the real commands against a served twin.
-- **Import is the CLI's** ([C26](../milestones/m6.md)). `reef import` reads and checks the book
-  where it is, moves each link to lead from the repo's root, and sends the service one
-  whole-plan write, so the service never reads a book. A plan that has nodes is replaced only
-  with `--replace`, since the write drops every node the book doesn't have.
+- **Import and export are the CLI's** ([C26, C27](../milestones/m6.md)). `reef import` reads
+  and checks the book where it is, moves each link to lead from the repo's root, and sends the
+  service one whole-plan write, so the service never reads or writes a book. A plan that has
+  nodes is replaced only with `--replace`, since the write drops every node the book doesn't
+  have. `reef export` lists the plan and writes a new book whose files sort in its written
+  order, so importing it gives the plan back.
