@@ -1,4 +1,4 @@
-//! Acceptance criteria in the viewer: which kinds the reader shows, the sidebar's Acceptance
+//! Acceptance criteria in the viewers: which kinds the reader shows, the sidebar's Acceptance
 //! section, and the pills a box shows for them. Pure, so it is tested natively.
 //!
 //! Each kind has its own colour (`reef.css`), and every badge also names its kind in words, so
@@ -52,7 +52,8 @@ pub fn act_kind(act: &str) -> Option<Kind> {
     Kind::ALL.into_iter().find(|kind| kind.as_str() == k)
 }
 
-fn plural_label(k: Kind) -> &'static str {
+/// A kind's name in the plural, as the chips' titles and the pills' tooltips say it
+pub fn plural_label(k: Kind) -> &'static str {
     match k {
         Kind::Unit => "unit tests",
         Kind::Integration => "integration tests",
@@ -81,7 +82,8 @@ pub fn toolbar(f: &Filter) -> String {
     format!(r#"<span class="reef-acc-filter" role="group" aria-label="Acceptance criteria shown">{chips}</span>"#)
 }
 
-fn state(m: Met) -> (&'static str, &'static str) {
+/// A criterion's mark and its state in words
+pub fn state(m: Met) -> (&'static str, &'static str) {
     match m {
         Met::Met => ("✓", "met"),
         Met::Unmet => ("✗", "not met"),
@@ -121,31 +123,9 @@ pub fn section(g: &Graph, i: usize, f: &Filter) -> String {
             label = crit.kind.label(),
             text = crit.text,
         );
-        let mut meta = Vec::new();
-        if let Some(t) = &crit.test {
-            meta.push(format!("<code>{}</code>", esc(t)));
-        }
-        if let Some((j, ch)) = r.chart {
-            let p = g.node(j).performance.as_ref();
-            let what = match ch {
-                AccChart::Metric(k) => p.and_then(|p| p.metrics.get(k)).map_or(String::new(), |m| esc(&m.name)),
-                AccChart::Change => "every metric's change".into(),
-                AccChart::Pair => "before and after".into(),
-            };
-            let from = if j == i {
-                String::new()
-            } else {
-                format!(r#" of <a href="javascript:void 0" data-goto="{}">{}</a>"#, esc(&g.node(j).id), esc(&g.node(j).id))
-            };
-            meta.push(format!("{what}{from}"));
-            if let AccChart::Metric(k) = ch
-                && let Some(t) = crit.target_text(p.and_then(|p| p.metrics.get(k)).and_then(|m| m.unit.as_deref()))
-            {
-                meta.push(format!("target {}", esc(&t)));
-            }
-        }
+        let meta = meta(g, i, c);
         if !meta.is_empty() {
-            let _ = write!(body, r#"<div class="reef-acc-meta">{}</div>"#, meta.join(" · "));
+            let _ = write!(body, r#"<div class="reef-acc-meta">{meta}</div>"#);
         }
         if r.chart.is_some() {
             body.push_str(&perf::chart(g, i, &ChartRef::Accept(c), &ChartView::default()));
@@ -158,6 +138,44 @@ pub fn section(g: &Graph, i: usize, f: &Filter) -> String {
     }
     let head = format!(r#"Acceptance <span class="reef-note">{met} of {shown} met</span>"#);
     crate::markup::sec(&head, "reef-acc", &body)
+}
+
+/// What a criterion's meta line says, as markup: its test, the chart it draws and whose, and
+/// its target. Empty when it has none of them.
+///
+/// # Arguments
+///
+/// * `g` - The plan
+/// * `i` - The node the criterion is of
+/// * `c` - The criterion's index among the node's
+pub fn meta(g: &Graph, i: usize, c: usize) -> String {
+    // the criterion as written, and what checking it found
+    let (Some(crit), Some(r)) = (g.node(i).acceptance.get(c), g.acceptance(i).get(c)) else { return String::new() };
+    let mut meta = Vec::new();
+    if let Some(t) = &crit.test {
+        meta.push(format!("<code>{}</code>", esc(t)));
+    }
+    // the chart, named, with a link to the node it is of when that is another
+    if let Some((j, ch)) = r.chart {
+        let p = g.node(j).performance.as_ref();
+        let what = match ch {
+            AccChart::Metric(k) => p.and_then(|p| p.metrics.get(k)).map_or(String::new(), |m| esc(&m.name)),
+            AccChart::Change => "every metric's change".into(),
+            AccChart::Pair => "before and after".into(),
+        };
+        let from = if j == i {
+            String::new()
+        } else {
+            format!(r#" of <a href="javascript:void 0" data-goto="{}">{}</a>"#, esc(&g.node(j).id), esc(&g.node(j).id))
+        };
+        meta.push(format!("{what}{from}"));
+        if let AccChart::Metric(k) = ch
+            && let Some(t) = crit.target_text(p.and_then(|p| p.metrics.get(k)).and_then(|m| m.unit.as_deref()))
+        {
+            meta.push(format!("target {}", esc(&t)));
+        }
+    }
+    meta.join(" · ")
 }
 
 /// A box's pills: for each shown kind it has criteria of, `(kind, met, total)`. A collapsed

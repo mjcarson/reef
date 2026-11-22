@@ -1,0 +1,25 @@
+[package]
+name = "reef-draw"
+description = "What reef's viewers draw a plan from: box sizes, the diagram and sidebar as markup, criteria, charts, and the view's pan, zoom and search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# What only a browser can do: read a doc's rendered page, and measure text in the view's font.
+# Both viewers turn it on in their wasm; without it the crate is pure and tested natively.
+web = ["dep:web-sys", "dep:js-sys", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+
+[dependencies]
+reef-model.workspace = true
+reef-layout.workspace = true
+serde_json.workspace = true
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+  "CanvasRenderingContext2d", "CssStyleDeclaration", "Document", "DomParser", "DomTokenList", "Element",
+  "HtmlCanvasElement", "Location", "Node", "NodeList", "Response", "SupportedType", "TextMetrics", "Url",
+  "Window", "console",
+] }

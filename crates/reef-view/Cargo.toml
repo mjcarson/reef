@@ -18,6 +18,8 @@ autostart = []
 [dependencies]
 reef-model.workspace = true
 reef-layout.workspace = true
+# the boxes, sidebar and charts it draws, shared with reef-app's canvas, and the docs it reads
+reef-draw = { workspace = true, features = ["web"] }
 serde_json.workspace = true
 wasm-bindgen = "=0.2.130"
 js-sys = "0.3"

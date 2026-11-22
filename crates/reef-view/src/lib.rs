@@ -7,12 +7,12 @@
 //! An app that links the viewer into its own wasm turns off the `autostart` feature and draws a
 //! plan into an element of its own with [`mount`], swapping in new revisions through the
 //! [`Handle`] it returns.
+//!
+//! What it draws (box sizes, the layout, the markup, the criteria and the charts) comes from
+//! reef-draw, which reef-app's Dioxus canvas draws from too; this crate is the DOM around it.
 
-mod accept;
 mod chartui;
 mod docs;
-mod markup;
-mod perf;
 mod viewer;
 
 use reef_model::{Graph, Payload, ViewSpec};

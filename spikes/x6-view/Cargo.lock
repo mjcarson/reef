@@ -2589,6 +2589,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "reef-draw"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "reef-layout",
+ "reef-model",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "reef-layout"
 version = "0.1.0"
 
@@ -2615,6 +2628,7 @@ name = "reef-view"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "reef-draw",
  "reef-layout",
  "reef-model",
  "serde_json",

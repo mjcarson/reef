@@ -12,7 +12,7 @@
 
 use crate::Plan;
 use crate::viewer::{Observer, Wiring};
-use crate::perf::{self, ChartRef, ChartView};
+use reef_draw::perf::{self, ChartRef, ChartView};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;

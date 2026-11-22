@@ -1,4 +1,5 @@
-//! The SVG and HTML the viewer draws, as strings. Pure, so it is tested natively.
+//! The SVG and HTML reef-view draws, as strings, and the sizes both viewers give boxes. Pure, so
+//! it is tested natively.
 
 use reef_layout::{Dir, Output, svg_path};
 use crate::accept::{self, Filter};
@@ -85,7 +86,7 @@ pub fn sizes(g: &Graph, vis: &Visible, filter: &Filter, measure: &dyn Fn(&str) -
 }
 
 /// A link off this book, which a page cannot read across.
-fn is_external(href: &str) -> bool {
+pub fn is_external(href: &str) -> bool {
     href.contains("://") || href.starts_with("mailto:") || href.starts_with("//")
 }
 
@@ -104,7 +105,8 @@ pub fn esc(s: &str) -> String {
     out
 }
 
-fn status_class(g: &Graph, i: usize) -> &'static str {
+/// The class a node's status draws it with, ready counted as a status of its own
+pub fn status_class(g: &Graph, i: usize) -> &'static str {
     if g.is_ready(i) {
         return "s-ready";
     }
@@ -256,7 +258,8 @@ fn entry(g: &Graph, j: usize, note: &str) -> String {
     )
 }
 
-fn status_label(g: &Graph, i: usize) -> &'static str {
+/// A node's status in words, ready counted as a status of its own
+pub fn status_label(g: &Graph, i: usize) -> &'static str {
     if g.is_ready(i) {
         return "ready to start";
     }
@@ -280,7 +283,7 @@ pub fn sec(head: &str, class: &str, body: &str) -> String {
 /// # Arguments
 ///
 /// * `from` - The doc heading or table row the part was taken from, if it was
-fn from_note(from: Option<&str>) -> String {
+pub fn from_note(from: Option<&str>) -> String {
     from.map_or(String::new(), |f| format!(r#" <span class="reef-note">from <em>{}</em></span>"#, esc(f)))
 }
 

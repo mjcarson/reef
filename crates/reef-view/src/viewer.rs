@@ -1,18 +1,17 @@
 //! One drawn view: its DOM, its state, and its event handlers.
 
 use crate::Plan;
-use crate::accept::{self, Filter};
-use crate::markup::{self, BoxSize, FONT_PX, HEADER_H};
-use reef_layout::{Dir, Input, LEdge, LNode, Output, Spacing};
-use reef_model::{Direction, Layout, ViewSpec, Visible};
+use reef_draw::accept::{self, Filter};
+use reef_draw::web::Measure;
+use reef_draw::{Camera, Scene, markup};
+use reef_layout::Dir;
+use reef_model::{Direction, Layout, ViewSpec};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use web_sys::{CanvasRenderingContext2d, Element, Event, HtmlElement, HtmlInputElement, KeyboardEvent, PointerEvent, WheelEvent};
+use web_sys::{Element, Event, HtmlElement, HtmlInputElement, KeyboardEvent, PointerEvent, WheelEvent};
 
-const MIN_K: f64 = 0.05;
-const MAX_K: f64 = 4.0;
 /// The narrowest the sidebar can be dragged.
 const SIDE_MIN_W: f64 = 240.0;
 
@@ -40,17 +39,16 @@ pub struct Viewer {
     root: Option<usize>,
     ghosts: bool,
     expanded: HashSet<usize>,
-    vis: Visible,
-    out: Output,
-    sizes: Vec<BoxSize>,
-    k: f64,
-    tx: f64,
-    ty: f64,
+    /// What is drawn now, laid out
+    scene: Scene,
+    /// The pan and zoom
+    cam: Camera,
     selected: Option<usize>,
     hover: Option<usize>,
     uid: String,
     storage_key: String,
-    ctx: Option<CanvasRenderingContext2d>,
+    /// Measures the labels in the view's font
+    measure: Measure,
     pointers: Vec<(i32, f64, f64)>,
     press: Option<Press>,
     pinch: Option<f64>,
@@ -91,7 +89,7 @@ pub fn tell(callback: &OnSelect, id: Option<String>) {
 ///
 /// * `plan` - The plan's name, such as `reef/central`
 pub fn plan_key(plan: &str) -> String {
-    format!("reef:plan:{plan}")
+    reef_draw::plan_key(plan)
 }
 
 /// The groups a view opens with: those saved under its key, else its spec's
@@ -105,7 +103,7 @@ fn open_groups(key: &str, spec: &ViewSpec, g: &reef_model::Graph) -> HashSet<usi
     // the groups opened last time, by id, as far as the plan still has them
     let saved = storage()
         .and_then(|s| s.get_item(key).ok().flatten())
-        .and_then(|saved| serde_json::from_str::<Vec<String>>(&saved).ok());
+        .and_then(|saved| reef_draw::groups_from_stored(&saved));
     match saved {
         Some(ids) => ids.iter().filter_map(|id| g.index_of(id)).collect(),
         None => spec.initial_expanded(g),
@@ -280,7 +278,7 @@ impl Viewer {
         let root = spec.root_id().and_then(|id| g.index_of(id));
         let ghosts = spec.focus.is_some();
         let expanded = open_groups(&storage_key, &spec, g);
-        let ctx = measure_ctx(&el);
+        let measure = Measure::new(&el);
         let v = Viewer {
             el,
             svg,
@@ -297,17 +295,13 @@ impl Viewer {
             root,
             ghosts,
             expanded,
-            vis: Visible::default(),
-            out: Output::default(),
-            sizes: Vec::new(),
-            k: 1.0,
-            tx: 0.0,
-            ty: 0.0,
+            scene: Scene::default(),
+            cam: Camera::default(),
             selected: None,
             hover: None,
             uid,
             storage_key,
-            ctx,
+            measure,
             pointers: Vec::new(),
             press: None,
             pinch: None,
@@ -500,42 +494,27 @@ impl Viewer {
         &self.plan.graph
     }
 
-    fn measure(&self, s: &str) -> f64 {
-        match &self.ctx {
-            Some(c) => c.measure_text(s).map(|m| m.width()).unwrap_or(s.len() as f64 * 7.0),
-            None => s.chars().count() as f64 * FONT_PX * 0.55,
-        }
-    }
-
     /// Lay out and draw what the view shows now.
     fn render(&mut self) {
         let t0 = window().performance().map(|p| p.now());
         let plan = self.plan.clone();
         let g = &plan.graph;
-        self.vis = g.visible(self.root, self.ghosts, &self.expanded);
-        let sizes = markup::sizes(g, &self.vis, &self.acc, &|s| self.measure(s));
-        let input = Input {
-            dir: self.dir,
-            nodes: self.vis.items.iter().zip(&sizes).map(|(it, s)| LNode { parent: it.parent, w: s.w, h: s.h, container: it.open }).collect(),
-            edges: self.vis.edges.iter().map(|e| LEdge { from: e.from, to: e.to }).collect(),
-            spacing: Spacing { header: HEADER_H, ..Spacing::default() },
-        };
-        self.out = reef_layout::layout(&input);
-        self.sizes = sizes;
-        let sel = self.selected.and_then(|s| self.vis.shown_as[s]);
-        let markup = markup::diagram(g, &self.vis, &self.out, &self.sizes, self.dir, &self.uid, sel);
+        self.scene = Scene::build(g, self.root, self.ghosts, &self.expanded, &self.acc, self.dir, &|s| self.measure.width(s));
+        let sel = self.selected.and_then(|s| self.scene.item_of(s));
+        let sc = &self.scene;
+        let markup = markup::diagram(g, &sc.vis, &sc.out, &sc.sizes, self.dir, &self.uid, sel);
         self.vp.set_inner_html(&markup);
         self.hover = None;
         let _ = self.svg.class_list().remove_1("reef-dim");
         if let (Some(t0), Some(p)) = (t0, window().performance()) {
             let _ = self.el.set_attribute("data-layout-ms", &format!("{:.1}", p.now() - t0));
         }
-        let _ = self.el.set_attribute("data-boxes", &self.vis.items.len().to_string());
+        let _ = self.el.set_attribute("data-boxes", &self.scene.vis.items.len().to_string());
         self.apply();
     }
 
     fn apply(&self) {
-        let _ = self.vp.set_attribute("transform", &format!("translate({:.2},{:.2}) scale({:.4})", self.tx, self.ty, self.k));
+        let _ = self.vp.set_attribute("transform", &self.cam.transform());
     }
 
     fn stage_size(&self) -> (f64, f64) {
@@ -561,8 +540,7 @@ impl Viewer {
         if pw <= 1.0 || ph <= 1.0 {
             self.initial_view();
         } else {
-            self.tx += (w - pw) / 2.0;
-            self.ty += (h - ph) / 2.0;
+            self.cam.recentre((pw, ph), (w, h));
             self.apply();
         }
     }
@@ -570,34 +548,21 @@ impl Viewer {
     fn fit(&mut self) {
         let (_, h) = self.stage_size();
         let w = self.free_width();
-        let (cw, ch) = (self.out.width.max(1.0), self.out.height.max(1.0));
-        self.k = (w / cw).min(h / ch).clamp(MIN_K, 1.0);
-        self.tx = (w - cw * self.k) / 2.0;
-        self.ty = ((h - ch * self.k) / 2.0).max(0.0);
+        self.cam.fit(&self.scene.out, w, h);
         self.apply();
     }
 
     /// Fit, unless that would make labels too small to read: then start at a readable size,
     /// at the top, and leave the rest to panning, zooming out, or Fit.
     fn initial_view(&mut self) {
-        self.fit();
-        // Below this a 13px label is unreadable; start at READABLE instead.
-        const TOO_SMALL: f64 = 0.35;
-        const READABLE: f64 = 0.55;
-        if self.k < TOO_SMALL {
-            let w = self.free_width();
-            self.k = READABLE;
-            self.tx = (w - self.out.width * self.k) / 2.0;
-            self.ty = 0.0;
-            self.apply();
-        }
+        let (_, h) = self.stage_size();
+        let w = self.free_width();
+        self.cam.initial(&self.scene.out, w, h);
+        self.apply();
     }
 
     fn zoom_at(&mut self, factor: f64, sx: f64, sy: f64) {
-        let k = (self.k * factor).clamp(MIN_K, MAX_K);
-        self.tx = sx - (sx - self.tx) * (k / self.k);
-        self.ty = sy - (sy - self.ty) * (k / self.k);
-        self.k = k;
+        self.cam.zoom_at(factor, sx, sy);
         self.apply();
     }
 
@@ -608,28 +573,27 @@ impl Viewer {
 
     fn save(&self) {
         let g = self.graph();
-        let ids: Vec<&str> = self.expanded.iter().map(|&i| g.node(i).id.as_str()).collect();
+        let ids = self.expanded.iter().map(|&i| g.node(i).id.as_str());
         if let Some(s) = storage() {
-            let _ = s.set_item(&self.storage_key, &serde_json::to_string(&ids).unwrap_or_default());
+            let _ = s.set_item(&self.storage_key, &reef_draw::groups_to_stored(ids));
         }
     }
 
     /// Open or close the group shown as item `item`, keeping it where it is on screen.
     fn toggle(&mut self, item: usize) {
-        let Some(it) = self.vis.items.get(item) else { return };
+        let Some(it) = self.scene.vis.items.get(item) else { return };
         let node = it.node;
         if !self.graph().is_group(node) {
             return;
         }
-        let before = self.out.rects[item];
+        let before = self.scene.out.rects[item];
         if !self.expanded.remove(&node) {
             self.expanded.insert(node);
         }
         self.save();
         self.render();
-        if let Some(after) = self.vis.shown_as[node].map(|i| self.out.rects[i]) {
-            self.tx += (before.x - after.x) * self.k;
-            self.ty += (before.y - after.y) * self.k;
+        if let Some(after) = self.scene.item_of(node).map(|i| self.scene.out.rects[i]) {
+            self.cam.keep(before, after);
             self.apply();
         }
         if self.selected == Some(node) {
@@ -665,7 +629,7 @@ impl Viewer {
 
     /// Where the sidebar's width is kept: one for views filling a page, one for views in the text.
     fn side_w_key(&self) -> &'static str {
-        if self.page_mode { "reef:side-w:page" } else { "reef:side-w:inline" }
+        reef_draw::side_w_key(self.page_mode)
     }
 
     /// Set the sidebar's width in px, or `None` for the stylesheet's. It never takes more than
@@ -703,7 +667,7 @@ impl Viewer {
     }
 
     fn refresh_selection(&self) {
-        let sel = self.selected.and_then(|s| self.vis.shown_as[s]);
+        let sel = self.selected.and_then(|s| self.scene.item_of(s));
         let Ok(list) = self.vp.query_selector_all(".reef-node, .reef-edge") else { return };
         for k in 0..list.length() {
             let Some(e) = list.item(k).and_then(|n| n.dyn_into::<Element>().ok()) else { continue };
@@ -725,7 +689,7 @@ impl Viewer {
         self.hover = item;
         let Ok(list) = self.vp.query_selector_all(".reef-node, .reef-group, .reef-edge") else { return };
         let lit: HashSet<usize> = match item {
-            Some(i) => self.lineage(i),
+            Some(i) => self.scene.lineage(i),
             None => HashSet::new(),
         };
         let _ = self.svg.class_list().toggle_with_force("reef-dim", item.is_some());
@@ -741,36 +705,9 @@ impl Viewer {
         }
     }
 
-    fn lineage(&self, start: usize) -> HashSet<usize> {
-        let mut out = HashSet::from([start]);
-        for forward in [true, false] {
-            let mut stack = vec![start];
-            let mut seen = HashSet::from([start]);
-            while let Some(v) = stack.pop() {
-                for e in &self.vis.edges {
-                    let (a, b) = if forward { (e.from, e.to) } else { (e.to, e.from) };
-                    if a == v && seen.insert(b) {
-                        stack.push(b);
-                    }
-                }
-            }
-            out.extend(seen);
-        }
-        // Open groups holding a lit box stay lit too.
-        let boxes: Vec<usize> = out.iter().copied().collect();
-        for i in boxes {
-            let mut p = self.vis.items[i].parent;
-            while let Some(c) = p {
-                out.insert(c);
-                p = self.vis.items[c].parent;
-            }
-        }
-        out
-    }
-
     /// Show node `node`: open the groups hiding it, pan to it and select it.
     fn goto(&mut self, node: usize) {
-        let in_view = |v: &Viewer| v.vis.shown_as[node].is_some_and(|i| v.vis.items[i].node == node);
+        let in_view = |v: &Viewer| v.scene.own_item(node).is_some();
         if !in_view(self) {
             let g = self.plan.clone();
             for a in g.graph.ancestors(node) {
@@ -787,15 +724,11 @@ impl Viewer {
     }
 
     fn center_on(&mut self, node: usize) {
-        let Some(item) = self.vis.shown_as[node] else { return };
-        let r = self.out.rects[item];
+        let Some(item) = self.scene.item_of(node) else { return };
+        let r = self.scene.out.rects[item];
         let (_, h) = self.stage_size();
         let w = self.free_width();
-        if self.k < 0.7 {
-            self.k = 0.9;
-        }
-        self.tx = w / 2.0 - r.cx() * self.k;
-        self.ty = h / 2.0 - r.cy() * self.k;
+        self.cam.center_on(r, w, h);
         self.apply();
         let _ = self.svg.class_list().add_1("reef-flash");
         let svg = self.svg.clone();
@@ -806,31 +739,7 @@ impl Viewer {
     }
 
     fn search_matches(&self, text: &str) -> Vec<usize> {
-        let g = self.graph();
-        let t = text.trim().to_lowercase();
-        if t.is_empty() {
-            return Vec::new();
-        }
-        let in_scope = |i: usize| self.root.is_none_or(|r| g.is_ancestor(r, i));
-        let mut hits: Vec<(u8, usize)> = (0..g.len())
-            .filter_map(|i| {
-                let n = g.node(i);
-                let id = n.id.to_lowercase();
-                let title = n.title.to_lowercase();
-                let rank = if id == t {
-                    0
-                } else if id.starts_with(&t) || title.starts_with(&t) {
-                    1
-                } else if title.contains(&t) || id.contains(&t) {
-                    2
-                } else {
-                    return None;
-                };
-                Some((rank + if in_scope(i) { 0 } else { 3 }, i))
-            })
-            .collect();
-        hits.sort();
-        hits.into_iter().take(12).map(|h| h.1).collect()
+        reef_draw::search(self.graph(), self.root, text)
     }
 
     fn update_results(&self) {
@@ -931,11 +840,11 @@ impl Viewer {
             "full" => self.fullscreen(),
             "close" => self.select(None),
             "toggle-sel" => {
-                if let Some(item) = self.selected.and_then(|s| self.vis.shown_as[s]).filter(|&i| Some(self.vis.items[i].node) == self.selected) {
+                if let Some(item) = self.selected.and_then(|s| self.scene.own_item(s)) {
                     self.toggle(item);
                 } else if let Some(s) = self.selected {
                     self.goto(s);
-                    if let Some(item) = self.vis.shown_as[s] {
+                    if let Some(item) = self.scene.item_of(s) {
                         self.toggle(item);
                     }
                 }
@@ -1057,8 +966,8 @@ impl Viewer {
                         let _ = v.svg.class_list().add_1("reef-panning");
                     }
                     if p.moved {
-                        v.tx += x - px;
-                        v.ty += y - py;
+                        v.cam.tx += x - px;
+                        v.cam.ty += y - py;
                         v.apply();
                     }
                 }
@@ -1082,7 +991,7 @@ impl Viewer {
                     if let Some(item) = closest_item(&t, "[data-toggle]", "data-toggle") {
                         v.toggle(item);
                     } else if let Some(item) = closest_item(&t, ".reef-node", "data-item").or_else(|| closest_item(&t, ".reef-group", "data-item")) {
-                        let node = v.vis.items[item].node;
+                        let node = v.scene.vis.items[item].node;
                         v.select(Some(node));
                     } else {
                         v.select(None);
@@ -1264,20 +1173,4 @@ fn status_dot(s: reef_model::Status) -> &'static str {
 
 fn storage() -> Option<web_sys::Storage> {
     window().local_storage().ok().flatten()
-}
-
-/// A canvas context set to the font the diagram's labels are drawn in.
-fn measure_ctx(el: &Element) -> Option<CanvasRenderingContext2d> {
-    let doc = window().document()?;
-    let canvas: web_sys::HtmlCanvasElement = doc.create_element("canvas").ok()?.dyn_into().ok()?;
-    let ctx: CanvasRenderingContext2d = canvas.get_context("2d").ok()??.dyn_into().ok()?;
-    let family = window()
-        .get_computed_style(el)
-        .ok()
-        .flatten()
-        .and_then(|s| s.get_property_value("font-family").ok())
-        .filter(|f| !f.is_empty())
-        .unwrap_or_else(|| "sans-serif".into());
-    ctx.set_font(&format!("{FONT_PX}px {family}"));
-    Some(ctx)
 }

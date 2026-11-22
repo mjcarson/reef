@@ -2,7 +2,7 @@
 //! table and charts drawn as inline SVG. Pure, so it is tested natively.
 //!
 //! The charts are interactive, the way a dashboard's are. Each `<svg>` names its chart and its
-//! view (hidden series, a zoomed x range) in `data-` attributes, and `chartui` asks this module
+//! view (hidden series, a zoomed x range) in `data-` attributes, and the viewer asks this module
 //! for what to draw as the pointer moves:
 //!
 //! - **Hover:** a crosshair snapped to the nearest x on line charts, the row under the pointer on
@@ -21,7 +21,7 @@
 
 use crate::markup::esc;
 use reef_model::perf::{self, Better, Metric, Performance, Value};
-use reef_model::{AccChart, Graph, Node};
+use reef_model::{AccChart, Graph, Node, PerfDoc};
 use std::fmt::Write;
 
 /// The charts' width in SVG units. They scale to the sidebar's width.
@@ -143,18 +143,120 @@ pub struct Hover {
     pub goto: Option<String>,
 }
 
+/// A piece of a node's Performance section: markup, a chart, or the doc its measurements are in
+#[derive(Debug, Clone, PartialEq)]
+pub enum PerfPart {
+    /// Markup drawn as it is: headings, tables and notes
+    Html(String),
+    /// A chart, drawn by [`chart`] in its default view until the reader changes it
+    Chart(ChartRef),
+    /// The doc section the node's measurements are in, read when it opens
+    Doc(PerfDoc),
+}
+
+/// A node's Performance section in pieces: its header's markup, then its body's parts in order
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerfSection {
+    /// The header's markup: "Performance" and its headline
+    pub head: String,
+    /// The body, in order
+    pub parts: Vec<PerfPart>,
+}
+
+/// A section's body as it is built: markup written runs into one part until a chart comes
+#[derive(Default)]
+struct Parts(Vec<PerfPart>);
+
+impl Parts {
+    /// Adds markup, after any markup written just before it
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The markup
+    fn push_str(&mut self, s: &str) {
+        match self.0.last_mut() {
+            Some(PerfPart::Html(html)) => html.push_str(s),
+            _ => self.0.push(PerfPart::Html(s.to_string())),
+        }
+    }
+
+    /// Adds a chart
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The chart
+    fn chart(&mut self, r: ChartRef) {
+        self.0.push(PerfPart::Chart(r));
+    }
+}
+
+impl std::fmt::Write for Parts {
+    /// Adds written markup, as [`Parts::push_str`] does
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push_str(s);
+        Ok(())
+    }
+}
+
 /// The section for node `i`, or nothing when it has no measurements.
 pub fn section(g: &Graph, i: usize) -> String {
+    let Some(sec) = section_parts(g, i) else { return String::new() };
+    // each chart in its default view, and the doc as a stub its text is read into
+    let mut body = String::new();
+    for part in &sec.parts {
+        match part {
+            PerfPart::Html(html) => body.push_str(html),
+            PerfPart::Chart(r) => body.push_str(&chart(g, i, r, &ChartView::default())),
+            PerfPart::Doc(d) => body.push_str(&doc_stub(d)),
+        }
+    }
+    crate::markup::sec(&sec.head, "reef-perf", &format!(r#"<div class="reef-perf-body">{body}</div>"#))
+}
+
+/// The doc section a node's measurements are in, as a stub its text is read into once it opens
+///
+/// # Arguments
+///
+/// * `d` - The doc section
+fn doc_stub(d: &PerfDoc) -> String {
+    format!(
+        r#"<details class="reef-perf-doc" data-href="{href}"{heading} open><summary>{summary}</summary><div class="reef-doc-text"><p class="reef-note">Loading…</p></div></details>"#,
+        href = esc(&d.href),
+        heading = d.heading.as_ref().map_or(String::new(), |h| format!(r#" data-heading="{}""#, esc(h))),
+        summary = doc_summary(d),
+    )
+}
+
+/// What a measurements doc's header says: which doc, and which part of it
+///
+/// # Arguments
+///
+/// * `d` - The doc section
+pub fn doc_summary(d: &PerfDoc) -> String {
+    let what = match (&d.heading_text, d.tables) {
+        (Some(h), _) => format!("<em>{}</em>", esc(h)),
+        (None, k) => plural(k, "table", "tables"),
+    };
+    format!(r#"From {} <span class="reef-note">{what}</span>"#, esc(&d.label))
+}
+
+/// Node `i`'s Performance section in pieces, or `None` when it has no measurements
+///
+/// # Arguments
+///
+/// * `g` - The plan
+/// * `i` - The node
+pub fn section_parts(g: &Graph, i: usize) -> Option<PerfSection> {
     let n = g.node(i);
     let own = n.performance.as_ref().filter(|p| !p.metrics.is_empty());
     let trends = if g.is_group(i) { trends(g, i) } else { Vec::new() };
     if own.is_none() && trends.is_empty() && n.perf_doc.is_none() {
-        return String::new();
+        return None;
     }
-    let mut body = String::new();
+    let mut body = Parts::default();
     let headline = match own {
         Some(p) => {
-            own_section(&mut body, g, i, p);
+            own_section(&mut body, p);
             headline(p)
         }
         None if !trends.is_empty() => {
@@ -164,24 +266,13 @@ pub fn section(g: &Graph, i: usize) -> String {
         None => String::new(),
     };
     for t in &trends {
-        trend_section(&mut body, g, i, t);
+        trend_section(&mut body, g, t);
     }
     if let Some(d) = &n.perf_doc {
-        let what = match (&d.heading_text, d.tables) {
-            (Some(h), _) => format!("<em>{}</em>", esc(h)),
-            (None, k) => plural(k, "table", "tables"),
-        };
-        let _ = write!(
-            body,
-            r#"<details class="reef-perf-doc" data-href="{href}"{heading} open><summary>From {label} <span class="reef-note">{what}</span></summary><div class="reef-doc-text"><p class="reef-note">Loading…</p></div></details>"#,
-            href = esc(&d.href),
-            heading = d.heading.as_ref().map_or(String::new(), |h| format!(r#" data-heading="{}""#, esc(h))),
-            label = esc(&d.label),
-        );
+        body.0.push(PerfPart::Doc(d.clone()));
     }
     let headline = if headline.is_empty() { String::new() } else { format!(r#" <span class="reef-perf-headline">{headline}</span>"#) };
-    let head = format!("Performance{headline}");
-    crate::markup::sec(&head, "reef-perf", &format!(r#"<div class="reef-perf-body">{body}</div>"#))
+    Some(PerfSection { head: format!("Performance{headline}"), parts: body.0 })
 }
 
 fn plural(k: usize, one: &str, many: &str) -> String {
@@ -232,31 +323,30 @@ fn both(p: &Performance) -> Vec<(usize, &Metric)> {
     p.metrics.iter().enumerate().filter(|(_, m)| m.before.is_some() && m.after.is_some()).collect()
 }
 
-fn own_section(s: &mut String, g: &Graph, i: usize, p: &Performance) {
+fn own_section(s: &mut Parts, p: &Performance) {
     let (bl, al) = (p.before_label(), p.after_label());
     let rows = pairs(p);
     if !rows.is_empty() {
         table(s, &rows, bl, al);
     }
-    let v = ChartView::default();
     if !changed(p).is_empty() {
         let _ = write!(s, r#"<h4>Change <span class="reef-note">{} against {}</span></h4>"#, esc(al), esc(bl));
-        s.push_str(&chart(g, i, &ChartRef::Change, &v));
+        s.chart(ChartRef::Change);
     }
     if !both(p).is_empty() {
         let _ = write!(s, "<h4>{} and {}</h4>", esc(bl), esc(al));
-        s.push_str(&chart(g, i, &ChartRef::Pair, &v));
+        s.chart(ChartRef::Pair);
     }
     for (k, m) in p.metrics.iter().enumerate().filter(|(_, m)| !m.points.is_empty()) {
         let _ = write!(s, "<h4>{}{}</h4>", esc(&m.name), unit_note(m.unit.as_deref()));
-        s.push_str(&chart(g, i, &ChartRef::Sweep(k), &v));
+        s.chart(ChartRef::Sweep(k));
     }
     if let Some(note) = p.note.as_deref().filter(|n| !n.trim().is_empty()) {
         let _ = write!(s, r#"<div class="reef-perf-note">{note}</div>"#);
     }
 }
 
-fn table(s: &mut String, ms: &[(usize, &Metric)], bl: &str, al: &str) {
+fn table(s: &mut Parts, ms: &[(usize, &Metric)], bl: &str, al: &str) {
     let disjoint = ms.iter().any(|(_, m)| m.disjoint().is_some());
     let _ = write!(s, r#"<div class="reef-perf-table"><table><thead><tr><th>Metric</th><th>{}</th><th>{}</th><th>Change</th>"#, esc(bl), esc(al));
     if disjoint {
@@ -335,6 +425,27 @@ fn svg_open_z(h: f64, label: &str, i: usize, r: &ChartRef, v: &ChartView, zoomab
 
 /// The overlay the pointer draws in, last so it is on top.
 const OVERLAY: &str = r#"<g class="reef-perf-overlay"></g>"#;
+
+/// The chart `r` of node `i`'s section, drawn as `v` says, with `overlay` drawn in its overlay:
+/// what the pointer over it shows. Empty when the node has no such chart.
+///
+/// # Arguments
+///
+/// * `g` - The plan
+/// * `i` - The node whose section it is in
+/// * `r` - Which chart
+/// * `v` - What the reader has done to it
+/// * `overlay` - SVG to draw over it, from [`Hover::overlay`]
+pub fn chart_with(g: &Graph, i: usize, r: &ChartRef, v: &ChartView, overlay: &str) -> String {
+    let mut svg = chart(g, i, r, v);
+    // the overlay is the chart's last group, so the pointer's marks draw over the rest
+    if !overlay.is_empty()
+        && let Some(at) = svg.rfind(OVERLAY)
+    {
+        svg.replace_range(at..at + OVERLAY.len(), &format!(r#"<g class="reef-perf-overlay">{overlay}</g>"#));
+    }
+    svg
+}
 
 /// The chart `r` of node `i`'s section, drawn as `v` says. Empty when the node has no such
 /// chart.
@@ -1107,7 +1218,7 @@ fn trends(g: &Graph, i: usize) -> Vec<Trend> {
     out
 }
 
-fn trend_section(s: &mut String, g: &Graph, i: usize, t: &Trend) {
+fn trend_section(s: &mut Parts, g: &Graph, t: &Trend) {
     let _ = write!(
         s,
         r#"<h4>{} across the members{} <span class="reef-note">{}</span></h4>"#,
@@ -1115,7 +1226,7 @@ fn trend_section(s: &mut String, g: &Graph, i: usize, t: &Trend) {
         unit_note(t.unit.as_deref()),
         if t.better == Better::Higher { "higher is better" } else { "lower is better" },
     );
-    s.push_str(&chart(g, i, &ChartRef::Trend(t.key.clone()), &ChartView::default()));
+    s.chart(ChartRef::Trend(t.key.clone()));
     s.push_str(r#"<div class="reef-perf-table"><table><thead><tr><th>Member</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>"#);
     for st in &t.steps {
         let n = g.node(st.node);
