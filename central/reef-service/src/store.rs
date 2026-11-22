@@ -42,9 +42,13 @@
 //!   its plan, a thread's first holding the thread's target and state, which a mark writes again
 //!   by version, and where its line went in later revisions, which a capture's follow writes
 //!   ([`follow`]).
+//! - **Every terminal loop in one partition** ([`loops`]): each a row under the pane it feeds,
+//!   so a pane keeps one loop, and every change to one is judged against them all under one
+//!   lock, so two loops never hold one node.
 
 mod comment;
 mod follow;
+mod loops;
 mod revision;
 mod work;
 
@@ -172,6 +176,8 @@ pub struct Store<B = ShoalBackend> {
     works: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Each project's comments' lock, held alone by their writes
     comments: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The loops' lock, held alone by their writes, since every loop shares one partition
+    loop_lock: tokio::sync::Mutex<()>,
 }
 
 impl Store<ShoalBackend> {
@@ -224,6 +230,7 @@ impl<B: Backend> Store<B> {
             queues: Mutex::new(HashMap::new()),
             works: Mutex::new(HashMap::new()),
             comments: Mutex::new(HashMap::new()),
+            loop_lock: tokio::sync::Mutex::new(()),
         }
     }
 

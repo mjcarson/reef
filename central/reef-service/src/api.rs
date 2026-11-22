@@ -41,6 +41,9 @@
 //! | `POST …/plans/{plan}/comments/{thread}/replies` | `reply` | [`Commented`]: 200, or 422 if no thread starts there |
 //! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there |
 //! | `POST …/plans/{plan}/comments/{thread}/resolution` | `resolve_thread` | [`Resolved`]: 200, 409 if stale, 422 if no thread starts there or the revision isn't stored |
+//! | `GET /api/v1/loops` | `loops` | every [`Loop`], by pane |
+//! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written, 409 if the pane's loop is busy or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or its plan's |
+//! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -70,11 +73,11 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, Commented, ErrorCode,
-    FileDiff, Listing, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, PageEdit,
-    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
-    ResolveThread, Resolved, Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread,
-    WRITE_BODY_MAX, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, Commented, EditLoop,
+    ErrorCode, FileDiff, Listing, Loop, LoopEdited, MarkThread, Marked, NewPlan, NewProject,
+    NewReply, NewThread, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
+    QueueEdit, QueueListing, Queued, ResolveThread, Resolved, Revision, Rewrite, StartWork,
+    Started, StoredNode, StoredPage, Thread, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -186,6 +189,8 @@ pub fn router<S: Serves>(serves: S) -> Router {
             paths::THREAD_RESOLUTION,
             axum::routing::post(resolve_thread::<S>),
         )
+        .route(paths::LOOPS, get(loops::<S>).post(edit_loop::<S>))
+        .route(paths::PROJECT_LOOPS, get(project_loops::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -1277,6 +1282,61 @@ async fn resolve_thread<S: Serves>(
         Resolved::NoThread { .. } | Resolved::NoRevision { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };
     Ok((status, Json(resolved)))
+}
+
+/// Lists every loop, by pane
+///
+/// # Arguments
+///
+/// * `serves` - The service
+#[instrument(name = "api::loops", skip_all, err(Debug))]
+async fn loops<S: Serves>(State(serves): State<S>) -> Result<Json<Vec<Loop>>, Failure> {
+    // every loop of every project, none before any starts
+    let loops = serves.service().loops().await?;
+    Ok(Json(loops))
+}
+
+/// Lists the loops feeding one project, by pane
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::project_loops", skip_all, err(Debug))]
+async fn project_loops<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<Loop>>, Failure> {
+    // refused if the project isn't registered
+    let loops = serves.service().project_loops(&segments.project).await?;
+    Ok(Json(loops))
+}
+
+/// Changes a pane's loop: 200 if written, 409 if the pane's loop is busy or another loop holds
+/// the node, 422 if the pane has no loop or the node isn't the loop's or its plan's
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `edit` - The pane, and the change to its loop
+#[instrument(name = "api::edit_loop", skip_all, err(Debug))]
+async fn edit_loop<S: Serves>(
+    State(serves): State<S>,
+    Body(edit): Body<EditLoop>,
+) -> Result<(StatusCode, Json<LoopEdited>), Failure> {
+    // one row written, under the loops' lock
+    let edited = serves.service().edit_loop(edit).await?;
+    let status = match edited {
+        LoopEdited::Started { .. }
+        | LoopEdited::Resumed { .. }
+        | LoopEdited::Edited { .. }
+        | LoopEdited::Stopped { .. } => StatusCode::OK,
+        LoopEdited::Busy { .. } | LoopEdited::Held { .. } => StatusCode::CONFLICT,
+        LoopEdited::NoLoop { .. } | LoopEdited::NotInLoop { .. } | LoopEdited::NotInPlan { .. } => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
+    };
+    Ok((status, Json(edited)))
 }
 
 /// The status a comment's outcome answers with: 200 if kept, else 422

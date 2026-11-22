@@ -21,8 +21,10 @@ add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|
 status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, `reef start` and
 `reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
 a node's changes in its worktree as a revision and resolves the comments its commits'
-`Reef-Resolves` trailers name, `reef comment resolve`, which resolves one by hand, and `reef
-import` and `reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
+`Reef-Resolves` trailers name, `reef comment resolve`, which resolves one by hand, `reef loop
+start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in, `reef hook
+session-start`, which hands it to each session that starts there, and `reef import` and `reef
+export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
 a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
 the address `[api] address` names and say so when nothing answers there.
 
@@ -147,6 +149,12 @@ It reads and writes through a `Store`, and checks every write against the whole 
   thread once, so a rebase never resolves one the user reopened. `reef comment resolve <n>`
   links a revision by hand (`Service::resolve_thread`), over the version it read. Each thread
   written is `thread-marked`.
+- **A terminal loop is kept by its pane** (`Service::edit_loop`): zellij's or tmux's pane, else
+  the Claude Code process, `CLAUDE_PID`, which every `/clear` keeps. A loop feeds a registered
+  project, or one listed plan of it, holds one node at a time, which no other loop may take,
+  and keeps the node whose end it acted on and whether it is paused. Each session that starts
+  in its pane takes it over, so a clear's new session keeps it. Each loop written is
+  `loop-changed`, to its project.
 
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
@@ -190,6 +198,9 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST …/plans/{plan}/comments/{n}/replies` `NewReply` | `Commented`: 200, or 422 if no thread starts at `n` |
 | `PUT …/plans/{plan}/comments/{n}/state` `MarkThread` | `Marked`: 200, 409 if stale, 422 if no thread starts at `n` |
 | `POST …/plans/{plan}/comments/{n}/resolution` `ResolveThread` | `Resolved`: 200, 409 if stale, 422 if no thread starts at `n` or the project has no such revision |
+| `GET /api/v1/loops` | every `Loop`, by pane |
+| `POST /api/v1/loops` `EditLoop` | `LoopEdited`: 200 if written, 409 if the pane's loop feeds another project or plan or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or in its plan |
+| `GET /api/v1/projects/{project}/loops` | every `Loop` feeding the project, by pane |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
@@ -272,7 +283,8 @@ reef import plan --plan central            # the plan, from its book
   needed none when C30 added `WorkRow`: its binary opened a data directory the one before it
   wrote, read the imported plan back, and kept work records beside it. C32's two tables and
   C34's `CommentRow` needed none either, nor did C37's resolutions, which a thread's row keeps
-  only once it has one, so a row kept before reads back with none.
+  only once it has one, so a row kept before reads back with none. C39's `LoopRow` moved the
+  schema's pin but needed none: its binary read back the nodes and comments C37's wrote.
 
 ## The app
 
@@ -375,6 +387,10 @@ is the twin's oracle.
   and state, and a mark writes it again by version; a reply is a row of its own. Where a line's
   thread was followed to sits on that row too, which a capture's follow writes by version, and
   so does each revision linked to it as one that answered it, which a resolve writes.
+- **Every loop is a row of one partition** (`Store::edit_loop`), under its pane's key, so a
+  pane keeps one loop. Every change reads them all under one lock and writes the one row, a
+  start `if_absent` and anything else by version, so two loops taking one node at once are
+  taken one at a time. A stop deletes the row by version.
 
 ## The schema
 
@@ -389,6 +405,7 @@ is the twin's oracle.
 | `RevisionRow` | (project, `plan/id`) | number, padded | a `version`, and the revision as JSON: its SHAs, conflicts and files without their hunks |
 | `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
 | `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target, trail, state and resolutions or a reply's thread |
+| `LoopRow` | the constant `"loops"` | the pane's key | a `version`, and the loop as JSON: its project, plan, session, node, the node it acted on, its state and when it started |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

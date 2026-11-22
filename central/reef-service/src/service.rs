@@ -35,6 +35,10 @@
 //!
 //! - **A node's work record comes from its checkout** ([`work`]). `reef start` and each capture
 //!   send what they read there, and the service keeps it, reading no checkout itself.
+//! - **Comments are threads on a node's work** ([`comments`]), each resolved by a mark, by hand
+//!   or by the change a commit's trailer names.
+//! - **A terminal loop is kept by its pane** ([`loops`]): the project it feeds, the node it
+//!   holds, which no other loop may take, and whether it is paused.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
@@ -66,6 +70,7 @@ use crate::store::{
 };
 
 mod comments;
+mod loops;
 mod work;
 
 /// The process's one service over shoal, opened on first use

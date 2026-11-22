@@ -25,6 +25,11 @@
 //! reef [--conf PATH] queue move <ID> (--top | --bottom | --before ID | --after ID) [--project NAME] [--plan NAME]
 //! reef [--conf PATH] queue rm <ID>... [--project NAME] [--plan NAME]
 //! reef [--conf PATH] queue ls [--project NAME]
+//! reef [--conf PATH] loop start [--plan NAME] [--pane KEY] [--session ID] [--project NAME]
+//! reef [--conf PATH] loop pause [--pane KEY]
+//! reef [--conf PATH] loop stop [--pane KEY]
+//! reef [--conf PATH] loop ls [--project NAME]
+//! reef [--conf PATH] hook session-start [--pane KEY]
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
@@ -36,10 +41,11 @@
 //! checkout they run in, which must be the project's repo or a linked worktree of it, and a
 //! capture's node must be worked there. `comment resolve` links the latest revision of the node
 //! the working directory's worktree is on, unless `--node` names one. `next` and the queue span
-//! the project's plans, and
-//! `--plan` narrows `next` to one. `import` picks the project the book is in, and lists the
-//! plan `--plan` names if it isn't listed. `export` picks the project the new book's directory
-//! is in.
+//! the project's plans, and `--plan` narrows `next` to one. `loop` works on the loop of the pane
+//! it runs in, zellij's or tmux's or else the Claude Code process that ran it, unless `--pane`
+//! names one, and a loop spans the project's plans unless `--plan` names one. `import` picks the
+//! project the book is in, and lists the plan `--plan` names if it isn't listed. `export` picks
+//! the project the new book's directory is in.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -54,6 +60,7 @@ use crate::comment;
 use crate::conf::Conf;
 use crate::export;
 use crate::import;
+use crate::loops;
 use crate::mcp::{self, Tools};
 use crate::node;
 use crate::page;
@@ -237,6 +244,15 @@ pub enum Command {
         #[command(flatten)]
         pick: PlanPick,
     },
+    /// Start, pause, stop and list the terminal loops that feed sessions their nodes
+    ///
+    /// A loop is kept by the pane its session runs in, which every `/clear` keeps, so run these
+    /// in the session's own pane, as `! reef loop start`, or name one with `--pane`.
+    #[command(subcommand)]
+    Loop(LoopCommand),
+    /// Claude Code's hooks, each handed its event's input on standard input
+    #[command(subcommand)]
+    Hook(HookCommand),
     /// Serve get, check, next, put, status and accept as MCP tools over standard input and
     /// output, for Claude Code
     ///
@@ -341,6 +357,54 @@ pub enum NodeCommand {
         /// The plan a node named is in, if not the project's only plan
         #[command(flatten)]
         pick: PlanPick,
+    },
+}
+
+/// What can be done with a pane's loop
+#[derive(Debug, Subcommand)]
+pub enum LoopCommand {
+    /// Start a loop in this pane, feeding its session the project's nodes, or set its paused
+    /// loop running again
+    Start {
+        /// The pane, as `reef loop ls` prints it, else this one
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+        /// The session feeding it, else the one this runs in, if Claude Code ran it
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+        /// The one plan to take nodes from, else every plan of the project
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Pause this pane's loop, so it stops once the node it is on is done
+    Pause {
+        /// The pane, as `reef loop ls` prints it, else this one
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+    },
+    /// Stop this pane's loop, letting go of the node it holds
+    Stop {
+        /// The pane, as `reef loop ls` prints it, else this one
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+    },
+    /// List the loops feeding the project: each pane, whether it runs, its plan, its node and
+    /// its session
+    Ls {
+        /// The project whose loops to list, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+}
+
+/// Claude Code's hooks
+#[derive(Debug, Subcommand)]
+pub enum HookCommand {
+    /// SessionStart: hand this pane's loop to the session that started, a clear's included
+    SessionStart {
+        /// The pane, else the one the session runs in
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
     },
 }
 
@@ -633,6 +697,40 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Export { dir, replace, pick } => {
             export::export(&client, cwd, &dir, &pick, replace, out).await
         }
+        Command::Loop(command) => {
+            // the pane named, else the one this process runs in, as its environment says
+            let var = |name: &str| std::env::var(name).ok();
+            match command {
+                LoopCommand::Start {
+                    pane,
+                    session,
+                    pick,
+                } => {
+                    let here = loops::Here::find(pane.as_deref(), var)?;
+                    loops::start(&client, cwd, &here, session.as_deref(), &pick, out).await
+                }
+                LoopCommand::Pause { pane } => {
+                    let here = loops::Here::find(pane.as_deref(), var)?;
+                    loops::pause(&client, &here, out).await
+                }
+                LoopCommand::Stop { pane } => {
+                    let here = loops::Here::find(pane.as_deref(), var)?;
+                    loops::stop(&client, &here, out).await
+                }
+                LoopCommand::Ls { pick } => {
+                    let here = reef_api::Pane::from_env(var);
+                    loops::ls(&client, cwd, here.as_ref(), &pick, out).await
+                }
+            }
+        }
+        Command::Hook(HookCommand::SessionStart { pane }) => {
+            // the session's pane, then the event Claude Code handed the hook
+            let var = |name: &str| std::env::var(name).ok();
+            let here = loops::Here::find(pane.as_deref(), var)?;
+            let mut input = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+            loops::session_start(&client, &input, &here.pane, out).await
+        }
         Command::Mcp { pick } => {
             // the protocol owns standard output, so nothing is printed to `out`
             let tools = Tools::new(client, cwd.to_path_buf(), pick);
@@ -872,8 +970,8 @@ pub(crate) fn columns<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, CommentCommand, NodeCommand, PageCommand, PlanCommand, ProjectCommand,
-        QueueCommand, columns,
+        Cli, Command, CommentCommand, HookCommand, LoopCommand, NodeCommand, PageCommand,
+        PlanCommand, ProjectCommand, QueueCommand, columns,
     };
     use clap::{CommandFactory, Parser};
     use reef_model::{Met, Status};
@@ -1100,6 +1198,53 @@ mod tests {
         assert!(matches!(named.command, Command::Work { id: Some(id), .. } if id == "C30"));
         let here = Cli::try_parse_from(["reef", "work", "--project", "reef"]).unwrap();
         assert!(matches!(here.command, Command::Work { id: None, .. }));
+    }
+
+    /// A loop command takes a pane or none, a start its plan and session, and a hook its event
+    #[test]
+    fn loop_commands_take_a_pane() {
+        // a start in a pane named, of one plan, fed by a session named
+        let line = [
+            "reef",
+            "loop",
+            "start",
+            "--pane",
+            "claude:7",
+            "--session",
+            "s1",
+            "--plan",
+            "central",
+        ];
+        match Cli::try_parse_from(line).unwrap().command {
+            Command::Loop(LoopCommand::Start {
+                pane,
+                session,
+                pick,
+            }) => {
+                assert_eq!(
+                    (pane.as_deref(), session.as_deref()),
+                    (Some("claude:7"), Some("s1"))
+                );
+                assert_eq!(pick.plan.as_deref(), Some("central"));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // pause and stop take a pane or none, and nothing else
+        let pause = Cli::try_parse_from(["reef", "loop", "pause"]).unwrap();
+        assert!(matches!(
+            pause.command,
+            Command::Loop(LoopCommand::Pause { pane: None })
+        ));
+        assert!(Cli::try_parse_from(["reef", "loop", "stop", "--plan", "x"]).is_err());
+        // ls lists a project's loops, so it takes no plan
+        assert!(Cli::try_parse_from(["reef", "loop", "ls", "--project", "reef"]).is_ok());
+        assert!(Cli::try_parse_from(["reef", "loop", "ls", "--plan", "central"]).is_err());
+        // and the SessionStart hook takes a pane or none
+        let hook = Cli::try_parse_from(["reef", "hook", "session-start"]).unwrap();
+        assert!(matches!(
+            hook.command,
+            Command::Hook(HookCommand::SessionStart { pane: None })
+        ));
     }
 
     /// A resolve takes its thread's number, and the node and revision that answered it or none

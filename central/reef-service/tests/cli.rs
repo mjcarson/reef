@@ -2987,3 +2987,139 @@ async fn trailers_and_resolve_say_what_they_cant_resolve() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+/// Has a pane's loop take a node through the JSON API, as next_task will, and hands back what
+/// came of it
+///
+/// # Arguments
+///
+/// * `cx` - The served twin
+/// * `pane` - The pane's key
+/// * `id` - The node's id in `cli/docs`
+async fn hold_in(cx: &Cx, pane: &str, id: &str) -> anyhow::Result<reef_api::LoopEdited> {
+    // a hold of the node, sent as the CLI's client sends one
+    let edit = reef_api::EditLoop {
+        pane: pane.parse()?,
+        edit: reef_api::LoopEdit::Hold {
+            node: Some(PlanName::new("cli", "docs")?.node(id)?),
+        },
+    };
+    let (_, edited): (_, reef_api::LoopEdited) =
+        cx.ax.client.post(reef_api::paths::LOOPS, &edit).await?;
+    Ok(edited)
+}
+
+/// A pane's loop is started, resumed, listed, handed to a clear's new session by the
+/// SessionStart hook with its node kept, paused and stopped; a second pane can't take its node,
+/// and every command says what it can't do
+#[tokio::test]
+async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
+    let cx = Cx::new("loop-pane").await?;
+    let repo = cli_project(&cx, &["A", "B"]).await?;
+    // no loop yet
+    let none = cx.reef(&repo, &["loop", "ls"]).await?;
+    assert_eq!(
+        none,
+        "no loop feeds `cli`: `reef loop start` starts one in this pane\n"
+    );
+    // started in a pane, fed by the session that ran it, then started again, running already
+    let pane = "claude:4242";
+    let start = ["loop", "start", "--pane", pane, "--session", "s1"];
+    let out = cx.reef(&repo, &start).await?;
+    assert_eq!(
+        out,
+        "started a loop in Claude Code process 4242, feeding it every plan of `cli`\n"
+    );
+    let again = cx.reef(&repo, &["loop", "start", "--pane", pane]).await?;
+    assert_eq!(
+        again,
+        "the loop in Claude Code process 4242 is running, feeding it every plan of `cli`\n"
+    );
+    // a start of one plan where it feeds every plan is busy
+    let (_, busy) = cx
+        .failing(&repo, &["loop", "start", "--pane", pane, "--plan", "docs"])
+        .await?;
+    assert!(
+        busy.contains("has a loop already, feeding it every plan of `cli`"),
+        "{busy}"
+    );
+    // it takes A, as next_task will, and lists it
+    let held = hold_in(&cx, pane, "A").await?;
+    assert!(
+        matches!(held, reef_api::LoopEdited::Edited { .. }),
+        "{held:?}"
+    );
+    let listed = cx.reef(&repo, &["loop", "ls"]).await?;
+    assert_eq!(
+        listed,
+        "claude:4242  running, feeding every plan of `cli`, on `cli/docs/A`, session s1\n"
+    );
+    // a clear starts a new session in the pane, and the hook hands it the loop, printing nothing
+    let conf = reef::Conf::load(Some(&cx.conf))?;
+    let client = reef::Client::new(&conf)?;
+    let cleared = r#"{"session_id":"s2","source":"clear","hook_event_name":"SessionStart"}"#;
+    let mut printed = Vec::new();
+    reef::loops::session_start(&client, cleared, &pane.parse()?, &mut printed).await?;
+    assert!(printed.is_empty());
+    let listed = cx.reef(&repo, &["loop", "ls"]).await?;
+    assert_eq!(
+        listed,
+        "claude:4242  running, feeding every plan of `cli`, on `cli/docs/A`, session s2\n"
+    );
+    // a second pane's loop can't take A, and takes B
+    let other = "claude:5151";
+    cx.reef(&repo, &["loop", "start", "--pane", other, "--plan", "docs"])
+        .await?;
+    let refused = hold_in(&cx, other, "A").await?;
+    assert!(
+        matches!(&refused, reef_api::LoopEdited::Held { by, .. } if by.pane.to_string() == pane),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        hold_in(&cx, other, "B").await?,
+        reef_api::LoopEdited::Edited { .. }
+    ));
+    // paused, the first stops once A is done, and starting it again runs it
+    let paused = cx.reef(&repo, &["loop", "pause", "--pane", pane]).await?;
+    assert_eq!(
+        paused,
+        "paused the loop in Claude Code process 4242: it stops once `cli/docs/A` is done\n"
+    );
+    let listed = cx.reef(&repo, &["loop", "ls"]).await?;
+    assert!(
+        listed.contains("claude:4242  paused, feeding every plan of `cli`, on `cli/docs/A`"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("claude:5151  running, feeding `cli/docs`, on `cli/docs/B`"),
+        "{listed}"
+    );
+    // stopped, it lets go of A, which the second can then take
+    let stopped = cx.reef(&repo, &["loop", "stop", "--pane", pane]).await?;
+    assert_eq!(
+        stopped,
+        "stopped the loop in Claude Code process 4242, which fed it every plan of `cli`, \
+         letting go of `cli/docs/A`\n"
+    );
+    assert!(matches!(
+        hold_in(&cx, other, "A").await?,
+        reef_api::LoopEdited::Edited { .. }
+    ));
+    // a pane with no loop says so, and the hook in one leaves it be
+    let (_, gone) = cx
+        .failing(&repo, &["loop", "pause", "--pane", pane])
+        .await?;
+    assert!(
+        gone.contains("no loop runs in Claude Code process 4242: `reef loop start` starts one"),
+        "{gone}"
+    );
+    let mut printed = Vec::new();
+    reef::loops::session_start(&client, cleared, &pane.parse()?, &mut printed).await?;
+    assert!(printed.is_empty());
+    // and a pane's key that names none says what one is
+    let (_, bad) = cx
+        .failing(&repo, &["loop", "stop", "--pane", "screen:1"])
+        .await?;
+    assert!(bad.contains("`screen:1` is no pane"), "{bad}");
+    Ok(())
+}

@@ -9,8 +9,8 @@ use reef_model::PlanName;
 use std::future::Future;
 
 use crate::schema::{
-    CommentRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
-    RevisionRow, WorkRow,
+    CommentRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow,
+    RevisionFileRow, RevisionRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -410,4 +410,33 @@ pub trait Backend: Send + Sync {
         row: CommentRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads every loop row, in pane order, or the one of a pane
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The one pane's key, or `None` for every loop
+    fn loops(
+        &self,
+        pane: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<LoopRow>>> + Send;
+
+    /// Writes one loop row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_loop(
+        &self,
+        row: LoopRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Deletes one loop row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    fn delete_loop(&self, row: &LoopRow) -> impl Future<Output = anyhow::Result<Written>> + Send;
 }

@@ -24,6 +24,9 @@
 //!   linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
+//! - **The loop** ([`loops`]): the terminal loop of the pane a session runs in, started,
+//!   paused, stopped and listed, and handed to each session that starts in its pane by the
+//!   SessionStart hook.
 //! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
 //!   plan as one revision, each inline member a node of its own, each page the plan's own, and
 //!   each link leading where it did.
@@ -49,6 +52,7 @@ pub mod conf;
 pub mod export;
 pub mod git;
 pub mod import;
+pub mod loops;
 pub mod mcp;
 pub mod node;
 pub mod page;

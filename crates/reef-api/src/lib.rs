@@ -21,6 +21,8 @@
 //! - **Comments** ([`comment`]): threads on a line of a node's revision or on the node as a
 //!   whole, each open or resolved, where a line's thread followed it to in later revisions, the
 //!   changes that resolved it, and what came of a comment, a mark or a resolve.
+//! - **Loops** ([`loops`]): the terminal loop's state: the pane a session feeds a project in,
+//!   the node it holds, the node whose end it acted on, and whether it is paused.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -33,6 +35,7 @@ pub mod change;
 pub mod comment;
 pub mod config;
 pub mod error;
+pub mod loops;
 pub mod node;
 pub mod page;
 pub mod paths;
@@ -48,6 +51,7 @@ pub use comment::{
     Thread, ThreadState, TrailerOutcome, TrailerRead,
 };
 pub use error::{ApiError, ErrorCode};
+pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
     StalePut, StoredNode, lift, puts_for, records,

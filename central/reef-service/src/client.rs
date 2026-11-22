@@ -13,11 +13,12 @@ use tracing::instrument;
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    CommentRow, CommentRowFilter, CommentRowGet, NodeKey, NodeRow, NodeRowDelete, NodeRowFilter,
-    NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter, PageRowGet, PlanRow,
-    PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete,
-    QueueRowFilter, QueueRowGet, ReefClient, ReefQueryKinds, RevisionFileRow, RevisionFileRowGet,
-    RevisionRow, RevisionRowFilter, RevisionRowGet, WorkRow, WorkRowFilter, WorkRowGet,
+    CommentRow, CommentRowFilter, CommentRowGet, LOOPS, LoopRow, LoopRowDelete, LoopRowFilter,
+    LoopRowGet, NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey,
+    PageRow, PageRowDelete, PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet,
+    PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter,
+    QueueRowGet, ReefClient, ReefQueryKinds, RevisionFileRow, RevisionFileRowGet, RevisionRow,
+    RevisionRowFilter, RevisionRowGet, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -778,6 +779,58 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Reads every loop row, in pane order, or the one of a pane
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The one pane's key, or `None` for every loop
+    #[instrument(name = "ShoalBackend::loops", skip_all, err(Debug))]
+    async fn loops(&self, pane: Option<&str>) -> anyhow::Result<Vec<LoopRow>> {
+        // every loop sits in the one listing partition
+        let mut get = LoopRowGet::new(vec![LOOPS.to_string()]);
+        if let Some(pane) = pane {
+            get = get.sort_keys(vec![pane.to_string()]);
+        }
+        self.read::<_, LoopRow>(get).await
+    }
+
+    /// Writes one loop row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_loop", skip_all, err(Debug))]
+    async fn write_loop(&self, row: LoopRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = LoopRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
+    }
+
+    /// Deletes one loop row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    #[instrument(name = "ShoalBackend::delete_loop", skip_all, err(Debug))]
+    async fn delete_loop(&self, row: &LoopRow) -> anyhow::Result<Written> {
+        // the row under its pane, only if no write moved it on since the read
+        let delete = LoopRowDelete::new(row.list.clone(), row.pane.clone());
+        let filter = LoopRowFilter {
+            version: Some(vec![row.version]),
+        };
+        written(self.client.send_one(delete.if_matches(filter)).await)
     }
 }
 

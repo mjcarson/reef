@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
-use crate::schema::PROJECTS;
 use crate::schema::{
-    CommentRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
-    RevisionRow, WorkRow,
+    CommentRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow,
+    RevisionFileRow, RevisionRow, WorkRow,
 };
+use crate::schema::{LOOPS, PROJECTS};
 
 /// A node's partition of revisions: its project and its `plan/id`
 type NodePartition = (String, String);
@@ -45,6 +45,8 @@ struct Tables {
     revision_files: BTreeMap<RevisionFilesKey, BTreeMap<String, RevisionFileRow>>,
     /// Each plan's comments, by padded number
     comments: BTreeMap<PlanPartition, BTreeMap<String, CommentRow>>,
+    /// Every loop, by the partition it is kept in and then by pane
+    loops: BTreeMap<String, BTreeMap<String, LoopRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -786,6 +788,68 @@ impl Backend for MemoryBackend {
             return Ok(Written::Refused(refusal));
         }
         partition.insert(row.number.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Reads every loop row, in pane order, or the one of a pane
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The one pane's key, or `None` for every loop
+    async fn loops(&self, pane: Option<&str>) -> anyhow::Result<Vec<LoopRow>> {
+        let tables = self.tables();
+        // the listing partition, whole or the one row of it
+        let Some(partition) = tables.loops.get(LOOPS) else {
+            return Ok(Vec::new());
+        };
+        Ok(match pane {
+            Some(pane) => partition.get(pane).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes one loop row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_loop(&self, row: LoopRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its key hashes
+        let partition = tables.loops.entry(row.list.clone()).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.pane).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.pane.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Deletes one loop row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_loop(&self, row: &LoopRow) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let Some(partition) = tables.loops.get_mut(&row.list) else {
+            return Ok(Written::Refused(Refusal::Missing));
+        };
+        // judged as `if_matches` judges it: a row must be stored, and at the version read
+        match partition.get(&row.pane) {
+            None => return Ok(Written::Refused(Refusal::Missing)),
+            Some(stored) if stored.version != row.version => {
+                return Ok(Written::Refused(Refusal::Moved));
+            }
+            Some(_) => {}
+        }
+        partition.remove(&row.pane);
+        // and a partition left empty is gone, as it never existed
+        if partition.is_empty() {
+            tables.loops.remove(&row.list);
+        }
         Ok(Written::Applied)
     }
 }

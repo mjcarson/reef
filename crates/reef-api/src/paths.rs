@@ -129,6 +129,12 @@ pub const THREAD_STATE: &str = "/api/v1/projects/{project}/plans/{plan}/comments
 pub const THREAD_RESOLUTION: &str =
     "/api/v1/projects/{project}/plans/{plan}/comments/{thread}/resolution";
 
+/// Every loop, read by `GET`, and a change to a pane's loop sent by `POST`
+pub const LOOPS: &str = "/api/v1/loops";
+
+/// One project's loops
+pub const PROJECT_LOOPS: &str = "/api/v1/projects/{project}/loops";
+
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
 
@@ -480,6 +486,15 @@ pub fn thread_resolution(plan: &PlanName, thread: u32) -> String {
     format!("{}/resolution", self::thread(plan, thread))
 }
 
+/// The path of one project's loops
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn project_loops(project: &str) -> String {
+    format!("{PROJECTS}/{}/loops", encode(project))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -586,6 +601,8 @@ mod tests {
             super::thread_resolution(&plan, 7),
             fill(super::THREAD_RESOLUTION)
         );
+        // and a project's loops
+        assert_eq!(super::project_loops("reef"), fill(super::PROJECT_LOOPS));
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

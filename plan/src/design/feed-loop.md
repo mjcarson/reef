@@ -47,9 +47,23 @@ where they are today:
 - **The hook acts once per finished node.** It records the node whose end it acted on, and never
   acts on it again. `stop_hook_active` stays true across a whole chain, so it can't be the
   guard.
-- **One loop per pane.** A clear gives the session a new id, so a loop follows its pane, and
-  SessionStart(clear) hands it to the new session ([C39](../milestones/m8.md)). Two loops never
-  take the same node.
+- **One loop per pane** ([C39](../milestones/m8.md)). A clear gives the session a new id, so a loop
+  follows its pane. Each session that starts in a pane takes its loop, a clear's included,
+  through the SessionStart hook (`reef hook session-start`). Two loops never take the same
+  node.
+  - **The pane is the multiplexer's, else the Claude Code process.** A zellij pane is named by
+    `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`, and a tmux pane by `TMUX`'s socket and
+    `TMUX_PANE`. Without either, the pane is `CLAUDE_PID`, the Claude Code process, which a
+    clear keeps. Claude Code 2.1.327 passes it to its Bash commands and to its SessionStart and
+    Stop hooks, beside `CLAUDE_CODE_SESSION_ID`, the session's current id.
+  - **Run in the session's own pane.** `reef loop start`, typed as `! reef loop start`, finds
+    its pane and its session from Claude Code's variables, or `--pane` names one.
+  - **A loop keeps** its project, the one plan it narrows to if any, its session, the node it
+    holds and the node whose end it acted on. `reef loop pause` lets it finish its node, `reef
+    loop start` sets it running again, `reef loop stop` ends it and lets go of its node, and
+    `reef loop ls` lists the project's.
+  - **Kept by central reef**, all loops in one partition, so whether another loop holds a node
+    is one read under one lock.
 - **Sessions at once work in their own worktrees**, which reef makes, so two nodes' changes never
   mix on one branch ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)).
 - **Pausing stops the loop after the current node**, never in the middle of one.

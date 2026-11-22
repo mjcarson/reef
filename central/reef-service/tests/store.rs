@@ -103,4 +103,8 @@ suite!(
     captures_follow_their_nodes_threads,
     trailers_resolve_each_thread_once_a_change,
     resolving_by_hand_is_over_the_version_read,
+    a_pane_keeps_one_loop,
+    two_loops_never_hold_one_node,
+    a_clears_session_takes_its_panes_loop,
+    a_beaten_loop_write_is_an_error,
 );

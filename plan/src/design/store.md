@@ -237,6 +237,10 @@ Changes and Comments tabs show.
   version where it was.
 - **A line comment names a stored line.** A thread on a line is kept only if its revision lists
   the file and the file has a line of that number on that side, read from the file's row.
+- **A thread's resolutions on its first row** ([C37](../milestones/m7.md)). Each revision linked to it
+  as one that answered it, with the commit whose trailer named it, sits beside its state, so
+  a trailer or a hand's resolve writes the one row over the version it read. A row kept
+  before has none, and reads as such.
 - **A thread's trail on its first row** ([C36](../milestones/m7.md)). Where its line went in each later
   revision, and the revision that lost it, sit beside its target, which stays where the
   thread was started. A capture's follow reads the plan's comments and the node's revisions
@@ -246,3 +250,22 @@ Changes and Comments tabs show.
   comments read whole after every step.
 - **Every row checked against its full key on read**, its project and plan, so a hash collision
   is caught rather than served as another plan's comments.
+
+## Loops
+
+Each terminal loop is a row ([C39](../milestones/m8.md)): the pane its session runs in, the project or
+plan it feeds that session, the node it holds, the node whose end it acted on, and whether it
+is paused.
+
+### Design choices
+
+- **Every loop in one constant partition**, as projects are, sorted by its pane's key, such as
+  `zellij:reef:0`, `tmux:<socket>:%3` or `claude:<pid>`. A pane keeps one loop, and a node
+  another loop holds is found by reading the one partition.
+- **Every change under one lock.** A change reads every loop, judges it against them all, and
+  writes the one row, so two loops taking one node at once are taken one at a time, and the
+  second is refused, naming the first.
+- **A start `if_absent`, every other change by version, and a stop a delete by version**, so
+  a write from another process between the read and the write is caught as an error.
+- **Its record is one JSON field**, beside its version, so what a loop keeps can change
+  without changing the table.

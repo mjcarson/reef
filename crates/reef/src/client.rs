@@ -7,10 +7,10 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, ErrorCode, FileDiff, Listing,
-    NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
-    QueueEdit, QueueListing, Queued, ResolveThread, Resolved, Revision, Rewrite, StartWork,
-    Started, StoredNode, StoredPage, Thread, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, EditLoop, ErrorCode,
+    FileDiff, Listing, Loop, LoopEdited, NewPlan, NewProject, PageEdit, PageEdited, PageListing,
+    PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, ResolveThread, Resolved,
+    Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -423,6 +423,36 @@ impl Client {
         let path = paths::thread_resolution(plan, thread);
         let request = self.http.post(self.url(&path)).json(resolve);
         self.send(request, &path).await
+    }
+
+    /// Lists every loop, by pane
+    pub async fn loops(&self) -> anyhow::Result<Vec<Loop>> {
+        let path = paths::LOOPS;
+        self.send(self.http.get(self.url(path)), path).await
+    }
+
+    /// Lists the loops feeding one project, by pane
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn project_loops(&self, project: &str) -> anyhow::Result<Vec<Loop>> {
+        let path = paths::project_loops(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Changes a pane's loop
+    ///
+    /// A pane with no loop, a busy one, or a node held by another loop is an answer, not an
+    /// error.
+    ///
+    /// # Arguments
+    ///
+    /// * `edit` - The pane, and the change to its loop
+    pub async fn edit_loop(&self, edit: &EditLoop) -> anyhow::Result<LoopEdited> {
+        let path = paths::LOOPS;
+        let request = self.http.post(self.url(path)).json(edit);
+        self.send(request, path).await
     }
 
     /// The full URL of a route's path

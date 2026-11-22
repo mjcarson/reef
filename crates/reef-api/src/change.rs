@@ -10,6 +10,7 @@ use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
 
 use crate::comment::ThreadState;
+use crate::loops::Pane;
 use crate::project::Project;
 
 /// A node a batch of puts wrote, and the version it is now at
@@ -134,6 +135,13 @@ pub enum Change {
         /// Each thread it wrote, by number
         threads: Vec<FollowedThread>,
     },
+    /// A pane's loop was started, changed or stopped
+    LoopChanged {
+        /// The project the loop feeds
+        project: String,
+        /// The pane whose loop it is
+        pane: Pane,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -156,6 +164,7 @@ impl Change {
             Change::CommentAdded { .. } => "comment-added",
             Change::ThreadMarked { .. } => "thread-marked",
             Change::ThreadsFollowed { .. } => "threads-followed",
+            Change::LoopChanged { .. } => "loop-changed",
             Change::Missed { .. } => "missed",
         }
     }
@@ -168,7 +177,9 @@ impl Change {
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
-            Change::QueueChanged { project } => Some(project.as_str()),
+            Change::QueueChanged { project } | Change::LoopChanged { project, .. } => {
+                Some(project.as_str())
+            }
             Change::WorkRecorded { node, .. }
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
@@ -192,9 +203,10 @@ impl Change {
             | Change::CommentAdded { node, .. }
             | Change::ThreadMarked { node, .. }
             | Change::ThreadsFollowed { node, .. } => Some(&node.plan),
-            Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
-                None
-            }
+            Change::ProjectAdded { .. }
+            | Change::QueueChanged { .. }
+            | Change::LoopChanged { .. }
+            | Change::Missed { .. } => None,
         }
     }
 }

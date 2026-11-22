@@ -6,8 +6,8 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    CommentRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, RevisionFileRow,
-    RevisionRow, WorkRow,
+    CommentRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow,
+    RevisionFileRow, RevisionRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +52,8 @@ pub struct Faults {
     fail_revision_write: AtomicBool,
     /// Refuse the next write of a comment row as moved, as another writer having written would
     refuse_comment_write: AtomicBool,
+    /// Refuse the next write of a loop row as moved, as another writer having written would
+    refuse_loop_write: AtomicBool,
 }
 
 impl Faults {
@@ -116,6 +118,12 @@ impl Faults {
     /// the store's read and its write would be
     pub fn refuse_next_comment_write(&self) {
         self.refuse_comment_write.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuses the next write of a loop row as moved, as a write from another process between
+    /// the store's read and its write would be
+    pub fn refuse_next_loop_write(&self) {
+        self.refuse_loop_write.store(true, Ordering::SeqCst);
     }
 
     /// Lets `writes` writes of a queue row through, then fails the next before writing it
@@ -559,5 +567,37 @@ impl<B: Backend> Backend for Faulty<B> {
             return Ok(Written::Refused(Refusal::Moved));
         }
         self.inner.write_comment(row, expect).await
+    }
+
+    /// Reads every loop row, or one pane's
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The one pane's key, or `None` for every loop
+    async fn loops(&self, pane: Option<&str>) -> anyhow::Result<Vec<LoopRow>> {
+        self.inner.loops(pane).await
+    }
+
+    /// Writes one loop row, if its condition holds, refusing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_loop(&self, row: LoopRow, expect: Expect) -> anyhow::Result<Written> {
+        // a fault armed for this write refuses it, as another process having written would
+        if self.faults.refuse_loop_write.swap(false, Ordering::SeqCst) {
+            return Ok(Written::Refused(Refusal::Moved));
+        }
+        self.inner.write_loop(row, expect).await
+    }
+
+    /// Deletes one loop row, if it is still at the version read
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_loop(&self, row: &LoopRow) -> anyhow::Result<Written> {
+        self.inner.delete_loop(row).await
     }
 }

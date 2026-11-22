@@ -7,12 +7,12 @@
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
-    Commented, ErrorCode, FileDiff, FollowedThread, Listing, MarkThread, Marked, NewPlan,
-    NewProject, NewReply, NewThread, NodePut, NodeWrite, PageEdit, PageEdited, PageListing,
-    PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued,
-    Refusal, ResolveThread, Resolved, Resolves, ResolvingCommit, Revision, Rewrite, Side, StalePut,
-    StartWork, Started, StoredNode, StoredPage, Target, Thread, ThreadState, TrailerOutcome,
-    TrailerRead, WorkRecord, paths,
+    Commented, EditLoop, ErrorCode, FileDiff, FollowedThread, Listing, Loop, LoopEdit, LoopEdited,
+    LoopState, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, NodePut, NodeWrite,
+    PageEdit, PageEdited, PageListing, PageWrite, Pane, Place, PlanInfo, PlanWrite, Project,
+    PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, ResolveThread, Resolved, Resolves,
+    ResolvingCommit, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode, StoredPage,
+    Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -1477,6 +1477,150 @@ pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
         marked(2),
     ];
     for expected in expected {
+        let event = events.next().await?.expect("the stream sent the write");
+        assert_eq!(event.event, expected.kind());
+        let change: Change = serde_json::from_str(&event.data)?;
+        assert_eq!(change, expected);
+    }
+    Ok(())
+}
+
+/// Each loop route answers with its status: a start, a hold, a hand to a session and a stop are
+/// 200, a busy pane and a node another loop holds are 409, a pane with no loop and a node not in
+/// its plan are 422, an unregistered project or an unlisted plan is 404, and each loop written
+/// is told to its project's followers
+///
+/// # Arguments
+///
+/// * `ax` - The served service and a client of it
+pub async fn loop_routes_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // C39 in the plan, the project's changes followed, and no loop yet
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C39", &[], 0), None))
+        .await?;
+    let response = ax.client.open(&paths::changes(Some("reef"), None)).await?;
+    let mut events = Events::new(response);
+    let (status, loops): (_, Vec<Loop>) = ax.client.get(paths::LOOPS).await?;
+    assert_eq!((status, loops), (StatusCode::OK, Vec::new()));
+    // an edit of a pane's loop
+    let edit = |pid, edit| EditLoop {
+        pane: Pane::Claude { pid },
+        edit,
+    };
+    let start = |project: &str, plan: Option<&str>| LoopEdit::Start {
+        project: project.to_string(),
+        plan: plan.map(str::to_string),
+        session: Some("s1".to_string()),
+    };
+    // started in a pane, 200, then busy for another plan, 409
+    let (status, started): (_, LoopEdited) = ax
+        .client
+        .post(paths::LOOPS, &edit(1, start("reef", Some("central"))))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(matches!(started, LoopEdited::Started { .. }), "{started:?}");
+    let (status, busy): (_, LoopEdited) = ax
+        .client
+        .post(paths::LOOPS, &edit(1, start("reef", None)))
+        .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(matches!(busy, LoopEdited::Busy { .. }), "{busy:?}");
+    // a project not registered, or a plan it doesn't list, is not found
+    for (project, plan, code) in [
+        ("nope", None, ErrorCode::NotRegistered),
+        ("reef", Some("unlisted"), ErrorCode::NotListed),
+    ] {
+        let (status, error): (_, ApiError) = ax
+            .client
+            .post(paths::LOOPS, &edit(2, start(project, plan)))
+            .await?;
+        assert_eq!((status, error.code), (StatusCode::NOT_FOUND, code));
+    }
+    // C39 held by the first pane, 200, then refused to a second, 409, naming the first
+    let node = ax.plan.node("C39")?;
+    let hold = |node: &reef_model::NodeName| LoopEdit::Hold {
+        node: Some(node.clone()),
+    };
+    let (status, held): (_, LoopEdited) =
+        ax.client.post(paths::LOOPS, &edit(1, hold(&node))).await?;
+    assert_eq!(status, StatusCode::OK);
+    let LoopEdited::Edited { r#loop: holding } = held else {
+        anyhow::bail!("the hold wasn't written: {held:?}");
+    };
+    assert_eq!(holding.node.as_ref(), Some(&node));
+    let (status, _): (_, LoopEdited) = ax
+        .client
+        .post(paths::LOOPS, &edit(2, start("reef", None)))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused): (_, LoopEdited) =
+        ax.client.post(paths::LOOPS, &edit(2, hold(&node))).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        refused,
+        LoopEdited::Held {
+            node: node.clone(),
+            by: holding.clone()
+        }
+    );
+    // a node its plan lacks, or a pane with no loop, is 422
+    let stray = ax.plan.node("C99")?;
+    let (status, refused): (_, LoopEdited) =
+        ax.client.post(paths::LOOPS, &edit(2, hold(&stray))).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused, LoopEdited::NotInPlan { node: stray });
+    let (status, refused): (_, LoopEdited) = ax
+        .client
+        .post(paths::LOOPS, &edit(3, LoopEdit::Pause))
+        .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        refused,
+        LoopEdited::NoLoop {
+            pane: Pane::Claude { pid: 3 }
+        }
+    );
+    // the first handed to a clear's new session keeps its node, 200
+    let session = LoopEdit::Session {
+        session: "s2".to_string(),
+    };
+    let (status, handed): (_, LoopEdited) = ax.client.post(paths::LOOPS, &edit(1, session)).await?;
+    assert_eq!(status, StatusCode::OK);
+    let LoopEdited::Edited { r#loop: handed } = handed else {
+        anyhow::bail!("the session wasn't handed the loop: {handed:?}");
+    };
+    assert_eq!(handed.session.as_deref(), Some("s2"));
+    assert_eq!(handed.node.as_ref(), Some(&node));
+    assert_eq!(handed.state, LoopState::Running);
+    // the project's loops are both, by pane, and an unregistered project's are not found
+    let (status, loops): (_, Vec<Loop>) = ax.client.get(&paths::project_loops("reef")).await?;
+    assert_eq!(status, StatusCode::OK);
+    let panes: Vec<String> = loops
+        .iter()
+        .map(|feeding| feeding.pane.to_string())
+        .collect();
+    assert_eq!(panes, ["claude:1", "claude:2"]);
+    let (status, error): (_, ApiError) = ax.client.get(&paths::project_loops("nope")).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
+    );
+    // the second stopped, 200, as it was
+    let (status, stopped): (_, LoopEdited) = ax
+        .client
+        .post(paths::LOOPS, &edit(2, LoopEdit::Stop))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(matches!(stopped, LoopEdited::Stopped { .. }), "{stopped:?}");
+    // and the project's followers heard of each loop written, and of nothing refused
+    let changed = |pid| Change::LoopChanged {
+        project: "reef".to_string(),
+        pane: Pane::Claude { pid },
+    };
+    for expected in [changed(1), changed(1), changed(2), changed(1), changed(2)] {
         let event = events.next().await?.expect("the stream sent the write");
         assert_eq!(event.event, expected.kind());
         let change: Change = serde_json::from_str(&event.data)?;

@@ -6,10 +6,12 @@ use std::time::Duration;
 
 use super::{Fx, Reopen, git, ids, node};
 
-// the queue's, the pages', the work records' and the comments' cases, run by the same suite, which the other suites sharing
-// `common` don't use
+// the queue's, the pages', the work records', the comments' and the loops' cases, run by the
+// same suite, which the other suites sharing `common` don't use
 #[allow(unused_imports)]
 pub use super::comment_cases::*;
+#[allow(unused_imports)]
+pub use super::loop_cases::*;
 #[allow(unused_imports)]
 pub use super::page_cases::*;
 #[allow(unused_imports)]
