@@ -50,8 +50,8 @@ where they are today:
 - **One loop per pane.** A clear gives the session a new id, so a loop follows its pane, and
   SessionStart(clear) hands it to the new session ([C39](../milestones/m8.md)). Two loops never
   take the same node.
-- **Sessions at once work in their own worktrees**, so two nodes' changes never mix on one branch
-  ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)).
+- **Sessions at once work in their own worktrees**, which reef makes, so two nodes' changes never
+  mix on one branch ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)).
 - **Pausing stops the loop after the current node**, never in the middle of one.
 
 ### What X4 found

@@ -1,0 +1,27 @@
+# X3's scratch crate: capturing one node's changes from its local checkout, while several nodes
+# are worked on at once, through amend, rebase and squash.
+# It is a workspace of its own, like the other spikes.
+[workspace]
+
+[package]
+name = "x3-capture"
+description = "X3's spike: picking out one node's changes from a local checkout, and capturing them"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# the same diff read through gix, to weigh against git's CLI
+gix = { version = "0.90", default-features = false, features = ["blob-diff", "sha1", "max-performance"] }
+# the stub reef MCP server whose status tool marks a node done
+rmcp = { version = "3.11", features = ["server", "transport-io", "macros"] }
+schemars = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# the scenarios' scratch repos, which `matrix` builds as the tests do
+tempfile = "3"

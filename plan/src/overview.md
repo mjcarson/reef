@@ -126,15 +126,64 @@ nodes:
     metric: plan-load-ms
 - id: X3
   title: X3 Capturing a node's changes
+  status: done
   docs:
   - design/code-and-comments.md#capturing-a-nodes-changes
   description:
     why: Commits are squashed regularly, so git can't hold a node's changes, and nobody knows how reef picks out one node's changes while several are worked on at once.
-    what: 'The capture rule is chosen: a worktree per node or trailers, the base a node''s diff starts from, which hook captures it, and whether reef reads git through its CLI or gix.'
+    what: A node's diff runs from its start, carried over what its base branch brought in, to its worktree. Nodes at once get worktrees, and Stop seals the draft git's hooks keep.
+    details: Tried in `spikes/x3-capture`. Six rules for the base of a node's diff ran on 13 scratch repos with no remote, worked with real git. Real git hooks ran in two worktrees. Three headless Claude Code 2.1.330 sessions ran at once, one through `claude -w`. The captures were extracted from each local checkout by the CLI, never pushed or fetched. The findings are in the code-and-comments page's *What X3 found*.
+  performance:
+    labels:
+    - git CLI
+    - gix
+    metrics:
+    - name: Read X2's commit's diff, ms
+      key: git-diff-ms
+      unit: ms
+      before:
+      - 2.62
+      - 2.56
+      - 2.98
+      after:
+      - 1.05
+      - 1.03
+      - 1.15
+    - name: Capture a node, process start to stored, ms
+      key: node-capture-ms
+      unit: ms
+      before:
+      - 19.95
+      - 16.26
+      - 20.96
+      after:
+      - 18.0
+      - 17.63
+      - 18.74
+    - name: Snapshot reef's worktree as a tree, ms
+      key: snapshot-ms
+      unit: ms
+      before:
+      - 2.78
+      - 2.66
+      - 3.16
+    note: '`x3-capture bench`: ten timed rounds after three warm-up rounds, release build, on a Ryzen 9 9950X, in a clone of reef on tmpfs with no remote. A diff is X2''s commit `31155d8` (16 files, +5886 -20) from its parent. The CLI starts a process each round and gix opens the repo each round. A capture is `x3-capture capture` of X2''s commit and one edit, from its process start to a stored revision, over ten runs after three. The snapshot is the clone''s 336 files with two edits and one untracked file, and is git''s CLI with either reader.'
   acceptance:
   - feature: Two nodes worked at once in two worktrees each capture only their own changes
+    status: met
+    test: spikes/x3-capture/tests/capture.rs::parallel_worktrees_capture_their_own
   - feature: A stub hook captures a node when it is marked done, and a squash afterwards loses nothing
+    status: met
+    test: spikes/x3-capture/tests/capture.rs::squash_loses_nothing
   - feature: The rule is tried on a scratch repo through amend and rebase before a capture
+    status: met
+    test: spikes/x3-capture/tests/rules.rs::the_matrix_holds
+  - feature: A capture reads only the local checkout, with nothing pushed, fetched or read from a remote
+    status: met
+    test: spikes/x3-capture/tests/capture.rs::a_dead_remote_is_never_touched
+  - perf: A capture is timed through the CLI and through gix
+    status: met
+    metric: node-capture-ms
 - id: X4
   title: X4 The terminal feed loop, tried
   status: done
@@ -291,10 +340,11 @@ Through it:
    ([C55](design/app.md#the-canvas-in-dioxus)), from reef-draw as reef-view does, after first
    mounting the existing viewer ([X6](design/app.md#what-x6-found)). mdbook-reef and its viewer
    stay, as the static mode.
-7. **reef keeps each node's changes.** Git is read once, by a Claude Code hook when a node is
-   completed, and never used to store them, since commits are squashed regularly. Nodes worked
-   on at the same time each get their own worktree
-   ([X3](design/code-and-comments.md#capturing-a-nodes-changes)).
+7. **reef keeps each node's changes.** Commits are squashed regularly, so git is only read and
+   never used to store them. reef's CLI reads it in the node's local checkout, and nothing is
+   pushed or fetched. A node's diff runs from where it started, carried over what its base
+   branch brought in since. Nodes worked on at the same time each get their own worktree
+   ([X3](design/code-and-comments.md#what-x3-found)).
 8. **Shoal in-process, unless an external node is configured.** The server starts shoal itself
    by default, and connects to a separate shoal node when its config names one
    ([X1](design/architecture.md#shoal-in-the-build)).
