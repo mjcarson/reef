@@ -18,12 +18,14 @@
 //! reef [--conf PATH] queue rm <ID>... [--project NAME] [--plan NAME]
 //! reef [--conf PATH] queue ls [--project NAME]
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
+//! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
 //! only plan, unless `--plan` names one. `next` and the queue span the project's plans, and
-//! `--plan` narrows `next` to one.
+//! `--plan` narrows `next` to one. `import` picks the project the book is in, and lists the
+//! plan `--plan` names if it isn't listed.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -34,6 +36,7 @@ use std::path::{Path, PathBuf};
 
 use crate::client::Client;
 use crate::conf::Conf;
+use crate::import;
 use crate::mcp::{self, Tools};
 use crate::node;
 use crate::queue;
@@ -139,6 +142,24 @@ pub enum Command {
     /// Order the work to take first: the project's queue, which next follows
     #[command(subcommand)]
     Queue(QueueCommand),
+    /// Import a book's plan into a plan as one revision: each node of its files a node of the
+    /// plan, inline members and all, with its links leading from the repo's root
+    ///
+    /// The book is checked first, and one with any problem imports nothing. A plan named with
+    /// `--plan` is listed if it isn't. A plan that has nodes loses those the book doesn't have,
+    /// so it is replaced only with `--replace`.
+    Import {
+        /// The book's directory, which holds its `book.toml`
+        #[arg(value_name = "BOOK", default_value = ".")]
+        book: PathBuf,
+        /// Replace the plan's nodes, if it has any
+        #[arg(long)]
+        replace: bool,
+        /// The plan to import into, if not the project's only plan, and the project the book
+        /// is in, if not the one its directory belongs to
+        #[command(flatten)]
+        pick: PlanPick,
+    },
     /// Serve get, check, next, put, status and accept as MCP tools over standard input and
     /// output, for Claude Code
     ///
@@ -409,6 +430,11 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let project = picked(&client, cwd, &pick).await?;
             queue::ls(&client, &project.name, out).await
         }
+        Command::Import {
+            book,
+            replace,
+            pick,
+        } => import::import(&client, cwd, &book, &pick, replace, out).await,
         Command::Mcp { pick } => {
             // the protocol owns standard output, so nothing is printed to `out`
             let tools = Tools::new(client, cwd.to_path_buf(), pick);
@@ -583,8 +609,23 @@ pub(crate) async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::
 pub async fn picked_plan(client: &Client, cwd: &Path, pick: &PlanPick) -> anyhow::Result<PlanName> {
     // the plan is in the project named, else the working directory's
     let project = picked(client, cwd, &pick.project).await?;
+    plan_in(client, project, pick.plan.as_deref()).await
+}
+
+/// The plan named in a project, else the project's only plan
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `project` - The project the plan is in
+/// * `plan` - The plan named, if one was
+pub(crate) async fn plan_in(
+    client: &Client,
+    project: Project,
+    plan: Option<&str>,
+) -> anyhow::Result<PlanName> {
     // a plan named keeps the rule names share, and the service says if it isn't listed
-    if let Some(plan) = &pick.plan {
+    if let Some(plan) = plan {
         return Ok(PlanName::new(project.name, plan)?);
     }
     // else the project's only plan

@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 reef-model = { workspace = true, features = ["parse"] }
 serde.workspace = true
+# the viewer's payload as the JSON a page carries
+serde_json.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
-[dev-dependencies]
-serde_json.workspace = true

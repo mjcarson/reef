@@ -14,6 +14,9 @@
 //!   and say what is ready to start, the user's queue first, and what the rest waits on.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
+//! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
+//!   plan as one revision, each inline member a node of its own and each link leading from the
+//!   repo's root.
 //! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
@@ -26,6 +29,7 @@
 pub mod cli;
 pub mod client;
 pub mod conf;
+pub mod import;
 pub mod mcp;
 pub mod node;
 pub mod queue;

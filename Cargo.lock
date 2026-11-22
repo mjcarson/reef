@@ -866,6 +866,7 @@ dependencies = [
  "clap",
  "reef-api",
  "reef-model",
+ "reef-render",
  "reqwest",
  "rmcp",
  "schemars",

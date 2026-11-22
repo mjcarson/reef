@@ -11,6 +11,8 @@ repository.workspace = true
 reef-api = { path = "../reef-api" }
 # plan names, and the frontmatter `reef node put` reads and `reef node get` prints
 reef-model = { workspace = true, features = ["parse"] }
+# a book's node files read as mdbook-reef reads them, and the links in them moved for import
+reef-render.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

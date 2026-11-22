@@ -1,156 +1,14 @@
 //! Finding a book's nodes, checking them, and rendering them for the viewer.
 
 use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
-use reef_model::spec::parse_node_file;
-use reef_model::{Diagnostic, Graph, Layout, Node, Origin, Record, ViewSpec, nodes_from_records};
+use reef_model::{Layout, ViewSpec};
 use reef_render::paths;
-use reef_render::{DocSource, FsSource, ROOT, Renderer, Sections, is_reef, md_options};
-use std::collections::{HashMap, HashSet};
+use reef_render::{ROOT, is_reef, md_options};
 use std::ops::Range;
-use std::path::Path;
 
-/// `[preprocessor.reef]` in `book.toml`.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(default, rename_all = "kebab-case")]
-pub struct Config {
-    /// Directories under `src` to look for nodes in. Default: all of `src`.
-    pub roots: Vec<String>,
-    /// The doc sections a node's why, what, design choices and measurements are taken from.
-    #[serde(flatten)]
-    pub sections: Sections,
-}
-
-/// A book's plan: its nodes checked as one graph, with the problems found in them
-pub struct Plan {
-    /// Every node, checked and briefed
-    pub graph: Graph,
-    /// The problems found, each with where it was written
-    pub diags: Vec<Diagnostic>,
-    /// Renders the nodes against the book's docs
-    pub renderer: Renderer<Box<dyn DocSource>>,
-}
-
-/// Every markdown file under `dir`, relative to `src`, sorted.
-///
-/// # Arguments
-///
-/// * `src` - The book's `src` directory
-/// * `roots` - The directories under `src` to look in, or all of it when empty
-pub fn markdown_files(src: &Path, roots: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    let roots: Vec<String> = if roots.is_empty() { vec![String::new()] } else { roots.to_vec() };
-    for r in roots {
-        let mut stack = vec![src.join(&r)];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-            for e in entries.flatten() {
-                let p = e.path();
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') {
-                    continue;
-                }
-                if p.is_dir() {
-                    stack.push(p);
-                } else if name.ends_with(".md") && name != "SUMMARY.md"
-                    && let Ok(rel) = p.strip_prefix(src) {
-                        out.push(rel.to_string_lossy().replace('\\', "/"));
-                    }
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
-impl Plan {
-    /// Find and check every node under `src`, its docs read from the book's files.
-    ///
-    /// # Arguments
-    ///
-    /// * `src` - The book's `src` directory
-    /// * `config` - The book's `[preprocessor.reef]`
-    pub fn load(src: &Path, config: &Config) -> Plan {
-        Plan::load_with(src, config, Box::new(FsSource::new(src)))
-    }
-
-    /// Find and check every node under `src`, its docs read from `docs`.
-    ///
-    /// # Arguments
-    ///
-    /// * `src` - The book's `src` directory
-    /// * `config` - The book's `[preprocessor.reef]`
-    /// * `docs` - Where the docs the nodes link to are read from
-    pub fn load_with(src: &Path, config: &Config, docs: Box<dyn DocSource>) -> Plan {
-        let mut diags = Vec::new();
-        let mut records = Vec::new();
-        // each node file's frontmatter and the line it starts on, to place its inline nodes
-        let mut yamls: HashMap<String, (String, usize)> = HashMap::new();
-        // read every node file into a record, in the order the files sort in
-        for (order, rel) in markdown_files(src, &config.roots).into_iter().enumerate() {
-            let Ok(text) = std::fs::read_to_string(src.join(&rel)) else { continue };
-            match parse_node_file(&text) {
-                Ok(Some((spec, fm))) => {
-                    yamls.insert(rel.clone(), (fm.yaml.to_string(), fm.yaml_line));
-                    let origin = Origin::File { source: rel, line: 1 };
-                    records.push(Record { spec, body: fm.body.to_string(), order: order as u64, origin });
-                }
-                Ok(None) => {}
-                Err(e) => diags.push(Diagnostic { source: rel, line: e.line, message: e.message }),
-            }
-        }
-        // turn the records into nodes, and put each inline node at the line its id is on
-        let mut nodes = nodes_from_records(records);
-        for n in nodes.iter_mut().filter(|n| n.inline) {
-            if let Origin::File { source, line } = &mut n.origin
-                && let Some((yaml, yaml_line)) = yamls.get(source.as_str())
-            {
-                *line = line_of_id(yaml, &n.id).map_or(1, |l| l + yaml_line - 1);
-            }
-        }
-        // check the nodes as one graph
-        let (mut graph, gd) = Graph::build(nodes);
-        diags.extend(gd);
-        // check their doc links and fill in their brief forms from their docs
-        let renderer = Renderer::new(docs, config.sections.clone());
-        diags.extend(renderer.prepare(&mut graph));
-        Plan { graph, diags, renderer }
-    }
-
-    /// Every problem, one an indented line
-    pub fn errors(&self) -> String {
-        self.diags.iter().map(|d| format!("  {d}")).collect::<Vec<_>>().join("\n")
-    }
-
-    /// The viewer's data: every node, its body rendered, its links resolved. Links start with
-    /// [`ROOT`].
-    ///
-    /// # Arguments
-    ///
-    /// * `chapters` - The book's chapter files, which have pages of their own
-    pub fn payload_json(&self, chapters: &HashSet<String>) -> String {
-        // a node written in a chapter links to the chapter's page
-        let page_of = |n: &Node| {
-            n.origin.file().filter(|f| chapters.contains(*f)).map(|f| format!("{ROOT}{}", paths::html_of(f)))
-        };
-        serde_json::to_string(&self.renderer.payload(&self.graph, page_of)).expect("serializable")
-    }
-}
-
-/// The line (0-based within `yaml`, plus one) an inline node's `id:` is on.
-///
-/// # Arguments
-///
-/// * `yaml` - The file's frontmatter
-/// * `id` - The inline node's id
-fn line_of_id(yaml: &str, id: &str) -> Option<usize> {
-    yaml.lines().position(|l| {
-        let t = l.trim_start().trim_start_matches("- ").trim_start_matches('{').trim_start();
-        let Some(rest) = t.strip_prefix("id:") else { return false };
-        let v = rest.trim().split([',', '}']).next().unwrap_or("").trim().trim_matches(['"', '\'']);
-        v == id
-    }).map(|l| l + 1)
-}
+// the book's node files and the plan they make are read by reef-render, which `reef import`
+// reads a book through too
+pub use reef_render::book::{Config, Plan, markdown_files};
 
 /// A ```` ```reef ```` fence in a chapter.
 pub struct Fence {
@@ -274,6 +132,9 @@ pub fn data_script(payload_json: &str, prefix: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reef_render::Sections;
+    use std::collections::HashSet;
+    use std::path::Path;
 
     #[test]
     fn briefs_written_or_taken_from_docs() {
@@ -426,13 +287,6 @@ mod tests {
         let spec = f[0].spec.as_ref().unwrap();
         assert_eq!(spec.root.as_deref(), Some("g"));
         assert!(find_fences("```reef\nnope = 1\n```\n")[0].spec.is_err());
-    }
-
-    #[test]
-    fn inline_lines() {
-        let y = "id: g\nnodes:\n  - id: a\n  - { id: \"b\", title: x }\n";
-        assert_eq!(line_of_id(y, "a"), Some(3));
-        assert_eq!(line_of_id(y, "b"), Some(4));
     }
 
     #[test]

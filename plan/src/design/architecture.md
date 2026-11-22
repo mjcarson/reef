@@ -14,7 +14,7 @@ The crates, once this plan is done:
 |---|---|---|
 | `reef-model` | stable, native and wasm | nodes, the checked graph, views (unchanged) |
 | `reef-layout` | stable | the layout (unchanged) |
-| `reef-render` | stable | markdown rendering, doc links, why/what extraction over a `DocSource` ([C1](#a-model-any-source-can-feed)) |
+| `reef-render` | stable | markdown rendering, doc links, why/what extraction over a `DocSource` ([C1](#a-model-any-source-can-feed)); a book's node files read, and the links in a node moved to another file ([C26](../milestones/m6.md)) |
 | `reef-view` | stable, wasm | the viewer, plus a `mount` entry point ([C12](app.md#the-viewer-inside-the-app)) |
 | `mdbook-reef` | stable | the static mode, now over `reef-render`'s filesystem source |
 | `reef-api` | stable | the service's data types, and the JSON API's requests, answers, paths and changes ([C53](../milestones/m3.md)) |
@@ -207,3 +207,7 @@ app.
   CLI that started a nightly server from another workspace would own a process nobody stops.
 - **A library under a thin binary.** `reef::run` takes the command line, the working directory
   and where to print, so the service's tests drive the real commands against a served twin.
+- **Import is the CLI's** ([C26](../milestones/m6.md)). `reef import` reads and checks the book
+  where it is, moves each link to lead from the repo's root, and sends the service one
+  whole-plan write, so the service never reads a book. A plan that has nodes is replaced only
+  with `--replace`, since the write drops every node the book doesn't have.

@@ -8,7 +8,7 @@
 
 use reef_api::{
     AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PlanInfo,
-    Project, Puts, QueueEdit, QueueListing, Queued, StoredNode, paths,
+    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, Rewrite, StoredNode, paths,
 };
 use reef_model::{Diagnostic, Next, PlanName};
 use serde::de::DeserializeOwned;
@@ -164,6 +164,22 @@ impl Client {
     pub async fn batch(&self, plan: &PlanName, batch: &Puts) -> anyhow::Result<Checked> {
         let path = paths::nodes(plan);
         let request = self.http.post(self.url(&path)).json(batch);
+        self.send(request, &path).await
+    }
+
+    /// Writes a whole plan as a new revision, made current at once, unless it would add a
+    /// problem to the plan
+    ///
+    /// Every node the plan had and the write leaves out is gone from the revision it makes. A
+    /// refused write is an answer, not an error, and writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `write` - Every node of the plan, each a node of its own
+    pub async fn write_plan(&self, plan: &PlanName, write: &PlanWrite) -> anyhow::Result<Rewrite> {
+        let path = paths::revision(plan);
+        let request = self.http.put(self.url(&path)).json(write);
         self.send(request, &path).await
     }
 

@@ -6,9 +6,15 @@
 //! repo's working tree, which no link may leave, and [`MemSource`] holds docs in memory, as a
 //! server holding a plan's pages would. [`render_page`] renders a doc as the page mdbook would
 //! write for it, for a server with no book to serve.
+//!
+//! A book's own files are read by [`book`]: its node files, and the plan they make, checked
+//! and briefed, as mdbook-reef draws it and `reef import` lifts it into a central plan. The
+//! links written in a node are moved with it by [`links`], so they lead where they did.
 
+pub mod book;
 pub mod docs;
 pub mod extract;
+pub mod links;
 pub mod markdown;
 pub mod paths;
 pub mod source;

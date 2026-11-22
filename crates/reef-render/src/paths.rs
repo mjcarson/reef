@@ -142,6 +142,52 @@ pub fn relative(from_dir: &str, to: &str) -> String {
     out.join("/")
 }
 
+/// A link written in `from` as it would be written in a file of the directory `to_dir`, so it
+/// leads to the same file and heading from there. Both are relative to the same root.
+///
+/// A URL, a mail link or an absolute path leads to the same place from anywhere, and so is
+/// `None`: left as written. So is a link that names no file, such as `#x` written from the
+/// root itself, since there is no file for it to name from elsewhere.
+///
+/// # Arguments
+///
+/// * `from` - The file the link is written in
+/// * `to_dir` - The directory of the file it is to be written in
+/// * `link` - The link as written
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::paths::moved;
+///
+/// // a link in a book's file, as a link from its repo's root
+/// let rooted = moved("plan/src/m/a.md", "", "../d/x.md#h");
+/// assert_eq!(rooted.as_deref(), Some("plan/src/d/x.md#h"));
+/// // and from the root back into an exported book's `src`
+/// let back = moved("", "out/src", "plan/src/d/x.md#h");
+/// assert_eq!(back.as_deref(), Some("../../plan/src/d/x.md#h"));
+/// // a URL is left as written
+/// assert_eq!(moved("plan/src/a.md", "", "https://x.org"), None);
+/// ```
+pub fn moved(from: &str, to_dir: &str, link: &str) -> Option<String> {
+    // only a link to a file of the root's leads elsewhere once it is moved
+    let Target::Internal { path, anchor } = resolve(from, link) else { return None };
+    // a link from the root to the root itself names no file
+    if path.is_empty() {
+        return None;
+    }
+    // the path from the new file's directory, which is `.` when it is that directory
+    let rel = match relative(to_dir, &path) {
+        rel if rel.is_empty() => ".".to_string(),
+        rel => rel,
+    };
+    // with the heading it named, if it named one
+    Some(match anchor {
+        Some(anchor) => format!("{rel}#{anchor}"),
+        None => rel,
+    })
+}
+
 /// The id mdbook gives a heading (`id_from_content` in mdbook-html): lowercase, alphanumerics,
 /// `_` and `-` kept, each whitespace character a `-`, everything else dropped.
 ///
@@ -187,6 +233,32 @@ pub fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link moved to the root and back leads where it did, whatever form it was written in
+    #[test]
+    fn moved_links_lead_where_they_did() {
+        // a heading of the file itself, a sibling, a climb out of `src` and a directory
+        let file = "book/src/plan/a.md";
+        assert_eq!(moved(file, "", "#x").as_deref(), Some("book/src/plan/a.md#x"));
+        assert_eq!(moved(file, "", "b.md").as_deref(), Some("book/src/plan/b.md"));
+        assert_eq!(moved(file, "", "../../../README.md").as_deref(), Some("README.md"));
+        assert_eq!(moved(file, "", "./").as_deref(), Some("book/src/plan"));
+        // a link above the root keeps its climb, for the repo's source to refuse
+        assert_eq!(moved("a.md", "", "../x.md").as_deref(), Some("../x.md"));
+        // what leads the same place from anywhere is left as written
+        for link in ["https://x.org/a.md", "mailto:a@b.org", "/abs.md", "data:x"] {
+            assert_eq!(moved(file, "", link), None, "{link}");
+        }
+        // from the root, a heading of no file is left as written, and the directory itself is `.`
+        assert_eq!(moved("", "out/src", "#x"), None);
+        assert_eq!(moved("", "out/src", "out/src").as_deref(), Some("."));
+        // moved into another file and back to the root, each link is as it was rooted
+        for link in ["#x", "b.md#y", "../../../README.md", "../d/c.md", "./"] {
+            let rooted = moved(file, "", link).unwrap();
+            let exported = moved("", "out/src", &rooted).unwrap();
+            assert_eq!(moved("out/src/001-a.md", "", &exported).as_deref(), Some(rooted.as_str()), "{link}");
+        }
+    }
 
     #[test]
     fn resolves() {

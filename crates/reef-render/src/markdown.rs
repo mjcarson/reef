@@ -2,7 +2,7 @@
 //! mdbook gives them.
 
 use crate::paths::{self, Target};
-use pulldown_cmark::{CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
 use std::collections::HashSet;
 
 /// Where links in rendered node bodies start. Each page replaces it with its way back to the
@@ -168,10 +168,10 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
         }
         let ev = match ev {
             Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Link { link_type, dest_url: rebase(source, &dest_url), title, id })
+                Event::Start(Tag::Link { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
             }
             Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Image { link_type, dest_url: rebase(source, &dest_url), title, id })
+                Event::Start(Tag::Image { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
             }
             e => e.into_static(),
         };
@@ -185,11 +185,19 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
 /// A link written in `source`, made to start from [`ROOT`] if it names a file of the book, with a
 /// markdown file's name changed to the page mdbook writes for it
 ///
+/// An autolink is left as written: `<a@b.org>` is a mail address, whose `mailto:` the HTML
+/// writer adds, not a file beside `source`.
+///
 /// # Arguments
 ///
+/// * `link_type` - How the link was written
 /// * `source` - The path the link is written relative to
 /// * `dest` - The link as written
-fn rebase(source: &str, dest: &str) -> CowStr<'static> {
+fn rebase(link_type: LinkType, source: &str, dest: &str) -> CowStr<'static> {
+    // an autolink names a URL or a mail address, never a file of the book
+    if matches!(link_type, LinkType::Autolink | LinkType::Email) {
+        return CowStr::from(dest.to_string());
+    }
     match paths::resolve(source, dest) {
         Target::External(u) => CowStr::from(u),
         Target::Internal { path, anchor } => {
@@ -244,10 +252,10 @@ pub fn render_page(md: &str, source: &str) -> String {
             Event::Start(Tag::Heading { level, classes, attrs, .. }) => Event::Start(Tag::Heading { level, id: ids.next(), classes, attrs }),
             // and each link leads where it did from the doc
             Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Link { link_type, dest_url: rebase(source, &dest_url), title, id })
+                Event::Start(Tag::Link { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
             }
             Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Image { link_type, dest_url: rebase(source, &dest_url), title, id })
+                Event::Start(Tag::Image { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
             }
             e => e,
         };
@@ -281,6 +289,18 @@ mod tests {
         assert!(html.contains("href=\"reef-root:/b.html#x\""), "{html}");
         assert!(html.contains("https://w.org"));
         assert!(!html.contains("<h1>"), "repeated title dropped: {html}");
+    }
+
+    /// A mail autolink keeps its address, and a URL autolink its URL
+    #[test]
+    fn autolinks_left_as_written() {
+        // in a node's body
+        let html = render_body("Mail <a@b.org> or see <https://w.org>.\n", "plan/n.md", "T");
+        assert!(html.contains("href=\"mailto:a@b.org\""), "{html}");
+        assert!(html.contains("href=\"https://w.org\""), "{html}");
+        // and on a doc's page
+        let page = render_page("Mail <a@b.org>.\n", "docs/a.md");
+        assert!(page.contains("href=\"mailto:a@b.org\""), "{page}");
     }
 
     #[test]
