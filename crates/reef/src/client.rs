@@ -8,7 +8,7 @@
 
 use reef_api::{
     AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PlanInfo,
-    Project, Puts, StoredNode, paths,
+    Project, Puts, QueueEdit, QueueListing, Queued, StoredNode, paths,
 };
 use reef_model::{Diagnostic, Next, PlanName};
 use serde::de::DeserializeOwned;
@@ -177,7 +177,8 @@ impl Client {
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
-    /// Says what work in a plan is ready to start, in plan order, and what the rest waits on
+    /// Says what work in a plan is ready to start, its entries of the queue first, then in plan
+    /// order, and what the rest waits on
     ///
     /// # Arguments
     ///
@@ -185,6 +186,42 @@ impl Client {
     pub async fn next(&self, plan: &PlanName) -> anyhow::Result<Next> {
         let path = paths::next(plan);
         self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Says what work across a project's plans is ready to start, the queue's first, then each
+    /// plan's in plan order, and what the rest waits on
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn project_next(&self, project: &str) -> anyhow::Result<Next> {
+        let path = paths::project_next(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Lists a project's queue: each entry with its rank, and whether next takes it
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn queue(&self, project: &str) -> anyhow::Result<QueueListing> {
+        let path = paths::queue(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Edits a project's queue: puts a node in it, moves one, or takes one off
+    ///
+    /// A node that isn't queued, or isn't in its plan, is an answer, not an error, and changes
+    /// nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `edit` - The edit
+    pub async fn edit_queue(&self, project: &str, edit: &QueueEdit) -> anyhow::Result<Queued> {
+        let path = paths::queue(project);
+        let request = self.http.post(self.url(&path)).json(edit);
+        self.send(request, &path).await
     }
 
     /// The full URL of a route's path

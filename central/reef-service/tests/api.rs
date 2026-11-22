@@ -52,6 +52,7 @@ suite!(
     change_stream_tells_of_each_write,
     anchored_doc_link_opens_its_section,
     next_says_what_is_ready_and_what_waits,
+    queue_routes_answer_with_their_status,
 );
 
 /// The API listens on a loopback address, and refuses any other until users sign in

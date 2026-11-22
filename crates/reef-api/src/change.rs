@@ -52,6 +52,11 @@ pub enum Change {
         /// The revision readers now load
         revision: u64,
     },
+    /// A project's queue was edited: an entry added, moved or taken off
+    QueueChanged {
+        /// The project whose queue it is
+        project: String,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -67,6 +72,7 @@ impl Change {
             Change::PlanAdded { .. } => "plan-added",
             Change::NodesPut { .. } => "nodes-put",
             Change::PlanWritten { .. } => "plan-written",
+            Change::QueueChanged { .. } => "queue-changed",
             Change::Missed { .. } => "missed",
         }
     }
@@ -78,17 +84,22 @@ impl Change {
             Change::PlanAdded { plan }
             | Change::NodesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
+            Change::QueueChanged { project } => Some(project.as_str()),
             Change::Missed { .. } => None,
         }
     }
 
     /// The plan this change is to, or `None` for a project's or a gap in the stream
+    ///
+    /// A queue spans its project's plans, so its change is the project's.
     pub fn plan(&self) -> Option<&PlanName> {
         match self {
             Change::PlanAdded { plan }
             | Change::NodesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
-            Change::ProjectAdded { .. } | Change::Missed { .. } => None,
+            Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
+                None
+            }
         }
     }
 }
@@ -149,6 +160,9 @@ mod tests {
                 removed: Vec::new(),
             },
             Change::PlanWritten { plan, revision: 4 },
+            Change::QueueChanged {
+                project: "reef".to_string(),
+            },
             Change::Missed { count: 3 },
         ];
         for change in changes {

@@ -190,7 +190,15 @@ app.
 - **The working directory picks the project:** the registered project whose repo holds it. A
   linked worktree picks its main repo's project (`git rev-parse --git-common-dir`).
   `--project` overrides. A node's plan is the project's only plan; with several, `--plan`
-  names one, and without it the command lists them and stops.
+  names one, and without it the command lists them and stops. `next` is the exception: it
+  spans the project's plans unless `--plan` narrows it.
+- **The queue is the project's** ([C24](../milestones/m5.md)). `reef queue add|move|rm` takes a
+  bare id in the picked plan or a full `project/plan/id`, and a node to go beside as a bare id
+  in that entry's plan or a full name. Adding a queued node moves it, to the bottom unless
+  `--top`, `--bottom`, `--before` or `--after` says where; a move needs one. `ls` lists each
+  entry ready, waiting with the needs it waits on, in progress, blocked, done or missing.
+  `next` follows the queue across the project's plans, naming nodes in full when it reads
+  several, and `--plan` narrows it, leaving other plans' entries out.
 - **It reads the service's own config, for `[api] address` alone.** `reef_api::config` finds the
   file for both (`--conf`, else `$REEF_CONFIG`, else the XDG path), so they meet at the address
   one file names. The CLI ignores every other key; the service checks them.

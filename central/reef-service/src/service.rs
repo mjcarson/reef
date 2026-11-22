@@ -21,17 +21,22 @@
 //! - **Docs are served as pages.** A payload's links lead under [`paths::docs`], where
 //!   [`Service::doc_page`] renders each doc as the page mdbook would write for it, so the
 //!   viewer's *Read here* cuts a section out of it as out of a book's page.
-//! - **Each applied write is a change.** A project registered, a plan listed, a batch written or
-//!   a whole plan written is sent to every subscriber of [`Service::changes`], after the write's
-//!   lock is let go, so two writers' changes to one plan can arrive in either order. A refused
-//!   write sends nothing.
+//! - **Each applied write is a change.** A project registered, a plan listed, a batch written, a
+//!   whole plan written or a queue edited is sent to every subscriber of [`Service::changes`],
+//!   after the write's lock is let go, so two writers' changes to one plan can arrive in either
+//!   order. A refused write sends nothing.
+//! - **next follows the user's queue.** A project's queue spans its plans, so next reads every
+//!   plan it is asked about, takes the queue's ready entries first, then each plan's other ready
+//!   work in plan order. Asked about one plan, it takes that plan's entries alone.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
 //! pool would find the data directory locked.
 
-use reef_api::{Change, PutNode, paths};
-use reef_model::{Diagnostic, Graph, Next, Payload, PlanName, Record, nodes_from_records};
+use reef_api::{Change, Listed, PutNode, QueueListing, paths};
+use reef_model::{
+    Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record, nodes_from_records,
+};
 use reef_render::{DocSource, ROOT, Renderer, RepoSource, Sections, doc_body, render_page};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -45,7 +50,7 @@ use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::store::{
     AddedProject, Checked, Listing, NodePut, NodeWrite, NotListed, NotRegistered, PlanInfo,
-    Project, Proposal, Puts, Rewrite, Store, StoredNode,
+    Project, Proposal, Puts, QueueEdit, Queued, Rewrite, Store, StoredNode,
 };
 
 /// The process's one service over shoal, opened on first use
@@ -382,25 +387,160 @@ impl<B: Backend> Service<B> {
         Ok(problems)
     }
 
-    /// Says what work in a plan is ready to start, in plan order, and what the rest waits on,
-    /// as `mdbook-reef next` says it of a book
+    /// Says what work in a plan is ready to start, its entries of its project's queue first,
+    /// then the rest in plan order, and what the rest waits on, as `mdbook-reef next` says it of
+    /// a book
     ///
     /// The plan is built as check builds it, so the answer counts its problems too; a plan with
-    /// problems still has an order.
+    /// problems still has an order. The queue's entries of other plans are left out.
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::next", skip_all, err(Debug))]
     pub async fn next(&self, plan: &PlanName) -> anyhow::Result<Next> {
-        // the plan as it stands, and the working tree its docs are read from
-        let (records, repo) = self.records(plan).await?;
+        // the plan alone, narrowed from its project
+        self.next_over(&plan.project, vec![plan.clone()]).await
+    }
+
+    /// Says what work across a project's plans is ready to start, the user's queue first, then
+    /// each plan's other ready work in plan order, plan by plan, and what the rest waits on
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Service::project_next", skip_all, err(Debug))]
+    pub async fn project_next(&self, project: &str) -> anyhow::Result<Next> {
+        // every plan the project lists, by name, refused if it isn't registered
+        let plans = self.plans(project).await?;
+        let plans = plans.into_iter().map(|info| info.name).collect();
+        self.next_over(project, plans).await
+    }
+
+    /// Lists a project's queue: each entry with its rank, and whether next takes it, and if not
+    /// why
+    ///
+    /// Each plan an entry names is built without its docs, which no entry's state depends on.
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Service::queue", skip_all, err(Debug))]
+    pub async fn queue(&self, project: &str) -> anyhow::Result<QueueListing> {
+        // every plan the project lists, refused if it isn't registered
+        let plans: Vec<PlanName> = self
+            .plans(project)
+            .await?
+            .into_iter()
+            .map(|info| info.name)
+            .collect();
+        let ranked = self.store.queue(project).await?;
+        // each listed plan an entry names, built; an entry of a plan gone is missing
+        let mut graphs = Vec::new();
+        for plan in plans
+            .iter()
+            .filter(|p| ranked.iter().any(|r| r.node.plan == **p))
+        {
+            let records = self.store.list(plan).await?.records(plan)?;
+            let (graph, problems) = Graph::build(nodes_from_records(records));
+            graphs.push(PlanGraph {
+                name: plan.clone(),
+                graph,
+                problems: problems.len(),
+            });
+        }
+        // what each entry is now, beside its rank
+        let queue: Vec<NodeName> = ranked.iter().map(|r| r.node.clone()).collect();
+        let entries = reef_model::queue::entries(&graphs, &queue)
+            .into_iter()
+            .zip(ranked)
+            .map(|(entry, ranked)| Listed {
+                rank: ranked.rank,
+                entry,
+            })
+            .collect();
+        Ok(QueueListing { plans, entries })
+    }
+
+    /// Edits a project's queue: puts a node in it, moves one, or takes one off
+    ///
+    /// A node added must be in its plan, or the edit is [`Queued::NotInPlan`], and its plan must
+    /// be listed. A node moved or taken off need not be, so an entry whose node is gone can
+    /// still be taken off.
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project whose queue to edit
+    /// * `edit` - The edit
+    #[instrument(name = "Service::edit_queue", skip_all, err(Debug))]
+    pub async fn edit_queue(&self, project: &str, edit: QueueEdit) -> anyhow::Result<Queued> {
+        // a project that isn't registered has no queue
+        if self.store.project(project).await?.is_none() {
+            return Err(NotRegistered(project.to_string()).into());
+        }
+        // a node added is one of this project's plans has, which the store checks is its own
+        if let QueueEdit::Add { node, .. } = &edit
+            && node.plan.project == project
+            && self.store.get(&node.plan, &node.id).await?.is_none()
+        {
+            return Ok(Queued::NotInPlan { node: node.clone() });
+        }
+        // edited under the queue's lock, and told to the change stream once it is
+        let queued = self.store.edit_queue(project, edit).await?;
+        if let Queued::Applied { .. } = &queued {
+            self.publish(Change::QueueChanged {
+                project: project.to_string(),
+            });
+        }
+        Ok(queued)
+    }
+
+    /// Says what work in some of a project's plans is ready to start, the queue's entries of
+    /// those plans first
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `plans` - The plans to read, in the order their work is taken
+    #[instrument(name = "Service::next_over", skip_all, err(Debug))]
+    async fn next_over(&self, project: &str, plans: Vec<PlanName>) -> anyhow::Result<Next> {
+        // the working tree the plans' docs are read from, refused if it isn't registered
+        let repo = self
+            .store
+            .project(project)
+            .await?
+            .ok_or_else(|| NotRegistered(project.to_string()))?
+            .repo;
+        // each plan as it stands
+        let mut read = Vec::with_capacity(plans.len());
+        for plan in &plans {
+            read.push((plan.clone(), self.store.list(plan).await?.records(plan)?));
+        }
+        // and the queue's entries of those plans, in its order
+        let queue: Vec<NodeName> = self
+            .store
+            .queue(project)
+            .await?
+            .into_iter()
+            .map(|ranked| ranked.node)
+            .filter(|node| plans.contains(&node.plan))
+            .collect();
         let sections = self.sections.clone();
-        // build it off the async threads, since its docs are files
+        // build them off the async threads, since their docs are files
         let next = tokio::task::spawn_blocking(move || {
             let renderer = Renderer::new(RepoSource::new(repo), sections);
-            let (graph, problems) = build(&renderer, records);
-            Next::of(&graph, problems.len())
+            let graphs: Vec<PlanGraph> = read
+                .into_iter()
+                .map(|(name, records)| {
+                    let (graph, problems) = build(&renderer, records);
+                    PlanGraph {
+                        name,
+                        graph,
+                        problems: problems.len(),
+                    }
+                })
+                .collect();
+            Next::queued(&graphs, &queue)
         })
         .await?;
         Ok(next)
@@ -760,5 +900,12 @@ mod tests {
         send(service.check(&plan));
         send(service.payload(&plan));
         send(service.doc_page(&plan, "design.html"));
+        send(service.next(&plan));
+        send(service.project_next("reef"));
+        send(service.queue("reef"));
+        let edit = crate::store::QueueEdit::Remove {
+            node: plan.node("C1").unwrap(),
+        };
+        send(service.edit_queue("reef", edit));
     }
 }

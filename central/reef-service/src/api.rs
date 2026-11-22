@@ -12,6 +12,9 @@
 //! | `GET /api/v1/find-project?dir=` | `find_project` | the [`Project`], or 404 |
 //! | `GET …/projects/{project}/plans` | `plans` | every [`PlanInfo`] |
 //! | `POST …/projects/{project}/plans` | `add_plan` | [`AddedPlan`]: 201, or 200 if listed |
+//! | `GET …/projects/{project}/queue` | `queue` | its [`QueueListing`] |
+//! | `POST …/projects/{project}/queue` | `edit_queue` | [`Queued`]: 200, 409 if not queued, 422 if not in its plan |
+//! | `GET …/projects/{project}/next` | `project_next` | its plans' ready work, the queue's first: [`Next`] |
 //! | `GET …/plans/{plan}` | `plans` | its [`PlanInfo`], or 404 |
 //! | `GET …/plans/{plan}/nodes` | `list` | its [`Listing`] |
 //! | `POST …/plans/{plan}/nodes` | `put` | [`Checked`]: 200, 409 if stale, 422 if refused |
@@ -19,7 +22,7 @@
 //! | `PUT …/plans/{plan}/revision` | `write_plan` | [`Rewrite`]: 200, or 422 if refused |
 //! | `GET …/plans/{plan}/payload` | `payload` | the viewer's [`Payload`] |
 //! | `GET …/plans/{plan}/check` | `check` | its problems |
-//! | `GET …/plans/{plan}/next` | `next` | its ready work, and what the rest waits on: [`Next`] |
+//! | `GET …/plans/{plan}/next` | `next` | its ready work, its queue's first, and what the rest waits on: [`Next`] |
 //! | `GET …/plans/{plan}/docs/{*path}` | `doc_page` | a doc rendered as its page, or 404 |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
@@ -45,7 +48,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
     AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
-    PlanInfo, PlanWrite, Project, Puts, Rewrite, StoredNode, paths,
+    PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, Rewrite, StoredNode,
+    paths,
 };
 use reef_model::{Diagnostic, NameError, Next, Payload, PlanName};
 use serde::Deserialize;
@@ -116,6 +120,8 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PROJECTS, get(projects::<S>).post(add_project::<S>))
         .route(paths::FIND_PROJECT, get(find_project::<S>))
         .route(paths::PLANS, get(plans::<S>).post(add_plan::<S>))
+        .route(paths::QUEUE, get(queue::<S>).post(edit_queue::<S>))
+        .route(paths::PROJECT_NEXT, get(project_next::<S>))
         .route(paths::PLAN, get(plan::<S>))
         .route(paths::NODES, get(list::<S>).post(put::<S>))
         .route(paths::NODE, get(node::<S>))
@@ -502,6 +508,62 @@ async fn plans<S: Serves>(
     Ok(Json(plans))
 }
 
+/// Lists a project's queue: each entry with its rank, and whether next takes it
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::queue", skip_all, err(Debug))]
+async fn queue<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<QueueListing>, Failure> {
+    // every entry in the queue's order, refused if the project isn't registered
+    let listing = serves.service().queue(&segments.project).await?;
+    Ok(Json(listing))
+}
+
+/// Edits a project's queue: 200 if made, 409 if a node named isn't queued, 422 if the node
+/// added is not in its plan
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+/// * `edit` - The edit
+#[instrument(name = "api::edit_queue", skip_all, err(Debug))]
+async fn edit_queue<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+    Body(edit): Body<QueueEdit>,
+) -> Result<(StatusCode, Json<Queued>), Failure> {
+    // one row written, under the queue's lock
+    let queued = serves.service().edit_queue(&segments.project, edit).await?;
+    let status = match queued {
+        Queued::Applied { .. } => StatusCode::OK,
+        Queued::NotQueued { .. } => StatusCode::CONFLICT,
+        Queued::NotInPlan { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(queued)))
+}
+
+/// Says what work across a project's plans is ready to start, the queue's first
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::project_next", skip_all, err(Debug))]
+async fn project_next<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Next>, Failure> {
+    // the queue's ready entries, then each plan's ready work, then what waits
+    let next = serves.service().project_next(&segments.project).await?;
+    Ok(Json(next))
+}
+
 /// Lists a plan in a project: 201 if it was added, 200 if it was listed already
 ///
 /// # Arguments
@@ -680,7 +742,7 @@ async fn next<S: Serves>(
     Segments(segments): Segments<PlanSegments>,
 ) -> Result<Json<Next>, Failure> {
     let plan = segments.name()?;
-    // the ready work in plan order, then each piece that waits with its unmet needs
+    // the plan's queued work first, then in plan order, then each piece that waits
     let next = serves.service().next(&plan).await?;
     Ok(Json(next))
 }
@@ -798,21 +860,27 @@ mod tests {
             },
         };
         let gap = Change::Missed { count: 2 };
+        let queue = Change::QueueChanged {
+            project: "reef".to_string(),
+        };
         // every change, unnarrowed
         let all = query(None, None);
         assert!(
-            [&central, &other, &project, &gap]
+            [&central, &other, &project, &queue, &gap]
                 .iter()
                 .all(|c| all.follows(c))
         );
-        // a project's changes, and none of another's
+        // a project's changes, its queue's among them, and none of another's
         assert!(query(Some("reef"), None).follows(&project));
+        assert!(query(Some("reef"), None).follows(&queue));
         assert!(!query(Some("shoal"), None).follows(&central));
-        // one plan's, and not its sibling's or its project's own
+        assert!(!query(Some("shoal"), None).follows(&queue));
+        // one plan's, and not its sibling's or its project's own, its queue being the project's
         let one = query(Some("reef"), Some("central"));
         assert!(one.follows(&central));
         assert!(!one.follows(&other));
         assert!(!one.follows(&project));
+        assert!(!one.follows(&queue));
         // and a gap reaches everyone
         assert!(one.follows(&gap));
     }

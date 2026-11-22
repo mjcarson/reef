@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::cli::{Pick, PlanPick, picked_plan};
+use crate::cli::{Pick, PlanPick, picked, picked_plan};
 use crate::client::Client;
 use crate::{node, work};
 
@@ -243,18 +243,27 @@ impl Tools {
         said(out, done)
     }
 
-    /// Lists the work ready to start, and what the rest waits on
+    /// Lists the work ready to start, the user's queue first, and what the rest waits on
     #[tool(
-        description = "List the reef work ready to start, in plan order, then each piece of work \
-                       that waits and the needs it waits on.",
+        description = "List the reef work ready to start, the user's queue first, then in plan \
+                       order, then each piece of work that waits and the needs it waits on. It \
+                       spans the project's plans unless one is named.",
         annotations(read_only_hint = true)
     )]
     async fn next(&self, Parameters(args): Parameters<PlanArgs>) -> Result<String, String> {
-        // the report `reef next` prints
+        // the report `reef next` prints, narrowed to a plan the call or the server names
         let mut out = Vec::new();
         let done = async {
-            let plan = self.plan(args.plan).await?;
-            work::next(&self.client, &plan, &mut out).await
+            match args.plan.or_else(|| self.pick.plan.clone()) {
+                Some(plan) => {
+                    let plan = self.plan(Some(plan)).await?;
+                    work::next(&self.client, &plan, &mut out).await
+                }
+                None => {
+                    let project = picked(&self.client, &self.cwd, &self.pick.project).await?;
+                    work::project_next(&self.client, &project.name, &mut out).await
+                }
+            }
         }
         .await;
         said(out, done)
@@ -323,8 +332,9 @@ impl Tools {
     name = "reef",
     instructions = "reef keeps this repo's plan: a graph of nodes, each a piece of work with a \
                     why, a what, needs and acceptance criteria. `next` says what is ready to \
-                    start, `get` reads a node as YAML and `check` lists the plan's problems; \
-                    these only read. `put` writes a node's YAML, `status` sets where its work \
+                    start, the user's queue first, `get` reads a node as YAML and `check` lists \
+                    the plan's problems; these only read. `put` writes a node's YAML, `status` \
+                    sets where its work \
                     stands and `accept` whether a criterion is met. Every write is checked \
                     against the whole plan, and one that is stale or adds a problem writes \
                     nothing and says why."

@@ -7,10 +7,12 @@
 
 use reef_api::{
     AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
-    NodePut, NodeWrite, PlanInfo, PlanWrite, Project, PutNode, Puts, Refusal, Rewrite, StalePut,
-    StoredNode, paths,
+    NodePut, NodeWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit,
+    QueueListing, Queued, Refusal, Rewrite, StalePut, StoredNode, paths,
 };
-use reef_model::{Description, Diagnostic, Next, NodeSpec, Payload, PlanName, Status, WaitsOn};
+use reef_model::{
+    Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
+};
 use reef_service::Backend;
 use reqwest::StatusCode;
 
@@ -540,6 +542,86 @@ pub async fn next_says_what_is_ready_and_what_waits<B: Backend + 'static>(
     assert_eq!(
         (status, error.code),
         (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    Ok(())
+}
+
+/// The queue's routes edit an entry at a time, answering what came of it with a status that
+/// says which, list each entry with its state, and the project's next follows them
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn queue_routes_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // two pieces of work, the second needing the first
+    let batch = Puts::new(vec![
+        NodePut::new(work("C1", &[], 0), None),
+        NodePut::new(work("C2", &["C1"], 1), None),
+    ]);
+    let (_, _): (_, Checked) = ax.client.post(&paths::nodes(&ax.plan), &batch).await?;
+    let queue = paths::queue("reef");
+    // the second queued is made, 200
+    let add = QueueEdit::Add {
+        node: ax.plan.node("C2")?,
+        at: Place::Bottom,
+    };
+    let (status, queued): (_, Queued) = ax.client.post(&queue, &add).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(matches!(queued, Queued::Applied { queue } if queue.len() == 1));
+    // a move of a node not queued is a conflict, 409, and an add of one not in its plan, 422
+    let stray = QueueEdit::Move {
+        node: ax.plan.node("C9")?,
+        at: Place::Top,
+    };
+    let (status, queued): (_, Queued) = ax.client.post(&queue, &stray).await?;
+    assert_eq!(
+        (status, queued),
+        (
+            StatusCode::CONFLICT,
+            Queued::NotQueued {
+                node: ax.plan.node("C9")?
+            }
+        )
+    );
+    let missing = QueueEdit::Add {
+        node: ax.plan.node("C9")?,
+        at: Place::Top,
+    };
+    let (status, queued): (_, Queued) = ax.client.post(&queue, &missing).await?;
+    assert_eq!(
+        (status, queued),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Queued::NotInPlan {
+                node: ax.plan.node("C9")?
+            }
+        )
+    );
+    // the listing names the entry's rank and that it waits on the first
+    let (status, listing): (_, QueueListing) = ax.client.get(&queue).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listing.entries.len(), 1);
+    assert_eq!(listing.entries[0].rank, "a0");
+    let needs = vec![WaitsOn {
+        id: "C1".to_string(),
+        status: Status::Todo,
+        through: None,
+    }];
+    assert_eq!(listing.entries[0].entry.state, EntryState::Waiting(needs));
+    // the project's next takes the first, and says it skipped the second
+    let (status, next): (_, Next) = ax.client.get(&paths::project_next("reef")).await?;
+    assert_eq!(status, StatusCode::OK);
+    let ready: Vec<&str> = next.ready.iter().map(|ready| ready.id.as_str()).collect();
+    assert_eq!(ready, ["C1"]);
+    assert_eq!(next.skipped.len(), 1);
+    assert_eq!(next.skipped[0].node, ax.plan.node("C2")?);
+    // and a project that isn't registered has no queue
+    let (status, error): (_, ApiError) = ax.client.get(&paths::queue("nobody")).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
     );
     Ok(())
 }

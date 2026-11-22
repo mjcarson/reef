@@ -4,7 +4,7 @@
 //! service keeps each entry under a rank that sorts it, which only the service makes; a client
 //! says where an entry goes by its neighbours.
 
-use reef_model::NodeName;
+use reef_model::{NodeName, PlanName, QueueEntry};
 use serde::{Deserialize, Serialize};
 
 /// Where in the queue an edit puts its node
@@ -97,12 +97,35 @@ pub enum Queued {
         /// The node that isn't queued
         node: NodeName,
     },
+    /// The node added is not in its plan, so nothing changed
+    NotInPlan {
+        /// The node that isn't in its plan
+        node: NodeName,
+    },
+}
+
+/// A project's queue as it stands: each entry, its rank, and what it is now
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueListing {
+    /// The plans the project lists, so a client knows whether to name nodes in full
+    pub plans: Vec<PlanName>,
+    /// The queue's entries, in its order
+    pub entries: Vec<Listed>,
+}
+
+/// One entry of a queue's listing
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listed {
+    /// The rank that sorts it
+    pub rank: String,
+    /// The node queued, and whether next takes it, and if not why
+    pub entry: QueueEntry,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Place, QueueEdit, Queued, Ranked};
-    use reef_model::NodeName;
+    use super::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};
+    use reef_model::{EntryState, NodeName, QueueEntry};
 
     /// Edits and their outcomes are tagged in kebab-case, and nodes are written in full
     #[test]
@@ -139,10 +162,43 @@ mod tests {
             serde_json::to_string(&applied).unwrap(),
             r#"{"applied":{"queue":[{"node":"reef/central/C21","rank":"a0"}]}}"#
         );
-        let not = Queued::NotQueued { node: anchor };
+        let not = Queued::NotQueued {
+            node: anchor.clone(),
+        };
         assert_eq!(
             serde_json::to_string(&not).unwrap(),
             r#"{"not-queued":{"node":"reef/other/O1"}}"#
+        );
+        let missing = Queued::NotInPlan { node: anchor };
+        assert_eq!(
+            serde_json::to_string(&missing).unwrap(),
+            r#"{"not-in-plan":{"node":"reef/other/O1"}}"#
+        );
+    }
+
+    /// A listing's entry carries its rank beside the entry, its state tagged in kebab-case
+    #[test]
+    fn listing_reads_back_as_it_was() {
+        let node: NodeName = "reef/central/C21".parse().unwrap();
+        let listing = QueueListing {
+            plans: vec!["reef/central".parse().unwrap()],
+            entries: vec![Listed {
+                rank: "a0".to_string(),
+                entry: QueueEntry {
+                    node,
+                    title: "C21 Rank strings".to_string(),
+                    state: EntryState::Done,
+                },
+            }],
+        };
+        let json = serde_json::to_string(&listing).unwrap();
+        assert_eq!(
+            json,
+            r#"{"plans":["reef/central"],"entries":[{"rank":"a0","entry":{"node":"reef/central/C21","title":"C21 Rank strings","state":"done"}}]}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<QueueListing>(&json).unwrap(),
+            listing
         );
     }
 }

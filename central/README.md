@@ -17,8 +17,8 @@ The service's data types, and the JSON API's requests, answers, routes and chang
 `reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
 add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef status`, `reef accept`, `reef
-check` and `reef next`, which call the address `[api] address` names and say so when nothing
-answers there.
+check`, `reef next` and `reef queue add|move|rm|ls`, which call the address `[api] address` names
+and say so when nothing answers there.
 
 ## Building
 

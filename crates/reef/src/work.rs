@@ -241,8 +241,53 @@ pub fn problems(plan: &PlanName, count: usize) -> String {
     }
 }
 
-/// Prints the work ready to start in a plan, in plan order, then each piece of work that waits
-/// and what it waits on, as `mdbook-reef next` prints a book's
+/// Prints the work ready to start across a project's plans, the queue's first, then each
+/// plan's in plan order, then each piece of work that waits and what it waits on
+///
+/// A project of one plan prints what `next` of that plan does, and one of no plans says how to
+/// list one.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `project` - The project to look in
+/// * `out` - Where to print it
+pub async fn project_next<W: Write>(
+    client: &Client,
+    project: &str,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let next = client.project_next(project).await?;
+    // a project with no plans has nothing to say yet
+    let plans = next.plans.clone();
+    match plans.as_slice() {
+        [] => anyhow::bail!(
+            "project `{project}` lists no plans: list one with `reef plan new <name>`"
+        ),
+        // the plans still have an order with problems in them, but say that they are there
+        [only] if next.problems > 0 => writeln!(
+            out,
+            "warning: {}; `reef check` lists them",
+            problems(only, next.problems)
+        )?,
+        _ if next.problems > 0 => {
+            let count = match next.problems {
+                1 => "1 problem".to_string(),
+                n => format!("{n} problems"),
+            };
+            writeln!(
+                out,
+                "warning: `{project}`'s plans have {count}; `reef check --plan NAME` lists each one's"
+            )?;
+        }
+        _ => {}
+    }
+    write!(out, "{next}")?;
+    Ok(())
+}
+
+/// Prints the work ready to start in a plan, its entries of the queue first, then in plan order,
+/// then each piece of work that waits and what it waits on, as `mdbook-reef next` prints a book's
 ///
 /// # Arguments
 ///

@@ -35,7 +35,7 @@ pub use node::{
     StalePut, StoredNode, lift, puts_for, records,
 };
 pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Project};
-pub use queue::{Place, QueueEdit, Queued, Ranked};
+pub use queue::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};
 
 /// Where the service listens when reef's config names no address: localhost only
 pub const DEFAULT_ADDRESS: &str = "127.0.0.1:12180";

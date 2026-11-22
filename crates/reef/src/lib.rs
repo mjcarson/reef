@@ -11,7 +11,9 @@
 //!   holds. `get` prints the version a node was read at as a comment, which `put` reads back, so
 //!   a put made after another writer's is refused as stale.
 //! - **Work** ([`work`]): set a node's status and whether each criterion is met, check the plan,
-//!   and say what is ready to start and what the rest waits on.
+//!   and say what is ready to start, the user's queue first, and what the rest waits on.
+//! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
+//!   moved, taken off and listed, each entry with what next makes of it.
 //! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
@@ -26,6 +28,7 @@ pub mod client;
 pub mod conf;
 pub mod mcp;
 pub mod node;
+pub mod queue;
 pub mod work;
 
 pub use cli::{Cli, run};

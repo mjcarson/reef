@@ -558,3 +558,133 @@ async fn check_fails_on_a_plan_with_a_problem() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A queued entry that waits shows the needs it waits on, and next skips it for the queue's
+/// ready entries until they are done
+#[tokio::test]
+async fn a_waiting_entry_shows_the_needs_it_waits_on() -> anyhow::Result<()> {
+    let cx = Cx::new("queue-waits").await?;
+    let repo = cx.ax.repo.clone();
+    // A, B needing A, and C
+    cx.put("a.yml", &work("A", &[])).await?;
+    cx.put("b.yml", &work("B", &["A"])).await?;
+    cx.put("c.yml", &work("C", &[])).await?;
+    // B queued, then C at the top
+    let added = cx.reef(&repo, &["queue", "add", "B"]).await?;
+    assert_eq!(added, "`B` is queued 1 of 1\n");
+    let added = cx.reef(&repo, &["queue", "add", "C", "--top"]).await?;
+    assert_eq!(added, "`C` is queued 1 of 2\n");
+    // the queue says C is ready, and B waits on A
+    let ls = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert_eq!(
+        ls,
+        "1. C  ready    C Some work\n2. B  waiting  B Some work\n      needs A (todo)\n"
+    );
+    // next takes C first, then A in plan order, and says it skipped B, and why
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert_eq!(
+        next,
+        "Ready to start (2), queued first, then in plan order:\n  C  C Some work\n  A  A Some \
+         work\n\nSkipped in the queue (1):\n  B  B Some work\n       needs A (todo)\n\n\
+         Waiting (1):\n  B  B Some work\n       needs A (todo)\n"
+    );
+    // once A is done, B is ready, and next takes the queue in its order
+    cx.reef(&repo, &["status", "A", "done"]).await?;
+    let ls = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert_eq!(ls, "1. C  ready  C Some work\n2. B  ready  B Some work\n");
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert_eq!(
+        next,
+        "Ready to start (2), queued first, then in plan order:\n  C  C Some work\n  B  B Some \
+         work\n\nWaiting (0):\n  nothing\n"
+    );
+    // and an entry taken off is gone
+    let off = cx.reef(&repo, &["queue", "rm", "C", "B"]).await?;
+    assert_eq!(off, "took `C` off the queue\ntook `B` off the queue\n");
+    let ls = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert_eq!(
+        ls,
+        "the queue of `reef` is empty: `reef queue add <ID>` queues a node\n"
+    );
+    Ok(())
+}
+
+/// next spans the project's plans, naming nodes in full, and `--plan` narrows it to one, leaving
+/// the other plans' entries out
+#[tokio::test]
+async fn next_spans_the_projects_plans_and_plan_narrows_it() -> anyhow::Result<()> {
+    let cx = Cx::new("queue-spans").await?;
+    let repo = cx.ax.repo.clone();
+    // a second plan, and a piece of work in each
+    cx.reef(&repo, &["plan", "new", "other"]).await?;
+    let a = cx.yaml("a.yml", &work("A", &[]))?;
+    cx.reef(&repo, &["node", "put", &a, "--plan", "central"])
+        .await?;
+    let x = cx.yaml("x.yml", &work("X", &[]))?;
+    cx.reef(&repo, &["node", "put", &x, "--plan", "other"])
+        .await?;
+    // X queued by its full name, which needs no plan picked
+    let added = cx.reef(&repo, &["queue", "add", "reef/other/X"]).await?;
+    assert_eq!(added, "`reef/other/X` is queued 1 of 1\n");
+    // across both plans, X first, every node named in full
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert_eq!(
+        next,
+        "Ready to start (2), queued first, then in plan order:\n  reef/other/X    X Some work\n  \
+         reef/central/A  A Some work\n\nWaiting (0):\n  nothing\n"
+    );
+    let ls = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert_eq!(ls, "1. reef/other/X  ready  X Some work\n");
+    // narrowed to central, as next of that plan alone was before the queue
+    let next = cx.reef(&repo, &["next", "--plan", "central"]).await?;
+    assert_eq!(
+        next,
+        "Ready to start (1), in plan order:\n  A  A Some work\n\nWaiting (0):\n  nothing\n"
+    );
+    // and a bare id beside it is in its own plan
+    let added = cx
+        .reef(
+            &repo,
+            &[
+                "queue",
+                "add",
+                "A",
+                "--plan",
+                "central",
+                "--before",
+                "reef/other/X",
+            ],
+        )
+        .await?;
+    assert_eq!(added, "`A` is queued 1 of 2\n");
+    Ok(())
+}
+
+/// Each queue command says what it refuses and how to see what is queued
+#[tokio::test]
+async fn queue_commands_say_what_they_refuse() -> anyhow::Result<()> {
+    let cx = Cx::new("queue-refuses").await?;
+    let repo = cx.ax.repo.clone();
+    cx.put("a.yml", &work("A", &[])).await?;
+    // a move of a node not queued, or one beside a node not queued
+    let (_, error) = cx.failing(&repo, &["queue", "move", "A", "--top"]).await?;
+    assert_eq!(error, "`A` isn't queued: `reef queue ls` lists what is");
+    let (_, error) = cx
+        .failing(&repo, &["queue", "add", "A", "--before", "B"])
+        .await?;
+    assert_eq!(error, "`B` isn't queued: `reef queue ls` lists what is");
+    // a move that says nowhere, and a removal of a node not queued
+    let (_, error) = cx.failing(&repo, &["queue", "move", "A"]).await?;
+    assert!(error.contains("needs where to"), "{error}");
+    let (_, error) = cx.failing(&repo, &["queue", "rm", "A"]).await?;
+    assert_eq!(error, "`A` isn't queued: `reef queue ls` lists what is");
+    // a node not in its plan, and one of another project
+    let (_, error) = cx.failing(&repo, &["queue", "add", "nope"]).await?;
+    assert_eq!(error, "node `reef/central/nope` is not in its plan");
+    let (_, error) = cx.failing(&repo, &["queue", "add", "app/main/A"]).await?;
+    assert!(error.contains("not of project `reef`"), "{error}");
+    // and nothing was queued
+    let ls = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert!(ls.starts_with("the queue of `reef` is empty"), "{ls}");
+    Ok(())
+}

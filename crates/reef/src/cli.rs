@@ -13,12 +13,17 @@
 //! reef [--conf PATH] accept <ID> [<N> <STATUS> [--test TEST]] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] check [--project NAME] [--plan NAME]
 //! reef [--conf PATH] next [--project NAME] [--plan NAME]
+//! reef [--conf PATH] queue add <ID> [--top | --bottom | --before ID | --after ID] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] queue move <ID> (--top | --bottom | --before ID | --after ID) [--project NAME] [--plan NAME]
+//! reef [--conf PATH] queue rm <ID>... [--project NAME] [--plan NAME]
+//! reef [--conf PATH] queue ls [--project NAME]
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
-//! only plan, unless `--plan` names one.
+//! only plan, unless `--plan` names one. `next` and the queue span the project's plans, and
+//! `--plan` narrows `next` to one.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -31,6 +36,7 @@ use crate::client::Client;
 use crate::conf::Conf;
 use crate::mcp::{self, Tools};
 use crate::node;
+use crate::queue;
 use crate::work;
 
 /// reef's terminal client: projects, plans and nodes, through the service's JSON API
@@ -120,12 +126,19 @@ pub enum Command {
         #[command(flatten)]
         pick: PlanPick,
     },
-    /// Print the work ready to start, in plan order, and what the rest waits on
+    /// Print the work ready to start, the queue's first, then in plan order, and what the rest
+    /// waits on
+    ///
+    /// Across the project's plans, unless `--plan` names one, which leaves the queue's entries
+    /// of other plans out.
     Next {
-        /// The plan to look in, if not the project's only plan
+        /// The plan to look in, if not all of the project's
         #[command(flatten)]
         pick: PlanPick,
     },
+    /// Order the work to take first: the project's queue, which next follows
+    #[command(subcommand)]
+    Queue(QueueCommand),
     /// Serve get, check, next, put, status and accept as MCP tools over standard input and
     /// output, for Claude Code
     ///
@@ -213,6 +226,66 @@ pub enum NodeCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
+}
+
+/// What can be done with a project's queue
+#[derive(Debug, Subcommand)]
+pub enum QueueCommand {
+    /// Queue a node, at the bottom unless a place is given, moving it if it is queued already
+    Add {
+        /// The node: a bare id in the plan, or `project/plan/id`
+        id: String,
+        /// Where it goes
+        #[command(flatten)]
+        at: At,
+        /// The plan a bare id is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Move a queued node
+    Move {
+        /// The node: a bare id in the plan, or `project/plan/id`
+        id: String,
+        /// Where it goes, which a move needs
+        #[command(flatten)]
+        at: At,
+        /// The plan a bare id is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Take nodes off the queue
+    Rm {
+        /// The nodes: bare ids in the plan, or `project/plan/id`
+        #[arg(required = true, value_name = "ID")]
+        ids: Vec<String>,
+        /// The plan a bare id is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// List the queue, each entry ready, waiting on what, in progress, blocked, done or missing
+    Ls {
+        /// The project whose queue to list, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+}
+
+/// Where in the queue a node goes: at one end, or beside a queued node
+#[derive(Debug, Clone, Default, Args)]
+#[group(multiple = false)]
+pub struct At {
+    /// First, ahead of every other entry
+    #[arg(long)]
+    pub top: bool,
+    /// Last, after every other entry
+    #[arg(long)]
+    pub bottom: bool,
+    /// Just before a queued node: a bare id in this node's plan, or `project/plan/id`
+    #[arg(long, value_name = "ID")]
+    pub before: Option<String>,
+    /// Just after a queued node: a bare id in this node's plan, or `project/plan/id`
+    #[arg(long, value_name = "ID")]
+    pub after: Option<String>,
 }
 
 /// A project named on the command line, else the working directory's
@@ -311,8 +384,30 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             Ok(())
         }
         Command::Next { pick } => {
-            let plan = picked_plan(&client, cwd, &pick).await?;
-            work::next(&client, &plan, out).await
+            // one plan named, else every plan of the project
+            match pick.plan {
+                Some(_) => {
+                    let plan = picked_plan(&client, cwd, &pick).await?;
+                    work::next(&client, &plan, out).await
+                }
+                None => {
+                    let project = picked(&client, cwd, &pick.project).await?;
+                    work::project_next(&client, &project.name, out).await
+                }
+            }
+        }
+        Command::Queue(QueueCommand::Add { id, at, pick }) => {
+            queue::add(&client, cwd, &id, &at, &pick, out).await
+        }
+        Command::Queue(QueueCommand::Move { id, at, pick }) => {
+            queue::mv(&client, cwd, &id, &at, &pick, out).await
+        }
+        Command::Queue(QueueCommand::Rm { ids, pick }) => {
+            queue::rm(&client, cwd, &ids, &pick, out).await
+        }
+        Command::Queue(QueueCommand::Ls { pick }) => {
+            let project = picked(&client, cwd, &pick).await?;
+            queue::ls(&client, &project.name, out).await
         }
         Command::Mcp { pick } => {
             // the protocol owns standard output, so nothing is printed to `out`
@@ -455,7 +550,7 @@ async fn plan_ls<W: Write>(
 /// * `client` - The service's client
 /// * `cwd` - The working directory
 /// * `pick` - The project named, if one was
-async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::Result<Project> {
+pub(crate) async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::Result<Project> {
     // a project named must be registered
     if let Some(name) = &pick.project {
         let projects = client.projects().await?;
@@ -537,7 +632,7 @@ fn columns<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, NodeCommand, PlanCommand, ProjectCommand, columns};
+    use super::{Cli, Command, NodeCommand, PlanCommand, ProjectCommand, QueueCommand, columns};
     use clap::{CommandFactory, Parser};
     use reef_model::{Met, Status};
     use std::path::PathBuf;
@@ -651,6 +746,50 @@ mod tests {
             mcp.command,
             Command::Mcp { pick } if pick.plan.as_deref() == Some("central")
         ));
+    }
+
+    /// A queue command takes one place at most, and its project and plan as a node command does
+    #[test]
+    fn queue_commands_take_one_place() {
+        // a node added with a place beside another, in a plan named
+        let add = [
+            "reef", "queue", "add", "C24", "--before", "C22", "--plan", "central",
+        ];
+        match Cli::try_parse_from(add).unwrap().command {
+            Command::Queue(QueueCommand::Add { id, at, pick }) => {
+                assert_eq!(id, "C24");
+                assert_eq!(at.before.as_deref(), Some("C22"));
+                assert!(!at.top && !at.bottom && at.after.is_none());
+                assert_eq!(pick.plan.as_deref(), Some("central"));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // with no place, and moved to the top
+        let add = Cli::try_parse_from(["reef", "queue", "add", "C24"]).unwrap();
+        assert!(matches!(
+            add.command,
+            Command::Queue(QueueCommand::Add { at, .. }) if !at.top && at.before.is_none()
+        ));
+        let mv = Cli::try_parse_from(["reef", "queue", "move", "C24", "--top"]).unwrap();
+        assert!(matches!(
+            mv.command,
+            Command::Queue(QueueCommand::Move { at, .. }) if at.top
+        ));
+        // two places at once are refused
+        assert!(Cli::try_parse_from(["reef", "queue", "add", "C24", "--top", "--bottom"]).is_err());
+        let two = [
+            "reef", "queue", "move", "C24", "--before", "a", "--after", "b",
+        ];
+        assert!(Cli::try_parse_from(two).is_err());
+        // `rm` needs an id, and `ls` lists a project's queue, so it takes no plan
+        assert!(Cli::try_parse_from(["reef", "queue", "rm"]).is_err());
+        let rm = Cli::try_parse_from(["reef", "queue", "rm", "C21", "C22"]).unwrap();
+        assert!(matches!(
+            rm.command,
+            Command::Queue(QueueCommand::Rm { ids, .. }) if ids == ["C21", "C22"]
+        ));
+        assert!(Cli::try_parse_from(["reef", "queue", "ls", "--project", "reef"]).is_ok());
+        assert!(Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central"]).is_err());
     }
 
     /// The first column is padded to its widest cell

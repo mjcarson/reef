@@ -5,10 +5,11 @@
 
 use reef_api::{Change, PutNode, paths};
 use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
+use reef_model::{EntryState, Status, WaitsOn};
 use reef_render::{ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
-    Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, Puts, Refusal,
-    RevisionKey, Rewrite, StalePut,
+    Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, Place, Puts,
+    QueueEdit, Queued, Refusal, RevisionKey, Rewrite, StalePut,
 };
 use std::time::Duration;
 
@@ -780,5 +781,169 @@ pub async fn untouched_nodes_keep_their_versions_through_a_batch<B: Backend>(
         .put(&sx.plan, vec![NodePut::new(edit, Some(1))])
         .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![2] });
+    Ok(())
+}
+
+/// Queues a node at the bottom of project `reef`'s queue
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+/// * `plan` - The node's plan
+/// * `id` - The node's id
+async fn queue_last<B: Backend>(sx: &Sx<B>, plan: &PlanName, id: &str) -> anyhow::Result<Queued> {
+    let edit = QueueEdit::Add {
+        node: plan.node(id)?,
+        at: Place::Bottom,
+    };
+    sx.service.edit_queue("reef", edit).await
+}
+
+/// next takes the queue's ready entries first across a project's plans, then each plan's ready
+/// work in plan order, and narrowed to one plan, that plan's entries alone
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn next_follows_the_queue_across_plans<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // two plans, each with work of its own
+    let other = PlanName::new("reef", "other")?;
+    sx.service.add_plan(&other).await?;
+    sx.service
+        .put(&sx.plan, new(vec![work("A", 0), work("B", 1)]))
+        .await?;
+    sx.service.put(&other, new(vec![work("X", 0)])).await?;
+    // X then B queued
+    queue_last(&sx, &other, "X").await?;
+    queue_last(&sx, &sx.plan, "B").await?;
+    // across the plans, the queue's first, then each plan's in plan order, plan by plan
+    let next = sx.service.project_next("reef").await?;
+    let ready: Vec<(String, bool)> = next
+        .ready
+        .iter()
+        .map(|r| (format!("{}/{}", r.plan.as_ref().unwrap(), r.id), r.queued))
+        .collect();
+    let expected = [
+        ("reef/other/X".to_string(), true),
+        ("reef/central/B".to_string(), true),
+        ("reef/central/A".to_string(), false),
+    ];
+    assert_eq!(ready, expected);
+    assert_eq!(next.plans, [sx.plan.clone(), other.clone()]);
+    // narrowed to one plan, the other's entries are left out
+    let central = sx.service.next(&sx.plan).await?;
+    let ready: Vec<(&str, bool)> = central
+        .ready
+        .iter()
+        .map(|r| (r.id.as_str(), r.queued))
+        .collect();
+    assert_eq!(ready, [("B", true), ("A", false)]);
+    assert_eq!(central.plans, std::slice::from_ref(&sx.plan));
+    Ok(())
+}
+
+/// The queue's listing says what each entry is now: ready, waiting on its needs, done, a
+/// group's ready members, or missing once its node is gone
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn queue_lists_each_entry_with_its_state<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // work, work needing it, work done, a group of one, and work about to go
+    let mut done = work("D", 2);
+    done.spec.status = Some(Status::Done);
+    let nodes = vec![
+        work("A", 0),
+        needing(work("B", 1), &["A"]),
+        done,
+        group("G", 3),
+        member("m1", "G", 4),
+        work("E", 5),
+    ];
+    sx.service.put(&sx.plan, new(nodes)).await?;
+    for id in ["B", "A", "D", "G", "E"] {
+        queue_last(&sx, &sx.plan, id).await?;
+    }
+    // E goes from its plan, and stays queued
+    let gone = Puts::removing(vec![NodeRemove::new("E", 1)]);
+    assert!(matches!(
+        sx.service.batch(&sx.plan, gone).await?,
+        Checked::Applied { .. }
+    ));
+    // each entry's state, in the queue's order, under ranks that sort it
+    let listing = sx.service.queue("reef").await?;
+    assert_eq!(listing.plans, std::slice::from_ref(&sx.plan));
+    let states: Vec<(&str, &EntryState)> = listing
+        .entries
+        .iter()
+        .map(|listed| (listed.entry.node.id.as_str(), &listed.entry.state))
+        .collect();
+    let needs = vec![WaitsOn {
+        id: "A".to_string(),
+        status: Status::Todo,
+        through: None,
+    }];
+    assert_eq!(
+        states,
+        [
+            ("B", &EntryState::Waiting(needs)),
+            ("A", &EntryState::Ready(vec!["A".to_string()])),
+            ("D", &EntryState::Done),
+            ("G", &EntryState::Ready(vec!["m1".to_string()])),
+            ("E", &EntryState::Missing),
+        ]
+    );
+    let ranks: Vec<&str> = listing.entries.iter().map(|l| l.rank.as_str()).collect();
+    assert!(ranks.windows(2).all(|w| w[0] < w[1]), "{ranks:?}");
+    // a missing entry can still be taken off
+    let off = QueueEdit::Remove {
+        node: sx.plan.node("E")?,
+    };
+    assert!(matches!(
+        sx.service.edit_queue("reef", off).await?,
+        Queued::Applied { .. }
+    ));
+    // while a node not in its plan isn't queued, and an unlisted plan or unknown project is an
+    // error
+    let nope = sx.plan.node("nope")?;
+    assert_eq!(
+        queue_last(&sx, &sx.plan, "nope").await?,
+        Queued::NotInPlan { node: nope }
+    );
+    let unlisted = PlanName::new("reef", "unlisted")?;
+    let error = queue_last(&sx, &unlisted, "A").await.unwrap_err();
+    assert!(error.downcast_ref::<NotListed>().is_some(), "{error:#}");
+    let error = sx.service.queue("nobody").await.unwrap_err();
+    assert!(error.downcast_ref::<NotRegistered>().is_some(), "{error:#}");
+    Ok(())
+}
+
+/// A queue edit made is a change to its project, and one refused is none
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn queue_edit_is_a_change_and_a_refusal_none<B: Backend>(
+    sx: Sx<B>,
+) -> anyhow::Result<()> {
+    sx.service.put(&sx.plan, new(vec![work("A", 0)])).await?;
+    let mut changes = sx.service.changes();
+    // an entry added tells the stream its project's queue changed
+    queue_last(&sx, &sx.plan, "A").await?;
+    let expected = Change::QueueChanged {
+        project: "reef".to_string(),
+    };
+    assert_eq!(changes.try_recv()?, expected);
+    // a move of a node not queued, and an add of one not in its plan, tell it nothing
+    let stray = QueueEdit::Move {
+        node: sx.plan.node("X")?,
+        at: Place::Top,
+    };
+    assert!(matches!(
+        sx.service.edit_queue("reef", stray).await?,
+        Queued::NotQueued { .. }
+    ));
+    queue_last(&sx, &sx.plan, "nope").await?;
+    assert!(changes.try_recv().is_err());
     Ok(())
 }

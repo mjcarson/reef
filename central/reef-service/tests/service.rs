@@ -60,4 +60,7 @@ suite!(
     killed_batch_leaves_the_plan_as_it_was,
     untouched_nodes_keep_their_versions_through_a_batch,
     removes_are_checked_with_the_batch,
+    next_follows_the_queue_across_plans,
+    queue_lists_each_entry_with_its_state,
+    queue_edit_is_a_change_and_a_refusal_none,
 );

@@ -156,7 +156,8 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
 - **The report says when the queue ordered it.** next's report reads as it always has until the
   queue puts something first or passes something over, and names nodes in full only across
   several plans.
-- **Per project, spanning its plans**, with `--plan` to narrow a loop to one.
+- **Per project, spanning its plans**, with `--plan` to narrow a loop to one. Narrowed, next
+  leaves the queue's entries of other plans out, and prints one plan's report as before.
 - **The terminal first, then the app.** `reef queue` sets the order ([C24](../milestones/m5.md)),
   and the app's queue panel follows ([C25](../milestones/m5.md)).
 

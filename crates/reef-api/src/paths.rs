@@ -9,6 +9,8 @@
 //! | `GET`, `POST` | [`PROJECTS`] |
 //! | `GET ?dir=` | [`FIND_PROJECT`] |
 //! | `GET`, `POST` | [`PLANS`] |
+//! | `GET`, `POST` | [`QUEUE`] |
+//! | `GET` | [`PROJECT_NEXT`] |
 //! | `GET` | [`PLAN`] |
 //! | `GET`, `POST` | [`NODES`] |
 //! | `GET` | [`NODE`] |
@@ -33,6 +35,13 @@ pub const FIND_PROJECT: &str = "/api/v1/find-project";
 /// A project's plans: listed by `GET`, added to by `POST`
 pub const PLANS: &str = "/api/v1/projects/{project}/plans";
 
+/// A project's queue: listed by `GET`, edited an entry at a time by `POST`
+pub const QUEUE: &str = "/api/v1/projects/{project}/queue";
+
+/// The work ready to start across a project's plans, in the user's order first, and what the
+/// rest waits on
+pub const PROJECT_NEXT: &str = "/api/v1/projects/{project}/next";
+
 /// One plan, and the revision readers load
 pub const PLAN: &str = "/api/v1/projects/{project}/plans/{plan}";
 
@@ -51,7 +60,8 @@ pub const PAYLOAD: &str = "/api/v1/projects/{project}/plans/{plan}/payload";
 /// A plan's problems, as `mdbook-reef check` finds a book's
 pub const CHECK: &str = "/api/v1/projects/{project}/plans/{plan}/check";
 
-/// The work ready to start in a plan, and what the rest waits on, as `mdbook-reef next` says
+/// The work ready to start in a plan, its entries of its project's queue first, and what the
+/// rest waits on, as `mdbook-reef next` says
 pub const NEXT: &str = "/api/v1/projects/{project}/plans/{plan}/next";
 
 /// One of a plan's docs, rendered as the page its links lead to
@@ -107,6 +117,24 @@ pub fn find_project(dir: &str) -> String {
 /// * `project` - The project's name
 pub fn plans(project: &str) -> String {
     format!("{PROJECTS}/{}/plans", encode(project))
+}
+
+/// The path of a project's queue
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn queue(project: &str) -> String {
+    format!("{PROJECTS}/{}/queue", encode(project))
+}
+
+/// The path of the work ready to start across a project's plans
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn project_next(project: &str) -> String {
+    format!("{PROJECTS}/{}/next", encode(project))
 }
 
 /// The path of one plan
@@ -252,6 +280,15 @@ mod tests {
         assert_eq!(super::payload(&plan), format!("{filled}/payload"));
         assert_eq!(super::check(&plan), format!("{filled}/check"));
         assert_eq!(super::next(&plan), format!("{filled}/next"));
+        // and a project's queue and its next fill in theirs
+        assert_eq!(
+            super::queue("reef"),
+            super::QUEUE.replace("{project}", "reef")
+        );
+        assert_eq!(
+            super::project_next("reef"),
+            super::PROJECT_NEXT.replace("{project}", "reef")
+        );
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")
