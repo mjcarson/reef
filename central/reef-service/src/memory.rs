@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::PROJECTS;
-use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, WorkRow};
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -25,6 +25,8 @@ struct Tables {
     queues: BTreeMap<String, BTreeMap<String, QueueRow>>,
     /// Each revision's pages, by path
     pages: BTreeMap<RevisionKey, BTreeMap<String, PageRow>>,
+    /// Each project's work records, by node
+    work: BTreeMap<String, BTreeMap<String, WorkRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -98,6 +100,21 @@ impl MemoryBackend {
             .entry(partition.to_string())
             .or_default()
             .insert(row.rank.clone(), row);
+    }
+
+    /// Stores a work row in a project's partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The project whose partition the row lands in
+    /// * `row` - The row, keyed by its own node as any other
+    pub fn plant_work(&self, partition: &str, row: WorkRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .work
+            .entry(partition.to_string())
+            .or_default()
+            .insert(row.node.clone(), row);
     }
 }
 
@@ -521,6 +538,43 @@ impl Backend for MemoryBackend {
         if partition.is_empty() {
             tables.queues.remove(&row.project);
         }
+        Ok(Written::Applied)
+    }
+
+    /// Reads the work rows stored in a project's partition, in node order, or the one of a node
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The one node's name within its project, or `None` for all of them
+    async fn work(&self, project: &str, node: Option<&str>) -> anyhow::Result<Vec<WorkRow>> {
+        let tables = self.tables();
+        // the project's partition, whole or the one row of it
+        let Some(partition) = tables.work.get(project) else {
+            return Ok(Vec::new());
+        };
+        Ok(match node {
+            Some(node) => partition.get(node).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes one work row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_work(&self, row: WorkRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its key hashes
+        let partition = tables.work.entry(row.project.clone()).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.node).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.node.clone(), row);
         Ok(Written::Applied)
     }
 }

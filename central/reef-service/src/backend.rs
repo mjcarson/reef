@@ -8,7 +8,7 @@
 use reef_model::PlanName;
 use std::future::Future;
 
-use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, WorkRow};
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
 pub use reef_api::Refusal;
@@ -304,4 +304,28 @@ pub trait Backend: Send + Sync {
     ///
     /// * `row` - The row to delete, as it was read
     fn delete_queue(&self, row: &QueueRow) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads the work rows stored in a project's partition, in node order, or the one of a node
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The one node's name within its project, `plan/id`, or `None` for all of them
+    fn work(
+        &self,
+        project: &str,
+        node: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<WorkRow>>> + Send;
+
+    /// Writes one work row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_work(
+        &self,
+        row: WorkRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 }

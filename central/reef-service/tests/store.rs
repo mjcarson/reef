@@ -86,4 +86,11 @@ suite!(
     page_edit_during_import_waits_and_is_refused,
     pages_it_cant_keep_are_refused,
     page_write_refused_in_place_is_an_error,
+    work_of_unstarted_node_is_none,
+    start_reads_back_after_a_restart,
+    second_start_is_stale_unless_it_names_the_record,
+    a_worktree_is_on_its_latest_start,
+    captures_add_to_their_own_start,
+    refused_and_unkeepable_starts_write_nothing,
+    each_project_has_its_own_work,
 );

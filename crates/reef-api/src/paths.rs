@@ -11,6 +11,7 @@
 //! | `GET`, `POST` | [`PLANS`] |
 //! | `GET`, `POST` | [`QUEUE`] |
 //! | `GET` | [`PROJECT_NEXT`] |
+//! | `GET` | [`WORK`] |
 //! | `GET` | [`PLAN`] |
 //! | `GET`, `POST` | [`NODES`] |
 //! | `GET` | [`NODE`] |
@@ -21,9 +22,11 @@
 //! | `GET` | [`DOC`] |
 //! | `GET`, `POST` | [`PAGES`] |
 //! | `GET` | [`PAGE`] |
+//! | `GET`, `POST` | [`NODE_WORK`] |
+//! | `POST` | [`CAPTURES`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
-use reef_model::PlanName;
+use reef_model::{NodeName, PlanName};
 
 /// What every route's path starts with
 pub const PREFIX: &str = "/api/v1";
@@ -43,6 +46,9 @@ pub const QUEUE: &str = "/api/v1/projects/{project}/queue";
 /// The work ready to start across a project's plans, in the user's order first, and what the
 /// rest waits on
 pub const PROJECT_NEXT: &str = "/api/v1/projects/{project}/next";
+
+/// Every work record of a project's nodes, across its plans
+pub const WORK: &str = "/api/v1/projects/{project}/work";
 
 /// One plan, and the revision readers load
 pub const PLAN: &str = "/api/v1/projects/{project}/plans/{plan}";
@@ -77,6 +83,12 @@ pub const PAGES: &str = "/api/v1/projects/{project}/plans/{plan}/pages";
 
 /// One of a plan's own pages, by its path: `design/app.md`
 pub const PAGE: &str = "/api/v1/projects/{project}/plans/{plan}/pages/{*path}";
+
+/// One node's work record: read by `GET`, and recorded by `POST`, which starts the node
+pub const NODE_WORK: &str = "/api/v1/projects/{project}/plans/{plan}/work/{id}";
+
+/// The SHAs each capture of a node's changes read, added to by `POST`
+pub const CAPTURES: &str = "/api/v1/projects/{project}/plans/{plan}/work/{id}/captures";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
@@ -143,6 +155,15 @@ pub fn queue(project: &str) -> String {
 /// * `project` - The project's name
 pub fn project_next(project: &str) -> String {
     format!("{PROJECTS}/{}/next", encode(project))
+}
+
+/// The path of every work record of a project's nodes
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn work(project: &str) -> String {
+    format!("{PROJECTS}/{}/work", encode(project))
 }
 
 /// The path of one plan
@@ -282,6 +303,24 @@ pub fn page(plan: &PlanName, path: &str) -> String {
     format!("{}/{}", pages(plan), parts.join("/"))
 }
 
+/// The path of one node's work record
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+pub fn node_work(node: &NodeName) -> String {
+    format!("{}/work/{}", self::plan(&node.plan), encode(&node.id))
+}
+
+/// The path of the SHAs each capture of a node's changes read
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+pub fn captures(node: &NodeName) -> String {
+    format!("{}/captures", node_work(node))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -340,6 +379,18 @@ mod tests {
             super::project_next("reef"),
             super::PROJECT_NEXT.replace("{project}", "reef")
         );
+        // and so do a project's work records, and one node's with its captures
+        assert_eq!(
+            super::work("reef"),
+            super::WORK.replace("{project}", "reef")
+        );
+        let node = plan.node("C30").unwrap();
+        let work = super::NODE_WORK
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{id}", "C30");
+        assert_eq!(super::node_work(&node), work);
+        assert_eq!(super::captures(&node), format!("{work}/captures"));
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

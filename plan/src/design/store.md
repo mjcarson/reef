@@ -165,3 +165,24 @@ and no transactions, rewriting every row's position on each move would be slow a
   queue that reads in order.
 - **One queue per project, spanning its plans.** Each entry names a plan and a node, and a
   loop can be narrowed to one plan.
+
+## Work records
+
+`reef start` records where a node's work happens and what it started from, and each capture
+of its changes adds the SHAs it read ([C30](../milestones/m7.md)). A capture run in a worktree must find
+the node it is on, across the project's plans, with no secondary index to ask.
+
+### Design choices
+
+- **One row a node, in its project's partition**, sorted by `plan/id`. The node a worktree is
+  on is the one started there last, found by reading that one partition.
+- **The record as one JSON field**, as a node's spec is, so what `reef start` and a capture
+  read can change without changing the table.
+- **A start is written whole, by version.** A node not started is written `if_absent`, and one
+  started again only over the version its start named, captures and all. A second start of a
+  node is refused as stale, rather than taking the first one's place unseen.
+- **Each start is later than the last in its project**, by at least a millisecond, so the
+  latest start in a worktree is never a tie.
+- **A capture names its start** by the commit its pin points at, so the SHAs of a capture
+  taken before a restart never join the new start's.
+- **Writes take a lock per project; reads take none**, since each write is one row's.

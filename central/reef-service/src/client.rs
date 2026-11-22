@@ -16,7 +16,7 @@ use crate::schema::{
     NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow,
     PageRowDelete, PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate,
     ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient,
-    ReefQueryKinds,
+    ReefQueryKinds, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -602,6 +602,44 @@ impl Backend for ShoalBackend {
             seq: Some(vec![row.seq]),
         };
         written(self.client.send_one(delete.if_matches(filter)).await)
+    }
+
+    /// Reads the work rows stored in a project's partition, in node order, or the one of a node
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The one node's name within its project, or `None` for all of them
+    #[instrument(name = "ShoalBackend::work", skip_all, err(Debug))]
+    async fn work(&self, project: &str, node: Option<&str>) -> anyhow::Result<Vec<WorkRow>> {
+        // a project's work records sit in that project's partition
+        let mut get = WorkRowGet::new(vec![project.to_string()]);
+        if let Some(node) = node {
+            get = get.sort_keys(vec![node.to_string()]);
+        }
+        self.read::<_, WorkRow>(get).await
+    }
+
+    /// Writes one work row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_work", skip_all, err(Debug))]
+    async fn write_work(&self, row: WorkRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = WorkRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
     }
 }
 

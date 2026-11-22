@@ -296,6 +296,11 @@ is the twin's oracle.
   (`rank`), so an edit writes one row. A move writes its new row, then deletes its old one; of a
   node's two rows the later write wins, and the next edit prunes the other. A rank grown past 32
   characters spreads the queue anew, an entry at a time, last first.
+- **A node's work record is one row** (`Store::start_work`), in its project's partition by
+  `plan/id`, so the node a worktree is on is the one started there last, across the project's
+  plans. A start is written where no record is, or over the version of the one it replaces, and
+  is later than every start before it. A capture's SHAs (`Store::add_capture`) join the start
+  its pinned commit names, and no other.
 
 ## The schema
 
@@ -306,6 +311,7 @@ is the twin's oracle.
 | `NodeRow` | (project, plan, revision) | id | a `version`, status, group, written order, the spec as JSON, the body |
 | `PageRow` | (project, plan, revision) | path | a `version`, and the page's markdown |
 | `QueueRow` | project | rank | the plan and id of the node queued, and the `seq` it was written at |
+| `WorkRow` | project | `plan/id` | a `version`, and the node's work record as JSON: its worktree, branch, base branch, start, start tree, fork and pin, and each capture's SHAs |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

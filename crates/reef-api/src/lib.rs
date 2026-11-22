@@ -14,6 +14,8 @@
 //!   what came of it, and the paths a page can have.
 //! - **The queue** ([`queue`]): a project's order of work, where an edit puts an entry, and
 //!   what came of one.
+//! - **Work records** ([`work`]): where a node's work happens and what it started from, as
+//!   `reef start` read it from the node's checkout, and the SHAs each capture since read.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -30,6 +32,7 @@ pub mod page;
 pub mod paths;
 pub mod project;
 pub mod queue;
+pub mod work;
 
 pub use change::{Change, PutNode, PutPage};
 pub use error::{ApiError, ErrorCode};
@@ -43,6 +46,9 @@ pub use page::{
 };
 pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Project};
 pub use queue::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};
+pub use work::{
+    AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,
+};
 
 /// Where the service listens when reef's config names no address: localhost only
 pub const DEFAULT_ADDRESS: &str = "127.0.0.1:12180";

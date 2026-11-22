@@ -5,7 +5,9 @@
 //! so the next write must recover from both the same way.
 
 use reef_model::PlanName;
-use reef_service::schema::{NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow};
+use reef_service::schema::{
+    NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow, WorkRow,
+};
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +43,8 @@ pub struct Faults {
     page_rows_left: Mutex<Option<usize>>,
     /// Fail the next delete of page rows, before deleting any
     fail_page_prune: AtomicBool,
+    /// Refuse the next write of a work row as moved, as another writer having written would
+    refuse_work_write: AtomicBool,
     /// Refuse the next write of one page row as moved, without writing it
     refuse_page_write: AtomicBool,
 }
@@ -89,6 +93,12 @@ impl Faults {
     /// its new row and deleting its old one would
     pub fn fail_next_queue_delete(&self) {
         self.fail_queue_delete.store(true, Ordering::SeqCst);
+    }
+
+    /// Refuses the next write of a work row as moved, as a write from another process between
+    /// the store's read and its write would be
+    pub fn refuse_next_work_write(&self) {
+        self.refuse_work_write.store(true, Ordering::SeqCst);
     }
 
     /// Lets `writes` writes of a queue row through, then fails the next before writing it
@@ -411,5 +421,29 @@ impl<B: Backend> Backend for Faulty<B> {
             anyhow::bail!("killed before deleting queue row `{}`", row.rank);
         }
         self.inner.delete_queue(row).await
+    }
+
+    /// Reads a project's work rows, or one node's
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `node` - The one node's name within its project, or `None` for all of them
+    async fn work(&self, project: &str, node: Option<&str>) -> anyhow::Result<Vec<WorkRow>> {
+        self.inner.work(project, node).await
+    }
+
+    /// Writes one work row, if its condition holds, refusing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_work(&self, row: WorkRow, expect: Expect) -> anyhow::Result<Written> {
+        // a fault armed for this write refuses it, as another process having written would
+        if self.faults.refuse_work_write.swap(false, Ordering::SeqCst) {
+            return Ok(Written::Refused(Refusal::Moved));
+        }
+        self.inner.write_work(row, expect).await
     }
 }

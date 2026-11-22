@@ -32,8 +32,16 @@
 //!   reads as made, and the next edit prunes the other. A rank grown long spreads the queue anew,
 //!   one entry at a time, last first, so the queue reads in order after every step. Queue writes
 //!   take a lock per project; reads take none.
+//! - **A node's work record a row** ([`work`]): where its work happens, what it started from, and
+//!   what each capture since read, as JSON in its project's partition. A start is written where
+//!   no record is, or over the version of the one it replaces.
+
+mod work;
 
 // the store's data types are the JSON API's, so the service and its clients share them
+pub use reef_api::{
+    AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,
+};
 pub use reef_api::{
     AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, PageEdit, PageEdited,
     PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Puts, QueueEdit, Queued, Ranked,
@@ -141,6 +149,8 @@ pub struct Store<B = ShoalBackend> {
     projects: tokio::sync::Mutex<()>,
     /// Each project's queue lock, held alone by its writes
     queues: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Each project's work records' lock, held alone by their writes
+    works: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Store<ShoalBackend> {
@@ -191,6 +201,7 @@ impl<B: Backend> Store<B> {
             locks: Mutex::new(HashMap::new()),
             projects: tokio::sync::Mutex::new(()),
             queues: Mutex::new(HashMap::new()),
+            works: Mutex::new(HashMap::new()),
         }
     }
 

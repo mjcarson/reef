@@ -1,11 +1,12 @@
-//! reef's shoal schema: projects, plans, each revision's nodes and pages, and each project's
-//! queue
+//! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
+//! and its nodes' work records
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
 //! plans sit in that project's, a plan's nodes and its pages each sit in a partition of their
-//! revision, and a project's queue sits in a partition of its own. Sort keys are a single `String`
-//! there, so each table sorts by a name, an id, a path or a rank.
+//! revision, and a project's queue and its work records each sit in a partition of their own.
+//! Sort keys are a single `String` there, so each table sorts by a name, an id, a path, a rank or
+//! a node's name within its project.
 //!
 //! This one module is both halves of the schema. Built with `embedded` it is the whole schema,
 //! which `reef-shoal` serves and an in-process pool runs. Built without it, only the client half
@@ -224,6 +225,33 @@ pub struct QueueRow {
     pub seq: u64,
 }
 
+/// One node's work record: where its work happens, what it started from, and what each capture
+/// since read
+///
+/// A project's records share its partition, so the node a worktree is on is found by reading one
+/// partition, across the project's plans. The record is one JSON field, as a node's spec is, so
+/// what `reef start` and a capture read can change without changing this table. A start writes
+/// the row whole, `if_absent` for a node not started and over the version read to start it again,
+/// and so does each capture it adds.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct WorkRow {
+    /// The project the node's plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The node's name within its project, `plan/id`, which sorts the partition
+    #[shoal(sort)]
+    pub node: String,
+    /// Bumped by every write of this record, and named by the next one
+    #[shoal(filter)]
+    pub version: u64,
+    /// The record as JSON, its name and version left to the fields beside it
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -243,6 +271,8 @@ pub struct Reef {
     /// Each revision's pages
     #[shoal(projections(PageKey))]
     pub pages: PersistentSortedTable<PageRow, FileSystem>,
+    /// Each project's work records, by node
+    pub work: PersistentSortedTable<WorkRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -251,7 +281,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 15686170799915864681;
+    const SCHEMA_ID: u64 = 18240001078674791654;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -260,6 +290,7 @@ mod tests {
         ("NodeRow", 1919551679666722412),
         ("QueueRow", 7438970626929457281),
         ("PageRow", 13886911418170667521),
+        ("WorkRow", 606948397267046790),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

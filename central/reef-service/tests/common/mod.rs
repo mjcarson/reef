@@ -15,6 +15,7 @@ pub mod http;
 pub mod page_cases;
 pub mod queue_cases;
 pub mod service_cases;
+pub mod work_cases;
 
 use reef_model::{Description, NodeSpec, PlanName};
 use reef_service::{AddedProject, Backend, Conf, MemoryBackend, NodeWrite, Service, Store};

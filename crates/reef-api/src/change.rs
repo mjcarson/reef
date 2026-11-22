@@ -4,9 +4,9 @@
 //! stream is live only: a client that connects, or connects again, reads what it needs first and
 //! follows the stream after, and one that falls behind is told how many changes it missed, so it
 //! reads again. Changes to one plan by two writers can arrive in either order, so each node or
-//! page put carries its new version.
+//! page put carries its new version, and each work record written its own.
 
-use reef_model::PlanName;
+use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
 
 use crate::project::Project;
@@ -78,6 +78,13 @@ pub enum Change {
         /// The project whose queue it is
         project: String,
     },
+    /// A node's work record was written: the node started, or a capture's SHAs added
+    WorkRecorded {
+        /// The node whose record it is
+        node: NodeName,
+        /// The version the record is now at
+        version: u64,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -95,6 +102,7 @@ impl Change {
             Change::PagesPut { .. } => "pages-put",
             Change::PlanWritten { .. } => "plan-written",
             Change::QueueChanged { .. } => "queue-changed",
+            Change::WorkRecorded { .. } => "work-recorded",
             Change::Missed { .. } => "missed",
         }
     }
@@ -108,6 +116,7 @@ impl Change {
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
             Change::QueueChanged { project } => Some(project.as_str()),
+            Change::WorkRecorded { node, .. } => Some(node.plan.project.as_str()),
             Change::Missed { .. } => None,
         }
     }
@@ -121,6 +130,7 @@ impl Change {
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
+            Change::WorkRecorded { node, .. } => Some(&node.plan),
             Change::ProjectAdded { .. } | Change::QueueChanged { .. } | Change::Missed { .. } => {
                 None
             }
@@ -206,6 +216,10 @@ mod tests {
             Change::PlanWritten { plan, revision: 4 },
             Change::QueueChanged {
                 project: "reef".to_string(),
+            },
+            Change::WorkRecorded {
+                node: "reef/central/C30".parse().unwrap(),
+                version: 2,
             },
             Change::Missed { count: 3 },
         ];
