@@ -426,27 +426,6 @@ fn svg_open_z(h: f64, label: &str, i: usize, r: &ChartRef, v: &ChartView, zoomab
 /// The overlay the pointer draws in, last so it is on top.
 const OVERLAY: &str = r#"<g class="reef-perf-overlay"></g>"#;
 
-/// The chart `r` of node `i`'s section, drawn as `v` says, with `overlay` drawn in its overlay:
-/// what the pointer over it shows. Empty when the node has no such chart.
-///
-/// # Arguments
-///
-/// * `g` - The plan
-/// * `i` - The node whose section it is in
-/// * `r` - Which chart
-/// * `v` - What the reader has done to it
-/// * `overlay` - SVG to draw over it, from [`Hover::overlay`]
-pub fn chart_with(g: &Graph, i: usize, r: &ChartRef, v: &ChartView, overlay: &str) -> String {
-    let mut svg = chart(g, i, r, v);
-    // the overlay is the chart's last group, so the pointer's marks draw over the rest
-    if !overlay.is_empty()
-        && let Some(at) = svg.rfind(OVERLAY)
-    {
-        svg.replace_range(at..at + OVERLAY.len(), &format!(r#"<g class="reef-perf-overlay">{overlay}</g>"#));
-    }
-    svg
-}
-
 /// The chart `r` of node `i`'s section, drawn as `v` says. Empty when the node has no such
 /// chart.
 pub fn chart(g: &Graph, i: usize, r: &ChartRef, v: &ChartView) -> String {

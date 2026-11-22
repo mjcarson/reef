@@ -1,12 +1,13 @@
-//! The app's wasm client never holds shoal or the service
+//! The app's wasm client never holds shoal, the service or reef-view
 //!
 //! gxhash can't target wasm, and the service is the only code that opens shoal, so the client's
-//! tree, with `web` on for wasm32, names neither.
+//! tree, with `web` on for wasm32, names neither. The canvas is Dioxus's own, drawn from
+//! reef-draw, so reef-view's viewer isn't linked in either.
 
 use std::path::Path;
 use std::process::Command;
 
-/// The crates whose names say they belong to shoal, glommio or the service
+/// The crates whose names say they belong to shoal, glommio, the service or reef-view
 ///
 /// # Arguments
 ///
@@ -16,12 +17,15 @@ fn forbidden(tree: &str) -> Vec<&str> {
         .filter(|line| {
             // each line is `name vX.Y.Z (source)`, sometimes marked `(*)`
             let name = line.split_whitespace().next().unwrap_or("");
-            name.starts_with("shoal") || name.starts_with("glommio") || name == "reef-service"
+            name.starts_with("shoal")
+                || name.starts_with("glommio")
+                || name == "reef-service"
+                || name == "reef-view"
         })
         .collect()
 }
 
-/// `cargo tree` of the wasm client names no shoal, glommio or reef-service crate
+/// `cargo tree` of the wasm client names no shoal, glommio, reef-service or reef-view crate
 #[test]
 fn the_wasm_client_has_neither_shoal_nor_the_service() {
     // central's workspace manifest, one directory up from this crate
@@ -52,11 +56,15 @@ fn the_wasm_client_has_neither_shoal_nor_the_service() {
         "cargo tree failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // the tree was read, and holds the client's own renderer
+    // the tree was read, and holds the client's own renderer and what the canvas draws from
     assert!(
         stdout.lines().any(|line| line.starts_with("dioxus-web ")),
         "{stdout}"
     );
-    // and none of shoal's, glommio's or the service's
+    assert!(
+        stdout.lines().any(|line| line.starts_with("reef-draw ")),
+        "{stdout}"
+    );
+    // and none of shoal's, glommio's, the service's or reef-view's
     assert_eq!(forbidden(&stdout), Vec::<&str>::new());
 }

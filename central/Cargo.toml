@@ -24,6 +24,9 @@ deepsize2 = "0.1"
 reef-model = { path = "../crates/reef-model", default-features = false }
 # markdown rendering, doc links and why/what taken from docs, as `mdbook-reef check` does them
 reef-render = { path = "../crates/reef-render" }
+# what reef's viewers draw a plan from, shared by reef-view and reef-app's canvas
+reef-draw = { path = "../crates/reef-draw" }
+reef-layout = { path = "../crates/reef-layout" }
 # the service's data types, and the JSON API's requests, answers, routes and changes
 reef-api = { path = "../crates/reef-api" }
 # the terminal's client of the JSON API, which the API's tests drive against a served twin

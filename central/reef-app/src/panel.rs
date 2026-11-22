@@ -1,9 +1,7 @@
-//! The node panel: the node the viewer selected, and its YAML to edit, beside the viewer's own
-//! sidebar
+//! The sidebar's Edit tab: the selected node's YAML to edit, and the problems the plan has at it
 //!
-//! The viewer's sidebar keeps the why, the what, acceptance and performance. This panel holds
-//! what the app adds to a node: its spec as YAML, saved as `reef node put` saves it, and the
-//! problems the plan has at it.
+//! The Details tab keeps the why, the what, acceptance and performance. This tab holds what the
+//! app adds to a node: its spec as YAML, saved as `reef node put` saves it.
 //!
 //! A save names the version the editor read, so a node that changed since is never written over.
 //! While the draft is untouched, each change to the plan reads the node again; once it is edited,
@@ -11,20 +9,17 @@
 
 use crate::calls::{self, NodeText, Saved};
 use dioxus::prelude::*;
-use reef_model::Payload;
 
-/// The selected node: its title, its YAML to edit, and its problems
+/// The selected node's YAML to edit, and its problems
 ///
 /// # Arguments
 ///
-/// * `payload` - The plan's nodes, for the node's title
 /// * `project` - The project the plan belongs to
 /// * `plan` - The plan's name within it
 /// * `id` - The selected node's id
 /// * `changes` - How many changes to the plan have come, which read the node again
 #[component]
-pub fn NodePanel(
-    payload: ReadSignal<Payload>,
+pub fn NodeEditor(
     project: ReadSignal<String>,
     plan: ReadSignal<String>,
     id: ReadSignal<String>,
@@ -91,16 +86,6 @@ pub fn NodePanel(
             })),
         }
     };
-    // the node's title, as the payload has it, which a newer revision may have dropped
-    let title = payload
-        .read()
-        .nodes
-        .iter()
-        .find(|node| node.id == id())
-        .map(|node| node.title.clone());
-    let Some(title) = title else {
-        return rsx! {};
-    };
     // what the editor shows under the YAML, and whether there is anything to save
     let problems = match &*text.read() {
         Some(Ok(read)) => read.problems.clone(),
@@ -108,9 +93,7 @@ pub fn NodePanel(
     };
     let edited = base().is_some_and(|started| started.yaml != draft());
     rsx! {
-        aside { class: "reef-app-panel",
-            p { class: "reef-app-panel-id", code { "{id}" } }
-            h2 { class: "reef-app-panel-title", "{title}" }
+        div { class: "reef-app-editor",
             if let Some(Err(error)) = &*text.read() {
                 p { class: "reef-app-error", "Reading the node failed: {error}" }
             }

@@ -172,6 +172,14 @@ nodes:
           unit: KiB
           before: 657.5
           after: 831.5
+  - id: C66
+    title: "C66 A double-click opens a collapsed group in reef-view"
+    description:
+      why: "reef-view takes the pointer on a press, so the browser sends the double-click to the diagram's SVG, and a double-click on a collapsed group finds no box and does nothing."
+      what: "A double-click on a collapsed group opens it in the static mode's viewer, as it does in reef-app's canvas."
+      details: "Found while building C55, whose canvas opens the box the double-click's press landed on. On the example book's plan page, 43 boxes were drawn before and after a double-click on a collapsed group in headless Chromium."
+    acceptance:
+      - feature: "A double-click on a collapsed group in the example book opens it"
 ---
 # Centralized reef
 
@@ -220,9 +228,10 @@ Through it:
    ([M5](milestones/m5.md)).
 6. **The UI is a Dioxus 0.7 fullstack app.** `reef-app` runs on axum. The same server answers a
    plain JSON API for the CLI, the MCP server and the hook. Both go through one service layer,
-   the only code that touches shoal. The existing viewer is linked into the app's wasm and
-   mounted inside it ([X6](design/app.md#what-x6-found)) until an optional native port.
-   mdbook-reef and its viewer stay, as the static mode.
+   the only code that touches shoal. The app draws the plan with Dioxus components of its own
+   ([C55](design/app.md#the-canvas-in-dioxus)), from reef-draw as reef-view does, after first
+   mounting the existing viewer ([X6](design/app.md#what-x6-found)). mdbook-reef and its viewer
+   stay, as the static mode.
 7. **reef keeps each node's changes.** Git is read once, by a Claude Code hook when a node is
    completed, and never used to store them, since commits are squashed regularly. Nodes worked
    on at the same time each get their own worktree

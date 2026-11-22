@@ -35,10 +35,12 @@ takes the plan's name, which its saved groups are kept under.
   app's wasm. `reef.js` beside it would add 306 KiB and a second runtime.
 - **Mount the viewer first; a native port is optional.** [C55](../milestones/m4.md) rebuilds
   the canvas and sidebar as Dioxus components over `reef-model` and `reef-layout`, but only once
-  the app works with the mounted viewer.
+  the app works with the mounted viewer. It has since done so
+  ([The canvas in Dioxus](#the-canvas-in-dioxus)), and the app no longer links reef-view.
 - **Two sidebars until then.** The viewer's sidebar keeps the why, the what, acceptance and
-  performance. The Dioxus node panel beside it holds the editor, and gains a Changes tab and a
-  Comments tab with M7 ([C33](../milestones/m7.md), [C35](../milestones/m7.md)).
+  performance. The Dioxus node panel beside it holds the editor. C55 made them one sidebar,
+  whose tabs M7's Changes and Comments join ([C33](../milestones/m7.md),
+  [C35](../milestones/m7.md)).
 - **mdbook-reef keeps the viewer as it is.** The static mode builds with the auto-start feature,
   and its committed `reef.js` is unchanged in behaviour.
 
@@ -89,6 +91,55 @@ swaps payloads. `check.py` drives it in headless Chromium.
   and a plain `style` element in rsx gets a hydration marker in its text that breaks its first
   rule.
 
+## The canvas in Dioxus
+
+### Context
+
+The mounted viewer wrote its own toolbar, SVG and sidebar as HTML strings, so the app couldn't
+style or extend them as components, and the editor sat in a second panel beside the viewer's
+sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
+
+### Design choices
+
+- **reef-draw holds what both viewers draw.** reef-view's pure half, its box sizes, layout
+  input, markup, criteria and charts, and the view's camera and search, moved into `reef-draw`
+  ([C65](../milestones/m4.md)). reef-view writes its markup; the canvas draws the same elements
+  in rsx, checked against it by `tests/diagram.rs`. Boxes are the same size and in the same
+  place in both, given the same font.
+- **State by id, and a canvas per plan.** Open groups, the selection and the filter are held by
+  id, so a newer revision draws where the old one was. The plan's page keys the canvas by
+  plan, so another plan starts afresh. Together they do what `Handle::swap` and
+  `Handle::swap_plan` did.
+- **One sidebar, with tabs.** The node's header, then **Details**, which is what reef-view's
+  sidebar shows, and **Edit**, which is C20's editor. M7's Changes and Comments tabs join them.
+- **The boxes say what was hit.** Each box, group head and toggle writes what a press or a move
+  landed on to a signal, as the event bubbles, and the SVG's own handler takes it. Nothing reads
+  the DOM to find the target, and nothing stops the event.
+- **Markup where it is markup.** A node's rendered markdown, and the charts' SVG from reef-draw,
+  go in as inner HTML. A chart's view (hidden series, a zoomed range) is a signal; what the
+  pointer shows over it, its crosshair and the metric it lights, is written into its SVG, so a
+  hover never draws the chart again.
+- **mdbook keeps reef-view.** The static mode still builds reef.js from reef-view, drawing from
+  reef-draw too.
+
+### What C55 found
+
+- **A key on a nested component is dropped.** Dioxus 0.7.10 reads a key only on the first node
+  of an rsx block, so the canvas is the root of a block of its own inside the stage.
+- **dioxus-html's `title` is the document's.** Made in the HTML namespace, it gives no tooltip
+  in an SVG. A local `dioxus_elements` module adds `svgtitle`, made in SVG's namespace.
+- **The SVG holds the pointer from a press,** so the browser sends the click and double-click
+  that follow it to the SVG, not to the box. The canvas opens the box the press landed on.
+  reef-view looks for the box under the double-click and finds none, so its double-click never
+  opens a collapsed group ([C66](../overview.md)).
+- **What the server rendered is what hydration keeps.** The sidebar's width, read from local
+  storage as its signal started, never reached the stage's style, and the arrows' marker, named
+  from a timer, differed from the server's, so no arrow had a head. Storage is now read in an
+  effect once the page is live, and the marker's name is fixed.
+- **Chrome sends `pointerover` when the page changes under a still pointer.** Lighting a box's
+  lineage on it lit the group a click had just collapsed. The canvas lights on `pointermove`,
+  as reef-view does, and a new layout lets the hover go.
+
 ## The shell
 
 ### Design choices
@@ -96,8 +147,8 @@ swaps payloads. `check.py` drives it in headless Chromium.
 - **A project and plan picker** as the app's front page, then each plan full-window.
 - **Server functions call `reef-service`**, and the same axum router mounts the JSON API's
   routes ([C53](../milestones/m3.md)), so one port serves both.
-- **Live refresh from the change stream.** When Claude puts a node, the app swaps the new
-  revision in through the mount handle.
+- **Live refresh from the change stream.** When Claude puts a node, the app reads the plan
+  again and draws the new revision where the old one was.
 - **The app listens where the CLI looks.** Its server is its own `axum::serve` on `[api] address`,
   loopback only, rather than `dioxus::serve`, which listens on `PORT` or 8080. It takes
   reef-serve's place: only one process can open shoal's data directory. Under `dx serve`, dx names

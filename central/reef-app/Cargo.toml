@@ -10,8 +10,9 @@ publish.workspace = true
 [features]
 # No default: dx keeps default features on in the wasm build too, and each side wants its own.
 default = []
-# the wasm client: Dioxus's web renderer and the viewer, and never shoal or the service
-web = ["dioxus/web", "dep:reef-view", "dep:web-sys", "dep:wasm-bindgen"]
+# the wasm client: Dioxus's web renderer, and what only a browser can do for the canvas, and
+# never shoal or the service
+web = ["dioxus/web", "reef-draw/web", "dep:web-sys", "dep:wasm-bindgen"]
 # the server: Dioxus's axum server, the service and the JSON API's router over shoal's client half
 # (reef-model's YAML, for the editor's server functions)
 server = ["dioxus/server", "dep:reef-service", "dep:tokio", "dep:axum", "dep:anyhow", "dep:tracing", "reef-model/parse"]
@@ -26,9 +27,14 @@ serde_json = { workspace = true }
 reef-api = { workspace = true }
 reef-model = { workspace = true }
 reef-service = { path = "../reef-service", optional = true }
-# the viewer, linked into the client's wasm, without the page-load start that would replace main
-reef-view = { path = "../../crates/reef-view", default-features = false, optional = true }
-web-sys = { version = "0.3", features = ["HtmlElement", "EventSource"], optional = true }
+# what the canvas draws: box sizes, the layout, the camera, the search, the criteria and the charts
+reef-draw = { workspace = true }
+# the layout's direction and paths, which the canvas's arrows are drawn along
+reef-layout = { workspace = true }
+web-sys = { version = "0.3", features = [
+  "Document", "DomRect", "DomTokenList", "Element", "EventSource", "EventTarget", "HtmlElement", "NodeList",
+  "Performance", "PointerEvent", "Storage", "WheelEvent", "Window", "console",
+], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 tokio = { workspace = true, features = ["net", "signal"], optional = true }
 axum = { workspace = true, optional = true }
@@ -38,6 +44,9 @@ tracing = { workspace = true, optional = true }
 [dev-dependencies]
 # the terminal's client, to put plans through the CLI as a user would
 reef = { workspace = true }
+# the diagram rendered natively, and parsed, to check it against reef-draw's markup
+dioxus-ssr = "=0.7.10"
+roxmltree = "0.20"
 reqwest = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }

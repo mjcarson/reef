@@ -41,6 +41,8 @@ SHOTS = Path(sys.argv[1]) if len(sys.argv) > 1 else WORK
 # the checks that failed, and everything the page logged
 failed = []
 logs = []
+# the mdbook build of the plan C54 draws, which reef-view draws, for C55 to compare against
+BOOK = {}
 
 
 def check(label, ok, seen):
@@ -173,10 +175,10 @@ LATER = node_yaml("L1", "L1 After the work", "needs: [G1]\n")
 
 
 def boxes(page):
-    """Every box and group the diagram draws, as its classes and its text, in order."""
+    """Every box and group the diagram draws, as its classes (in any order) and its text, sorted."""
     return page.evaluate(
         "() => [...document.querySelectorAll('.reef-viewport .reef-node, .reef-viewport .reef-group')]"
-        ".map(e => [e.getAttribute('class'), e.textContent]).sort()"
+        ".map(e => [e.getAttribute('class').split(' ').sort().join(' '), e.textContent]).sort()"
     )
 
 
@@ -220,6 +222,7 @@ def c54_draws_as_in_mdbook(page):
     page.click("button[data-act=expand]")
     page.wait_for_timeout(300)
     in_book = (page.get_attribute(".reef", "data-boxes"), boxes(page))
+    BOOK["work"] = html
     # the app's, the same way
     page.goto(URL + "/plans/check/draws")
     wait_drawn(page)
@@ -233,46 +236,152 @@ def c54_draws_as_in_mdbook(page):
 
 
 def c54_selecting_opens_the_panel(page):
-    """C54: clicking a node in the diagram opens it in the node panel, and letting it go closes it."""
+    """C54: clicking a node in the diagram opens it in the sidebar, and letting it go closes it."""
     page.goto(URL + "/plans/check/draws")
     wait_drawn(page)
     page.click("button[data-act=expand]")
     page.wait_for_timeout(300)
     page.locator(".reef-viewport .reef-node", has_text="W2 Build on it").click()
-    page.wait_for_selector(".reef-app-panel", timeout=5000)
-    shown = (page.inner_text(".reef-app-panel-id"), page.inner_text(".reef-app-panel-title"))
+    page.wait_for_selector(".reef-side", timeout=5000)
+    shown = (page.inner_text(".reef-side .reef-id"), page.inner_text(".reef-side h2"))
     page.screenshot(path=str(SHOTS / "reef-app-panel.png"))
     page.click(".reef-side [data-act=close]")
     page.wait_for_timeout(300)
-    closed = page.locator(".reef-app-panel").count() == 0
+    closed = page.locator(".reef-side").count() == 0
     check("C54 selecting a node opens it in the node panel", shown == ("W2", "W2 Build on it") and closed,
-          {"panel": shown, "closed with the viewer's sidebar": closed})
+          {"sidebar": shown, "closed": closed})
 
 
 def c54_one_viewer_listens(page):
-    """C58 in the app: leaving a plan for the picker and coming back leaves one viewer listening."""
+    """C58 in the app: leaving a plan for the picker and coming back leaves one canvas drawing."""
     page.goto(URL + "/plans/check/draws")
     wait_drawn(page)
-    page.evaluate("() => { window.__old = document.querySelector('.reef'); window.__kept = 'same page'; }")
+    page.evaluate("() => { window.__old = document.querySelector('.reef'); window.__kept = 'same page';"
+                  " window.__oldDraws = window.__old.getAttribute('data-draws'); }")
     page.click("text=← Plans")
     page.wait_for_selector(".reef-app-plans a")
     page.click(".reef-app-plans a:text-is('draws')")
     wait_drawn(page)
     page.wait_for_timeout(300)
-    # a filter change reaches every live view through a document event, and a live view draws again
-    page.evaluate("() => { window.__old.removeAttribute('data-layout-ms');"
-                  " document.querySelector('.reef').removeAttribute('data-layout-ms'); }")
+    # a filter change lays the live canvas out again, which counts it in `data-draws`
+    before = page.get_attribute(".reef", "data-draws")
     chip = page.locator(".reef-acc-filter button").first
     chip.click()
     page.wait_for_timeout(500)
-    drew = page.evaluate("() => [window.__old.getAttribute('data-layout-ms') !== null,"
-                         " document.querySelector('.reef').getAttribute('data-layout-ms') !== null,"
+    drew = page.evaluate("() => [window.__old.getAttribute('data-draws') !== window.__oldDraws,"
+                         " document.querySelector('.reef').getAttribute('data-draws'),"
                          " window.__old.isConnected, window.__kept]")
     chip.click()
     check("C54 a plan left and opened again leaves one viewer listening",
-          drew == [False, True, False, "same page"],
-          {"left view drew": drew[0], "new view drew": drew[1], "left element in the page": drew[2],
+          drew[0] is False and drew[1] != before and drew[2] is False and drew[3] == "same page",
+          {"left view drew": drew[0], "new view's layouts": [before, drew[1]], "left element in the page": drew[2],
            "no reload": drew[3]})
+
+
+def seen(page):
+    """What C55 compares in a view: search, sidebar, chart hover and a group collapsed from its head."""
+    wait_drawn(page)
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    out = {}
+    # a search for W2, taken with Enter, selects it and opens its sidebar
+    page.fill(".reef-search", "W2")
+    page.wait_for_timeout(200)
+    out["results"] = page.eval_on_selector_all(".reef-results a", "as => as.map(a => a.textContent)")
+    page.press(".reef-search", "Enter")
+    page.wait_for_selector(".reef-side .reef-id", timeout=5000)
+    page.wait_for_timeout(300)
+    out["searched"] = (page.inner_text(".reef-side .reef-id"), page.get_attribute(".reef", "data-boxes"), boxes(page))
+    # its sidebar: the sections, the criteria, and the charts as drawn, whatever node index they name
+    out["sections"] = page.eval_on_selector_all(".reef-side .reef-sec > summary h3", "hs => hs.map(h => h.textContent)")
+    out["criteria"] = page.eval_on_selector_all(".reef-side .reef-acc-item", "is => is.map(i => i.textContent)")
+    out["charts"] = page.evaluate(
+        "() => [...document.querySelectorAll('.reef-side svg.reef-perf-chart')]"
+        ".map(s => s.outerHTML.replace(/ data-node=\"[0-9]+\"/, ''))"
+    )
+    # a hover over the first chart's middle shows the same tooltip
+    chart = page.locator(".reef-side svg.reef-perf-chart").first
+    chart.scroll_into_view_if_needed()
+    chart.hover()
+    page.wait_for_timeout(200)
+    out["tip"] = page.evaluate("() => { const t = document.querySelector('.reef-tip:not([hidden])'); return t && t.textContent; }")
+    page.mouse.move(5, 5)
+    # G1's head, clicked, closes it, and the boxes are the same
+    page.click(".reef-side [data-act=close]")
+    page.wait_for_timeout(200)
+    page.locator(".reef-viewport .reef-group .reef-head", has_text="G1 The work").first.click()
+    page.wait_for_timeout(300)
+    out["collapsed"] = (page.get_attribute(".reef", "data-boxes"), boxes(page))
+    return out
+
+
+def c55_matches_the_viewer(page):
+    """C55: the canvas searches, collapses groups and draws charts as reef-view does in mdbook."""
+    page.goto(f"file://{BOOK['work']}")
+    in_book = seen(page)
+    page.goto(URL + "/plans/check/draws")
+    in_app = seen(page)
+    page.screenshot(path=str(SHOTS / "reef-app-collapsed.png"))
+    for what in ["results", "searched", "sections", "criteria", "charts", "tip", "collapsed"]:
+        same = in_book[what] == in_app[what] and in_app[what] not in (None, [], "")
+        check(f"C55 {what} match the mounted viewer", same,
+              {"book": str(in_book[what])[:300], "app": str(in_app[what])[:300]} if not same else str(in_app[what])[:120])
+    # the pills' and arrows' tooltips are SVG titles, which a browser shows
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    spaces = page.eval_on_selector_all(".reef-viewport title", "ts => [...new Set(ts.map(t => t.namespaceURI))]")
+    check("C55 the boxes' tooltips are SVG titles", spaces == ["http://www.w3.org/2000/svg"], spaces)
+
+
+def c55_answers_the_pointer(page):
+    """C55: the canvas pans, zooms, opens a group on a double-click and keeps its sidebar's width."""
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.click("button[data-act=collapse]")
+    page.wait_for_timeout(300)
+    seen = {}
+    transform = lambda: page.get_attribute(".reef-viewport", "transform")
+    box = page.locator(".reef-svg").bounding_box()
+    x, y = box["x"] + 60, box["y"] + 60
+    # a wheel zooms, since the view fills the page, and a drag on nothing pans and selects nothing
+    first = transform()
+    page.mouse.move(x, y)
+    page.mouse.wheel(0, -200)
+    page.wait_for_timeout(150)
+    seen["wheel zooms"] = transform() != first
+    zoomed = transform()
+    page.mouse.down()
+    page.mouse.move(x + 60, y + 40, steps=6)
+    page.mouse.up()
+    page.wait_for_timeout(150)
+    seen["drag pans"] = transform() != zoomed and page.locator(".reef-side").count() == 0
+    # a double-click on the collapsed group opens it
+    page.keyboard.press("0")
+    group = page.locator(".reef-viewport .reef-node.collapsed", has_text="G1 The work").bounding_box()
+    page.mouse.dblclick(group["x"] + group["width"] - 20, group["y"] + 12)
+    page.wait_for_timeout(300)
+    seen["double-click opens"] = page.get_attribute(".reef", "data-boxes") == "5"
+    # every arrow's head is a marker the page has
+    seen["arrowheads"] = page.evaluate(
+        "() => [...document.querySelectorAll('.reef-edge')].every(e => document.querySelector(e.getAttribute('marker-end').slice(4, -1)))")
+    # the sidebar's edge, dragged, keeps its width over a reload
+    page.locator(".reef-viewport .reef-node", has_text="W2 Build on it").click()
+    page.wait_for_selector(".reef-side")
+    grip = page.locator(".reef-side-grip").bounding_box()
+    page.mouse.move(grip["x"] + 4, grip["y"] + 200)
+    page.mouse.down()
+    page.mouse.move(grip["x"] - 100, grip["y"] + 200, steps=5)
+    page.mouse.up()
+    page.wait_for_timeout(150)
+    dragged = round(page.locator(".reef-side").bounding_box()["width"])
+    page.reload()
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="W2 Build on it").click()
+    page.wait_for_selector(".reef-side")
+    seen["width kept"] = [dragged, round(page.locator(".reef-side").bounding_box()["width"])]
+    page.evaluate("() => localStorage.removeItem('reef:side-w:page')")
+    check("C55 the canvas answers the pointer", all(v is True for k, v in seen.items() if k != "width kept")
+          and seen["width kept"][0] == seen["width kept"][1], seen)
 
 
 def c15_a_put_shows_live(page):
@@ -282,7 +391,7 @@ def c15_a_put_shows_live(page):
     page.click("button[data-act=expand]")
     page.wait_for_timeout(300)
     page.locator(".reef-viewport .reef-node", has_text="W2 Build on it").click()
-    page.wait_for_selector(".reef-app-panel", timeout=5000)
+    page.wait_for_selector(".reef-side", timeout=5000)
     page.evaluate("() => { window.__kept = 'same page'; }")
     badges = "() => [...document.querySelectorAll('.reef-side .reef-badge')].map(b => b.textContent)"
     before = (page.get_attribute(".reef", "data-boxes"), page.evaluate(badges))
@@ -292,7 +401,7 @@ def c15_a_put_shows_live(page):
                            ".some(b => b.textContent === 'done')", timeout=10000)
     after = (page.get_attribute(".reef", "data-boxes"), page.evaluate(badges))
     kept = page.evaluate("() => window.__kept")
-    panel = page.inner_text(".reef-app-panel-id") if page.locator(".reef-app-panel").count() else None
+    panel = page.inner_text(".reef-side .reef-id") if page.locator(".reef-side").count() else None
     check("C15 a CLI put shows up without a reload", kept == "same page" and before[0] == after[0]
           and "done" in after[1] and panel == "W2",
           {"before": before, "after": after, "no reload": kept, "panel": panel})
@@ -305,6 +414,7 @@ def c20_a_stale_save_shows_the_newer(page):
     page.click("button[data-act=expand]")
     page.wait_for_timeout(300)
     page.locator(".reef-viewport .reef-node", has_text="W3 Look after it").click()
+    page.click(".reef-side .reef-app-tab:text-is('Edit')")
     page.wait_for_function("() => (document.querySelector('.reef-app-yaml') || {}).value?.includes('id: W3')",
                            timeout=10000)
     # a plain edit saves, and the diagram redraws with it
@@ -372,6 +482,8 @@ def main():
             c54_draws_as_in_mdbook(page)
             c54_selecting_opens_the_panel(page)
             c54_one_viewer_listens(page)
+            c55_matches_the_viewer(page)
+            c55_answers_the_pointer(page)
             c15_a_put_shows_live(page)
             c20_a_stale_save_shows_the_newer(page)
             browser.close()

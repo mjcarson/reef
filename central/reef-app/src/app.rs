@@ -1,9 +1,8 @@
 //! The app's pages: the picker, and a plan's own page
 
 use crate::calls::{self, ProjectPlans};
+use crate::canvas::{Canvas, Keyed};
 use crate::live::use_changes;
-use crate::panel::NodePanel;
-use crate::view::{Keyed, PlanGraph};
 use dioxus::prelude::*;
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
@@ -31,9 +30,13 @@ code { font-size: 0.92em; }
 .reef-app-stage { flex: 1; min-height: 0; display: flex; position: relative; }
 .reef-app-stage > .reef.reef-page { margin: 0; border: 0; border-radius: 0; min-width: 0; }
 .reef-app-over { position: absolute; top: 3rem; left: 0; right: 0; text-align: center; }
-.reef-app-panel { width: 22rem; flex: none; overflow: auto; border-left: 1px solid var(--line); background: var(--panel); padding: 0.8rem 1rem; box-sizing: border-box; }
-.reef-app-panel-id { margin: 0; }
-.reef-app-panel-title { margin: 0.3rem 0 0.6rem; font-size: 1.1rem; }
+.reef-app-stage > .reef.reef-page { flex: 1; }
+.reef-app-tabs { display: flex; gap: 0.2rem; margin: 0.6rem 0 0.2rem; border-bottom: 1px solid var(--line); }
+.reef-app-tab { font: inherit; font-size: 0.85rem; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; padding: 0.25rem 0.6rem; margin-bottom: -1px; cursor: pointer; }
+.reef-app-tab:hover { color: var(--fg); }
+.reef-app-tab.on { color: var(--fg); border-bottom-color: var(--links); }
+.reef-app-editor { margin-top: 0.6rem; }
+.reef-app-html { display: contents; }
 .reef-app-yaml { width: 100%; box-sizing: border-box; min-height: 24rem; resize: vertical; font-family: monospace; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem; }
 .reef-app-actions { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
 .reef-app-problems { margin: 0.3rem 0 0.6rem; padding-left: 1.2rem; color: #c0392b; font-size: 0.9rem; }
@@ -150,10 +153,10 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
     }
 }
 
-/// A plan's page: a bar naming the plan, or saying why it can't be read, over the plan's graph
-/// and the node panel beside it
+/// A plan's page: a bar naming the plan, or saying why it can't be read, over the plan's canvas
 ///
-/// Its props are signals, so a route to another plan reads that plan again.
+/// Its props are signals, so a route to another plan reads that plan again, and the canvas is
+/// keyed by the plan, so another plan starts it afresh.
 ///
 /// # Arguments
 ///
@@ -175,12 +178,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
             .await
             .map(|payload| -> Keyed { (name, payload) })
     });
-    // the node the viewer selected, which the node panel shows
-    let selected = use_signal(|| None::<String>);
-    let drawn = match &*payload.read() {
-        Some(Ok((_, payload))) => Some(payload.clone()),
-        _ => None,
-    };
+    let (project_now, plan_now) = (project(), plan());
     rsx! {
         div { class: "reef-app-plan",
             header { class: "reef-app-bar",
@@ -191,14 +189,16 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                 }
             }
             div { class: "reef-app-stage",
-                PlanGraph { payload, selected }
-                if let (Some(payload), Some(id)) = (drawn, selected()) {
-                    NodePanel {
-                        payload,
-                        project,
-                        plan,
-                        id,
-                        changes,
+                // a key holds only on a block's first node, so the canvas is one of its own
+                {
+                    rsx! {
+                        Canvas {
+                            key: "{project_now}/{plan_now}",
+                            project: project_now.clone(),
+                            plan: plan_now.clone(),
+                            payload,
+                            changes,
+                        }
                     }
                 }
             }

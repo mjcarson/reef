@@ -3886,17 +3886,33 @@ dependencies = [
  "anyhow",
  "axum",
  "dioxus",
+ "dioxus-ssr",
  "reef",
  "reef-api",
+ "reef-draw",
+ "reef-layout",
  "reef-model",
  "reef-service",
- "reef-view",
  "reqwest",
+ "roxmltree",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
  "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "reef-draw"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "reef-layout",
+ "reef-model",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 
@@ -3955,19 +3971,6 @@ dependencies = [
  "reef-service",
  "shoal",
  "tokio",
-]
-
-[[package]]
-name = "reef-view"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "reef-layout",
- "reef-model",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
@@ -4165,6 +4168,12 @@ dependencies = [
  "bitflags 1.3.2",
  "serde",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rust-ini"

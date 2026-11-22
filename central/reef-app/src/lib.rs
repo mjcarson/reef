@@ -16,10 +16,11 @@
 
 pub mod app;
 pub mod calls;
+pub mod canvas;
 pub mod live;
 pub mod panel;
 #[cfg(feature = "server")]
 pub mod server;
-pub mod view;
+pub mod side;
 
 pub use app::App;
