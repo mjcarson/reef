@@ -6,10 +6,10 @@
 //! project registered for a fresh git repo.
 
 use reef_api::{
-    AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
-    NodePut, NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite,
-    Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, Rewrite, StalePut,
-    StoredNode, StoredPage, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, CaptureShas, Captured, Change, Checked,
+    ErrorCode, Listing, NewPlan, NewProject, NodePut, NodeWrite, PageEdit, PageEdited, PageListing,
+    PageWrite, Place, PlanInfo, PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued,
+    Refusal, Rewrite, StalePut, StartWork, Started, StoredNode, StoredPage, WorkRecord, paths,
 };
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -18,6 +18,7 @@ use reef_service::Backend;
 use reqwest::StatusCode;
 
 use super::http::{Ax, Events};
+use super::work_cases::start_in;
 use super::{doc, git};
 
 /// A piece of work that says why it is needed and what it does, needing what it names
@@ -753,5 +754,139 @@ pub async fn whole_plan_write_over_two_mebibytes_is_taken<B: Backend + 'static>(
     let (_, listing): (_, PageListing) = ax.client.get(&paths::pages(&ax.plan)).await?;
     assert_eq!(listing.pages.len(), 3);
     assert!(listing.pages.iter().all(|page| page.text == big));
+    Ok(())
+}
+
+/// The work routes start a node, read its record and add a capture's SHAs, each outcome said
+/// by its status, and each record written is a change to the node's plan
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a node to start, and the plan's changes followed
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C30", &[], 0), None))
+        .await?;
+    let response = ax
+        .client
+        .open(&paths::changes(Some("reef"), Some("central")))
+        .await?;
+    let mut events = Events::new(response);
+    let node = ax.plan.node("C30")?;
+    // nothing started, so no records, and a node's is not found
+    let (status, records): (_, Vec<WorkRecord>) = ax.client.get(&paths::work("reef")).await?;
+    assert_eq!((status, records), (StatusCode::OK, Vec::new()));
+    let (status, error): (_, ApiError) = ax.client.get(&paths::node_work(&node)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+    );
+    // a start is recorded, 200, and reads back from both routes
+    let start = StartWork {
+        start: start_in(&ax.repo, "C30", 'a'),
+        replaces: None,
+    };
+    let (status, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
+    assert_eq!(status, StatusCode::OK);
+    let Started::Recorded { record } = started else {
+        anyhow::bail!("the start wasn't recorded: {started:?}");
+    };
+    let (_, read): (_, WorkRecord) = ax.client.get(&paths::node_work(&node)).await?;
+    assert_eq!(read, record);
+    let (_, records): (_, Vec<WorkRecord>) = ax.client.get(&paths::work("reef")).await?;
+    assert_eq!(records, [record.clone()]);
+    // the same start again is stale, 409, and one of a node not in the plan, 422
+    let (status, again): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        again,
+        Started::Stale {
+            record: Some(record.clone())
+        }
+    );
+    let stray = ax.plan.node("C99")?;
+    let (status, missing): (_, Started) = ax.client.post(&paths::node_work(&stray), &start).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        missing,
+        Started::NotInPlan {
+            node: stray.clone()
+        }
+    );
+    // a capture of its start is added, 200, one of another start is a conflict, 409, and one of
+    // a node never started, 422
+    let shas = CaptureShas {
+        head: "d".repeat(40),
+        tree: "e".repeat(40),
+        merge_base: None,
+        base: record.start.start_tree.clone(),
+    };
+    let add = AddCapture {
+        pinned: record.start.pinned.clone(),
+        shas: shas.clone(),
+    };
+    let (status, added): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
+    assert_eq!(status, StatusCode::OK);
+    let Captured::Added { record: captured } = added else {
+        anyhow::bail!("the capture wasn't added: {added:?}");
+    };
+    assert_eq!(captured.captures.len(), 1);
+    assert_eq!(captured.captures[0].shas, shas);
+    let other = AddCapture {
+        pinned: "f".repeat(40),
+        shas: shas.clone(),
+    };
+    let (status, late): (_, Captured) = ax.client.post(&paths::captures(&node), &other).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        late,
+        Captured::Restarted {
+            record: captured.clone()
+        }
+    );
+    let (status, none): (_, Captured) = ax.client.post(&paths::captures(&stray), &add).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(none, Captured::NotStarted { node: stray });
+    // a start naming a relative worktree is a bad request, and an unregistered project's
+    // records, or a plan not listed, are said as such
+    let relative = StartWork {
+        start: start_in(std::path::Path::new("reef"), "C30", 'b'),
+        replaces: Some(captured.version),
+    };
+    let (status, error): (_, ApiError) =
+        ax.client.post(&paths::node_work(&node), &relative).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    let (status, error): (_, ApiError) = ax.client.get(&paths::work("nobody")).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
+    );
+    let unlisted = PlanName::new("reef", "unlisted")?.node("C30")?;
+    let (status, error): (_, ApiError) = ax.client.get(&paths::node_work(&unlisted)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    // and the plan's followers were told of the start and the capture, each at its version
+    for version in [1, 2] {
+        let event = events
+            .next()
+            .await?
+            .expect("the stream sent the record written");
+        assert_eq!(event.event, "work-recorded");
+        let change: Change = serde_json::from_str(&event.data)?;
+        let expected = Change::WorkRecorded {
+            node: node.clone(),
+            version,
+        };
+        assert_eq!(change, expected);
+    }
     Ok(())
 }

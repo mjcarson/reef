@@ -18,7 +18,7 @@ The crates, once this plan is done:
 | `reef-view` | stable, wasm | the viewer, plus a `mount` entry point ([C12](app.md#the-viewer-inside-the-app)) |
 | `mdbook-reef` | stable | the static mode, now over `reef-render`'s filesystem source |
 | `reef-api` | stable | the service's data types, and the JSON API's requests, answers, paths and changes ([C53](../milestones/m3.md)) |
-| `reef` | stable | the CLI, the MCP server and the hooks, all HTTP clients of the JSON API |
+| `reef` | stable | the CLI, the MCP server and the hooks, all HTTP clients of the JSON API, and the only code that reads a node's checkout ([C30](../milestones/m7.md)) |
 | `reef-service` | nightly; stable built external-only | the store and the model: the only code that touches shoal, in-process or external ([C57](../milestones/m2.md)); the JSON API's router, and `reef-serve`, which serves it alone |
 | `reef-app` | nightly; stable built external-only | the Dioxus fullstack app on axum, which also mounts the JSON API |
 | `reef-shoal` | nightly | the external node: shoal's node program over reef's schema ([C57](../milestones/m2.md)) |
@@ -208,6 +208,14 @@ app.
   CLI that started a nightly server from another workspace would own a process nobody stops.
 - **A library under a thin binary.** `reef::run` takes the command line, the working directory
   and where to print, so the service's tests drive the real commands against a served twin.
+- **`reef start` reads the checkout it runs in** ([C30](../milestones/m7.md)). The checkout must be the
+  picked project's repo or a linked worktree of it, and the node a piece of work in its plan.
+  It sends the service what it read, since the service reads no checkout, and pins the start
+  first, putting the pin back if the service refuses the record. A node is started once: a
+  second start says where the first was, and `--restart` replaces it. A node to do goes in
+  progress, as `reef status` would put it.
+- **`reef work` shows a record**, of a node named or of the one the worktree is on: the one
+  started there last, in any of the project's plans, as a capture will find it.
 - **Import and export are the CLI's** ([C26, C27](../milestones/m6.md)). `reef import` reads
   and checks the book where it is, moves each link to lead from the repo's root, and sends the
   service one whole-plan write, so the service never reads or writes a book. A plan that has

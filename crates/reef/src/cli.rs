@@ -13,6 +13,8 @@
 //! reef [--conf PATH] page get <PATH> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page put <PATH> [FILE] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page rm <PATH> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] start <ID> [--base BRANCH] [--restart] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] work [ID] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] status <ID> <STATUS> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] accept <ID> [<N> <STATUS> [--test TEST]] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] check [--project NAME] [--plan NAME]
@@ -28,7 +30,8 @@
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
-//! only plan, unless `--plan` names one, and so is a page's. `next` and the queue span the project's plans, and
+//! only plan, unless `--plan` names one, and so is a page's. `start` reads the checkout it runs
+//! in, which must be the project's repo or a linked worktree of it. `next` and the queue span the project's plans, and
 //! `--plan` narrows `next` to one. `import` picks the project the book is in, and lists the
 //! plan `--plan` names if it isn't listed. `export` picks the project the new book's directory
 //! is in.
@@ -48,6 +51,7 @@ use crate::mcp::{self, Tools};
 use crate::node;
 use crate::page;
 use crate::queue;
+use crate::start;
 use crate::work;
 
 /// reef's terminal client: projects, plans and nodes, through the service's JSON API
@@ -103,6 +107,37 @@ pub enum Command {
     /// A plan's pages lie over its repo's files, and nodes link to them as they do to the repo's.
     #[command(subcommand)]
     Page(PageCommand),
+    /// Start a node here: record this checkout's worktree, branch, base branch and start, pin
+    /// the start, and mark a node to do in progress
+    ///
+    /// The start is HEAD and the worktree written as a tree, anything uncommitted included, so
+    /// work an earlier node left uncommitted is the start's. It is pinned under
+    /// `refs/reef/start/<plan>/<id>`, so a gc after a rebase can't prune it.
+    Start {
+        /// The node's id
+        id: String,
+        /// The branch other work comes in on, else the repo's default: the branch `origin/HEAD`
+        /// names, else `main` or `master`
+        #[arg(long, value_name = "BRANCH")]
+        base: Option<String>,
+        /// Start a node started already again, from here, replacing its record
+        #[arg(long)]
+        restart: bool,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Show a node's work record: where its work happens and what it started from
+    ///
+    /// Without an id, the node this worktree is on: the one started here last, in any of the
+    /// project's plans.
+    Work {
+        /// The node's id, else the node this worktree is on
+        id: Option<String>,
+        /// The plan a node named is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
     /// Set where a node's work stands: todo, in-progress, done or blocked
     ///
     /// A group's status is derived from its members, so only a member's is set.
@@ -475,6 +510,13 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let plan = picked_plan(&client, cwd, &pick).await?;
             page::rm(&client, &plan, &path, out).await
         }
+        Command::Start {
+            id,
+            base,
+            restart,
+            pick,
+        } => start::start(&client, cwd, &id, &pick, base.as_deref(), restart, out).await,
+        Command::Work { id, pick } => start::work(&client, cwd, id.as_deref(), &pick, out).await,
         Command::Status { id, status, pick } => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             work::status(&client, &plan, &id, status, out).await
@@ -754,7 +796,7 @@ pub(crate) async fn plan_in(
 ///
 /// * `out` - Where to print them
 /// * `rows` - Each row's two cells
-fn columns<W: Write>(
+pub(crate) fn columns<W: Write>(
     out: &mut W,
     rows: impl Iterator<Item = (String, String)>,
 ) -> anyhow::Result<()> {
@@ -952,6 +994,55 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--project", "reef"]).is_ok());
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central"]).is_err());
+    }
+
+    /// A start takes its node, a base and whether to start again, and `work` its node or none
+    #[test]
+    fn start_and_work_take_a_node() {
+        // a node started with its base named, starting it again, in a plan named
+        let line = [
+            "reef",
+            "start",
+            "C30",
+            "--base",
+            "main",
+            "--restart",
+            "--plan",
+            "central",
+        ];
+        match Cli::try_parse_from(line).unwrap().command {
+            Command::Start {
+                id,
+                base,
+                restart,
+                pick,
+            } => {
+                assert_eq!(
+                    (id.as_str(), base.as_deref(), restart),
+                    ("C30", Some("main"), true)
+                );
+                assert_eq!(pick.plan.as_deref(), Some("central"));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // with neither, the repo's default base and a first start
+        let plain = Cli::try_parse_from(["reef", "start", "C30"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Start {
+                base: None,
+                restart: false,
+                ..
+            }
+        ));
+        // a start needs its node, and takes one alone
+        assert!(Cli::try_parse_from(["reef", "start"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "start", "C30", "C31"]).is_err());
+        // `work` names a node, or none for the one this worktree is on
+        let named = Cli::try_parse_from(["reef", "work", "C30"]).unwrap();
+        assert!(matches!(named.command, Command::Work { id: Some(id), .. } if id == "C30"));
+        let here = Cli::try_parse_from(["reef", "work", "--project", "reef"]).unwrap();
+        assert!(matches!(here.command, Command::Work { id: None, .. }));
     }
 
     /// The first column is padded to its widest cell

@@ -7,11 +7,11 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddedPlan, AddedProject, ApiError, Checked, ErrorCode, Listing, NewPlan, NewProject, PageEdit,
-    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
-    Rewrite, StoredNode, StoredPage, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, ErrorCode, Listing, NewPlan,
+    NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit,
+    QueueListing, Queued, Rewrite, StartWork, Started, StoredNode, StoredPage, WorkRecord, paths,
 };
-use reef_model::{Diagnostic, Next, PlanName};
+use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -279,6 +279,61 @@ impl Client {
         self.send(request, &path).await
     }
 
+    /// Lists the work records of a project's nodes, by node, across its plans
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn work(&self, project: &str) -> anyhow::Result<Vec<WorkRecord>> {
+        let path = paths::work(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Gets one node's work record, or `None` if it hasn't been started
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub async fn work_of(&self, node: &NodeName) -> anyhow::Result<Option<WorkRecord>> {
+        let path = paths::node_work(node);
+        // a node not started is an answer here, not an error
+        match self.send(self.http.get(self.url(&path)), &path).await {
+            Ok(record) => Ok(Some(record)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Records a node's start, naming the version of the record it replaces, if any
+    ///
+    /// A stale start, or one of a node its plan doesn't have, is an answer, not an error, and
+    /// writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `start` - What the start read in the node's checkout
+    pub async fn start_work(&self, node: &NodeName, start: &StartWork) -> anyhow::Result<Started> {
+        let path = paths::node_work(node);
+        let request = self.http.post(self.url(&path)).json(start);
+        self.send(request, &path).await
+    }
+
+    /// Adds the SHAs a capture read to its node's record
+    ///
+    /// A node never started, or started again since the capture's start, is an answer, not an
+    /// error, and adds nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `add` - The start the capture was taken from, and what it read
+    pub async fn add_capture(&self, node: &NodeName, add: &AddCapture) -> anyhow::Result<Captured> {
+        let path = paths::captures(node);
+        let request = self.http.post(self.url(&path)).json(add);
+        self.send(request, &path).await
+    }
+
     /// The full URL of a route's path
     ///
     /// # Arguments
@@ -347,6 +402,13 @@ pub fn decode<T: DeserializeOwned>(status: u16, path: &str, text: &str) -> anyho
             anyhow::anyhow!("{status} from {path} is not the answer expected ({error}): {text}")
         });
     }
+    // a route the service doesn't have answers with nothing: it is older than this client
+    if status == 404 && text.trim().is_empty() {
+        anyhow::bail!(
+            "reef's service has no route {path}, so it is older than this `reef`: install \
+             `reef-serve` again and restart it"
+        );
+    }
     // an error names its kind, and its message is the service's
     if let Ok(error) = serde_json::from_str::<ApiError>(text) {
         return Err(error.into());
@@ -402,6 +464,10 @@ mod tests {
         // and a body no route sends names its status
         let odd = decode::<AddedProject>(502, "/p", "bad gateway").expect_err("text read");
         assert_eq!(odd.to_string(), "502 from /p: bad gateway");
+        // a route a service older than this client lacks says to restart it
+        let old = decode::<AddedProject>(404, "/w", "").expect_err("nothing read");
+        assert!(old.to_string().contains("no route /w"), "{old}");
+        assert!(old.to_string().contains("restart it"), "{old}");
     }
 
     /// With nothing listening, the error names the address, where it came from, and the fix

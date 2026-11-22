@@ -2139,3 +2139,236 @@ async fn export_replace_refuses() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A field of a work record as `reef start` and `reef work` print it
+///
+/// # Arguments
+///
+/// * `out` - What the command printed
+/// * `key` - The field's name, such as `tree`
+fn field<'a>(out: &'a str, key: &str) -> &'a str {
+    // the first line whose first word is the key, its value after the padding
+    out.lines()
+        .find_map(|line| {
+            line.strip_prefix(key)
+                .filter(|rest| rest.starts_with(' '))
+                .map(str::trim)
+        })
+        .unwrap_or_else(|| panic!("no `{key}` in:\n{out}"))
+}
+
+/// A project `cli` registered for a fresh repo, its plan `docs` holding the nodes given
+///
+/// # Arguments
+///
+/// * `cx` - The served twin
+/// * `ids` - The ids of the nodes to put, each a piece of work
+async fn cli_project(cx: &Cx, ids: &[&str]) -> anyhow::Result<PathBuf> {
+    // the repo, its project and its plan
+    let repo = cx.repo("cli")?;
+    cx.reef(&repo, &["project", "add", "cli"]).await?;
+    cx.reef(&repo, &["plan", "new", "docs"]).await?;
+    // each node put from a file of its own
+    for id in ids {
+        let file = cx.yaml(&format!("{id}.yml"), &work(id, &[]))?;
+        cx.reef(&repo, &["node", "put", &file]).await?;
+    }
+    Ok(repo)
+}
+
+/// Two nodes started at once in two worktrees are recorded apart: each its own worktree,
+/// branch and start, its own uncommitted work in it, and each worktree on its own node
+#[tokio::test]
+async fn two_worktrees_at_once_are_recorded_apart() -> anyhow::Result<()> {
+    let cx = Cx::new("start-apart").await?;
+    let repo = cli_project(&cx, &["A", "B"]).await?;
+    // a file on main, then a worktree for each node, each with work left uncommitted
+    let main = git::commit(&repo, "base.txt", "base\n", "base")?;
+    let a = git::worktree(&repo, &cx.ax.dir.join("cli-a"))?;
+    let b = git::worktree(&repo, &cx.ax.dir.join("cli-b"))?;
+    std::fs::write(a.join("a.txt"), "A's, uncommitted\n")?;
+    std::fs::write(b.join("base.txt"), "base, as B left it\n")?;
+    // both started at once, each from its own worktree
+    let (started_a, started_b) =
+        tokio::join!(cx.reef(&a, &["start", "A"]), cx.reef(&b, &["start", "B"]));
+    let (started_a, started_b) = (started_a?, started_b?);
+    assert!(
+        started_a.starts_with(&format!("started `A` in {}\n", a.display())),
+        "{started_a}"
+    );
+    assert!(started_a.contains("`A` is in-progress"), "{started_a}");
+    assert!(started_b.contains("`B` is in-progress"), "{started_b}");
+    // each worktree is on its own node, on its own branch, both forked from main
+    let on_a = cx.reef(&a, &["work"]).await?;
+    let on_b = cx.reef(&b, &["work"]).await?;
+    assert_eq!(field(&on_a, "node"), "cli/docs/A");
+    assert_eq!(field(&on_b, "node"), "cli/docs/B");
+    assert_eq!(field(&on_a, "worktree"), a.display().to_string());
+    assert_eq!(field(&on_b, "worktree"), b.display().to_string());
+    assert_eq!(field(&on_a, "branch"), "cli-a");
+    assert_eq!(field(&on_b, "branch"), "cli-b");
+    for on in [&on_a, &on_b] {
+        assert_eq!(field(on, "base"), "main");
+        assert_eq!(field(on, "start"), main);
+        assert_eq!(field(on, "fork"), main);
+    }
+    // a record read by name, from any worktree, is the same one
+    assert_eq!(cx.reef(&b, &["work", "A"]).await?, on_a);
+    assert_eq!(cx.reef(&repo, &["work", "B"]).await?, on_b);
+    // each start's tree holds its own worktree's uncommitted work, and none of the other's
+    let (tree_a, tree_b) = (field(&on_a, "tree"), field(&on_b, "tree"));
+    let files = |tree: &str| git::run(&repo, &["ls-tree", "-r", "--name-only", tree]);
+    let base = |tree: &str| git::run(&repo, &["cat-file", "blob", &format!("{tree}:base.txt")]);
+    assert_eq!(files(tree_a)?, "a.txt\nbase.txt");
+    assert_eq!(files(tree_b)?, "base.txt");
+    assert_eq!(base(tree_a)?, "base");
+    assert_eq!(base(tree_b)?, "base, as B left it");
+    // each pinned under its own ref, which every worktree of the repo shares
+    for (id, tree) in [("A", tree_a), ("B", tree_b)] {
+        let pin = format!("refs/reef/start/docs/{id}");
+        assert_eq!(
+            git::run(&repo, &["rev-parse", &format!("{pin}^{{tree}}")])?,
+            tree
+        );
+        assert_eq!(git::run(&repo, &["rev-parse", &format!("{pin}^")])?, main);
+    }
+    // neither worktree's index was touched
+    assert_eq!(git::run(&a, &["status", "--porcelain"])?, "?? a.txt");
+    assert_eq!(git::run(&b, &["status", "--porcelain"])?, "M base.txt");
+    // and both are in progress
+    for id in ["A", "B"] {
+        let got = cx.reef(&repo, &["node", "get", id]).await?;
+        assert!(got.contains("status: in-progress"), "{got}");
+    }
+    Ok(())
+}
+
+/// A node's start still reads after its branch is rebased and git is pruned: its pin keeps the
+/// start's commit and tree, which nothing else does
+#[tokio::test]
+async fn start_reads_after_a_rebase_and_a_prune() -> anyhow::Result<()> {
+    let cx = Cx::new("start-pruned").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    // an earlier node's commit on a branch off main, and work it left uncommitted
+    git::run(&repo, &["checkout", "-q", "-b", "nodes"])?;
+    let earlier = git::commit(&repo, "earlier.txt", "an earlier node\n", "earlier")?;
+    std::fs::write(repo.join("left.txt"), "left uncommitted\n")?;
+    // A started there, its start the earlier node's commit and what it left
+    cx.reef(&repo, &["start", "A"]).await?;
+    let record = cx.reef(&repo, &["work", "A"]).await?;
+    assert_eq!(field(&record, "start"), earlier);
+    let tree = field(&record, "tree").to_string();
+    // then A's work committed with what was left, and main moving on
+    std::fs::write(repo.join("a.txt"), "A's work\n")?;
+    git::run(&repo, &["add", "-A"])?;
+    git::run(&repo, &["commit", "-q", "-m", "A"])?;
+    git::run(&repo, &["checkout", "-q", "main"])?;
+    git::commit(&repo, "main.txt", "main moved on\n", "main")?;
+    // the branch rebased onto main, which rewrites the earlier node's commit
+    git::run(&repo, &["checkout", "-q", "nodes"])?;
+    git::run(&repo, &["rebase", "-q", "main"])?;
+    let rewritten = !git::succeeds(&repo, &["merge-base", "--is-ancestor", &earlier, "nodes"])?;
+    assert!(rewritten, "the rebase left {earlier} on the branch");
+    // nothing but the pin left naming the start: every reflog expired, and git pruned
+    let prune = || -> anyhow::Result<()> {
+        git::run(&repo, &["update-ref", "-d", "ORIG_HEAD"])?;
+        git::run(&repo, &["reflog", "expire", "--expire=now", "--all"])?;
+        git::run(&repo, &["gc", "-q", "--prune=now"])?;
+        Ok(())
+    };
+    prune()?;
+    // the start's commit and its tree are still there, and the record reads as it did
+    assert!(git::succeeds(&repo, &["cat-file", "-e", &earlier])?);
+    assert!(git::succeeds(&repo, &["cat-file", "-e", &tree])?);
+    let files = git::run(&repo, &["ls-tree", "-r", "--name-only", &tree])?;
+    assert_eq!(files, "earlier.txt\nleft.txt");
+    assert_eq!(cx.reef(&repo, &["work", "A"]).await?, record);
+    // without the pin, the same prune takes both
+    git::run(&repo, &["update-ref", "-d", "refs/reef/start/docs/A"])?;
+    git::run(&repo, &["checkout", "-q", "nodes"])?;
+    prune().or_else(|_| {
+        // ORIG_HEAD is already gone the second time
+        git::run(&repo, &["reflog", "expire", "--expire=now", "--all"])?;
+        git::run(&repo, &["gc", "-q", "--prune=now"]).map(|_| ())
+    })?;
+    assert!(!git::succeeds(&repo, &["cat-file", "-e", &tree])?);
+    assert!(!git::succeeds(&repo, &["cat-file", "-e", &earlier])?);
+    Ok(())
+}
+
+/// A start's base is `--base`, the repo's default, or the upstream of the base branch it is on,
+/// and a start it can't record is refused, leaving the node's pin and record as they were
+#[tokio::test]
+async fn start_takes_its_base_and_refuses_what_it_cant_record() -> anyhow::Result<()> {
+    let cx = Cx::new("start-base").await?;
+    let repo = cli_project(&cx, &["A", "B", "C"]).await?;
+    let group = cx.yaml("G.yml", GROUP)?;
+    cx.reef(&repo, &["node", "put", &group]).await?;
+    let main = git::run(&repo, &["rev-parse", "HEAD"])?;
+    // on main with no upstream, nothing brings other work in
+    let on_main = cx.reef(&repo, &["start", "A"]).await?;
+    assert_eq!(field(&on_main, "branch"), "main");
+    assert_eq!(field(&on_main, "base"), "none");
+    assert_eq!(field(&on_main, "fork"), "none");
+    let record = cx.reef(&repo, &["work", "A"]).await?;
+    // on main tracking an upstream no fetch made, the upstream is the base
+    git::run(&repo, &["remote", "add", "origin", "/nowhere/at/all"])?;
+    git::run(&repo, &["update-ref", "refs/remotes/origin/main", &main])?;
+    git::run(&repo, &["branch", "-q", "--set-upstream-to=origin/main"])?;
+    let tracking = cx.reef(&repo, &["start", "B"]).await?;
+    assert_eq!(field(&tracking, "base"), "origin/main");
+    assert_eq!(field(&tracking, "fork"), main);
+    // a base named is the base, on any branch
+    git::run(&repo, &["checkout", "-q", "-b", "side"])?;
+    let side = git::commit(&repo, "s.txt", "side\n", "side")?;
+    git::run(&repo, &["branch", "-q", "other", &main])?;
+    let named = cx.reef(&repo, &["start", "C", "--base", "other"]).await?;
+    assert_eq!(field(&named, "base"), "other");
+    assert_eq!(field(&named, "start"), side);
+    assert_eq!(field(&named, "fork"), main);
+    // refused, each saying why: started already, a base that names nothing, a group, a node
+    // not in the plan, and a checkout of another project's repo
+    let pin = git::run(&repo, &["rev-parse", "refs/reef/start/docs/A"])?;
+    let (_, again) = cx.failing(&repo, &["start", "A"]).await?;
+    assert!(again.contains("was started already"), "{again}");
+    assert!(again.contains("--restart"), "{again}");
+    let (_, base) = cx
+        .failing(&repo, &["start", "A", "--restart", "--base", "nope"])
+        .await?;
+    assert!(base.contains("`--base nope`"), "{base}");
+    let (_, grouped) = cx.failing(&repo, &["start", "G"]).await?;
+    assert!(grouped.contains("is a group"), "{grouped}");
+    let (_, missing) = cx.failing(&repo, &["start", "Z"]).await?;
+    assert!(
+        missing.contains("`Z` is not a node of `cli/docs`"),
+        "{missing}"
+    );
+    let elsewhere = ["start", "A", "--restart", "--project", "cli"];
+    let (_, other) = cx.failing(&cx.ax.repo, &elsewhere).await?;
+    assert!(other.contains("is not in project `cli`'s repo"), "{other}");
+    // none of which moved A's pin or its record
+    assert_eq!(
+        git::run(&repo, &["rev-parse", "refs/reef/start/docs/A"])?,
+        pin
+    );
+    assert_eq!(cx.reef(&repo, &["work", "A"]).await?, record);
+    // A started again from here replaces its record and its pin, and this worktree is on it
+    let restarted = cx.reef(&repo, &["start", "A", "--restart"]).await?;
+    assert_eq!(field(&restarted, "branch"), "side");
+    assert_ne!(
+        git::run(&repo, &["rev-parse", "refs/reef/start/docs/A"])?,
+        pin
+    );
+    assert_eq!(
+        field(&cx.reef(&repo, &["work"]).await?, "node"),
+        "cli/docs/A"
+    );
+    // and a worktree where nothing started says so
+    let fresh = git::worktree(&repo, &cx.ax.dir.join("cli-fresh"))?;
+    let (_, none) = cx.failing(&fresh, &["work"]).await?;
+    assert!(
+        none.contains("no node of `cli` has been started in"),
+        "{none}"
+    );
+    Ok(())
+}

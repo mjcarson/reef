@@ -45,14 +45,21 @@ on and when it is completed, and keeps what it read. That needs four things reef
   - `reef node capture` seals by hand, for work done outside a session.
 - **reef makes a node's worktree.** Its WorktreeCreate hook replaces Claude Code's own, so
   `claude -w <node>` gets `.claude/worktrees/<node>` on branch `reef/<node>`, with the node
-  started in it ([C60](../milestones/m8.md)). `reef start` does the same from the terminal.
+  started in it ([C60](../milestones/m8.md)). `reef start` starts a node in the worktree it runs in.
 - **A work record** ([C30](../milestones/m7.md)).
   - `reef start` records the node's worktree, branch, base branch, start and fork, and pins the
-    start.
-  - Each capture records the SHAs it read. The SHAs are provenance only, and may stop resolving
+    start under `refs/reef/start/<plan>/<id>`, as a commit of the start's tree whose parent is
+    the start.
+  - The base branch is `--base`, else the branch `origin/HEAD` names, else `main` or `master`.
+    On the base branch itself, it is the upstream that branch tracks, or none.
+  - A node has one record, in its project's partition, so a capture finds the node its
+    worktree is on, the one started there last, across the project's plans.
+  - Each capture adds the SHAs it read, naming its start by the pinned commit, so a capture of
+    a start since replaced adds nothing. The SHAs are provenance only, and may stop resolving
     once squashed.
 - **gix for every step but the snapshot.** The diff, the carry, merge-base and ancestry run
-  in-process through gix, behind reef's own git module.
+  in-process through gix, behind reef's own git module, and so do `reef start`'s reads and its
+  pin ([C30](../milestones/m7.md)).
   - The snapshot stays `git add -A` and `git write-tree`, since gix can't stage a worktree. Any
     git version can do that, so reef needs a git binary but no recent one.
   - Every step meets at tree ids in the one object store, so gix reads the tree git just wrote.

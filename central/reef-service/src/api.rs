@@ -15,6 +15,7 @@
 //! | `GET …/projects/{project}/queue` | `queue` | its [`QueueListing`] |
 //! | `POST …/projects/{project}/queue` | `edit_queue` | [`Queued`]: 200, 409 if not queued, 422 if not in its plan |
 //! | `GET …/projects/{project}/next` | `project_next` | its plans' ready work, the queue's first: [`Next`] |
+//! | `GET …/projects/{project}/work` | `work` | every [`WorkRecord`] of its nodes, by node |
 //! | `GET …/plans/{plan}` | `plans` | its [`PlanInfo`], or 404 |
 //! | `GET …/plans/{plan}/nodes` | `list` | its [`Listing`] |
 //! | `POST …/plans/{plan}/nodes` | `put` | [`Checked`]: 200, 409 if stale, 422 if refused |
@@ -27,6 +28,9 @@
 //! | `GET …/plans/{plan}/pages` | `pages` | its own pages: [`PageListing`] |
 //! | `POST …/plans/{plan}/pages` | `edit_page` | [`PageEdited`]: 200, 409 if stale, 422 if refused |
 //! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
+//! | `GET …/plans/{plan}/work/{id}` | `work_of` | the node's [`WorkRecord`], or 404 |
+//! | `POST …/plans/{plan}/work/{id}` | `start_work` | [`Started`]: 200, 409 if stale, 422 if not in its plan |
+//! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200, 409 if started again since, 422 if not started |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
@@ -55,11 +59,12 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
-    AddedPlan, AddedProject, ApiError, Change, Checked, ErrorCode, Listing, NewPlan, NewProject,
-    PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing,
-    Queued, Rewrite, StoredNode, StoredPage, WRITE_BODY_MAX, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, ErrorCode, Listing,
+    NewPlan, NewProject, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
+    QueueEdit, QueueListing, Queued, Rewrite, StartWork, Started, StoredNode, StoredPage,
+    WRITE_BODY_MAX, WorkRecord, paths,
 };
-use reef_model::{Diagnostic, NameError, Next, Payload, PlanName};
+use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::convert::Infallible;
@@ -130,6 +135,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PLANS, get(plans::<S>).post(add_plan::<S>))
         .route(paths::QUEUE, get(queue::<S>).post(edit_queue::<S>))
         .route(paths::PROJECT_NEXT, get(project_next::<S>))
+        .route(paths::WORK, get(work::<S>))
         .route(paths::PLAN, get(plan::<S>))
         .route(paths::NODES, get(list::<S>).post(put::<S>))
         .route(paths::NODE, get(node::<S>))
@@ -148,6 +154,8 @@ pub fn router<S: Serves>(serves: S) -> Router {
                 .layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
         )
         .route(paths::PAGE, get(page::<S>))
+        .route(paths::NODE_WORK, get(work_of::<S>).post(start_work::<S>))
+        .route(paths::CAPTURES, axum::routing::post(add_capture::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -364,6 +372,13 @@ struct NodeSegments {
     plan: String,
     /// The node's id
     id: String,
+}
+
+impl NodeSegments {
+    /// The node these segments name, refusing a name that breaks the rule
+    fn name(self) -> Result<NodeName, Failure> {
+        Ok(PlanName::new(self.project, self.plan)?.node(self.id)?)
+    }
 }
 
 /// The segments of a route to one of a plan's docs
@@ -864,6 +879,94 @@ async fn page<S: Serves>(
             format!("no page `{}` in `{plan}`", segments.path),
         )),
     }
+}
+
+/// Lists the work records of a project's nodes, by node, across its plans
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::work", skip_all, err(Debug))]
+async fn work<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<WorkRecord>>, Failure> {
+    // every record, refused if the project isn't registered
+    let records = serves.service().work(&segments.project).await?;
+    Ok(Json(records))
+}
+
+/// Gets one node's work record, or a 404 if it wasn't started
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+#[instrument(name = "api::work_of", skip_all, err(Debug))]
+async fn work_of<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+) -> Result<Json<WorkRecord>, Failure> {
+    // the node's full name keeps the rule names share
+    let node = segments.name()?;
+    // its record as it stands, or a 404 naming it
+    match serves.service().work_of(&node).await? {
+        Some(record) => Ok(Json(record)),
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("node `{node}` has not been started"),
+        )),
+    }
+}
+
+/// Records a node's start: 200 if recorded, 409 if stale, 422 if the node is not in its plan
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+/// * `start` - What the start read, and the version of the record it replaces
+#[instrument(name = "api::start_work", skip_all, err(Debug))]
+async fn start_work<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+    Body(start): Body<StartWork>,
+) -> Result<(StatusCode, Json<Started>), Failure> {
+    let node = segments.name()?;
+    // one row written, under the project's work lock
+    let started = serves.service().start_work(&node, start).await?;
+    let status = match started {
+        Started::Recorded { .. } => StatusCode::OK,
+        Started::Stale { .. } => StatusCode::CONFLICT,
+        Started::NotInPlan { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(started)))
+}
+
+/// Adds a capture's SHAs to its node's record: 200 if added, 409 if the node was started again
+/// since, 422 if it was never started
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+/// * `add` - The start the capture was taken from, and what it read
+#[instrument(name = "api::add_capture", skip_all, err(Debug))]
+async fn add_capture<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+    Body(add): Body<AddCapture>,
+) -> Result<(StatusCode, Json<Captured>), Failure> {
+    let node = segments.name()?;
+    // one row written, under the project's work lock
+    let captured = serves.service().add_capture(&node, add).await?;
+    let status = match captured {
+        Captured::Added { .. } => StatusCode::OK,
+        Captured::Restarted { .. } => StatusCode::CONFLICT,
+        Captured::NotStarted { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(captured)))
 }
 
 /// Follows the change stream: one server-sent event a change, from now on

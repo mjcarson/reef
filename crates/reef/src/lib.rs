@@ -14,6 +14,9 @@
 //!   over its repo's files, by version as nodes are.
 //! - **Work** ([`work`]): set a node's status and whether each criterion is met, check the plan,
 //!   and say what is ready to start, the user's queue first, and what the rest waits on.
+//! - **Starting work** ([`start`]): a node started in the working directory's checkout, its
+//!   worktree, branch, base branch and start recorded and the start pinned, and the record of
+//!   a node, or of the one a worktree is on, shown.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
 //! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
@@ -42,6 +45,7 @@ pub mod mcp;
 pub mod node;
 pub mod page;
 pub mod queue;
+pub mod start;
 pub mod work;
 
 pub use cli::{Cli, run};

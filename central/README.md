@@ -18,8 +18,9 @@ The service's data types, and the JSON API's requests, answers, routes and chang
 `reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
 add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
-status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, and `reef import`
-and `reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
+status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, `reef start` and
+`reef work`, which record and show where a node's work happens, and `reef import` and `reef
+export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
 a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
 the address `[api] address` names and say so when nothing answers there.
 
@@ -117,6 +118,12 @@ It reads and writes through a `Store`, and checks every write against the whole 
   so two writers' changes to one plan can arrive in either order; each put names its node's new
   version. `Service::end_changes` closes every subscriber, as a server does before it stops.
 
+- **A node's work record comes from its checkout** (`Service::start_work`). `reef start` reads
+  the worktree it runs in through gix, writes its worktree as a tree through git's CLI, pins the
+  start under `refs/reef/start/<plan>/<id>`, and sends what it read. The service keeps it, a
+  node only if it is in its plan, and reads no checkout itself. A capture's SHAs
+  (`Service::add_capture`) join the start whose pinned commit they name.
+
 The store's own `put` and `write_plan` are unchecked; nothing outside the service and the tests
 writes through them.
 
@@ -145,6 +152,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/pages` | its own pages: a `PageListing` |
 | `POST …/plans/{plan}/pages` `PageEdit` | `PageEdited`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/pages/{*path}` | the `StoredPage`, or 404 |
+| `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
+| `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
+| `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
+| `POST …/plans/{plan}/work/{id}/captures` `AddCapture` | `Captured`: 200, 409 if started again since, 422 if not started |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
@@ -155,7 +166,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
 - **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,
-  `plan-added`, `nodes-put`, `pages-put`, `plan-written`), its data the change as JSON. It is live only: a
+  `plan-added`, `nodes-put`, `pages-put`, `plan-written`, `queue-changed`, `work-recorded`), its
+  data the change as JSON. It is live only: a
   client reads what it needs, then follows. One that falls behind by more than 256 changes is
   sent `missed`, with how many, and should read again. `plan` narrows it within a `project`.
 - **Localhost only.** `api::bind` refuses any address but a loopback one until users sign in
@@ -217,11 +229,14 @@ reef import plan --plan central            # the plan, from its book
   file, its `# version:` line inside the frontmatter, and `reef node put` of that file writes its
   body as well. YAML alone keeps the body stored. A body's links lead from the repo's root, as
   the plan keeps them ([C69](../plan/src/milestones/m6.md)).
-- **A new binary is a reinstall and a restart.** Install again, then
-  `systemctl --user restart reef`. Stop the unit before running reef-app over the same data.
-- **A schema change needs a fresh data directory**, since shoal can't migrate a table: stop the
+- **A new binary is a reinstall and a restart.** Install both again, then
+  `systemctl --user restart reef`. Stop the unit before running reef-app over the same data. A
+  `reef` newer than the service it calls says the service has no route for what it asked.
+- **A changed row needs a fresh data directory**, since shoal can't migrate a table: stop the
   unit, move `~/.local/share/reef/shoal` aside, start it, then `reef project add reef` and
-  `reef import plan --plan central` again. Export first if the book is behind.
+  `reef import plan --plan central` again. Export first if the book is behind. A table added
+  needed none when C30 added `WorkRow`: its binary opened a data directory the one before it
+  wrote, read the imported plan back, and kept work records beside it.
 
 ## The app
 

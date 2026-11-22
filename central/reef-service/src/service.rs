@@ -26,12 +26,15 @@
 //!   [`Service::doc_page`] renders each doc as the page mdbook would write for it, so the
 //!   viewer's *Read here* cuts a section out of it as out of a book's page.
 //! - **Each applied write is a change.** A project registered, a plan listed, a batch written, a
-//!   page edited, a whole plan written or a queue edited is sent to every subscriber of [`Service::changes`],
+//!   page edited, a whole plan written, a queue edited or a work record written is sent to every subscriber of [`Service::changes`],
 //!   after the write's lock is let go, so two writers' changes to one plan can arrive in either
 //!   order. A refused write sends nothing.
 //! - **next follows the user's queue.** A project's queue spans its plans, so next reads every
 //!   plan it is asked about, takes the queue's ready entries first, then each plan's other ready
 //!   work in plan order. Asked about one plan, it takes that plan's entries alone.
+//!
+//! - **A node's work record comes from its checkout** ([`work`]). `reef start` and each capture
+//!   send what they read there, and the service keeps it, reading no checkout itself.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
@@ -61,6 +64,8 @@ use crate::store::{
     PageListing, PageWrite, PlanInfo, PlanWrite, Project, Proposal, Puts, QueueEdit, Queued,
     Rewrite, Store, StoredNode, StoredPage,
 };
+
+mod work;
 
 /// The process's one service over shoal, opened on first use
 static SHARED: OnceCell<Service> = OnceCell::const_new();
