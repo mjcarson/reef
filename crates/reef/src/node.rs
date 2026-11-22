@@ -1,21 +1,26 @@
-//! reef's node commands: a node's YAML put, got and removed through the JSON API
+//! reef's node commands: a node's YAML, or its markdown, put, got and removed through the JSON
+//! API
 //!
 //! ```text
-//! reef node get <ID>            # print a node's YAML, after the version it was read at
-//! reef node put [FILE]          # put a node's YAML, from FILE or standard input
+//! reef node get <ID> [--md]     # print a node's YAML, or its markdown, with its version
+//! reef node put [FILE]          # put a node's YAML or markdown, from FILE or standard input
 //! reef node rm <ID>...          # remove the nodes named, as one change
 //! ```
 //!
-//! The YAML is a node's frontmatter, with the keys a book's nodes take.
+//! The YAML is a node's frontmatter, with the keys a book's nodes take. Its markdown is a
+//! node file as a book writes one: that frontmatter between `---` lines, then its body.
 //!
 //! - **The version rides in a comment.** `get` prints `# version: N` before the YAML, which
-//!   YAML reads as a comment. `put` reads it back as the version its writer read, so a put made
-//!   after another writer's is refused as stale. YAML with no version line is a new node, and is
-//!   refused as stale if its id is taken.
+//!   YAML reads as a comment, and inside the frontmatter with `--md`. `put` reads it back as
+//!   the version its writer read, so a put made after another writer's is refused as stale.
+//!   YAML with no version line is a new node, and is refused as stale if its id is taken.
 //! - **A group goes in with its members.** A spec's inline `nodes:` are lifted out, each a new
 //!   node of its own in the group that lists it, and put in one batch with it.
-//! - **YAML only.** A put keeps a stored node's body and its place in the plan's written order.
-//!   A new node goes after the plan's last.
+//! - **YAML keeps the body, markdown replaces it.** A put of YAML keeps a stored node's body,
+//!   and a put of markdown writes the body after its frontmatter, an empty one too. Either
+//!   keeps the node's place in the plan's written order, and a new node goes after the plan's
+//!   last. A body's links lead from the repo's root, as the plan keeps them, so a body got and
+//!   put back leads where it did.
 //! - **`rm` removes exactly what it names.** A group goes only with its members named too, and
 //!   a node another needs only once nothing needs it, since check refuses either alone.
 //!
@@ -24,6 +29,7 @@
 
 pub use reef_api::puts_for;
 use reef_api::{Checked, NodeRemove, Puts, Refusal, StalePut, StoredNode, lift};
+use reef_model::spec::split_frontmatter;
 use reef_model::{NodeSpec, PlanName};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -34,33 +40,44 @@ use crate::client::Client;
 /// The key of the comment `get` prints a node's version in, and `put` reads it from
 const VERSION_KEY: &str = "version:";
 
-/// Prints a node's YAML, after the version it was read at
+/// Prints a node's YAML after the version it was read at, or its markdown with the version
+/// inside its frontmatter
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `plan` - The plan the node is in
 /// * `id` - The node's id
+/// * `markdown` - Whether to print it as a markdown file, its body after its frontmatter
 /// * `out` - Where to print it
 pub async fn get<W: Write>(
     client: &Client,
     plan: &PlanName,
     id: &str,
+    markdown: bool,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the node as it stands, or the service's error naming it
     let node = client.node(plan, id).await?;
-    out.write_all(printed(&node).as_bytes())?;
+    // as YAML alone, or as a node file with its body
+    let text = match markdown {
+        true => printed_markdown(&node),
+        false => printed(&node),
+    };
+    out.write_all(text.as_bytes())?;
     Ok(())
 }
 
-/// Puts a node's YAML, its inline members with it, unless the batch is stale or breaks the plan
+/// Puts a node's YAML or markdown, its inline members with it, unless the batch is stale or
+/// breaks the plan
+///
+/// YAML keeps the node's stored body, and markdown writes the body after its frontmatter.
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `plan` - The plan to put it in
-/// * `text` - The YAML, after the version line `get` printed, if it was got
+/// * `text` - The YAML or markdown, with the version line `get` printed, if it was got
 /// * `out` - Where to print each node written, at its new version
 pub async fn put<W: Write>(
     client: &Client,
@@ -68,14 +85,17 @@ pub async fn put<W: Write>(
     text: &str,
     out: &mut W,
 ) -> anyhow::Result<()> {
-    // the version its writer read, then the spec, each member lifted out of it
+    // the version its writer read, then the spec and any body, each member lifted out of it
     let read = read_version(text)?;
-    let spec = NodeSpec::from_yaml(text)
-        .map_err(|error| anyhow::anyhow!("the YAML is not a node's spec: {}", error.message))?;
+    let (spec, body) = read_put(text)?;
     let specs = lift(spec);
     // each node keeps its place and body, and new ones go after the plan's last
     let listing = client.list(plan).await?;
-    let puts = puts_for(&listing, specs, read);
+    let mut puts = puts_for(&listing, specs, read);
+    // a markdown file's body is its node's, in place of the one stored
+    if let Some(body) = body {
+        puts[0].node.body = body;
+    }
     let ids: Vec<String> = puts.iter().map(|put| put.node.spec.id.clone()).collect();
     // checked against the whole plan as one change
     let checked = client.batch(plan, &Puts::new(puts)).await?;
@@ -170,6 +190,73 @@ pub fn read_input(cwd: &Path, file: Option<&Path>) -> anyhow::Result<String> {
 pub fn printed(node: &StoredNode) -> String {
     // the version first, as a comment YAML skips, then the canonical frontmatter
     format!("# {VERSION_KEY} {}\n{}", node.version, node.spec.to_yaml())
+}
+
+/// A node as `get --md` prints it: a node file, its frontmatter opening with the version it was
+/// read at as a comment, then its body
+///
+/// # Arguments
+///
+/// * `node` - The node as it was read
+///
+/// # Examples
+///
+/// ```
+/// use reef::node::printed_markdown;
+/// use reef_api::StoredNode;
+/// use reef_model::NodeSpec;
+///
+/// let spec = NodeSpec { id: "M6".into(), ..NodeSpec::default() };
+/// let node = StoredNode { spec, body: "# M6\n".into(), order: 0, version: 3 };
+/// assert_eq!(printed_markdown(&node), "---\n# version: 3\nid: M6\n---\n# M6\n");
+/// ```
+pub fn printed_markdown(node: &StoredNode) -> String {
+    // the version inside the fences, where a put reads it, then the frontmatter and the body
+    format!(
+        "---\n# {VERSION_KEY} {}\n{}---\n{}",
+        node.version,
+        node.spec.to_yaml(),
+        node.body
+    )
+}
+
+/// The spec a put's text gives, and the body it gives if it is a markdown file
+///
+/// Text that opens with a `---` line closed by another is a node file: the YAML between them is
+/// the spec, and everything after is the body, so an empty one is a body too. Any other text is
+/// YAML alone, and gives no body, so the stored one is kept.
+///
+/// # Arguments
+///
+/// * `text` - The YAML or markdown to put
+///
+/// # Examples
+///
+/// ```
+/// use reef::node::read_put;
+///
+/// let (spec, body) = read_put("---\n# version: 3\nid: M6\n---\n# M6\n").unwrap();
+/// assert_eq!((spec.id.as_str(), body.as_deref()), ("M6", Some("# M6\n")));
+/// let (spec, body) = read_put("# version: 3\nid: M6\n").unwrap();
+/// assert_eq!((spec.id.as_str(), body), ("M6", None));
+/// ```
+pub fn read_put(text: &str) -> anyhow::Result<(NodeSpec, Option<String>)> {
+    match split_frontmatter(text) {
+        // a node file, its frontmatter the spec and the rest its body
+        Some(fm) => {
+            let spec = NodeSpec::from_yaml(fm.yaml).map_err(|error| {
+                anyhow::anyhow!("the frontmatter is not a node's spec: {}", error.message)
+            })?;
+            Ok((spec, Some(fm.body.to_string())))
+        }
+        // YAML alone, which leaves the body as it is stored
+        None => {
+            let spec = NodeSpec::from_yaml(text).map_err(|error| {
+                anyhow::anyhow!("the YAML is not a node's spec: {}", error.message)
+            })?;
+            Ok((spec, None))
+        }
+    }
 }
 
 /// Reads the version a node was got at from the comments before its YAML, or `None` for a new
@@ -273,7 +360,7 @@ fn stale_line(stale: &StalePut) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{printed, puts_for, read_version, settled, stale_line};
+    use super::{printed, printed_markdown, puts_for, read_put, read_version, settled, stale_line};
     use reef_api::{Checked, Listing, Refusal, StalePut, StoredNode, lift};
     use reef_model::{Diagnostic, NodeSpec, PlanName};
 
@@ -308,6 +395,35 @@ mod tests {
         // reads back as the version it was got at and the spec it was
         assert_eq!(read_version(&text).unwrap(), Some(3));
         assert_eq!(NodeSpec::from_yaml(&text).unwrap(), node.spec);
+    }
+
+    /// What `get --md` prints, `put` reads back: the version, the same spec and the body
+    #[test]
+    fn printed_markdown_reads_back() {
+        // a node with a body that has a rule and a fence of its own
+        let mut node = stored("M6", 2, 4);
+        node.spec.title = Some("M6 Import, export, and this plan".to_string());
+        node.body = "# M6\n\n---\n\n```reef\nfocus = \"M6\"\n```\n".to_string();
+        let text = printed_markdown(&node);
+        assert!(text.starts_with("---\n# version: 4\nid: M6\n"), "{text}");
+        // reads back as the version it was got at, the spec it was and the body it had
+        assert_eq!(read_version(&text).unwrap(), Some(4));
+        let (spec, body) = read_put(&text).unwrap();
+        assert_eq!(spec, node.spec);
+        assert_eq!(body.as_deref(), Some(node.body.as_str()));
+        // an empty body is a body, and YAML alone gives none
+        node.body = String::new();
+        let (_, body) = read_put(&printed_markdown(&node)).unwrap();
+        assert_eq!(body.as_deref(), Some(""));
+        assert_eq!(read_put(&printed(&node)).unwrap().1, None);
+        // a frontmatter that isn't a spec says so
+        let error = read_put("---\ntitle: no id\n---\nBody.\n").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("the frontmatter is not a node's spec"),
+            "{error}"
+        );
     }
 
     /// Only the comments before the YAML are read, once

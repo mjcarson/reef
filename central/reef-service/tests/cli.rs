@@ -16,7 +16,7 @@ use reef_render::book::{Plan, read_nodes};
 use reef_render::paths;
 use reef_service::MemoryBackend;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use common::git;
@@ -329,6 +329,81 @@ async fn got_node_put_back_and_stale_put_refused() -> anyhow::Result<()> {
     assert!(member.contains("group: G\n"), "{member}");
     let group = cx.reef(&repo, &["node", "get", "G"]).await?;
     assert!(!group.contains("nodes:"), "{group}");
+    Ok(())
+}
+
+/// A node's body put as a node file through the CLI is stored, drawn and exported, a put of YAML
+/// alone keeps it, and one put at a stale version is refused, writing nothing
+#[tokio::test]
+async fn body_put_through_the_cli_is_stored_drawn_and_exported() -> anyhow::Result<()> {
+    let cx = Cx::new("body-put").await?;
+    let repo = cx.ax.repo.clone();
+    // a group and its members, put as YAML, the group with no body yet
+    cx.put("g.yml", GROUP).await?;
+    let got = cx.reef(&repo, &["node", "get", "G", "--md"]).await?;
+    assert!(got.starts_with("---\n# version: 1\nid: G\n"), "{got}");
+    assert!(got.ends_with("\n---\n"), "{got}");
+    // got as a node file, given a body with a fence of its own, and put back
+    let body = "# G A group\n\nThe group's own words.\n\n```reef\nfocus = \"G\"\n```\n";
+    let written = format!("{got}{body}");
+    assert_eq!(cx.put("g.md", &written).await?, "put `G` at version 2\n");
+    // stored as written, and printed back after its frontmatter
+    let stored = cx
+        .ax
+        .service
+        .get(&cx.ax.plan, "G")
+        .await?
+        .expect("G is stored");
+    assert_eq!(stored.body, body);
+    let again = cx.reef(&repo, &["node", "get", "G", "--md"]).await?;
+    assert!(again.starts_with("---\n# version: 2\nid: G\n"), "{again}");
+    assert!(again.ends_with(&format!("\n---\n{body}")), "{again}");
+    // drawn in the sidebar, its first heading and its fence left out as a book's are
+    let payload = cx.ax.service.payload(&cx.ax.plan).await?;
+    let drawn = payload
+        .nodes
+        .iter()
+        .find(|node| node.id == "G")
+        .expect("G is drawn");
+    assert!(
+        drawn.html.contains("The group's own words."),
+        "{}",
+        drawn.html
+    );
+    assert!(!drawn.html.contains("focus"), "{}", drawn.html);
+    // the version-1 file put again is stale, and leaves the body as it was
+    let error = cx.put("g.md", &got).await.unwrap_err().to_string();
+    assert!(
+        error.contains("`G`: it changed since it was read"),
+        "{error}"
+    );
+    let kept = cx
+        .ax
+        .service
+        .get(&cx.ax.plan, "G")
+        .await?
+        .expect("G is stored");
+    assert_eq!((kept.version, kept.body.as_str()), (2, body));
+    // YAML alone, retitling it, keeps the body
+    let yaml = cx.reef(&repo, &["node", "get", "G"]).await?;
+    let retitled = yaml.replace("title: G A group", "title: G The group");
+    assert_eq!(cx.put("g.yml", &retitled).await?, "put `G` at version 3\n");
+    let kept = cx
+        .ax
+        .service
+        .get(&cx.ax.plan, "G")
+        .await?
+        .expect("G is stored");
+    assert_eq!(kept.body, body);
+    // exported, the body is its file's, its members inline in its frontmatter
+    cx.reef(&repo, &["export", "out"]).await?;
+    let file = std::fs::read_to_string(repo.join("out/src/001-g.md"))?;
+    let (spec, fm) = parse_node_file(&file)
+        .map_err(|error| anyhow::anyhow!("001-g.md: {error:?}"))?
+        .expect("the file is G's");
+    assert_eq!(spec.id, "G");
+    assert_eq!(spec.nodes.len(), 2);
+    assert_eq!(fm.body, body);
     Ok(())
 }
 
@@ -746,15 +821,19 @@ struct Served<'a> {
     prefix: &'a str,
     /// The book's pages, by their paths from its `src`, which the plan keeps at the same paths
     pages: &'a HashSet<String>,
+    /// The id of the node heading each of the book's node files, by the file's path from its
+    /// `src`
+    nodes: &'a HashMap<String, String>,
 }
 
 /// Text with each link a book's payload writes from its root made to lead where the service's
 /// payload links lead: under its plan's docs, to the plan's page if the link names one of the
-/// book's pages, and from the repo's root otherwise
+/// book's pages, to its node's box if it is a markdown link into a node's file, and from the
+/// repo's root otherwise
 ///
 /// A link is a field that starts with the root, or an `href` or `src` that does. The root named
 /// anywhere else is prose, such as a node's text quoting it, which the service swaps for its
-/// docs' path as it is.
+/// docs' path as it is. A doc link is a field of its own, and leads to the file it reads.
 ///
 /// # Arguments
 ///
@@ -772,6 +851,16 @@ fn served(text: &str, book: &Served) -> String {
             .find(['"', '\'', '#', '<', '>', ' ', '\n', ')'])
             .unwrap_or(after.len());
         let path = &after[..end];
+        // a markdown link into a node's file is one to its node's box, at no heading
+        let node = paths::md_of(path)
+            .iter()
+            .find_map(|md| book.nodes.get(md.as_str()));
+        if let Some(id) = node.filter(|_| out.ends_with("href=\"")) {
+            out.push_str(&format!("javascript:void 0\" data-goto=\"{id}"));
+            let rest_of = &after[end..];
+            rest = rest_of.find('"').map_or(rest_of, |at| &rest_of[at..]);
+            continue;
+        }
         out.push_str(book.docs);
         // a page at the same path, else the repo's file
         let page = paths::md_of(path).iter().any(|md| book.pages.contains(md));
@@ -844,10 +933,15 @@ async fn draws_as_the_book(cx: &Cx, book: &Path, prefix: &str) -> anyhow::Result
     let pages: HashSet<String> = reef::import::pages_of(&opened.src, &files)?
         .into_iter()
         .collect();
+    let nodes: HashMap<String, String> = files
+        .iter()
+        .map(|file| (file.rel.clone(), file.spec.id.clone()))
+        .collect();
     let book = Served {
         docs: &docs,
         prefix,
         pages: &pages,
+        nodes: &nodes,
     };
     let from_book = comparable(plan.payload(&HashSet::new()), Some(&book))?;
     // and the plan's, as the service serves it
@@ -959,11 +1053,30 @@ async fn import_rebases_every_link() -> anyhow::Result<()> {
     );
     assert!(
         g.html
-            .contains(&format!("href=\"{docs}book/src/plan/g.html#x\"")),
+            .contains(r#"<a href="javascript:void 0" data-goto="g">its own</a>"#),
         "{}",
         g.html
     );
     assert!(g.html.contains("href=\"mailto:a@b.org\""), "{}", g.html);
+    // a link into a node's file names the node, the heading it named kept for an export
+    let a = cx
+        .ax
+        .service
+        .get(&cx.ax.plan, "a")
+        .await?
+        .expect("a is stored");
+    assert!(a.body.starts_with("See [g](node:g) and "), "{}", a.body);
+    let g_body = cx
+        .ax
+        .service
+        .get(&cx.ax.plan, "g")
+        .await?
+        .expect("g is stored");
+    assert!(
+        g_body.body.contains("[its own](node:g#x)"),
+        "{}",
+        g_body.body
+    );
     // the member keeps its body in its spec, its row's is empty, and it is titled by its id
     let m = cx
         .ax
@@ -1006,10 +1119,10 @@ async fn import_rebases_every_link() -> anyhow::Result<()> {
     // others lead to the repo's files from where it is
     assert_eq!(
         pages[0].text,
-        "# Design\n\n## Rows\n\nEach node a row: [notes](plan/notes.md), [g](book/src/plan/g.md#x), \
+        "# Design\n\n## Rows\n\nEach node a row: [notes](plan/notes.md), [g](node:g#x), \
          [setup](README.md#setup), [rows](#rows).\n\n```reef\npage = \"plan/notes.md\"\n```\n"
     );
-    // and served, they lead where they did: the page, the node's file, and the repo's README
+    // and served, they lead where they did: the page, the node's box, and the repo's README
     let page = cx
         .ax
         .service
@@ -1018,7 +1131,7 @@ async fn import_rebases_every_link() -> anyhow::Result<()> {
         .expect("the page is served");
     for href in [
         format!("href=\"{docs}plan/notes.html\""),
-        format!("href=\"{docs}book/src/plan/g.html#x\""),
+        r#"href="javascript:void 0" data-goto="g""#.to_string(),
         format!("href=\"{docs}index.html#setup\""),
         format!("href=\"{docs}design.html#rows\""),
     ] {
@@ -1428,6 +1541,144 @@ async fn page_commands_edit_by_version() -> anyhow::Result<()> {
         error.contains("no page `design.md` in `reef/central`"),
         "{error}"
     );
+    Ok(())
+}
+
+/// A book whose page links into a group's file inline and by reference, at a heading of it, and
+/// into another node's file, and whose node links a heading of the group's file
+const NODE_LINKED_BOOK: [(&str, &str); 4] = [
+    (
+        "book/book.toml",
+        "[book]\nsrc = \"src\"\n\n[preprocessor.reef]\n",
+    ),
+    (
+        "book/src/design.md",
+        "# Design\n\n## Rows\n\nSee [M](plan/m.md), [W](plan/w.md) and [rows][r].\n\n[r]: plan/m.md#rows\n",
+    ),
+    (
+        "book/src/plan/m.md",
+        "---\nid: M\ntitle: M The milestone\nnodes:\n  - id: C\n    title: C Some work\n    \
+         description: { why: Without C., what: With C. }\n---\n# M\n\n## Rows\n\nRows.\n",
+    ),
+    (
+        "book/src/plan/w.md",
+        "---\nid: W\ntitle: W Other work\ndocs: [../design.md#rows]\n\
+         description: { why: Without W., what: \"With W, as [M's rows](m.md#rows) say.\" }\n---\n# W\n",
+    ),
+];
+
+/// A link into a node's file names the node once imported: the sidebar is given it as a link
+/// to the node's box, a page or node naming a node the plan lacks is a problem, so the node
+/// can't be removed while a page links it, and an export writes it back to the node's file
+#[tokio::test]
+async fn links_into_node_files_name_their_nodes() -> anyhow::Result<()> {
+    let cx = Cx::new("node-links").await?;
+    let repo = cx.ax.repo.clone();
+    write_files(&repo, &NODE_LINKED_BOOK)?;
+    let book = repo.join("book");
+    let before = read_tree(&book)?;
+    // imported, every link into a node's file names its node, at the heading it named
+    let out = cx.reef(&repo, &["import", "book"]).await?;
+    assert!(
+        out.starts_with("imported 3 nodes and 1 page from book"),
+        "{out}"
+    );
+    assert_eq!(
+        cx.reef(&repo, &["check"]).await?,
+        "`reef/central` has no problems\n"
+    );
+    let pages = cx.ax.service.pages(&cx.ax.plan).await?.pages;
+    assert_eq!(
+        pages[0].text,
+        "# Design\n\n## Rows\n\nSee [M](node:M), [W](node:W) and [rows][r].\n\n[r]: node:M#rows\n"
+    );
+    let w = cx
+        .ax
+        .service
+        .get(&cx.ax.plan, "W")
+        .await?
+        .expect("W is stored");
+    assert_eq!(
+        w.spec.description.as_ref().and_then(|d| d.what.as_deref()),
+        Some("With W, as [M's rows](node:M#rows) say.")
+    );
+    // its doc link reads the page, as written
+    assert_eq!(w.spec.docs, ["design.md#rows"]);
+    // the sidebar is given each as a link to its node's box, in the served page and the payload
+    let page = cx
+        .ax
+        .service
+        .doc_page(&cx.ax.plan, "design.html")
+        .await?
+        .expect("the page is served");
+    for anchor in [
+        r#"<a href="javascript:void 0" data-goto="M">M</a>"#,
+        r#"<a href="javascript:void 0" data-goto="W">W</a>"#,
+        r#"<a href="javascript:void 0" data-goto="M">rows</a>"#,
+    ] {
+        assert!(page.contains(anchor), "{anchor} isn't in {page}");
+    }
+    let payload = cx.ax.service.payload(&cx.ax.plan).await?;
+    let drawn = payload
+        .nodes
+        .iter()
+        .find(|node| node.id == "W")
+        .expect("W is drawn");
+    assert!(
+        drawn
+            .what
+            .contains(r#"<a href="javascript:void 0" data-goto="M">M's rows</a>"#),
+        "{}",
+        drawn.what
+    );
+    // so W can't be removed while the page links it, and the refusal names the page
+    let (_, error) = cx.failing(&repo, &["node", "rm", "W"]).await?;
+    assert!(
+        error.contains("page `design.md`: the link `node:W` names `W`, which is not a node"),
+        "{error}"
+    );
+    assert!(cx.ax.service.get(&cx.ax.plan, "W").await?.is_some());
+    // and a page put naming a node the plan lacks is refused, writing nothing
+    let got = cx.reef(&repo, &["page", "get", "design.md"]).await?;
+    let gone = cx.yaml("design.md", &format!("{got}\nAnd [gone](node:C99).\n"))?;
+    let (_, error) = cx
+        .failing(&repo, &["page", "put", "design.md", &gone])
+        .await?;
+    assert!(
+        error.contains("page `design.md`: the link `node:C99` names `C99`, which is not a node"),
+        "{error}"
+    );
+    // a node's markdown naming one is refused the same, at the node
+    let w_yaml = cx.reef(&repo, &["node", "get", "W"]).await?;
+    let gone = w_yaml.replace("as [M's rows](node:M#rows) say", "as [gone](node:C99) says");
+    let error = cx.put("w.yml", &gone).await.unwrap_err().to_string();
+    assert!(
+        error.contains("reef/central/W: the link `node:C99` names `C99`, which is not a node"),
+        "{error}"
+    );
+    // exported to a new book, each leads to the file its node is written in
+    cx.reef(&repo, &["export", "out"]).await?;
+    let design = std::fs::read_to_string(repo.join("out/src/design.md"))?;
+    assert_eq!(
+        design,
+        "# Design\n\n## Rows\n\nSee [M](001-m.md), [W](002-w.md) and [rows][r].\n\n[r]: 001-m.md#rows\n"
+    );
+    let w_file = std::fs::read_to_string(repo.join("out/src/002-w.md"))?;
+    assert!(
+        w_file.contains("as [M's rows](001-m.md#rows) say"),
+        "{w_file}"
+    );
+    // and written back over its own book, each is as it was written
+    let out = cx.reef(&repo, &["export", "book", "--replace"]).await?;
+    assert!(
+        out.ends_with(", 0 removed\n  added src/SUMMARY.md\n"),
+        "{out}"
+    );
+    let after: Vec<(String, String)> = read_tree(&book)?
+        .into_iter()
+        .filter(|(path, _)| path != "src/SUMMARY.md")
+        .collect();
+    kept_as_written(&before, &after)?;
     Ok(())
 }
 

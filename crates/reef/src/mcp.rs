@@ -217,7 +217,7 @@ impl Tools {
         let mut out = Vec::new();
         let done = async {
             let plan = self.plan(args.plan).await?;
-            node::get(&self.client, &plan, &args.id, &mut out).await
+            node::get(&self.client, &plan, &args.id, false, &mut out).await
         }
         .await;
         said(out, done)

@@ -21,6 +21,11 @@
 //!   keeps its links to other pages as written, since they keep their places, and its links to
 //!   any other file lead to the repo's from where the page now is. A link to a repo file that a
 //!   page at the same path would hide is refused.
+//! - **A link into a node's file names the node.** A link a node's or a page's markdown writes
+//!   into one of the book's node files becomes `node:<ID>`, naming the node that heads the file,
+//!   with the heading it named, so it leads to the node once the book is gone, and an export
+//!   writes it back to wherever the node's file is. A doc link reads a file's section, so it
+//!   leads to the repo's file as any other does.
 //! - **A plan with nodes or pages is replaced only when asked.** The import is a whole-plan
 //!   write, which leaves out every node and page the book doesn't have, so a plan that has any
 //!   takes `--replace`.
@@ -38,7 +43,7 @@ use reef_render::links::{LinkError, rewrite_links, rewrite_spec};
 use reef_render::paths::Target;
 use reef_render::{Sections, paths};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -184,13 +189,16 @@ pub(crate) fn prefix(root: &Path, dir: &Path) -> anyhow::Result<String> {
 }
 
 /// Where a book's links lead once it is imported: to the plan's pages, which were the book's,
-/// and to the repo's other files, which the pages lie over
+/// to the nodes its node files hold, and to the repo's other files, which the pages lie over
 #[derive(Debug, Clone)]
 pub struct BookLinks {
     /// The book's `src`, from the repo's root
     prefix: String,
     /// The book's pages, by their paths from its `src`, which are their paths in the plan
     pages: BTreeSet<String>,
+    /// The id of the node heading each of the book's node files, by the file's path from its
+    /// `src`
+    nodes: HashMap<String, String>,
 }
 
 impl BookLinks {
@@ -217,7 +225,32 @@ impl BookLinks {
         BookLinks {
             prefix: prefix.into(),
             pages: pages.into_iter().collect(),
+            nodes: HashMap::new(),
         }
+    }
+
+    /// These links, with a link into each of the book's node files naming the node heading it
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - Each node file's path from the book's `src`, and its node's id
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef::import::BookLinks;
+    ///
+    /// let nodes = [("milestones/m6.md".to_string(), "M6".to_string())];
+    /// let links = BookLinks::new("plan/src", ["design/app.md".to_string()]).with_nodes(nodes);
+    /// // a page's link into the node's file names the node, and a node's own heading too
+    /// assert_eq!(links.lead("design/app.md", true, "../milestones/m6.md"), Ok(Some("node:M6".into())));
+    /// assert_eq!(links.lead("milestones/m6.md", false, "#rows"), Ok(Some("node:M6#rows".into())));
+    /// // and a node's doc link leads to the file, whose section it reads
+    /// assert_eq!(links.lead_doc("milestones/m5.md", "m6.md"), Ok(Some("plan/src/milestones/m6.md".into())));
+    /// ```
+    pub fn with_nodes<I: IntoIterator<Item = (String, String)>>(mut self, nodes: I) -> Self {
+        self.nodes.extend(nodes);
+        self
     }
 
     /// The book's pages, by their paths from its `src`
@@ -236,6 +269,27 @@ impl BookLinks {
                 && paths::md_of(path).iter().any(|md| self.pages.contains(md)))
     }
 
+    /// The id of the node whose file a path from the repo's root names, as its markdown or as
+    /// the page it is served as, if it names one of the book's node files
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path, from the repo's root
+    fn node_of(&self, path: &str) -> Option<&str> {
+        // only a path in the book's `src` can be one of its node files
+        let rel = match self.prefix.is_empty() {
+            true => path,
+            false => path.strip_prefix(&format!("{}/", self.prefix))?,
+        };
+        // the file's markdown, or the page mdbook writes for it
+        let found = |md: &str| self.nodes.get(md).map(String::as_str);
+        found(rel).or_else(|| {
+            rel.ends_with(".html")
+                .then(|| paths::md_of(rel).iter().find_map(|md| found(md)))
+                .flatten()
+        })
+    }
+
     /// The path a path from the repo's root takes in the plan, if it names one of the book's
     /// pages
     ///
@@ -251,12 +305,13 @@ impl BookLinks {
         self.names_page(rel).then(|| rel.to_string())
     }
 
-    /// A link written in one of the book's files, as it leads from where the file is kept once
-    /// imported, or `None` if it is left as written
+    /// A link written in the markdown of one of the book's files, as it leads from where the
+    /// file is kept once imported, or `None` if it is left as written
     ///
     /// A node's links lead from the repo's root. A page's links lead from its own path, so its
-    /// links to other pages are left as written. A link that leads to a repo file a page at the
-    /// same path would hide is refused, saying why.
+    /// links to other pages are left as written. A link into a node's file names the node, with
+    /// the heading it named. A link that leads to a repo file a page at the same path would hide
+    /// is refused, saying why.
     ///
     /// # Arguments
     ///
@@ -264,6 +319,39 @@ impl BookLinks {
     /// * `page` - Whether the file is a page, rather than a node's
     /// * `link` - The link as written
     pub fn lead(&self, rel: &str, page: bool, link: &str) -> Result<Option<String>, String> {
+        self.lead_to(rel, page, link, true)
+    }
+
+    /// A doc link written in a node of one of the book's node files, as it leads from the
+    /// repo's root once imported, or `None` if it is left as written
+    ///
+    /// A doc link reads a section of the file it names, so one into a node's file leads to
+    /// that file, as a link to any other file does.
+    ///
+    /// # Arguments
+    ///
+    /// * `rel` - The node file's path from the book's `src`
+    /// * `link` - The doc link as written
+    pub fn lead_doc(&self, rel: &str, link: &str) -> Result<Option<String>, String> {
+        self.lead_to(rel, false, link, false)
+    }
+
+    /// A link written in one of the book's files, as it leads from where the file is kept once
+    /// imported, or `None` if it is left as written
+    ///
+    /// # Arguments
+    ///
+    /// * `rel` - The file's path from the book's `src`
+    /// * `page` - Whether the file is a page, rather than a node's
+    /// * `link` - The link as written
+    /// * `to_nodes` - Whether a link into a node's file names the node
+    fn lead_to(
+        &self,
+        rel: &str,
+        page: bool,
+        link: &str,
+        to_nodes: bool,
+    ) -> Result<Option<String>, String> {
         // where the link leads in the repo, as the book reads it
         let from = paths::join(&self.prefix, rel);
         let Target::Internal { path, anchor } = paths::resolve(&from, link) else {
@@ -283,6 +371,14 @@ impl BookLinks {
                 Some(anchor) => format!("{target}#{anchor}"),
                 None => target,
             }));
+        }
+        // a link into a node's file names its node, wherever the file goes, unless its id can't
+        // be named so
+        if to_nodes
+            && let Some(id) = self.node_of(&path)
+            && let Some(named) = paths::node_href(id, anchor.as_deref())
+        {
+            return Ok(Some(named));
         }
         // any other file is the repo's, which a page at its path would hide
         if self.names_page(&path) {
@@ -305,14 +401,16 @@ impl BookLinks {
     ///
     /// * `rel` - The file's path from the book's `src`
     /// * `page` - Whether the file is a page, rather than a node's
+    /// * `to_nodes` - Whether a link into a node's file names the node, as a markdown link does
     /// * `refused` - Where each link refused is kept, with why
     fn map<'a>(
         &'a self,
         rel: &'a str,
         page: bool,
+        to_nodes: bool,
         refused: &'a RefCell<Vec<String>>,
     ) -> impl Fn(&str) -> Option<String> + 'a {
-        move |link| match self.lead(rel, page, link) {
+        move |link| match self.lead_to(rel, page, link, to_nodes) {
             Ok(led) => led,
             // a refused link is left as written, and said once the file is rewritten
             Err(why) => {
@@ -386,7 +484,8 @@ pub fn writes(
         // each link in the file leads where it did, from the repo's root
         let rel = &file.rel;
         let refused = RefCell::new(Vec::new());
-        let map = links.map(rel, false, &refused);
+        let map = links.map(rel, false, true, &refused);
+        let doc_map = links.map(rel, false, false, &refused);
         let mut body = rewrite_links(&file.body, &map).map_err(|error| {
             let at = format!("`{}` body", file.spec.id);
             anyhow::anyhow!("{rel}: {}", LinkError { at, ..error })
@@ -395,7 +494,14 @@ pub fn writes(
         let specs = lift(file.spec);
         let mut lifted = Vec::with_capacity(specs.len());
         for mut spec in specs {
+            // its doc links lead to the files whose sections they read, and its markdown's to
+            // the nodes of any node files they lead into
+            let docs = std::mem::take(&mut spec.docs);
             rewrite_spec(&mut spec, &map).map_err(|error| anyhow::anyhow!("{rel}: {error}"))?;
+            spec.docs = docs
+                .into_iter()
+                .map(|link| doc_map(&link).unwrap_or(link))
+                .collect();
             lifted.push(spec);
         }
         // a link a page would hide refuses the file
@@ -447,7 +553,7 @@ pub fn page_writes(src: &Path, links: &BookLinks) -> anyhow::Result<Vec<PageWrit
         let at = frontmatter_is_yaml(&text).map_or(0, |fm| text.len() - fm.body.len());
         let (head, body) = text.split_at(at);
         let refused = RefCell::new(Vec::new());
-        let body = rewrite_links(body, &links.map(rel, true, &refused)).map_err(|error| {
+        let body = rewrite_links(body, &links.map(rel, true, true, &refused)).map_err(|error| {
             let at = "body".to_string();
             anyhow::anyhow!("{rel}: {}", LinkError { at, ..error })
         })?;
@@ -506,7 +612,11 @@ pub async fn import<W: Write>(
     let plan = plan_in(client, project, pick.plan.as_deref()).await?;
     // the rows the book makes, each id one the plan can name, and the pages its other files do
     let (files, _) = read_nodes(&opened.src, &opened.config.roots);
-    let links = BookLinks::new(prefix, pages_of(&opened.src, &files)?);
+    let heads: Vec<(String, String)> = files
+        .iter()
+        .map(|file| (file.rel.clone(), file.spec.id.clone()))
+        .collect();
+    let links = BookLinks::new(prefix, pages_of(&opened.src, &files)?).with_nodes(heads);
     let rows = writes(files, &links, &plan)?;
     let pages = page_writes(&opened.src, &links)?;
     // a plan named is listed if it isn't
@@ -700,7 +810,8 @@ mod tests {
     }
 
     /// A node's link to a page leads to the plan's page, a page's to another is left as
-    /// written, and every other link leads to the repo's file from where the file is kept
+    /// written, a link into a node's file names the node, a doc link leads to the file, and
+    /// every other link leads to the repo's file from where the file is kept
     #[test]
     fn page_links_lead_where_they_did() {
         let src = scratch("page-links");
@@ -718,22 +829,46 @@ mod tests {
         )
         .unwrap();
         std::fs::write(src.join("plan.md"), "# Plan\n\n[app](./design/app.md)\n").unwrap();
+        // and a node whose doc link and body lead into another node's file, and its own
+        std::fs::write(
+            src.join("plan/c.md"),
+            "---\nid: c\ndocs: [a.md]\ndescription: { why: \"[own](#h)\" }\n---\n[a](a.md#h) [page](../plan/a.html) [self](c.md)\n",
+        )
+        .unwrap();
         let (files, diags) = read_nodes(&src, &[]);
         assert!(diags.is_empty(), "{diags:?}");
         let pages = pages_of(&src, &files).unwrap();
         assert_eq!(pages, ["design/app.md", "plan.md"]);
-        let links = BookLinks::new("book/src", pages);
+        let heads: Vec<(String, String)> = files
+            .iter()
+            .map(|file| (file.rel.clone(), file.spec.id.clone()))
+            .collect();
+        let links = BookLinks::new("book/src", pages).with_nodes(heads);
         let plan = PlanName::new("reef", "central").unwrap();
         // the node's links to the page lead to the plan's page, its others to the repo's files
         let rows = writes(files, &links, &plan).unwrap();
         assert_eq!(rows[0].spec.docs, ["design/app.md#rows"]);
         assert_eq!(rows[0].body, "[app](design/app.html) [out](docs/x.md)\n");
+        // the doc link leads to the node's file, and every markdown link into one names its node
+        assert_eq!(rows[1].spec.docs, ["book/src/plan/a.md"]);
+        assert_eq!(
+            rows[1].body,
+            "[a](node:a#h) [page](node:a) [self](node:c)\n"
+        );
+        assert_eq!(
+            rows[1]
+                .spec
+                .description
+                .as_ref()
+                .and_then(|d| d.why.as_deref()),
+            Some("[own](node:c#h)")
+        );
         // the pages keep their links to pages, and lead to the rest from where they now are
         let written = page_writes(&src, &links).unwrap();
         assert_eq!(written[0].path, "design/app.md");
         assert_eq!(
             written[0].text,
-            "---\ntitle: kept\n---\n# App\n\n[rows](#rows) [plan](../plan.md) [a](../book/src/plan/a.md) [out](../docs/x.md#y)\n"
+            "---\ntitle: kept\n---\n# App\n\n[rows](#rows) [plan](../plan.md) [a](node:a) [out](../docs/x.md#y)\n"
         );
         assert_eq!(written[1].text, "# Plan\n\n[app](./design/app.md)\n");
         // a link to a repo file a page would hide is refused, naming the file and the link

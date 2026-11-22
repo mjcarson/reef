@@ -41,6 +41,7 @@ use reef_api::{Change, Listed, PutNode, PutPage, QueueListing, check_page_path, 
 use reef_model::{
     Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record, nodes_from_records,
 };
+use reef_render::docs::page_node_problems;
 use reef_render::{
     Cached, DocSource, Layered, MemSource, ROOT, Renderer, RepoSource, Sections, doc_body,
     render_page,
@@ -453,8 +454,8 @@ impl<B: Backend> Service<B> {
         let sections = self.sections.clone();
         // build it off the async threads, since its docs are files
         let problems = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(Layered::new(pages, RepoSource::new(repo)), sections);
-            build(&renderer, records).1
+            let renderer = Renderer::new(Layered::new(&pages, RepoSource::new(repo)), sections);
+            checked(&renderer, records, &pages).1
         })
         .await?;
         Ok(problems)
@@ -607,8 +608,8 @@ impl<B: Backend> Service<B> {
             let graphs: Vec<PlanGraph> = read
                 .into_iter()
                 .map(|(name, records, pages)| {
-                    let renderer = Renderer::new(Layered::new(pages, &repo), sections.clone());
-                    let (graph, problems) = build(&renderer, records);
+                    let renderer = Renderer::new(Layered::new(&pages, &repo), sections.clone());
+                    let (graph, problems) = checked(&renderer, records, &pages);
                     PlanGraph {
                         name,
                         graph,
@@ -742,6 +743,28 @@ fn build<S: DocSource>(renderer: &Renderer<S>, records: Vec<Record>) -> (Graph, 
     (graph, problems)
 }
 
+/// Builds a plan as check does, its pages with it: the checked graph, then each node briefed
+/// from its docs, then each link of a page that names a node the plan doesn't have
+///
+/// Returns the graph and its problems, the nodes' first, then the pages'.
+///
+/// # Arguments
+///
+/// * `renderer` - Reads the docs the nodes link to, the plan's pages over its repo
+/// * `records` - The plan's records, in written order
+/// * `pages` - The plan's pages, whose links to nodes are checked
+fn checked<S: DocSource>(
+    renderer: &Renderer<S>,
+    records: Vec<Record>,
+    pages: &MemSource,
+) -> (Graph, Vec<Diagnostic>) {
+    // the nodes as check builds them
+    let (graph, mut problems) = build(renderer, records);
+    // and each page's links to nodes, against the nodes built
+    problems.extend(page_node_problems(&graph, pages.iter()));
+    (graph, problems)
+}
+
 /// The problems a write would add to a plan, judged off the async threads
 ///
 /// Both sides read the working tree through one cache, so they see its docs as they were at
@@ -772,14 +795,20 @@ async fn added(
             // the same docs on both sides, each read once
             None => {
                 let renderer = Renderer::new(Layered::new(&pages, &repo), sections);
-                (build(&renderer, before).1, build(&renderer, after).1)
+                (
+                    checked(&renderer, before, &pages).1,
+                    checked(&renderer, after, &pages).1,
+                )
             }
             // each side over its own pages, the working tree read once for both
             Some(pages_after) => {
                 let pages_after = page_source(pages_after);
                 let stood = Renderer::new(Layered::new(&pages, &repo), sections.clone());
                 let left = Renderer::new(Layered::new(&pages_after, &repo), sections);
-                (build(&stood, before).1, build(&left, after).1)
+                (
+                    checked(&stood, before, &pages).1,
+                    checked(&left, after, &pages_after).1,
+                )
             }
         };
         new_problems(&before, after)

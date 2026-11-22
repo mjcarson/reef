@@ -98,6 +98,12 @@ It reads and writes through a `Store`, and checks every write against the whole 
   leads out of the repo.
 - **A page edit is checked as a node write is** (`Service::edit_page`): taking out a page a node
   links to, or the heading it names, or the section its why came from, is refused.
+- **A link can name a node.** `node:C28`, or `node:M6#rows` at a heading of its body, in a page
+  or in any of a node's markdown, opens that node in the sidebar (its anchor carries
+  `data-goto`, which both viewers follow). One naming a node the plan lacks is a problem, so a
+  node can't be removed while a page links it. `reef import` writes each link into a book's
+  node file so, naming the node that heads the file, and `reef export` writes each back to the
+  file its node lands in ([C68](../plan/src/milestones/m6.md)).
 - **The check runs under the plan's write lock**, through `Store::put_checked` and
   `Store::write_plan_checked`, so two writes that are fine alone can't break the plan together.
   It builds the plan off the async threads, since its docs are files.
@@ -207,9 +213,10 @@ reef import plan --plan central            # the plan, from its book
   `reef accept` and `reef page get|put` change the plan, each checked. `reef export plan --replace`
   then writes it back over `../plan`, only the files whose text changed, and the book is committed
   in the same change. `plan/` is never edited by hand: the next export writes over it.
-- **A node's body comes from the book for now.** `reef node put` takes YAML alone and keeps a
-  stored body, so a body is edited in `../plan`, then `reef import plan --plan central --replace`
-  and the export again ([C69](../plan/src/milestones/m6.md)).
+- **A node's body goes through reef too.** `reef node get <ID> --md` prints a node as a node
+  file, its `# version:` line inside the frontmatter, and `reef node put` of that file writes its
+  body as well. YAML alone keeps the body stored. A body's links lead from the repo's root, as
+  the plan keeps them ([C69](../plan/src/milestones/m6.md)).
 - **A new binary is a reinstall and a restart.** Install again, then
   `systemctl --user restart reef`. Stop the unit before running reef-app over the same data.
 - **A schema change needs a fresh data directory**, since shoal can't migrate a table: stop the

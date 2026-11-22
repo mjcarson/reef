@@ -504,6 +504,67 @@ def c28_an_edited_page_shows_live(page):
           {"sidebar": text, "no reload": kept})
 
 
+def sidebar_title(page):
+    """The title of the node the sidebar shows, or None with no sidebar open."""
+    return page.evaluate("() => document.querySelector('.reef-side h2')?.textContent ?? null")
+
+
+def c68_a_node_link_opens_its_node(page):
+    """C68: a page's link naming a node, as import makes a link into a node's file, opens that
+    node in the sidebar when it is clicked in another node's doc section."""
+    # a node, a page naming it, and a node whose doc link reads that page's section
+    put("pages", node_yaml("P2", "P2 Named by a page"))
+    source = WORK / "named.md"
+    source.write_text("# Named\n\n## Rows\n\nSee [the work it names](node:P2).\n")
+    reef("page", "put", "design/named.md", str(source), "--plan", "pages")
+    put("pages", node_yaml("P3", "P3 Reads the naming page", "docs: [design/named.md#rows]\n"))
+    page.goto(URL + "/plans/check/pages")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="P3 Reads the naming page").click()
+    link = ".reef-side .reef-doc-text a[data-goto=P2]"
+    try:
+        page.wait_for_selector(link, timeout=10000)
+    except Exception:
+        pass
+    shown = page.locator(link).count() == 1
+    before = sidebar_title(page)
+    # clicked, the sidebar shows the node it names, with nothing loaded in the page's place
+    if shown:
+        page.click(link)
+        try:
+            page.wait_for_function("() => document.querySelector('.reef-side h2')?.textContent === 'P2 Named by a page'",
+                                   timeout=5000)
+        except Exception:
+            pass
+    after = sidebar_title(page)
+    page.screenshot(path=str(SHOTS / "reef-app-node-link.png"))
+    check("C68 a page's link naming a node opens that node in the sidebar",
+          shown and before == "P3 Reads the naming page" and after == "P2 Named by a page"
+          and page.url.endswith("/plans/check/pages"),
+          {"link shown": shown, "before": before, "after": after, "url": page.url})
+
+
+def c69_a_body_put_shows_in_the_sidebar(page):
+    """C69: a node's body put from the terminal as a node file shows in the sidebar that has the
+    node open, without a reload."""
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    # the node got as markdown, given a body, and put back at the version it was got at
+    got = reef("node", "get", "P2", "--md", "--plan", "pages")
+    edited = WORK / "p2.md"
+    edited.write_text(got + "# P2\n\nThe body, put from the terminal.\n")
+    reef("node", "put", str(edited), "--plan", "pages")
+    try:
+        page.wait_for_function("() => document.querySelector('.reef-side .reef-body')?.textContent"
+                               ".includes('The body, put from the terminal.')", timeout=10000)
+    except Exception:
+        pass
+    body = page.evaluate("() => document.querySelector('.reef-side .reef-body')?.textContent ?? null")
+    kept = page.evaluate("() => window.__kept")
+    check("C69 a body put from the terminal shows in the open sidebar",
+          body is not None and "The body, put from the terminal." in body and kept == "same page",
+          {"body": body, "no reload": kept})
+
+
 def queue_order():
     """The check's queue as `reef queue ls` lists it: each entry's name, in order."""
     return [line.split()[1] for line in reef("queue", "ls").splitlines() if line[:1].isdigit()]
@@ -641,6 +702,8 @@ def main():
             c25_keys_and_the_sidebar_queue(page)
             c28_a_linked_page_shows_in_the_sidebar(page)
             c28_an_edited_page_shows_live(page)
+            c68_a_node_link_opens_its_node(page)
+            c69_a_body_put_shows_in_the_sidebar(page)
             browser.close()
     finally:
         stop(server)

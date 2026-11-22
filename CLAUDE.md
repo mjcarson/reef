@@ -22,8 +22,13 @@ that finishes). Only the mechanics differ, until the skill for central reef exis
   that would add a problem is refused with check's messages.
 - **Then write the book**: `reef export plan --replace`, and commit `plan/` in the same change
   as the work. `cargo run -q --release -p mdbook-reef -- check plan` still checks it.
-- **A node's body** (the markdown after a file's frontmatter) can't be put through reef yet
-  (C69): edit it in `plan/`, run `reef import plan --plan central --replace`, then export.
+- **Change a node's body** (the markdown after a file's frontmatter) the same way, as a node
+  file: `reef node get C29 --md > <scratch>/C29.md` prints it with the `# version:` line inside
+  the frontmatter, and `reef node put <scratch>/C29.md` puts the body too. YAML alone keeps the
+  body. A body's links lead from the repo's root, as the plan keeps them.
+- **Link to a node** with `node:<ID>` (`node:M6#rows` for a heading of its body), in a page or a
+  node, rather than a path to its file: it opens the node in the sidebar, and export writes it
+  back as a path to the node's file.
 
 Run `reef` from the repo's root. If it says nothing answers, start the server with
 `systemctl --user start reef`.

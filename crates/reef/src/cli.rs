@@ -7,7 +7,7 @@
 //! reef [--conf PATH] plan new <NAME> [--project NAME]
 //! reef [--conf PATH] plan ls [--project NAME]
 //! reef [--conf PATH] node put [FILE] [--project NAME] [--plan NAME]
-//! reef [--conf PATH] node get <ID> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] node get <ID> [--md] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node rm <ID>... [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page ls [--project NAME] [--plan NAME]
 //! reef [--conf PATH] page get <PATH> [--project NAME] [--plan NAME]
@@ -247,12 +247,14 @@ pub enum PlanCommand {
 /// What can be done with a plan's nodes
 #[derive(Debug, Subcommand)]
 pub enum NodeCommand {
-    /// Put a node's YAML and its inline members, unless it is stale or breaks the plan
+    /// Put a node's YAML or markdown and its inline members, unless it is stale or breaks the
+    /// plan
     ///
-    /// YAML that starts with the `# version:` line `get` printed changes the node got; YAML
-    /// without one is a new node.
+    /// YAML or frontmatter that starts with the `# version:` line `get` printed changes the
+    /// node got; without one it is a new node. YAML keeps the node's body, and markdown, a
+    /// node file's frontmatter between `---` lines and then its body, replaces it.
     Put {
-        /// The YAML to put, else standard input, which `-` names too
+        /// The YAML or markdown to put, else standard input, which `-` names too
         #[arg(value_name = "FILE")]
         file: Option<PathBuf>,
         /// The plan to put it in, if not the project's only plan
@@ -263,6 +265,10 @@ pub enum NodeCommand {
     Get {
         /// The node's id
         id: String,
+        /// Print it as a node file: its frontmatter, the `# version:` line inside it, then its
+        /// body, whose links lead from the repo's root
+        #[arg(long)]
+        md: bool,
         /// The plan it is in, if not the project's only plan
         #[command(flatten)]
         pick: PlanPick,
@@ -443,9 +449,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let plan = picked_plan(&client, cwd, &pick).await?;
             node::put(&client, &plan, &text, out).await
         }
-        Command::Node(NodeCommand::Get { id, pick }) => {
+        Command::Node(NodeCommand::Get { id, md, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
-            node::get(&client, &plan, &id, out).await
+            node::get(&client, &plan, &id, md, out).await
         }
         Command::Node(NodeCommand::Rm { ids, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
@@ -808,13 +814,20 @@ mod tests {
         // a node's project and plan are picked on the command line
         let get = Cli::try_parse_from(["reef", "node", "get", "C17", "--plan", "central"]);
         match get.unwrap().command {
-            Command::Node(NodeCommand::Get { id, pick }) => {
+            Command::Node(NodeCommand::Get { id, md, pick }) => {
                 assert_eq!(id, "C17");
+                assert!(!md);
                 assert_eq!(pick.plan.as_deref(), Some("central"));
                 assert_eq!(pick.project.project, None);
             }
             other => panic!("parsed as {other:?}"),
         }
+        // and it is printed as a node file when asked
+        let get = Cli::try_parse_from(["reef", "node", "get", "C17", "--md"]);
+        assert!(matches!(
+            get.unwrap().command,
+            Command::Node(NodeCommand::Get { md: true, .. })
+        ));
         // a put's file is optional, and `rm` needs at least one id
         let put = Cli::try_parse_from(["reef", "node", "put", "--project", "reef"]);
         assert!(matches!(

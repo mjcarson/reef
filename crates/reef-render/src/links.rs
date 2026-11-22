@@ -483,6 +483,46 @@ fn mapped(event: Event<'_>, map: &dyn Fn(&str) -> Option<String>) -> Event<'stat
     }
 }
 
+/// Each link written in `md` that names a node, as written, in the order written
+///
+/// Inline links and reference links each count, a reference link once for each place it is
+/// used, and an autolink names a URL, not a node. Markdown that never names the scheme isn't
+/// parsed.
+///
+/// # Arguments
+///
+/// * `md` - The markdown to look in
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::links::node_links;
+///
+/// let md = "See [M6](node:M6#rows), [f](f.md) and [r].\n\n[r]: node:C28\n";
+/// assert_eq!(node_links(md), ["node:M6#rows", "node:C28"]);
+/// ```
+pub fn node_links(md: &str) -> Vec<String> {
+    // markdown that never names the scheme names no node
+    if !md.contains(crate::paths::NODE_SCHEME) {
+        return Vec::new();
+    }
+    Parser::new_ext(md, md_options())
+        .filter_map(|event| match event {
+            // a link written with a destination, not an autolink, that names a node
+            Event::Start(Tag::Link {
+                link_type,
+                dest_url,
+                ..
+            }) if !matches!(link_type, LinkType::Autolink | LinkType::Email)
+                && crate::paths::node_link(&dest_url).is_some() =>
+            {
+                Some(dest_url.trim().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{rewrite_links, rewrite_spec};

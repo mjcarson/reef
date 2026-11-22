@@ -20,6 +20,10 @@
 //!   same file and heading from where the book's file is, in the project's repo. A node's link
 //!   to a page leads to it from the node's file, which a new book writes at the root of `src`,
 //!   where the plan's root is, so there it is left as written.
+//! - **A link naming a node leads to its file.** A `node:<ID>` link, in a node or a page, is
+//!   written as a link to the file the node is written in, with the heading it named, so the
+//!   book reads it as the link import read. One naming a node the plan doesn't have is left as
+//!   written.
 //! - **Over the book it lives in, with `--replace`.** The directory must hold a reef book, and
 //!   its layout is kept. A node that heads a file of the book keeps that file. A node with no
 //!   body of its own is listed under its group, wherever the group is written, so a node put
@@ -151,6 +155,58 @@ struct Kept {
     added: Vec<String>,
 }
 
+/// The file each of a plan's nodes is written in, which a link naming a node leads to
+struct NodeFiles<'a> {
+    /// The file each node is written in, from the book's `src`, by its id
+    files: HashMap<&'a str, &'a str>,
+}
+
+impl<'a> NodeFiles<'a> {
+    /// The files a plan's nodes are placed in
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - The plan's nodes, in the order it was written in
+    /// * `placing` - Where each node is written
+    fn new(nodes: &'a [StoredNode], placing: &'a Placing) -> Self {
+        // each node's file, through the file it is listed in
+        let files = nodes
+            .iter()
+            .enumerate()
+            .map(|(at, node)| {
+                let file = placing.paths[placing.file_of[at]].as_str();
+                (node.spec.id.as_str(), file)
+            })
+            .collect();
+        NodeFiles { files }
+    }
+
+    /// A link naming a node, as a link to the node's file from a file of the book, or `None` if
+    /// it names no node, or one the plan doesn't have
+    ///
+    /// # Arguments
+    ///
+    /// * `from` - The file the link is written in, from the book's `src`
+    /// * `link` - The link as written
+    fn lead(&self, from: &str, link: &str) -> Option<String> {
+        // only a link naming a node of the plan leads to a node's file
+        let (id, anchor) = paths::node_link(link)?;
+        let file = *self.files.get(id)?;
+        // a heading of the file it is written in is named alone, as a book writes it
+        if file == from
+            && let Some(anchor) = anchor
+        {
+            return Some(format!("#{anchor}"));
+        }
+        // else the file from the directory of the one it is written in, at the heading named
+        let rel = paths::relative(paths::parent(from), file);
+        Some(match anchor {
+            Some(anchor) => format!("{rel}#{anchor}"),
+            None => rel,
+        })
+    }
+}
+
 /// The plan's pages, for telling a link to one from a link to a file of the repo
 struct Pages<'a> {
     /// Each page's path
@@ -279,8 +335,9 @@ pub fn files(
         }
     }
     // the node files, then each page at its path, their links leading from where they are
-    let node_files = render_nodes(nodes, &placing, &known, to_dir)?;
-    let page_files = render_pages(pages, &known, to_dir)?;
+    let placed = NodeFiles::new(nodes, &placing);
+    let node_files = render_nodes(nodes, &placing, &known, &placed, to_dir)?;
+    let page_files = render_pages(pages, &known, &placed, to_dir)?;
     // and the summary listing each, the node files first
     let summary = fresh_summary(&placing, nodes, pages);
     let mut out: Vec<(String, String)> = node_files
@@ -482,18 +539,24 @@ fn free_name(dir: &str, id: &str, taken: &HashSet<String>) -> String {
 /// * `nodes` - The plan's nodes, in the order it was written in
 /// * `placing` - Where each node is written
 /// * `known` - The plan's pages
+/// * `node_files` - The file each node is written in, which a link naming it leads to
 /// * `src_dir` - The book's `src`, from the repo's root
 fn render_nodes(
     nodes: &[StoredNode],
     placing: &Placing,
     known: &Pages,
+    node_files: &NodeFiles,
     src_dir: &str,
 ) -> anyhow::Result<Vec<(String, String)>> {
     let mut placed: Vec<Placed> = Vec::with_capacity(nodes.len());
     for (at, node) in nodes.iter().enumerate() {
-        // each link leads from the file the node is written in
+        // each link leads from the file the node is written in, a node's to its file
         let file = &placing.paths[placing.file_of[at]];
-        let map = |link: &str| known.from_node(file, src_dir, link);
+        let map = |link: &str| {
+            node_files
+                .lead(file, link)
+                .or_else(|| known.from_node(file, src_dir, link))
+        };
         let mut spec = node.spec.clone();
         rewrite_spec(&mut spec, &map)?;
         let body = rewrite_links(&node.body, &map).map_err(|error| LinkError {
@@ -530,19 +593,26 @@ fn render_nodes(
 ///
 /// * `pages` - The plan's pages
 /// * `known` - The plan's pages, for telling a link to one
+/// * `node_files` - The file each node is written in, which a link naming it leads to
 /// * `src_dir` - The book's `src`, from the repo's root
 fn render_pages(
     pages: &[StoredPage],
     known: &Pages,
+    node_files: &NodeFiles,
     src_dir: &str,
 ) -> anyhow::Result<Vec<(String, String)>> {
     let mut sorted: Vec<&StoredPage> = pages.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     let mut out = Vec::with_capacity(sorted.len());
     for page in sorted {
-        // its links lead from where it is written, and the frontmatter holds none
+        // its links lead from where it is written, a node's to its file, and the frontmatter
+        // holds none
         let to = paths::join(src_dir, paths::parent(&page.path));
-        let map = |link: &str| known.lead(&page.path, &to, link);
+        let map = |link: &str| {
+            node_files
+                .lead(&page.path, link)
+                .or_else(|| known.lead(&page.path, &to, link))
+        };
         let at = frontmatter_is_yaml(&page.text).map_or(0, |fm| page.text.len() - fm.body.len());
         let (head, body) = page.text.split_at(at);
         let body = rewrite_links(body, &map).map_err(|error| LinkError {
@@ -763,8 +833,9 @@ fn kept_files(
     // each node placed as the book has it, and each file's text
     let known = Pages::new(pages);
     let placing = kept_placing(nodes, pages, layout);
-    let node_files = render_nodes(nodes, &placing, &known, src_dir)?;
-    let page_files = render_pages(pages, &known, src_dir)?;
+    let placed = NodeFiles::new(nodes, &placing);
+    let node_files = render_nodes(nodes, &placing, &known, &placed, src_dir)?;
+    let page_files = render_pages(pages, &known, &placed, src_dir)?;
     // the files the book has that the plan no longer does, and those it didn't have
     let written: HashSet<&str> = node_files
         .iter()
@@ -1141,7 +1212,8 @@ fn counted(count: usize, word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Layout, Listing, Pages, files, free_name, kept_files, kept_placing, kept_summary, slug,
+        Layout, Listing, NodeFiles, Pages, Placing, files, free_name, kept_files, kept_placing,
+        kept_summary, slug,
     };
     use reef_api::{StoredNode, StoredPage};
     use reef_model::NodeSpec;
@@ -1455,6 +1527,50 @@ mod tests {
         );
         // and a URL left as written
         assert_eq!(lead("milestones/m6.md", "https://x.org"), None);
+    }
+
+    /// A link naming a node leads to the file the node is written in, from a node's file or a
+    /// page, at the heading it named, and one naming a node the plan lacks is left as written
+    #[test]
+    fn node_links_lead_to_their_files() {
+        // M6 heading its file, and C28 listed in it
+        let nodes = [
+            stored("id: M6\n", "# M6\n", 0),
+            stored("id: C28\ngroup: M6\n", "", 1),
+            stored("id: M1\n", "# M1\n", 2),
+        ];
+        let placing = Placing {
+            heads: vec![0, 2],
+            paths: vec!["milestones/m6.md".to_string(), "overview.md".to_string()],
+            members: vec![vec![1], Vec::new(), Vec::new()],
+            file_of: vec![0, 0, 1],
+        };
+        let files = NodeFiles::new(&nodes, &placing);
+        // from a page in another directory, and from the files of other nodes
+        assert_eq!(
+            files.lead("design/app.md", "node:C28").as_deref(),
+            Some("../milestones/m6.md")
+        );
+        assert_eq!(
+            files.lead("overview.md", "node:M6#rows").as_deref(),
+            Some("milestones/m6.md#rows")
+        );
+        assert_eq!(
+            files.lead("milestones/m6.md", "node:M1").as_deref(),
+            Some("../overview.md")
+        );
+        // its own file by its name, and a heading of it alone
+        assert_eq!(
+            files.lead("milestones/m6.md", "node:C28").as_deref(),
+            Some("m6.md")
+        );
+        assert_eq!(
+            files.lead("milestones/m6.md", "node:M6#x").as_deref(),
+            Some("#x")
+        );
+        // a node the plan lacks, and a link that names none, are left to the rest
+        assert_eq!(files.lead("design/app.md", "node:C99"), None);
+        assert_eq!(files.lead("design/app.md", "../milestones/m6.md"), None);
     }
 
     /// A kept summary keeps its every line and part, retitles a node file listed by its old

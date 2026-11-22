@@ -122,6 +122,7 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
     let title = title.unwrap_or("\u{0}");
     let mut struck = 0usize;
     let mut events = Vec::new();
+    let mut links = Links::new(source);
     let mut skip_fence = false;
     let mut first_heading: Option<Vec<Event<'_>>> = None;
     let mut seen_block = false;
@@ -166,20 +167,84 @@ pub fn render(md: &str, source: &str, title: Option<&str>, drop_struck: bool) ->
             }
             seen_block = true;
         }
-        let ev = match ev {
-            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Link { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
-            }
-            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Image { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
-            }
-            e => e.into_static(),
-        };
-        events.push(ev.into_static());
+        // each link leads where it did, or to the box of the node it names
+        events.push(links.event(ev).into_static());
     }
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, events.into_iter());
     html
+}
+
+/// The links of markdown being rendered: each led where it did from the file it is written in,
+/// and each naming a node made a link the viewer follows to the node's box
+struct Links<'s> {
+    /// The path the links are written relative to
+    source: &'s str,
+    /// Whether each link still open names a node, so it is closed as it was opened
+    open: Vec<bool>,
+}
+
+impl<'s> Links<'s> {
+    /// The links of markdown written in a file
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The path the links are written relative to
+    fn new(source: &'s str) -> Self {
+        Links { source, open: Vec::new() }
+    }
+
+    /// An event as the viewer shows it: a link or image led where it did from its file, and a
+    /// link naming a node opened and closed as one whose `data-goto` the viewer follows
+    ///
+    /// A link naming a node has no page to lead to, so it leads nowhere itself, and the viewer
+    /// selects the node when it is clicked. An autolink is left as written.
+    ///
+    /// # Arguments
+    ///
+    /// * `ev` - The event as parsed
+    fn event<'a>(&mut self, ev: Event<'a>) -> Event<'a> {
+        match ev {
+            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
+                // a link naming a node, not an autolink's URL, opens as a link to its box
+                if !matches!(link_type, LinkType::Autolink | LinkType::Email)
+                    && let Some((node, _)) = paths::node_link(&dest_url)
+                {
+                    self.open.push(true);
+                    return Event::InlineHtml(CowStr::from(node_anchor(node, &title)));
+                }
+                // any other leads where it did from its file
+                self.open.push(false);
+                Event::Start(Tag::Link { link_type, dest_url: rebase(link_type, self.source, &dest_url), title, id })
+            }
+            // a link closes as it was opened
+            Event::End(TagEnd::Link) => match self.open.pop() {
+                Some(true) => Event::InlineHtml(CowStr::Borrowed("</a>")),
+                _ => Event::End(TagEnd::Link),
+            },
+            // an image leads where it did from its file
+            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
+                Event::Start(Tag::Image { link_type, dest_url: rebase(link_type, self.source, &dest_url), title, id })
+            }
+            e => e,
+        }
+    }
+}
+
+/// The HTML that opens a link to a node's box: no page of its own to lead to, and the node's id
+/// in `data-goto`, which a viewer's sidebar follows to select it
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `title` - The link's title, if it was written with one
+fn node_anchor(id: &str, title: &str) -> String {
+    // the title the link was written with, as the HTML writer gives a link's
+    let title = match title.is_empty() {
+        true => String::new(),
+        false => format!(" title=\"{}\"", paths::escape(title)),
+    };
+    format!("<a href=\"javascript:void 0\" data-goto=\"{}\"{title}>", paths::escape(id))
 }
 
 /// A link written in `source`, made to start from [`ROOT`] if it names a file of the book, with a
@@ -236,6 +301,7 @@ pub fn render_page(md: &str, source: &str) -> String {
     let title = spans.first().map_or(source, |h| h.text.as_str());
     let mut events = Vec::new();
     let mut skip_fence = false;
+    let mut links = Links::new(source);
     for ev in Parser::new_ext(md, md_options()) {
         let ev = match ev {
             // a plan drawn on the doc's page isn't drawn here
@@ -250,14 +316,8 @@ pub fn render_page(md: &str, source: &str) -> String {
             _ if skip_fence => continue,
             // each heading gets its id, so a link's anchor finds it
             Event::Start(Tag::Heading { level, classes, attrs, .. }) => Event::Start(Tag::Heading { level, id: ids.next(), classes, attrs }),
-            // and each link leads where it did from the doc
-            Event::Start(Tag::Link { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Link { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
-            }
-            Event::Start(Tag::Image { link_type, dest_url, title, id }) => {
-                Event::Start(Tag::Image { link_type, dest_url: rebase(link_type, source, &dest_url), title, id })
-            }
-            e => e,
+            // and each link leads where it did from the doc, or to the box of the node it names
+            e => links.event(e),
         };
         events.push(ev);
     }
@@ -301,6 +361,24 @@ mod tests {
         // and on a doc's page
         let page = render_page("Mail <a@b.org>.\n", "docs/a.md");
         assert!(page.contains("href=\"mailto:a@b.org\""), "{page}");
+    }
+
+    /// A link naming a node is one the viewer follows to its box, in a node's body and on a
+    /// doc's page, and any other link is as it was
+    #[test]
+    fn node_links_go_to_their_boxes() {
+        // inline and by reference, with a title, beside a link to a file and an autolink
+        let md = "See [M6 *now*](node:M6#rows \"The milestone\"), [ref] and [f](f.md), <node:C1>.\n\n[ref]: node:C28\n";
+        let html = render_body(md, "plan/n.md", "T");
+        assert!(html.contains(r#"<a href="javascript:void 0" data-goto="M6" title="The milestone">M6 <em>now</em></a>"#), "{html}");
+        assert!(html.contains(r#"<a href="javascript:void 0" data-goto="C28">ref</a>"#), "{html}");
+        assert!(html.contains(r#"href="reef-root:/plan/f.html""#), "{html}");
+        assert!(html.contains(r#"href="node:C1""#), "{html}");
+        // a doc's page draws them the same, its headings still given their ids
+        let page = render_page("# D\n\n## Rows\n\n[M6](node:M6) and [f](f.md#x).\n", "design/d.md");
+        assert!(page.contains(r#"<a href="javascript:void 0" data-goto="M6">M6</a>"#), "{page}");
+        assert!(page.contains(r#"href="reef-root:/design/f.html#x""#), "{page}");
+        assert!(page.contains(r#"<h2 id="rows">"#), "{page}");
     }
 
     #[test]

@@ -22,7 +22,8 @@ pub enum Target {
 /// * `link` - The link as written
 pub fn resolve(from: &str, link: &str) -> Target {
     let link = link.trim();
-    if link.contains("://") || link.starts_with("mailto:") || link.starts_with('/') || link.starts_with("data:") {
+    // a link naming a node names no file, so it leads the same place from anywhere
+    if link.contains("://") || link.starts_with("mailto:") || link.starts_with('/') || link.starts_with("data:") || link.starts_with(NODE_SCHEME) {
         return Target::External(link.to_string());
     }
     let (path, anchor) = match link.split_once('#') {
@@ -194,6 +195,67 @@ pub fn moved(from: &str, to_dir: &str, link: &str) -> Option<String> {
     })
 }
 
+/// What a link naming a node starts with: `node:C28`, or `node:M6#rows` for a heading of the
+/// node's body
+pub const NODE_SCHEME: &str = "node:";
+
+/// A link that names a node, rather than a file: the node's id, and the heading of its body
+/// after a `#`, if it names one
+///
+/// A central plan's links into a node's file name the node, so they lead to it wherever its
+/// file is, and a book's export writes each back as a link to the file the node is written in.
+///
+/// # Arguments
+///
+/// * `link` - The link as written
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::paths::node_link;
+///
+/// assert_eq!(node_link("node:M6#rows"), Some(("M6", Some("rows"))));
+/// assert_eq!(node_link(" node:C28 "), Some(("C28", None)));
+/// assert_eq!(node_link("milestones/m6.md"), None);
+/// assert_eq!(node_link("node:"), None);
+/// ```
+pub fn node_link(link: &str) -> Option<(&str, Option<&str>)> {
+    // the scheme, then an id that isn't empty
+    let named = link.trim().strip_prefix(NODE_SCHEME)?;
+    let (id, anchor) = match named.split_once('#') {
+        Some((id, anchor)) => (id, Some(anchor).filter(|anchor| !anchor.is_empty())),
+        None => (named, None),
+    };
+    (!id.is_empty()).then_some((id, anchor))
+}
+
+/// The link that names a node, and a heading of its body if one is given, or `None` for an id
+/// such a link can't hold, since a `#` in it would be read as the heading's
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `anchor` - The heading of its body, if one is named
+///
+/// # Examples
+///
+/// ```
+/// use reef_render::paths::node_href;
+///
+/// assert_eq!(node_href("M6", Some("rows")).as_deref(), Some("node:M6#rows"));
+/// assert_eq!(node_href("a#b", None), None);
+/// ```
+pub fn node_href(id: &str, anchor: Option<&str>) -> Option<String> {
+    // an id with a `#` in it would end at it, and an empty one names nothing
+    if id.is_empty() || id.contains('#') {
+        return None;
+    }
+    Some(match anchor {
+        Some(anchor) => format!("{NODE_SCHEME}{id}#{anchor}"),
+        None => format!("{NODE_SCHEME}{id}"),
+    })
+}
+
 /// The id mdbook gives a heading (`id_from_content` in mdbook-html): lowercase, alphanumerics,
 /// `_` and `-` kept, each whitespace character a `-`, everything else dropped.
 ///
@@ -253,8 +315,8 @@ mod tests {
         assert_eq!(moved("", "book/src", "book/src/").as_deref(), Some("./"));
         // a link above the root keeps its climb, for the repo's source to refuse
         assert_eq!(moved("a.md", "", "../x.md").as_deref(), Some("../x.md"));
-        // what leads the same place from anywhere is left as written
-        for link in ["https://x.org/a.md", "mailto:a@b.org", "/abs.md", "data:x"] {
+        // what leads the same place from anywhere is left as written, a node named by its id too
+        for link in ["https://x.org/a.md", "mailto:a@b.org", "/abs.md", "data:x", "node:C28#x"] {
             assert_eq!(moved(file, "", link), None, "{link}");
         }
         // from the root, a heading of no file is left as written, and the directory itself is `.`

@@ -278,6 +278,20 @@ impl MemSource {
         self.insert(path, text);
         self
     }
+
+    /// Each doc kept, by its path, with its markdown as written, in no order
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_render::MemSource;
+    ///
+    /// let docs = MemSource::new().with("a.md", "# A\n");
+    /// assert_eq!(docs.iter().collect::<Vec<_>>(), [("a.md", "# A\n")]);
+    /// ```
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.docs.iter().map(|(path, text)| (path.as_str(), text.as_str()))
+    }
 }
 
 impl DocSource for MemSource {

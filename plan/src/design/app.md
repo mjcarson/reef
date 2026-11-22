@@ -186,6 +186,12 @@ A node's doc is a markdown file in its project's repo, or a page stored with the
 - **A page edit is checked as a node write is.** Taking out a page a node links to, or the
   heading it names, or the section its why came from, adds a problem and is refused. An edit
   names the version its writer read, and the app reads an open section again after each change.
+- **A link can name a node.** `node:C28`, or `node:M6#rows` at a heading of its body, written in
+  a page or a node, opens that node in the sidebar: its anchor carries `data-goto`, which both
+  viewers' sidebars follow, so a link to a node needs no page of its own. Import turns a link
+  into a node's file into one naming the node that heads the file, so it outlives the book, a
+  link naming a node the plan lacks is a problem, and export writes each back to the file its
+  node lands in ([C68](../milestones/m6.md)).
 - **The same section for Claude.** next_task returns the doc section as markdown, so Claude reads
   the same design the user sees.
 - **Links that leave the repo are refused.** Check refuses a link that climbs out with `..`, and

@@ -2,6 +2,7 @@
 //! source of docs, and rendering the plan for the viewer.
 
 use crate::extract::{self, has_text, Section};
+use crate::links::node_links;
 use crate::markdown::{heading_spans, inline_html, render, render_body, HeadingSpan, ROOT};
 use crate::paths::{self, Target};
 use crate::source::{doc_body, DocSource};
@@ -154,8 +155,9 @@ impl<S: DocSource> Renderer<S> {
     }
 
     /// Check a built plan's doc links and fill in every node's brief form, returning the
-    /// problems found: each doc link that doesn't resolve, then each piece of work that does
-    /// not say why it is needed or what finishing it will do
+    /// problems found: each doc link that doesn't resolve, then each link naming a node that
+    /// the plan doesn't have, then each piece of work that does not say why it is needed or
+    /// what finishing it will do
     ///
     /// # Arguments
     ///
@@ -166,6 +168,15 @@ impl<S: DocSource> Renderer<S> {
         for n in &graph.nodes {
             for d in &n.docs_raw {
                 if let Err(msg) = self.doc_link(n.origin.base(), d) {
+                    diags.push(n.origin.diagnostic(msg));
+                }
+            }
+        }
+        // every link naming a node, in any part of a node written as markdown, names one of the
+        // plan's, read before the parts are rendered in place
+        for n in &graph.nodes {
+            for link in written_markdown(n).into_iter().flat_map(node_links) {
+                if let Some(msg) = unknown_node(graph, &link) {
                     diags.push(n.origin.diagnostic(msg));
                 }
             }
@@ -318,6 +329,74 @@ impl<S: DocSource> Renderer<S> {
     }
 }
 
+/// The problems of the links a plan's pages write that name a node the plan doesn't have, each
+/// at its page, the pages in path order
+///
+/// A page's problem has no line, so an edit that moves the link up or down a line leaves the
+/// problem as it was.
+///
+/// # Arguments
+///
+/// * `graph` - The plan, built
+/// * `pages` - Each of the plan's pages, by its path, with its markdown as written
+///
+/// # Examples
+///
+/// ```
+/// use reef_model::{Graph, Node};
+/// use reef_render::docs::page_node_problems;
+///
+/// let (graph, _) = Graph::build(vec![Node { id: "M6".into(), ..Node::default() }]);
+/// let pages = [("design/app.md", "[M6](node:M6) and [gone](node:C99).\n")];
+/// let problems = page_node_problems(&graph, pages);
+/// assert_eq!(problems[0].to_string(), "page `design/app.md`: the link `node:C99` names `C99`, which is not a node");
+/// ```
+pub fn page_node_problems<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(graph: &Graph, pages: I) -> Vec<Diagnostic> {
+    // the pages in path order, so the problems are said in the same order each time
+    let mut pages: Vec<(&str, &str)> = pages.into_iter().collect();
+    pages.sort_unstable_by_key(|(path, _)| *path);
+    let mut diags = Vec::new();
+    for (path, text) in pages {
+        // a page's links are in the markdown after its frontmatter
+        for link in node_links(doc_body(text)) {
+            if let Some(message) = unknown_node(graph, &link) {
+                diags.push(Diagnostic { source: format!("page `{path}`"), line: None, message });
+            }
+        }
+    }
+    diags
+}
+
+/// The problem of a link naming a node, if the plan has no node of that id
+///
+/// # Arguments
+///
+/// * `graph` - The plan, built
+/// * `link` - The link, which names a node
+fn unknown_node(graph: &Graph, link: &str) -> Option<String> {
+    let (id, _) = paths::node_link(link)?;
+    graph.index_of(id).is_none().then(|| format!("the link `{link}` names `{id}`, which is not a node"))
+}
+
+/// Each part of a node written as markdown, as written: its body, its description, its design
+/// choices, the note under its measurements and its acceptance criteria
+///
+/// # Arguments
+///
+/// * `n` - The node, not yet briefed, so its note and criteria are as written
+fn written_markdown(n: &Node) -> Vec<&str> {
+    let mut parts = vec![n.body.as_str()];
+    // each part of the description that is written
+    if let Some(d) = &n.description_raw {
+        parts.extend([&d.why, &d.what, &d.details].into_iter().flatten().map(String::as_str));
+    }
+    // then the design choices, the note and the criteria
+    parts.extend(n.decisions_raw.iter().map(String::as_str));
+    parts.extend(n.performance.as_ref().and_then(|p| p.note.as_deref()));
+    parts.extend(n.acceptance.iter().map(|c| c.text.as_str()));
+    parts
+}
+
 /// Where a doc section keeps its measurements: a subsection named in `names`, or failing that,
 /// when the link names a heading, that section's tables. The subsection's heading id is the one
 /// it has in the whole file.
@@ -448,6 +527,33 @@ mod tests {
         let p = r.payload(&g, |_| None);
         assert!(p.nodes[0].html.contains("href=\"reef-root:/design.html\""), "{}", p.nodes[0].html);
         assert_eq!(p.nodes[0].docs[0].href, "reef-root:/design.html#rows");
+    }
+
+    /// A link naming a node the plan doesn't have is a problem at the node that writes it, in
+    /// any part written as markdown, and one naming a node it has isn't
+    #[test]
+    fn links_to_nodes_the_plan_lacks_are_problems() {
+        let r = Renderer::new(MemSource::new(), Sections::default());
+        let mut a = linked("a", &[]);
+        a.description_raw = Some(Description { why: Some("See [b](node:b).".into()), what: Some("Not [x](node:x#h).".into()), ..Description::default() });
+        a.body = "[y](node:y), [a](node:a#top), <node:z>.\n".into();
+        a.acceptance = vec![reef_model::Criterion { text: "As [w][w] says\n\n[w]: node:w".into(), ..reef_model::Criterion::default() }];
+        let (mut g, _) = Graph::build(vec![a, linked("b", &[])]);
+        let diags: Vec<String> = r.prepare(&mut g).iter().map(|d| d.to_string()).collect();
+        // the body's first, then the description's, then the criteria's, an autolink none
+        let lacking: Vec<&String> = diags.iter().filter(|d| d.contains("which is not a node")).collect();
+        assert_eq!(lacking, [
+            "plan/a.md:3: the link `node:y` names `y`, which is not a node",
+            "plan/a.md:3: the link `node:x#h` names `x`, which is not a node",
+            "plan/a.md:3: the link `node:w` names `w`, which is not a node",
+        ]);
+        // and a page's are its own, in path order
+        let pages = [("z.md", "[q](node:q)\n"), ("a.md", "---\ntitle: t\n---\n[b](node:b) [r](node:r)\n")];
+        let problems: Vec<String> = page_node_problems(&g, pages).iter().map(|d| d.to_string()).collect();
+        assert_eq!(problems, [
+            "page `a.md`: the link `node:r` names `r`, which is not a node",
+            "page `z.md`: the link `node:q` names `q`, which is not a node",
+        ]);
     }
 
     #[test]
