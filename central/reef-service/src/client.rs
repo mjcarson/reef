@@ -14,7 +14,8 @@ use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
     NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PlanRow, PlanRowFilter,
-    PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, ReefClient, ReefQueryKinds,
+    PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter,
+    QueueRowGet, ReefClient, ReefQueryKinds,
 };
 
 #[cfg(feature = "embedded")]
@@ -442,6 +443,46 @@ impl Backend for ShoalBackend {
             }
             Err(error) => anyhow::bail!("deleting node rows failed: {error:?}"),
         }
+    }
+
+    /// Lists the queue rows stored in a project's partition, in rank order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "ShoalBackend::queue", skip_all, err(Debug))]
+    async fn queue(&self, project: &str) -> anyhow::Result<Vec<QueueRow>> {
+        // a project's queue sits in that project's partition
+        let get = QueueRowGet::new(vec![project.to_string()]);
+        self.read::<_, QueueRow>(get).await
+    }
+
+    /// Writes a queue row only if none is stored under its rank
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    #[instrument(name = "ShoalBackend::insert_queue", skip_all, err(Debug))]
+    async fn insert_queue(&self, row: QueueRow) -> anyhow::Result<Written> {
+        // `if_absent` refuses it where a row is stored
+        written(self.client.send_one(row.if_absent()).await)
+    }
+
+    /// Deletes a queue row, only if the row stored under its rank is still this one
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    #[instrument(name = "ShoalBackend::delete_queue", skip_all, err(Debug))]
+    async fn delete_queue(&self, row: &QueueRow) -> anyhow::Result<Written> {
+        // the row under its rank, only if it still names the node and write it was read with
+        let delete = QueueRowDelete::new(row.project.clone(), row.rank.clone());
+        let filter = QueueRowFilter {
+            plan: Some(vec![row.plan.clone()]),
+            id: Some(vec![row.id.clone()]),
+            seq: Some(vec![row.seq]),
+        };
+        written(self.client.send_one(delete.if_matches(filter)).await)
     }
 }
 

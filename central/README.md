@@ -217,6 +217,10 @@ is the twin's oracle.
   plan's row, its rows written, then made current by one conditional write, and the revision it
   replaced pruned. A write killed midway leaves the old revision current and whole, and the next
   write prunes what it left. `tests/common/faulty.rs` kills writes where a case asks it to.
+- **A project's queue is one row an entry** (`Store::edit_queue`), sorted by a rank string
+  (`rank`), so an edit writes one row. A move writes its new row, then deletes its old one; of a
+  node's two rows the later write wins, and the next edit prunes the other. A rank grown past 32
+  characters spreads the queue anew, an entry at a time, last first.
 
 ## The schema
 
@@ -225,6 +229,7 @@ is the twin's oracle.
 | `ProjectRow` | the constant `"projects"` | name | the repo's path |
 | `PlanRow` | project | plan name | `current`, `pending` and `retired` revisions, and a `version` |
 | `NodeRow` | (project, plan, revision) | id | a `version`, status, group, written order, the spec as JSON, the body |
+| `QueueRow` | project | rank | the plan and id of the node queued, and the `seq` it was written at |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

@@ -140,7 +140,15 @@ and no transactions, rewriting every row's position on each move would be slow a
 - **Fractional rank strings.** Each entry's sort key is a rank such as `a0`, `a0V` or `a1`, and
   a new rank can be made before the first, after the last, or between any two. Moving an entry
   rewrites only that entry's row.
-- **Rebalanced when long.** When ranks grow past a length, the whole partition is rewritten with
-  short ranks, as one revision.
+- **A move writes its new row, then deletes its old one**, which must still be the row read. Of
+  two rows for one node, the one with the higher `seq` wins, since the new row's write is the
+  move, so a move killed between the two reads as made. The next edit prunes the other row.
+- **Rebalanced when long, one entry at a time.** When a placement would make a rank longer than
+  32 characters, every entry moves, last first, to a short rank after the last one. The entries
+  moved sort after those not moved yet, so the queue reads in order after every step, and a
+  rebalance killed midway leaves at most one entry twice. That needs no revision, which a
+  rewrite of the whole partition would.
+- **Writes take a lock per project; reads take none**, since every step of a write leaves a
+  queue that reads in order.
 - **One queue per project, spanning its plans.** Each entry names a plan and a node, and a
   loop can be narrowed to one plan.

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::PROJECTS;
-use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
+use crate::schema::{NodeKey, NodeRow, PlanRow, ProjectRow, QueueRow};
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -21,6 +21,8 @@ struct Tables {
     plans: BTreeMap<String, BTreeMap<String, PlanRow>>,
     /// Each revision's nodes, by id
     nodes: BTreeMap<RevisionKey, BTreeMap<String, NodeRow>>,
+    /// Each project's queue, by rank
+    queues: BTreeMap<String, BTreeMap<String, QueueRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -64,6 +66,21 @@ impl MemoryBackend {
             .entry(partition.clone())
             .or_default()
             .insert(row.id.clone(), row);
+    }
+
+    /// Stores a queue row in a project's partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The project whose partition the row lands in
+    /// * `row` - The row, keyed by its own rank as any other
+    pub fn plant_queue(&self, partition: &str, row: QueueRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .queues
+            .entry(partition.to_string())
+            .or_default()
+            .insert(row.rank.clone(), row);
     }
 }
 
@@ -310,5 +327,65 @@ impl Backend for MemoryBackend {
             }
         }
         Ok(())
+    }
+
+    /// Lists the queue rows stored in a project's partition, in rank order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn queue(&self, project: &str) -> anyhow::Result<Vec<QueueRow>> {
+        // the project's partition, in rank order
+        Ok(self
+            .tables()
+            .queues
+            .get(project)
+            .into_iter()
+            .flat_map(|partition| partition.values().cloned())
+            .collect())
+    }
+
+    /// Writes a queue row only if none is stored under its rank
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    async fn insert_queue(&self, row: QueueRow) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let partition = tables.queues.entry(row.project.clone()).or_default();
+        // refused if a row is stored under its rank, as `if_absent` is
+        if partition.contains_key(&row.rank) {
+            return Ok(Written::Refused(Refusal::Exists));
+        }
+        partition.insert(row.rank.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Deletes a queue row, only if the row stored under its rank is still this one
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_queue(&self, row: &QueueRow) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let Some(partition) = tables.queues.get_mut(&row.project) else {
+            return Ok(Written::Refused(Refusal::Missing));
+        };
+        // judged as `if_matches` judges it: a row must be stored, and pass the filter
+        match partition.get(&row.rank) {
+            None => return Ok(Written::Refused(Refusal::Missing)),
+            Some(stored)
+                if (&stored.plan, &stored.id, stored.seq) != (&row.plan, &row.id, row.seq) =>
+            {
+                return Ok(Written::Refused(Refusal::Moved));
+            }
+            Some(_) => {}
+        }
+        partition.remove(&row.rank);
+        // and a partition left empty is gone, as it never existed
+        if partition.is_empty() {
+            tables.queues.remove(&row.project);
+        }
+        Ok(Written::Applied)
     }
 }

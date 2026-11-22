@@ -6,6 +6,10 @@ use std::time::Duration;
 
 use super::{Fx, Reopen, git, ids, node};
 
+// the queue's cases, run by the same suite, which the other suites sharing `common` don't use
+#[allow(unused_imports)]
+pub use super::queue_cases::*;
+
 /// A put of a new node is written at version 1, and a get reads back what was put
 ///
 /// # Arguments

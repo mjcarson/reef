@@ -5,7 +5,7 @@
 //! so the next write must recover from both the same way.
 
 use reef_model::PlanName;
-use reef_service::schema::{NodeKey, NodeRow, PlanRow, ProjectRow};
+use reef_service::schema::{NodeKey, NodeRow, PlanRow, ProjectRow, QueueRow};
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -33,6 +33,10 @@ pub struct Faults {
     node_pause: Mutex<Option<Arc<Pause>>>,
     /// Let this many writes of one node row through, then refuse the next as moved
     node_writes_left: Mutex<Option<usize>>,
+    /// Fail the next delete of a queue row, before deleting it
+    fail_queue_delete: AtomicBool,
+    /// Let this many writes of a queue row through, then fail the next before writing it
+    queue_inserts_left: Mutex<Option<usize>>,
 }
 
 impl Faults {
@@ -73,6 +77,38 @@ impl Faults {
     /// * `writes` - How many node writes to let through first
     pub fn refuse_node_writes_after(&self, writes: usize) {
         *self.node_writes_left.lock().unwrap() = Some(writes);
+    }
+
+    /// Fails the next delete of a queue row before deleting it, as a move killed between writing
+    /// its new row and deleting its old one would
+    pub fn fail_next_queue_delete(&self) {
+        self.fail_queue_delete.store(true, Ordering::SeqCst);
+    }
+
+    /// Lets `writes` writes of a queue row through, then fails the next before writing it
+    ///
+    /// # Arguments
+    ///
+    /// * `writes` - How many queue row writes to let through first
+    pub fn fail_queue_inserts_after(&self, writes: usize) {
+        *self.queue_inserts_left.lock().unwrap() = Some(writes);
+    }
+
+    /// Whether the next write of a queue row fails, counting it against the fault armed
+    fn fail_queue_insert(&self) -> bool {
+        // only an armed fault fails, once its writes have been let through
+        let mut left = self.queue_inserts_left.lock().unwrap();
+        match left.as_mut() {
+            Some(0) => {
+                *left = None;
+                true
+            }
+            Some(writes) => {
+                *writes -= 1;
+                false
+            }
+            None => false,
+        }
     }
 
     /// Whether the next write of one node row is refused, counting it against the fault armed
@@ -252,5 +288,40 @@ impl<B: Backend> Backend for Faulty<B> {
             anyhow::bail!("killed before pruning");
         }
         self.inner.delete_nodes(key, ids).await
+    }
+
+    /// Lists a project's queue rows
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn queue(&self, project: &str) -> anyhow::Result<Vec<QueueRow>> {
+        self.inner.queue(project).await
+    }
+
+    /// Writes a queue row only if none is stored under its rank, failing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    async fn insert_queue(&self, row: QueueRow) -> anyhow::Result<Written> {
+        // a fault armed for this write stops it before it is written
+        if self.faults.fail_queue_insert() {
+            anyhow::bail!("killed before writing queue row `{}`", row.rank);
+        }
+        self.inner.insert_queue(row).await
+    }
+
+    /// Deletes a queue row if it is still the one read, failing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_queue(&self, row: &QueueRow) -> anyhow::Result<Written> {
+        // a fault armed for this delete stops it before anything is deleted
+        if self.faults.fail_queue_delete.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("killed before deleting queue row `{}`", row.rank);
+        }
+        self.inner.delete_queue(row).await
     }
 }

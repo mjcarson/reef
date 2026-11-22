@@ -1,9 +1,10 @@
-//! reef's shoal schema: projects, plans and each revision's nodes
+//! reef's shoal schema: projects, plans, each revision's nodes, and each project's queue
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
-//! plans sit in that project's, and a plan's nodes sit in a partition of their revision. Sort keys
-//! are a single `String` there, so each table sorts by a name or an id.
+//! plans sit in that project's, a plan's nodes sit in a partition of their revision, and a
+//! project's queue sits in a partition of its own. Sort keys are a single `String` there, so each
+//! table sorts by a name, an id or a rank.
 //!
 //! This one module is both halves of the schema. Built with `embedded` it is the whole schema,
 //! which `reef-shoal` serves and an in-process pool runs. Built without it, only the client half
@@ -131,6 +132,36 @@ pub struct NodeKey {
     pub version: u64,
 }
 
+/// One entry of a project's queue, sorted by its rank
+///
+/// A row is written once and deleted, never updated. A move writes the entry's new row before
+/// it deletes the old one, so a move killed between the two leaves the node in two rows: the
+/// one with the higher `seq` is the move, and wins. Ranks repeat across projects, so a project
+/// whose partition key's hash collides with another's could overwrite its rows; the store reads
+/// each back against its full key, as it does every row.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct QueueRow {
+    /// The project whose queue this is
+    #[shoal(partition)]
+    pub project: String,
+    /// The entry's rank, which sorts the queue
+    #[shoal(sort)]
+    pub rank: String,
+    /// The plan of the node queued
+    #[shoal(filter)]
+    pub plan: String,
+    /// The id of the node queued, within its plan
+    #[shoal(filter)]
+    pub id: String,
+    /// The queue's write count when this row was written, higher for each later write
+    #[shoal(filter)]
+    pub seq: u64,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -145,6 +176,8 @@ pub struct Reef {
     /// Each revision's nodes
     #[shoal(projections(NodeKey))]
     pub nodes: PersistentSortedTable<NodeRow, FileSystem>,
+    /// Each project's queue, by rank
+    pub queue: PersistentSortedTable<QueueRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -153,13 +186,14 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 8968132830820625058;
+    const SCHEMA_ID: u64 = 10508282782169471902;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
         ("ProjectRow", 12832186597557680855),
         ("PlanRow", 2457880101249943207),
         ("NodeRow", 1919551679666722412),
+        ("QueueRow", 7438970626929457281),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

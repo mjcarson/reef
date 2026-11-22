@@ -37,6 +37,6 @@ pub use memory::MemoryBackend;
 pub use service::Service;
 pub use store::{
     AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
-    PlanInfo, Project, Proposal, Put, Puts, Rewrite, Rewritten, StalePut, Store, StoredNode,
-    Unkeepable,
+    Place, PlanInfo, Project, Proposal, Put, Puts, QueueEdit, Queued, Ranked, Rewrite, Rewritten,
+    StalePut, Store, StoredNode, Unkeepable,
 };

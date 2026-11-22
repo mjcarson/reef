@@ -20,13 +20,20 @@
 //!   the write would leave it, under the plan's write lock, and write only if it finds no
 //!   problem. A batch puts and removes nodes as one change. [`Service`](crate::Service) checks every write this way; `put` and `write_plan`
 //!   are the unchecked layer under it.
+//! - **A project's queue sorted by rank.** Each entry is one row in its project's partition,
+//!   sorted by a [`rank`](crate::rank) string, so adding, moving or removing an entry writes one
+//!   row. A move writes the entry's new row, then deletes its old one only if it is still the row
+//!   read. Of two rows for one node, the one written later wins, so a move killed between the two
+//!   reads as made, and the next edit prunes the other. A rank grown long spreads the queue anew,
+//!   one entry at a time, last first, so the queue reads in order after every step. Queue writes
+//!   take a lock per project; reads take none.
 
 // the store's data types are the JSON API's, so the service and its clients share them
 pub use reef_api::{
-    AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanInfo, Project, Puts,
-    Rewrite, Rewritten, StalePut, StoredNode, records,
+    AddedProject, Checked, Listing, NodePut, NodeRemove, NodeWrite, Place, PlanInfo, Project, Puts,
+    QueueEdit, Queued, Ranked, Rewrite, Rewritten, StalePut, StoredNode, records,
 };
-use reef_model::{Diagnostic, PlanName, Record};
+use reef_model::{Diagnostic, NodeName, PlanName, Record};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
@@ -39,8 +46,9 @@ use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
+use crate::rank;
 use crate::repo::{self, Located};
-use crate::schema::{NodeRow, PROJECTS, PlanRow, ProjectRow};
+use crate::schema::{NodeRow, PROJECTS, PlanRow, ProjectRow, QueueRow};
 
 /// How many node rows a bulk write sends in one bundle
 const BUNDLE_ROWS: usize = 256;
@@ -113,6 +121,8 @@ pub struct Store<B = ShoalBackend> {
     locks: Mutex<HashMap<PlanName, Arc<RwLock<()>>>>,
     /// Held to register a project, so two can't take one repo between a check and a write
     projects: tokio::sync::Mutex<()>,
+    /// Each project's queue lock, held alone by its writes
+    queues: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Store<ShoalBackend> {
@@ -162,6 +172,7 @@ impl<B: Backend> Store<B> {
             backend,
             locks: Mutex::new(HashMap::new()),
             projects: tokio::sync::Mutex::new(()),
+            queues: Mutex::new(HashMap::new()),
         }
     }
 
@@ -206,6 +217,21 @@ impl<B: Backend> Store<B> {
     /// * `plan` - The plan to write
     async fn writing(&self, plan: &PlanName) -> OwnedRwLockWriteGuard<()> {
         self.plan_lock(plan).write_owned().await
+    }
+
+    /// Finds a project's queue lock, making it on first use
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project whose queue's lock to find
+    fn queue_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+        // the map is only held to find or add the lock, never across a wait
+        self.queues
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(project.to_string())
+            .or_default()
+            .clone()
     }
 
     /// Gets a plan's row, checked against its full key
@@ -982,6 +1008,337 @@ impl<B: Backend> Store<B> {
         }
         Ok(count)
     }
+
+    /// Lists a project's queue, in its order
+    ///
+    /// No lock is taken: every step of a queue write leaves the queue reading in order. A node
+    /// in two rows, as a move killed midway leaves it, reads as the row written later.
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Store::queue", skip_all, err(Debug))]
+    pub async fn queue(&self, project: &str) -> anyhow::Result<Vec<Ranked>> {
+        // each node's winning row, in rank order
+        let (rows, _) = settle(self.queue_rows(project).await?);
+        ranked_all(&rows)
+    }
+
+    /// Edits a project's queue: puts a node in it, moves one, or takes one off
+    ///
+    /// Each edit writes the node's one row, and a move deletes its old one after. Adding a node
+    /// already queued moves it. Moving or taking off a node that isn't queued, or placing one
+    /// beside a node that isn't, is [`Queued::NotQueued`], and changes nothing. A placement that
+    /// would make a rank longer than [`rank::LONG`] spreads the queue's ranks anew first.
+    ///
+    /// The store keeps rows; it doesn't check the nodes named are in their plans. The service
+    /// does.
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project whose queue to edit
+    /// * `edit` - The edit
+    #[instrument(name = "Store::edit_queue", skip_all, err(Debug))]
+    pub async fn edit_queue(&self, project: &str, edit: QueueEdit) -> anyhow::Result<Queued> {
+        // every node the edit names is of this project's
+        let named = std::iter::once(edit.node()).chain(edit.place().and_then(Place::anchor));
+        for node in named {
+            if node.plan.project != project {
+                let message =
+                    format!("node `{node}` is not of project `{project}`, whose queue this is");
+                return Err(Unkeepable(message).into());
+            }
+        }
+        // one write to a project's queue at a time
+        let lock = self.queue_lock(project);
+        let _write = lock.lock().await;
+        // the queue as it stands, after pruning what a killed write left
+        let read = self.queue_rows(project).await?;
+        let mut seq = read.iter().map(|row| row.seq).max().unwrap_or(0);
+        let (mut rows, leftovers) = settle(read);
+        self.prune_queue(leftovers).await?;
+        let node = edit.node();
+        let queued = rows.iter().any(|row| is_entry_of(row, node));
+        let at = match &edit {
+            // taking a node off deletes its one row
+            QueueEdit::Remove { .. } => {
+                let Some(i) = rows.iter().position(|row| is_entry_of(row, node)) else {
+                    return Ok(Queued::NotQueued { node: node.clone() });
+                };
+                let row = rows.remove(i);
+                self.delete_row(&row).await?;
+                return Ok(Queued::Applied {
+                    queue: ranked_all(&rows)?,
+                });
+            }
+            // a move is of a node already queued
+            QueueEdit::Move { .. } if !queued => {
+                return Ok(Queued::NotQueued { node: node.clone() });
+            }
+            QueueEdit::Add { at, .. } | QueueEdit::Move { at, .. } => at,
+        };
+        // a queued node placed beside itself stays where it is
+        if queued && at.anchor() == Some(node) {
+            return Ok(Queued::Applied {
+                queue: ranked_all(&rows)?,
+            });
+        }
+        // at most twice: once as the queue stands, and once spread anew if that was too long
+        let mut spread = false;
+        loop {
+            // where the node goes among the other entries
+            let old = rows.iter().position(|row| is_entry_of(row, node));
+            let others: Vec<&QueueRow> =
+                rows.iter().filter(|row| !is_entry_of(row, node)).collect();
+            let index = match place_index(&others, at) {
+                Ok(index) => index,
+                Err(anchor) => return Ok(Queued::NotQueued { node: anchor }),
+            };
+            // a node placed where it already is changes nothing
+            if old == Some(index) {
+                return Ok(Queued::Applied {
+                    queue: ranked_all(&rows)?,
+                });
+            }
+            // a rank between its new neighbours, unless that is too long to keep
+            let lo = index.checked_sub(1).map(|i| others[i].rank.as_str());
+            let hi = others.get(index).map(|row| row.rank.as_str());
+            let made = rank::between(lo, hi)?;
+            if made.len() > rank::LONG && !spread {
+                rows = self.rebalance(rows, &mut seq).await?;
+                spread = true;
+                continue;
+            }
+            // the new row, written after every row read, then the old one deleted
+            seq += 1;
+            let row = QueueRow {
+                project: project.to_string(),
+                rank: made,
+                plan: node.plan.plan.clone(),
+                id: node.id.clone(),
+                seq,
+            };
+            let replaced = old.map(|i| rows[i].clone());
+            self.move_row(replaced.as_ref(), row.clone()).await?;
+            // and the queue as the edit leaves it
+            let mut after: Vec<QueueRow> = others.into_iter().cloned().collect();
+            after.insert(index, row);
+            return Ok(Queued::Applied {
+                queue: ranked_all(&after)?,
+            });
+        }
+    }
+
+    /// Reads a project's queue rows, checking each against its full key and its rank
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Store::queue_rows", skip_all, err(Debug))]
+    async fn queue_rows(&self, project: &str) -> anyhow::Result<Vec<QueueRow>> {
+        let rows = self.backend.queue(project).await?;
+        for row in &rows {
+            // a row of another project whose key hashed the same is a collision, not an entry
+            anyhow::ensure!(
+                row.project == project,
+                "queue row `{}` of `{}` was stored where `{project}`'s queue is: their partition \
+                 keys' hashes collide",
+                row.rank,
+                row.project
+            );
+            // and a row sorts by a rank, which placing beside it splits
+            anyhow::ensure!(
+                rank::is_valid(&row.rank),
+                "`{project}`'s queue row for `{}/{}` is at `{}`, which is no rank",
+                row.plan,
+                row.id,
+                row.rank
+            );
+        }
+        Ok(rows)
+    }
+
+    /// Spreads a queue's ranks anew: short ranks after its last, one entry at a time, last first
+    ///
+    /// The entries moved sort after those not moved yet, in their order, so the queue reads in
+    /// order after every step. One killed midway leaves at most one entry in two rows, which a
+    /// read settles and the next edit prunes.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The queue's rows, one for each node, in rank order
+    /// * `seq` - The queue's write count, moved on by each row written
+    #[instrument(name = "Store::rebalance", skip_all, err(Debug))]
+    async fn rebalance(&self, rows: Vec<QueueRow>, seq: &mut u64) -> anyhow::Result<Vec<QueueRow>> {
+        // consecutive integers after the last rank, which are short
+        let Some(last) = rows.last() else {
+            return Ok(rows);
+        };
+        let ranks = rank::spread(Some(&last.rank), None, rows.len())?;
+        // the last entry moved first, so what has moved stays after what hasn't
+        let mut moved = Vec::with_capacity(rows.len());
+        for (row, rank) in rows.iter().zip(ranks).rev() {
+            *seq += 1;
+            let new = QueueRow {
+                rank,
+                seq: *seq,
+                ..row.clone()
+            };
+            self.move_row(Some(row), new.clone()).await?;
+            moved.push(new);
+        }
+        moved.reverse();
+        Ok(moved)
+    }
+
+    /// Writes an entry's new row, then deletes its old one, if it had one
+    ///
+    /// Once the new row is in, the move is made: it was written after every row read, so it wins
+    /// over the old row for as long as that is left.
+    ///
+    /// # Arguments
+    ///
+    /// * `old` - The entry's row as it was read, or `None` for an entry new to the queue
+    /// * `new` - Its new row
+    #[instrument(name = "Store::move_row", skip_all, err(Debug))]
+    async fn move_row(&self, old: Option<&QueueRow>, new: QueueRow) -> anyhow::Result<()> {
+        // the new row first, under a rank no row read holds
+        let (project, rank) = (new.project.clone(), new.rank.clone());
+        if let Written::Refused(refusal) = self.backend.insert_queue(new).await? {
+            anyhow::bail!(
+                "another process wrote `{project}`'s queue: its rank `{rank}` was refused as \
+                 {refusal:?}"
+            );
+        }
+        // then the old one, only if it is still the row read
+        if let Some(old) = old {
+            self.delete_row(old).await?;
+        }
+        Ok(())
+    }
+
+    /// Deletes a queue row, if it is still the row read
+    ///
+    /// A row already gone is no failure, so a prune that is tried again is harmless.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row as it was read
+    #[instrument(name = "Store::delete_row", skip_all, err(Debug))]
+    async fn delete_row(&self, row: &QueueRow) -> anyhow::Result<()> {
+        match self.backend.delete_queue(row).await? {
+            Written::Applied | Written::Refused(Refusal::Missing) => Ok(()),
+            // another row under its rank is another writer's, which this process can't be
+            Written::Refused(_) => anyhow::bail!(
+                "another process wrote `{}`'s queue: the row at rank `{}` is no longer the one read",
+                row.project,
+                row.rank
+            ),
+        }
+    }
+
+    /// Deletes the rows a killed queue write left, each only if it is still the row read
+    ///
+    /// # Arguments
+    ///
+    /// * `leftovers` - The rows each node's later row won over
+    #[instrument(name = "Store::prune_queue", skip_all, err(Debug))]
+    async fn prune_queue(&self, leftovers: Vec<QueueRow>) -> anyhow::Result<usize> {
+        // each answer checked, one at a time
+        for row in &leftovers {
+            self.delete_row(row).await?;
+        }
+        Ok(leftovers.len())
+    }
+}
+
+/// Settles a queue's rows: each node's row written last, in rank order, and the rows it won over
+///
+/// A move writes its new row before deleting the old one, so the later row is the move. Two of
+/// a node's rows written at once can't happen; if they did, the one ranked first would win.
+///
+/// # Arguments
+///
+/// * `rows` - A queue's rows, as read
+fn settle(mut rows: Vec<QueueRow>) -> (Vec<QueueRow>, Vec<QueueRow>) {
+    // in rank order, as shoal compares sort keys, whatever order they were read in
+    rows.sort_by(|a, b| a.rank.cmp(&b.rank));
+    // the winning row of each node: the highest seq, the first ranked of equals
+    let mut best: HashMap<(&str, &str), usize> = HashMap::new();
+    for (i, row) in rows.iter().enumerate() {
+        let winner = best
+            .entry((row.plan.as_str(), row.id.as_str()))
+            .or_insert(i);
+        if row.seq > rows[*winner].seq {
+            *winner = i;
+        }
+    }
+    let winners: HashSet<usize> = best.into_values().collect();
+    // split, keeping rank order on both sides
+    let (mut kept, mut left) = (Vec::new(), Vec::new());
+    for (i, row) in rows.into_iter().enumerate() {
+        if winners.contains(&i) {
+            kept.push(row);
+        } else {
+            left.push(row);
+        }
+    }
+    (kept, left)
+}
+
+/// Whether a queue row is the entry of a node
+///
+/// # Arguments
+///
+/// * `row` - The row, of the node's project's queue
+/// * `node` - The node
+fn is_entry_of(row: &QueueRow, node: &NodeName) -> bool {
+    row.plan == node.plan.plan && row.id == node.id
+}
+
+/// Where a place puts a node among a queue's other entries, or the node it is beside if that
+/// isn't queued
+///
+/// # Arguments
+///
+/// * `others` - The queue's other entries, in order
+/// * `at` - The place
+fn place_index(others: &[&QueueRow], at: &Place) -> Result<usize, NodeName> {
+    match at {
+        Place::Top => Ok(0),
+        Place::Bottom => Ok(others.len()),
+        Place::Before(anchor) | Place::After(anchor) => {
+            // beside a node that is queued
+            let i = others
+                .iter()
+                .position(|row| is_entry_of(row, anchor))
+                .ok_or_else(|| anchor.clone())?;
+            Ok(if matches!(at, Place::After(_)) {
+                i + 1
+            } else {
+                i
+            })
+        }
+    }
+}
+
+/// A queue's rows as its entries, each naming its node in full
+///
+/// # Arguments
+///
+/// * `rows` - The rows, in order
+fn ranked_all(rows: &[QueueRow]) -> anyhow::Result<Vec<Ranked>> {
+    rows.iter()
+        .map(|row| {
+            // a row names its node by its project, its plan and its id
+            let node =
+                PlanName::new(row.project.clone(), row.plan.clone())?.node(row.id.clone())?;
+            Ok(Ranked {
+                node,
+                rank: row.rank.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Refuses a whole plan the store can't keep: a node it can't keep as one row, or an id twice
@@ -1208,9 +1565,9 @@ fn fresh_revision() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddedProject, NodeWrite, Store};
+    use super::{AddedProject, NodeWrite, Store, settle};
     use crate::backend::RevisionKey;
-    use crate::schema::NodeRow;
+    use crate::schema::{NodeRow, QueueRow};
     use reef_model::PlanName;
     use std::path::Path;
 
@@ -1293,5 +1650,62 @@ mod tests {
         // while the plan's own node still reads back
         assert!(store.get(&plan, "C7").await?.is_some());
         Ok(())
+    }
+
+    /// A queue row of project `reef`'s plan `central`
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node queued
+    /// * `rank` - Its rank
+    /// * `seq` - The write count it was written at
+    fn queued(id: &str, rank: &str, seq: u64) -> QueueRow {
+        QueueRow {
+            project: "reef".to_string(),
+            rank: rank.to_string(),
+            plan: "central".to_string(),
+            id: id.to_string(),
+            seq,
+        }
+    }
+
+    /// A row stored in a project's queue under another project's key is an error, never an entry
+    #[tokio::test]
+    async fn collided_queue_row_is_an_error() -> anyhow::Result<()> {
+        // a row of another project's, landing in reef's partition as a hash collision would
+        let store = Store::memory();
+        let stray = QueueRow {
+            project: "other".to_string(),
+            ..queued("C1", "a0", 1)
+        };
+        store.backend().plant_queue("reef", stray);
+        // a read of the queue is caught
+        let error = store
+            .queue("reef")
+            .await
+            .expect_err("a collided row was served");
+        assert!(format!("{error:#}").contains("collide"), "{error:#}");
+        Ok(())
+    }
+
+    /// Of a node's rows the one written later wins, wherever it is ranked, and the rest are
+    /// left over, each side in rank order
+    #[test]
+    fn settle_keeps_the_newest_row_of_each_node() {
+        // A moved from the bottom to the top, its old row left; B once
+        let rows = vec![
+            queued("A", "a2", 1),
+            queued("B", "a1", 2),
+            queued("A", "Zz", 3),
+        ];
+        let (kept, left) = settle(rows);
+        assert_eq!(kept, [queued("A", "Zz", 3), queued("B", "a1", 2)]);
+        assert_eq!(left, [queued("A", "a2", 1)]);
+        // and of two written at once, the first ranked
+        let (kept, left) = settle(vec![queued("A", "a1", 4), queued("A", "a0", 4)]);
+        assert_eq!(
+            (kept, left),
+            (vec![queued("A", "a0", 4)], vec![queued("A", "a1", 4)])
+        );
     }
 }
