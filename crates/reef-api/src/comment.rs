@@ -109,6 +109,35 @@ impl ThreadState {
     }
 }
 
+/// Who wrote a comment
+///
+/// Until reef knows its users, a comment is the user's unless Claude wrote it through reef's
+/// tools, so a thread whose last word is Claude's waits on the user rather than on Claude.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Writer {
+    /// The user, in the app or the terminal
+    #[default]
+    User,
+    /// Claude, through reef's tools while it works the loop
+    Claude,
+}
+
+impl Writer {
+    /// Whether the user wrote it, which a comment leaves unsaid
+    pub fn is_user(&self) -> bool {
+        *self == Writer::User
+    }
+
+    /// The name this writer takes in JSON and on the command line
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Writer::User => "user",
+            Writer::Claude => "claude",
+        }
+    }
+}
+
 /// One comment in a thread
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
@@ -116,6 +145,9 @@ pub struct Comment {
     pub number: u32,
     /// When it was written, in milliseconds since the epoch
     pub at: u64,
+    /// Who wrote it, the user unless it says so
+    #[serde(default, skip_serializing_if = "Writer::is_user")]
+    pub by: Writer,
     /// Its body, as markdown, as it was written
     pub body: String,
     /// Its body rendered, raw HTML escaped, filled in as it is read
@@ -155,6 +187,18 @@ impl Thread {
     /// Whether it still wants an answer
     pub fn is_open(&self) -> bool {
         self.state == ThreadState::Open
+    }
+
+    /// Whether it wants an answer from Claude: it is open, and the user wrote its last comment
+    ///
+    /// A thread Claude replied to last, with a question back, waits on the user instead.
+    pub fn wants_answer(&self) -> bool {
+        // open, and not left waiting on the user by Claude's own reply
+        self.is_open()
+            && self
+                .comments
+                .last()
+                .is_none_or(|comment| comment.by.is_user())
     }
 
     /// The change linked to it last as the one that answered it, if one was
@@ -224,6 +268,9 @@ pub struct NewThread {
     pub target: Target,
     /// Its first comment's body, as markdown
     pub body: String,
+    /// Who writes it, the user unless it says so
+    #[serde(default, skip_serializing_if = "Writer::is_user")]
+    pub by: Writer,
 }
 
 /// A reply to a thread
@@ -231,6 +278,9 @@ pub struct NewThread {
 pub struct NewReply {
     /// Its body, as markdown
     pub body: String,
+    /// Who writes it, the user unless it says so
+    #[serde(default, skip_serializing_if = "Writer::is_user")]
+    pub by: Writer,
 }
 
 /// A thread marked open or resolved, over the version its writer read
@@ -242,7 +292,11 @@ pub struct MarkThread {
     pub read: u64,
 }
 
-/// A commit whose `Reef-Resolves` trailer named a thread, as the capture that read it found it
+/// A commit as a capture read it: one whose `Reef-Resolves` trailer named a thread, or one of
+/// a node's own commits
+///
+/// Its id may stop resolving once it is rewritten, but its author, when it was authored and its
+/// summary find it again (`same_change`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvingCommit {
     /// The commit's id, which may stop resolving once it is squashed
@@ -435,8 +489,8 @@ pub enum Marked {
 #[cfg(test)]
 mod tests {
     use super::{
-        Comment, Commented, Marked, NewThread, Resolution, Resolved, ResolvingCommit, Target,
-        Thread, ThreadState, TrailerOutcome, TrailerRead, trailer_threads,
+        Comment, Commented, Marked, NewReply, NewThread, Resolution, Resolved, ResolvingCommit,
+        Target, Thread, ThreadState, TrailerOutcome, TrailerRead, Writer, trailer_threads,
     };
     use crate::revision::{Anchor, Side};
     use serde_json::json;
@@ -497,12 +551,14 @@ mod tests {
                 Comment {
                     number: 4,
                     at: 10,
+                    by: Writer::User,
                     body: "Why a lock?".to_string(),
                     html: String::new(),
                 },
                 Comment {
                     number: 6,
                     at: 12,
+                    by: Writer::User,
                     body: "*Two* writers.".to_string(),
                     html: "<p><em>Two</em> writers.</p>\n".to_string(),
                 },
@@ -553,6 +609,7 @@ mod tests {
         let new = NewThread {
             target: Target::Node,
             body: "Looks good".to_string(),
+            by: Writer::User,
         };
         let json = serde_json::to_string(&new).unwrap();
         assert_eq!(json, r#"{"target":{"on":"node"},"body":"Looks good"}"#);
@@ -683,5 +740,77 @@ mod tests {
             serde_json::to_string(&missing).unwrap(),
             r#"{"no-revision":{"node":"reef/central/C37","revision":9}}"#
         );
+    }
+
+    /// A comment is the user's unless it says it is Claude's, and a thread waits on Claude only
+    /// while it is open and the user wrote its last comment
+    #[test]
+    fn threads_want_an_answer_while_the_user_spoke_last() {
+        // a comment and a reply, each with who wrote it
+        let said = |number, by| Comment {
+            number,
+            at: u64::from(number),
+            by,
+            body: "Why?".to_string(),
+            html: String::new(),
+        };
+        let thread = Thread {
+            node: "reef/central/C43".parse().unwrap(),
+            number: 1,
+            version: 1,
+            target: Target::Node,
+            followed: Vec::new(),
+            outdated: None,
+            state: ThreadState::Open,
+            resolutions: Vec::new(),
+            comments: vec![said(1, Writer::User)],
+        };
+        // the user's leaves the writer unsaid, and Claude's says so
+        let value = serde_json::to_value(&thread.comments[0]).unwrap();
+        assert!(value.get("by").is_none());
+        let claudes = serde_json::to_value(said(2, Writer::Claude)).unwrap();
+        assert_eq!(claudes["by"], "claude");
+        assert_eq!(
+            serde_json::from_value::<Comment>(claudes).unwrap().by,
+            Writer::Claude
+        );
+        // a comment kept before writers were said reads back as the user's
+        let old: Comment =
+            serde_json::from_value(json!({"number": 3, "at": 4, "body": "Old"})).unwrap();
+        assert_eq!(old.by, Writer::User);
+        // open, the user's word last, it wants an answer
+        assert!(thread.wants_answer());
+        // Claude's reply last leaves it waiting on the user
+        let asked = Thread {
+            comments: vec![said(1, Writer::User), said(2, Writer::Claude)],
+            ..thread.clone()
+        };
+        assert!(asked.is_open() && !asked.wants_answer());
+        // the user answering wants an answer again
+        let answered = Thread {
+            comments: vec![
+                said(1, Writer::User),
+                said(2, Writer::Claude),
+                said(3, Writer::User),
+            ],
+            ..thread.clone()
+        };
+        assert!(answered.wants_answer());
+        // and a resolved thread wants none
+        let resolved = Thread {
+            state: ThreadState::Resolved,
+            ..thread
+        };
+        assert!(!resolved.wants_answer());
+        // a reply sent as Claude's says so, and the user's leaves it out
+        let reply = NewReply {
+            body: "Is two enough?".to_string(),
+            by: Writer::Claude,
+        };
+        assert_eq!(
+            serde_json::to_string(&reply).unwrap(),
+            r#"{"body":"Is two enough?","by":"claude"}"#
+        );
+        assert_eq!(Writer::Claude.as_str(), "claude");
     }
 }

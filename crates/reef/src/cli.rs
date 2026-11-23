@@ -16,7 +16,9 @@
 //! reef [--conf PATH] page rm <PATH> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] start <ID> [--base BRANCH] [--restart] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] work [ID] [--project NAME] [--plan NAME]
-//! reef [--conf PATH] comment resolve <N> [--node ID] [--revision N] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] comment ls [--node ID] [--all] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] comment reply <N> <TEXT> [--project NAME] [--plan NAME]
+//! reef [--conf PATH] comment resolve <N> [--node ID] [--revision N] [--reply TEXT] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] status <ID> <STATUS> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] accept <ID> [<N> <STATUS> [--test TEST]] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] check [--project NAME] [--plan NAME]
@@ -50,8 +52,9 @@
 //! repo's for a linked worktree. `--project` names one instead. A node's plan is the project's
 //! only plan, unless `--plan` names one, and so is a page's. `start` and `node capture` read the
 //! checkout they run in, which must be the project's repo or a linked worktree of it, and a
-//! capture's node must be worked there. `comment resolve` links the latest revision of the node
-//! the working directory's worktree is on, unless `--node` names one. `next` and the queue span
+//! capture's node must be worked there. `comment ls` lists a plan's open threads, or a node's, and
+//! `comment resolve` links the latest revision of the node the working directory's worktree is
+//! on, unless `--node` names one. `next` and the queue span
 //! the project's plans, and `--plan` narrows `next` to one. `loop` works on the loop of the pane
 //! it runs in, zellij's or tmux's or else the Claude Code process that ran it, unless `--pane`
 //! names one, and a loop spans the project's plans unless `--plan` names one. `loop take`, as
@@ -65,7 +68,7 @@
 //! that holds its directory, and neither needs reef's config or its service.
 
 use clap::{Args, Parser, Subcommand};
-use reef_api::{AddedProject, Project};
+use reef_api::{AddedProject, Project, Writer};
 use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
 use std::io::Write;
@@ -175,7 +178,8 @@ pub enum Command {
         #[command(flatten)]
         pick: PlanPick,
     },
-    /// Resolve a plan's comment threads by the changes that answered them
+    /// List a plan's comment threads, reply in them, and resolve them by the changes that
+    /// answered them
     #[command(subcommand)]
     Comment(CommentCommand),
     /// Set where a node's work stands: todo, in-progress, done or blocked
@@ -277,12 +281,13 @@ pub enum Command {
     /// standard input
     #[command(subcommand)]
     Hook(HookCommand),
-    /// Serve get, check, next, next_task, put, status and accept as MCP tools over standard
-    /// input and output, for Claude Code
+    /// Serve get, check, next, next_task, put, status, accept, comments, reply and resolve as
+    /// MCP tools over standard input and output, for Claude Code
     ///
-    /// get, check and next only read, and say so, so plan mode runs them without a prompt.
-    /// next_task takes nodes for the loop of the pane the server runs in: its multiplexer's,
-    /// else the Claude Code process that started it.
+    /// get, check, next and comments only read, and say so, so plan mode runs them without a
+    /// prompt. next_task takes nodes for the loop of the pane the server runs in: its
+    /// multiplexer's, else the Claude Code process that started it. reply and resolve write as
+    /// Claude.
     Mcp {
         /// The project and plan the tools work in, if not the working directory's and its
         /// only plan
@@ -545,6 +550,30 @@ pub enum HookCommand {
 /// What can be done with a plan's comment threads
 #[derive(Debug, Subcommand)]
 pub enum CommentCommand {
+    /// List the plan's open threads, or one node's, each with where it is and every comment
+    Ls {
+        /// The node whose threads to list: a bare id in the plan, or `project/plan/id`
+        #[arg(long, value_name = "ID")]
+        node: Option<String>,
+        /// List resolved threads too
+        #[arg(long)]
+        all: bool,
+        /// The plan whose threads to list, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
+    /// Reply in a thread, leaving it open or resolved as it is
+    Reply {
+        /// The thread's number in its plan
+        #[arg(value_name = "N")]
+        thread: u32,
+        /// The reply, as markdown
+        #[arg(value_name = "TEXT")]
+        body: String,
+        /// The plan the thread is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
     /// Resolve a thread, linking the revision that answered it, as a commit's `Reef-Resolves`
     /// trailer does when it is captured
     ///
@@ -561,6 +590,9 @@ pub enum CommentCommand {
         /// The revision that answered it, else the node's latest
         #[arg(long, value_name = "N")]
         revision: Option<u32>,
+        /// A reply to keep in it first, as markdown, such as how it was answered
+        #[arg(long, value_name = "TEXT")]
+        reply: Option<String>,
         /// The plan the thread is in, if not the project's only plan
         #[command(flatten)]
         pick: PlanPick,
@@ -777,12 +809,37 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             pick,
         } => start::start(&client, cwd, &id, &pick, base.as_deref(), restart, out).await,
         Command::Work { id, pick } => start::work(&client, cwd, id.as_deref(), &pick, out).await,
+        Command::Comment(CommentCommand::Ls { node, all, pick }) => {
+            comment::ls(&client, cwd, node.as_deref(), all, &pick, out).await
+        }
+        Command::Comment(CommentCommand::Reply { thread, body, pick }) => {
+            comment::reply(&client, cwd, thread, &body, Writer::User, &pick, out).await
+        }
         Command::Comment(CommentCommand::Resolve {
             thread,
             node,
             revision,
+            reply,
             pick,
-        }) => comment::resolve(&client, cwd, thread, node.as_deref(), revision, &pick, out).await,
+        }) => {
+            // the node named, else the one this worktree is on
+            let answering = match node.as_deref() {
+                Some(named) => comment::Answering::Named(named),
+                None => comment::Answering::Here,
+            };
+            comment::resolve(
+                &client,
+                cwd,
+                thread,
+                answering,
+                revision,
+                reply.as_deref(),
+                Writer::User,
+                &pick,
+                out,
+            )
+            .await
+        }
         Command::Status { id, status, pick } => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             work::status(&client, &plan, &id, status, out).await
@@ -1578,6 +1635,7 @@ mod tests {
                 node,
                 revision,
                 pick,
+                ..
             }) => {
                 assert_eq!(
                     (thread, node.as_deref(), revision),
@@ -1600,6 +1658,42 @@ mod tests {
         // a thread is a number, and one is needed
         assert!(Cli::try_parse_from(["reef", "comment", "resolve"]).is_err());
         assert!(Cli::try_parse_from(["reef", "comment", "resolve", "#12"]).is_err());
+        // a reply may go with a resolve
+        let answered =
+            Cli::try_parse_from(["reef", "comment", "resolve", "12", "--reply", "Done"]).unwrap();
+        assert!(matches!(
+            answered.command,
+            Command::Comment(CommentCommand::Resolve { reply: Some(text), .. }) if text == "Done"
+        ));
+    }
+
+    /// Listing takes a node and whether to list every thread, and a reply its thread and text
+    #[test]
+    fn comment_ls_and_reply_take_their_thread() {
+        // a node's threads, resolved ones too
+        let listed =
+            Cli::try_parse_from(["reef", "comment", "ls", "--node", "C43", "--all"]).unwrap();
+        assert!(matches!(
+            listed.command,
+            Command::Comment(CommentCommand::Ls { node: Some(id), all: true, .. }) if id == "C43"
+        ));
+        // the plan's open ones by default
+        let plain = Cli::try_parse_from(["reef", "comment", "ls"]).unwrap();
+        assert!(matches!(
+            plain.command,
+            Command::Comment(CommentCommand::Ls {
+                node: None,
+                all: false,
+                ..
+            })
+        ));
+        // a reply names its thread and says something
+        let reply = Cli::try_parse_from(["reef", "comment", "reply", "12", "Why two?"]).unwrap();
+        assert!(matches!(
+            reply.command,
+            Command::Comment(CommentCommand::Reply { thread: 12, body, .. }) if body == "Why two?"
+        ));
+        assert!(Cli::try_parse_from(["reef", "comment", "reply", "12"]).is_err());
     }
 
     /// The skill takes a directory or none, and whether to print it, and no project or plan

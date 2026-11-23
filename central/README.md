@@ -21,10 +21,12 @@ add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|
 status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, `reef start` and
 `reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
 a node's changes in its worktree as a revision and resolves the comments its commits'
-`Reef-Resolves` trailers name, `reef comment resolve`, which resolves one by hand, `reef loop
+`Reef-Resolves` trailers name, `reef comment ls|reply|resolve`, which list a plan's open threads,
+reply in one and resolve one by hand, `reef loop
 start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in, `--width`
 setting how many nodes it works at once, `reef loop take`, which takes that loop's next node and
-starts it, as the MCP tool next_task does, or the next group for a loop wider than one, `reef
+starts it, as the MCP tool next_task does, or the next group for a loop wider than one, or a
+done node again for a round of its open comments, `reef
 loop attach`, which has an open session work a group's member, `reef hook session-start`, which
 hands the loop to each session that starts there and names the next node to a clear between
 nodes, `reef hook stop`, which seals a node done and says once what comes after the loop's node

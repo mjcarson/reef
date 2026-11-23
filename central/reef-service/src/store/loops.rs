@@ -358,9 +358,13 @@ impl<B: Backend> Store<B> {
                     .into_iter()
                     .map(|node| Member { node, pane: None })
                     .collect();
+                // a node whose end it acted on, taken again for a round of its comments, has
+                // that round's end to act on as well
+                let acted = current.acted.clone().filter(|acted| *acted != node);
                 Loop {
                     node: Some(node),
                     members,
+                    acted,
                     ..current
                 }
             }

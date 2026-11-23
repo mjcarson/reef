@@ -139,6 +139,9 @@ problem is a tool error carrying the message, and writes nothing.
 | `mcp__reef__put` | writes | `yaml` | `reef node put <FILE>` |
 | `mcp__reef__status` | writes | `id`, `status` | `reef status <ID> <STATUS>` |
 | `mcp__reef__accept` | writes | `id`, `criterion`, `status`, `test` | `reef accept <ID> <N> met --test <TEST>` |
+| `mcp__reef__comments` | reads | `id`, else the plan's; `all` for resolved ones too | `reef comment ls` |
+| `mcp__reef__reply` | writes, as Claude | `thread`, `body` | `reef comment reply <N> <TEXT>` |
+| `mcp__reef__resolve` | writes, as Claude | `thread`, `reply` | `reef comment resolve <N> --reply <TEXT>` |
 
 ## Commands
 
@@ -163,6 +166,10 @@ reef page put design/feed-loop.md feed-loop.md   # put it back, keeping that lin
 reef queue ls                        # the user's order, and what next makes of each entry
 reef loop start                      # start a loop in this pane, typed as `! reef loop start`
 reef loop take                       # the loop's next node, started here, as next_task takes it
+reef comment ls                      # the plan's open comment threads, each comment with who wrote it
+reef comment ls --node C38 --all     # one node's threads, resolved ones too
+reef comment reply 12 Why?           # reply in thread 12, leaving it open
+reef comment resolve 12 --reply Done # resolve thread 12 by hand, after a reply
 reef export plan --replace           # write the plan back over the book it was exported to
 reef skill                           # rewrite this skill from the installed reef
 reef claude install                  # set the repo up for the loop: MCP entry, hooks and skill

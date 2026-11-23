@@ -228,6 +228,7 @@ fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
         comments: vec![Comment {
             number,
             at: 0,
+            by: reef_api::Writer::User,
             body: body.to_string(),
             html: format!("<p>{body}</p>"),
         }],

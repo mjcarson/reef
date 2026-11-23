@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use super::revision::{Slot, check_files};
+use super::revision::{Latest, Slot, check_files};
 use super::{Store, Unkeepable};
 use crate::backend::{Backend, Expect, Written};
 use crate::schema::WorkRow;
@@ -139,6 +139,20 @@ impl<B: Backend> Store<B> {
                 });
             }
         };
+        // a restart seals the draft its last start left, as it stands, so no capture of the new
+        // start writes over it
+        let mut sealed = None;
+        if current.is_some()
+            && let Some(latest) = self.latest_revision(node).await?
+            && latest.revision.draft
+        {
+            let shas = latest.revision.shas.clone();
+            let commits = latest.revision.commits.clone();
+            let revision = self
+                .seal_revision(node, latest, now_ms(), shas, commits)
+                .await?;
+            sealed = Some(revision.revision);
+        }
         // later than every start the project recorded, so the latest in a worktree is plain
         let latest = all.iter().map(|record| record.started_at).max();
         let started_at = latest.map_or(now_ms(), |latest| now_ms().max(latest + 1));
@@ -151,6 +165,7 @@ impl<B: Backend> Store<B> {
         match self.backend.write_work(row, expect).await? {
             Written::Applied => Ok(Started::Recorded {
                 record: recorded(node, version, kept),
+                sealed,
             }),
             // another writer got there between the read and the write
             Written::Refused(_) => Ok(Started::Stale {
@@ -209,7 +224,9 @@ impl<B: Backend> Store<B> {
             Some(latest) if latest.revision.draft && same => match draft {
                 true => (latest.revision, Outcome::Matched),
                 false => {
-                    let sealed = self.seal_revision(node, latest, at, add.shas).await?;
+                    let sealed = self
+                        .seal_revision(node, latest, at, add.shas, add.commits)
+                        .await?;
                     (sealed, Outcome::Replaced)
                 }
             },
@@ -222,6 +239,12 @@ impl<B: Backend> Store<B> {
             }
             // a sealed revision it matches keeps nothing
             Some(latest) if same => (latest.revision, Outcome::Matched),
+            // nor does a capture of nothing over a sealed revision an earlier start took, as a
+            // round of comments answered without a change leaves it, so no empty revision
+            // outdates the node's threads
+            Some(latest) if add.files.is_empty() && !captured_since(&current, &latest) => {
+                (latest.revision, Outcome::Matched)
+            }
             latest => {
                 // the next number after the latest, whatever start it was taken from
                 let number = latest.map_or(1, |latest| latest.revision.revision + 1);
@@ -272,6 +295,21 @@ impl<B: Backend> Store<B> {
             ),
         }
     }
+}
+
+/// Whether a capture of the record's start named the latest revision, so it is that start's
+/// rather than an earlier one's
+///
+/// # Arguments
+///
+/// * `record` - The node's work record, its captures since its start
+/// * `latest` - The node's latest revision
+fn captured_since(record: &WorkRecord, latest: &Latest) -> bool {
+    // a capture since the start that kept or matched it
+    record
+        .captures
+        .iter()
+        .any(|capture| capture.revision == Some(latest.revision.revision))
 }
 
 /// Refuses a start the store can't keep as it was given

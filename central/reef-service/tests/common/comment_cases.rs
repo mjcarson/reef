@@ -4,7 +4,7 @@
 use reef_api::{
     Anchor, COMMENT_BODY_MAX, Commented, FileStatus, FollowedThread, Hunk, Line, LineKind,
     MarkThread, Marked, NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves,
-    ResolvingCommit, Side, Target, Thread, ThreadState, TrailerOutcome,
+    ResolvingCommit, Side, Target, Thread, ThreadState, TrailerOutcome, Writer,
 };
 use reef_model::NodeName;
 use reef_service::{Backend, FileDiff, Unkeepable};
@@ -153,6 +153,7 @@ async fn started<B: Backend>(
     let new = NewThread {
         target,
         body: body.to_string(),
+        by: Writer::User,
     };
     match fx.store.start_thread(node, new).await? {
         Commented::Added { thread, comment } => Ok((thread, comment)),
@@ -170,6 +171,7 @@ async fn started<B: Backend>(
 async fn replied<B: Backend>(fx: &Fx<B>, thread: u32, body: &str) -> anyhow::Result<(Thread, u32)> {
     let reply = NewReply {
         body: body.to_string(),
+        by: Writer::User,
     };
     match fx.store.reply(&fx.plan, thread, reply).await? {
         Commented::Added { thread, comment } => Ok((thread, comment)),
@@ -286,6 +288,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         let new = NewThread {
             target: target.clone(),
             body: "Here?".to_string(),
+            by: Writer::User,
         };
         let answer = fx.store.start_thread(&a, new).await?;
         assert_eq!(answer, Commented::NoLine { target });
@@ -295,6 +298,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
     let new = NewThread {
         target: on_line(1, "src/m.rs", Side::New, 1),
         body: "Here?".to_string(),
+        by: Writer::User,
     };
     assert!(matches!(
         fx.store.start_thread(&b, new).await?,
@@ -303,6 +307,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
     // a reply in a thread that isn't there
     let reply = NewReply {
         body: "Hm".to_string(),
+        by: Writer::User,
     };
     let answer = fx.store.reply(&fx.plan, 1, reply.clone()).await?;
     assert_eq!(answer, Commented::NoThread { thread: 1 });
@@ -311,6 +316,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         let new = NewThread {
             target: Target::Node,
             body: body.to_string(),
+            by: Writer::User,
         };
         let error = fx
             .store
@@ -530,6 +536,7 @@ pub async fn drafts_hold_no_thread_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow:
     let new = NewThread {
         target: on_line(2, "src/a.rs", Side::New, 1),
         body: "Zero?".to_string(),
+        by: Writer::User,
     };
     let refused = fx.store.start_thread(&a, new).await?;
     assert!(matches!(refused, Commented::NoLine { .. }), "{refused:?}");

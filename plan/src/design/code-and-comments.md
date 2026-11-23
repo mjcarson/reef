@@ -299,5 +299,53 @@ The rules:
     summary match, as a rebase or an amend that keeps the message leaves them. A thread the
     user reopened stays open until a new commit names it, or it is resolved by hand.
   - **A thread resolved already** is linked to the new revision, and stays resolved.
-- **Claude takes open comments between nodes.** After it finishes a node, next_task hands back
-  the open comments before the next node ([C43](../milestones/m8.md)).
+- **Who wrote each comment.** Until reef knows its users ([C50](../milestones/m10.md)), a comment is the
+  user's unless Claude wrote it through reef's `reply` or `resolve` tool, which say so. A thread
+  *wants an answer* while it is open and the user wrote its last comment. One Claude answered
+  last, with a question back, waits on the user, and calls for no round until the user answers.
+  Rows kept before writers were said read as the user's.
+
+### Comments in the loop
+
+Claude answers the comments on a node's work before the loop moves on ([C43](../milestones/m8.md)).
+
+#### Design choices
+
+- **Every node handed out with its open threads.** next_task prints a node's open threads, every
+  comment whole with who wrote it, each time it hands the node out, so one left while the node
+  is worked on is there on the next call. `reef comment ls` and the MCP tool `comments` list a
+  plan's or a node's.
+- **A round of a done node's comments comes before any new node.** Between nodes, next_task
+  takes a done node with a thread that wants an answer again before any ready work, as a
+  *round* of its comments: the loop's own group's first, then the node of the oldest such thread,
+  never a group or a node another loop holds. A comment left on the node just finished, or on
+  one a group finished before the user reviewed it, comes back this way.
+  - **The node worked again.** The round is held alone, started again in the loop's checkout as
+    `reef start --restart` starts it, and marked in progress, after the last group's members are
+    merged. It is planned like a node, in plan mode, and its end is acted on like one: holding a
+    node again clears the end the loop acted on, so the round's Stop seals its revision and names
+    what comes next.
+  - **Handed back with how it finishes,** which next_task prints again mid-round, since a plan
+    approval's clear drops the context: fix, answer or resolve what needs no change, mark the node
+    done, commit, squash.
+- **The fix goes into the node's commit.** It is committed as a fixup of that commit, its
+  `Reef-Resolves` trailer naming each thread it answers, so the fixup's own post-commit capture
+  resolves them before the squash drops its message. Then `git rebase -i --autosquash
+  --autostash --rebase-merges` from the commit's parent squashes it in, keeping the merges a
+  group left. A rebase that stops for any reason is aborted, leaving the fixup.
+  - **The node's commit** is the newest commit of its oldest revision that read any. It is found
+    in HEAD's history apart from the base branch by its id, or once rewritten by the change it is
+    (`same_change`), so a round after an earlier round's squash finds it again.
+  - **Never a pushed commit.** A commit any remote branch holds isn't rewritten: the fixup stays
+    a commit of its own, for a later `git rebase --autosquash`. Nor is one the base branch holds,
+    or one reef can't find, such as a node captured before reef read commits: its fix is a
+    commit of its own.
+- **A node's own commits are kept with each revision.** A capture keeps the non-merge commits its
+  head holds that its start and its base branch don't. Once a rebase has rewritten the start
+  itself, as a round's squash does, a head commit that is the same change as one the start held
+  is the start's, so a round's revision holds none of the other nodes' rewritten commits, nor
+  their trailers.
+- **A restart keeps what the last start took.** A restart seals the draft its last start left,
+  as it stands, so a capture of the new start never writes over it. And a capture of nothing over
+  a sealed revision of an earlier start keeps no revision, so a round answered without a change
+  outdates no line thread.

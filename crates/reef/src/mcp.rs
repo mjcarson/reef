@@ -8,11 +8,15 @@
 //! the CLI, and `--project` and `--plan` name one instead. Each tool takes a `plan` of its own
 //! too.
 //!
-//! - **Read-only tools are marked `readOnlyHint`:** `get`, `check` and `next`. Plan mode runs
-//!   them without a prompt, and asks for every other tool, so nothing Claude needs while it
-//!   plans writes (X4).
+//! - **Read-only tools are marked `readOnlyHint`:** `get`, `check`, `next` and `comments`. Plan
+//!   mode runs them without a prompt, and asks for every other tool, so nothing Claude needs
+//!   while it plans writes (X4).
 //! - **Writes are the CLI's:** `put` takes a node's YAML, as `reef node put` does, and
 //!   `status` and `accept` set a node's status and a criterion's.
+//! - **Comments are answered as Claude's.** `comments` lists open threads as `reef comment ls`
+//!   does. `reply` keeps a reply in one, which leaves it waiting on the user, and `resolve`
+//!   resolves one answered without a change, linking its own node's latest revision. Both write
+//!   as Claude, so a thread whose last word is Claude's never calls for another round.
 //! - **`next_task` takes a node for the session's loop,** as `reef loop take` does, and starts
 //!   it, so Claude calls it before plan mode. The loop is the pane's the server runs in: its
 //!   multiplexer's, else the Claude Code process that started it
@@ -36,7 +40,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::cli::{Pick, PlanPick, picked, picked_plan};
 use crate::client::Client;
+use crate::comment::{self, Answering};
 use crate::{node, open, task, work};
+use reef_api::Writer;
 
 /// The tools one session's server offers, over the service reef's config names
 #[derive(Clone)]
@@ -116,6 +122,40 @@ pub struct StatusArgs {
     pub id: String,
     /// Where its work now stands
     pub status: WorkStatus,
+    /// The plan within the project, if the project has several and the server names none
+    pub plan: Option<String>,
+}
+
+/// Lists comment threads: a node's, else the plan's
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct CommentsArgs {
+    /// The node whose threads to list, such as C18, else every thread of the plan
+    pub id: Option<String>,
+    /// Whether to list resolved threads too, rather than only the open ones
+    #[serde(default)]
+    pub all: bool,
+    /// The plan within the project, if the project has several and the server names none
+    pub plan: Option<String>,
+}
+
+/// Replies in a comment thread
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReplyArgs {
+    /// The thread's number, such as 12
+    pub thread: u32,
+    /// The reply, as markdown
+    pub body: String,
+    /// The plan within the project, if the project has several and the server names none
+    pub plan: Option<String>,
+}
+
+/// Resolves a comment thread answered without a change
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveArgs {
+    /// The thread's number, such as 12
+    pub thread: u32,
+    /// A reply to keep in it first, as markdown, saying how it was answered
+    pub reply: Option<String>,
     /// The plan within the project, if the project has several and the server names none
     pub plan: Option<String>,
 }
@@ -208,14 +248,22 @@ impl Tools {
     ///
     /// * `plan` - The plan the tool was given, if any
     async fn plan(&self, plan: Option<String>) -> anyhow::Result<PlanName> {
+        picked_plan(&self.client, &self.cwd, &self.pick_of(plan)).await
+    }
+
+    /// The project and plan a tool works in, as a command would be given them
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan the tool was given, if any
+    fn pick_of(&self, plan: Option<String>) -> PlanPick {
         // a plan named by the call wins over the one the server was started for
-        let pick = PlanPick {
+        PlanPick {
             project: Pick {
                 project: self.pick.project.project.clone(),
             },
             plan: plan.or_else(|| self.pick.plan.clone()),
-        };
-        picked_plan(&self.client, &self.cwd, &pick).await
+        }
     }
 }
 
@@ -378,6 +426,77 @@ impl Tools {
         said(out, done)
     }
 
+    /// Lists comment threads, each whole
+    #[tool(
+        description = "List the open comment threads on a reef node's work, or the plan's: each \
+                       thread's number, its node, where it is (a file's line in a revision, or \
+                       the node as a whole) and every comment, with who wrote it.",
+        annotations(read_only_hint = true)
+    )]
+    async fn comments(&self, Parameters(args): Parameters<CommentsArgs>) -> Result<String, String> {
+        // as `reef comment ls` lists them
+        let mut out = Vec::new();
+        let pick = self.pick_of(args.plan);
+        let done = comment::ls(
+            &self.client,
+            &self.cwd,
+            args.id.as_deref(),
+            args.all,
+            &pick,
+            &mut out,
+        )
+        .await;
+        said(out, done)
+    }
+
+    /// Replies in a comment thread, as Claude
+    #[tool(
+        description = "Reply in a reef comment thread, such as with a question back. The thread \
+                       stays open, waiting on the user's answer rather than on yours."
+    )]
+    async fn reply(&self, Parameters(args): Parameters<ReplyArgs>) -> Result<String, String> {
+        // as `reef comment reply` keeps one, written as Claude's
+        let mut out = Vec::new();
+        let pick = self.pick_of(args.plan);
+        let done = comment::reply(
+            &self.client,
+            &self.cwd,
+            args.thread,
+            &args.body,
+            Writer::Claude,
+            &pick,
+            &mut out,
+        )
+        .await;
+        said(out, done)
+    }
+
+    /// Resolves a comment thread answered without a change, as Claude
+    #[tool(
+        description = "Resolve a reef comment thread answered without a change, linking its \
+                       node's latest revision, after a reply saying how if one is given. A \
+                       thread a commit answers is resolved by the commit's `Reef-Resolves: <n>` \
+                       trailer instead."
+    )]
+    async fn resolve(&self, Parameters(args): Parameters<ResolveArgs>) -> Result<String, String> {
+        // as `reef comment resolve` does, over the thread's own node
+        let mut out = Vec::new();
+        let pick = self.pick_of(args.plan);
+        let done = comment::resolve(
+            &self.client,
+            &self.cwd,
+            args.thread,
+            Answering::Own,
+            None,
+            args.reply.as_deref(),
+            Writer::Claude,
+            &pick,
+            &mut out,
+        )
+        .await;
+        said(out, done)
+    }
+
     /// Sets whether a node's criterion is met
     #[tool(
         description = "Set whether one of a reef node's acceptance criteria is met, numbered from \
@@ -409,10 +528,12 @@ impl Tools {
     instructions = "reef keeps this repo's plan: a graph of nodes, each a piece of work with a \
                     why, a what, needs and acceptance criteria. `next` says what is ready to \
                     start, the user's queue first, `get` reads a node as YAML and `check` lists \
-                    the plan's problems; these only read. `next_task` takes the next node for \
-                    this session's loop and starts it, before plan mode. `put` writes a node's \
-                    YAML, `status` sets where its work \
-                    stands and `accept` whether a criterion is met. Every write is checked \
+                    the plan's problems; these only read, as does `comments`, which lists open \
+                    comment threads. `next_task` takes the next node for this session's loop \
+                    and starts it, before plan mode, or a done node again for a round of its \
+                    open comments. `put` writes a node's YAML, `status` sets where its work \
+                    stands and `accept` whether a criterion is met. `reply` answers a comment \
+                    and `resolve` resolves one answered without a change. Every write is checked \
                     against the whole plan, and one that is stale or adds a problem writes \
                     nothing and says why."
 )]

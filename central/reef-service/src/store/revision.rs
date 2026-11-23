@@ -20,7 +20,7 @@
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another node's changes.
 
-use reef_api::{AddCapture, CaptureShas, FileDiff, FileSummary, Revision};
+use reef_api::{AddCapture, CaptureShas, FileDiff, FileSummary, ResolvingCommit, Revision};
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -48,6 +48,9 @@ struct Kept {
     conflicts: Vec<String>,
     /// Every changed file, without its hunks
     files: Vec<FileSummary>,
+    /// The node's own commits the capture read, oldest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    commits: Vec<ResolvingCommit>,
     /// Whether it is the node's draft, which a capture may still rewrite
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     draft: bool,
@@ -250,13 +253,14 @@ impl<B: Backend> Store<B> {
             shas: add.shas,
             conflicts: add.conflicts,
             files: listed,
+            commits: add.commits,
             draft: add.draft,
         };
         self.write_kept(node, number, slot, kept).await
     }
 
-    /// Seals a node's draft as it is, with the SHAs of the capture that sealed it: its row
-    /// alone, since its files are the ones it lists already
+    /// Seals a node's draft as it is, with the SHAs and commits of the capture that sealed it:
+    /// its row alone, since its files are the ones it lists already
     ///
     /// The caller holds the node's project's work lock, and has read the draft as the latest.
     ///
@@ -266,12 +270,14 @@ impl<B: Backend> Store<B> {
     /// * `latest` - The node's draft, and the version its row was read at
     /// * `at` - When it was sealed, in milliseconds since the epoch
     /// * `shas` - What the sealing capture read
+    /// * `commits` - The node's own commits the sealing capture read
     pub(super) async fn seal_revision(
         &self,
         node: &NodeName,
         latest: Latest,
         at: u64,
         shas: CaptureShas,
+        commits: Vec<ResolvingCommit>,
     ) -> anyhow::Result<Revision> {
         // the draft's files and conflicts, which the same base and tree give again
         let Latest { revision, version } = latest;
@@ -280,6 +286,7 @@ impl<B: Backend> Store<B> {
             shas,
             conflicts: revision.conflicts,
             files: revision.files,
+            commits,
             draft: false,
         };
         self.write_kept(node, revision.revision, Slot::Over(version), kept)
@@ -418,6 +425,7 @@ fn revised(node: &NodeName, number: u32, kept: Kept) -> Revision {
         shas: kept.shas,
         conflicts: kept.conflicts,
         files: kept.files,
+        commits: kept.commits,
         draft: kept.draft,
     }
 }

@@ -7,10 +7,11 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, EditLoop, ErrorCode,
-    FileDiff, Listing, Loop, LoopEdited, NewPlan, NewProject, PageEdit, PageEdited, PageListing,
-    PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, ResolveThread, Resolved,
-    Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, Commented, EditLoop,
+    ErrorCode, FileDiff, Listing, Loop, LoopEdited, NewPlan, NewProject, NewReply, PageEdit,
+    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
+    ResolveThread, Resolved, Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread,
+    WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -403,6 +404,46 @@ impl Client {
             Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Lists every comment thread of a plan, by number
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn plan_threads(&self, plan: &PlanName) -> anyhow::Result<Vec<Thread>> {
+        let path = paths::plan_comments(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Lists the comment threads on one node, by number
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub async fn node_threads(&self, node: &NodeName) -> anyhow::Result<Vec<Thread>> {
+        let path = paths::node_comments(node);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Replies in a thread of a plan
+    ///
+    /// A thread that isn't there is an answer, not an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `thread` - The thread's number
+    /// * `reply` - The reply's body, and who writes it
+    pub async fn reply(
+        &self,
+        plan: &PlanName,
+        thread: u32,
+        reply: &NewReply,
+    ) -> anyhow::Result<Commented> {
+        let path = paths::replies(plan, thread);
+        let request = self.http.post(self.url(&path)).json(reply);
+        self.send(request, &path).await
     }
 
     /// Resolves a thread by hand, a revision linked to it, over the version read

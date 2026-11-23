@@ -170,6 +170,7 @@ pub fn order(
 /// let next = Ending::Next {
 ///     done: "reef/central/C61".parse().unwrap(),
 ///     next: "reef/central/C71".parse().unwrap(),
+///     round: false,
 /// };
 /// // a Claude Code process with no multiplexer is the user's to clear
 /// let bare = Pane::Claude { pid: 4242 };
@@ -1075,6 +1076,7 @@ mod tests {
         let next = Ending::Next {
             done: done.clone(),
             next: named("C61"),
+            round: false,
         };
         let zellij: Pane = "zellij:work:3".parse().unwrap();
         let session = || Some("s1".to_string());
@@ -1118,6 +1120,7 @@ mod tests {
         let next = Ending::Next {
             done: named("C61"),
             next: named("C71"),
+            round: false,
         };
         let zellij: Pane = "zellij:work:3".parse().unwrap();
         // a pane reef can type into starts the injector once, and says reef clears

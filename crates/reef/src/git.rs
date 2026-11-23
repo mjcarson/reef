@@ -110,6 +110,35 @@ pub struct Trailed {
     pub values: Vec<String>,
 }
 
+/// A commit a walk read: what finds it again once it is rewritten, whether it merges, and its
+/// trailers
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Walked {
+    /// The commit, its summary, its author and when it was authored
+    pub commit: ResolvingCommit,
+    /// Whether it has more than one parent
+    pub merges: bool,
+    /// Each trailer in its message's last paragraph, as its token and its value, in the order
+    /// written
+    pub trailers: Vec<(String, String)>,
+}
+
+impl Walked {
+    /// The values of one trailer on it, its token matched whatever its case, as git matches one
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The trailer's token, such as `Reef-Resolves`
+    pub fn values(&self, token: &str) -> Vec<String> {
+        // each trailer of the token, in the order written
+        self.trailers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(token))
+            .map(|(_, value)| value.clone())
+            .collect()
+    }
+}
+
 /// One checkout: a worktree and the repo it is in
 pub struct Checkout {
     /// gix's view of the repo, opened from the worktree
@@ -451,8 +480,61 @@ impl Checkout {
         }
     }
 
-    /// Reads one trailer off each commit a head reaches and none of the hidden commits do,
-    /// oldest first, leaving out commits that don't carry it
+    /// Walks the commits a head reaches past the hidden ones, as `git log head ^hidden` lists
+    /// them, oldest first
+    ///
+    /// A trailer is read as git reads one: from the message's last paragraph.
+    ///
+    /// # Arguments
+    ///
+    /// * `head` - The commit to walk back from
+    /// * `hidden` - The commits whose history is left out, such as a start and a merge-base
+    pub fn walk(&self, head: &str, hidden: &[&str]) -> anyhow::Result<Vec<Walked>> {
+        // every commit the head reaches past the hidden ones
+        let hidden = hidden
+            .iter()
+            .map(|commit| id(commit))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let walk = self.repo.rev_walk([id(head)?]).with_hidden(hidden).all()?;
+        let mut walked = Vec::new();
+        for info in walk {
+            let commit = info?.object()?;
+            let message = commit.message()?;
+            // the trailers in the message's last paragraph, if it has a body
+            let trailers = message
+                .body()
+                .map(|body| {
+                    body.trailers()
+                        .map(|trailer| {
+                            (
+                                trailer.token.to_str_lossy().into_owned(),
+                                trailer.value.to_str_lossy().into_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            // who wrote it, and when, which a rebase or an amend keeps
+            let author = commit.author()?;
+            let merges = commit.parent_ids().count() > 1;
+            walked.push(Walked {
+                commit: ResolvingCommit {
+                    commit: commit.id.to_string(),
+                    summary: message.summary().to_str_lossy().into_owned(),
+                    author: author.email.to_str_lossy().into_owned(),
+                    authored: author.time()?.seconds,
+                },
+                merges,
+                trailers,
+            });
+        }
+        // the walk comes newest first, and the oldest commit comes first
+        walked.reverse();
+        Ok(walked)
+    }
+
+    /// Each commit a head reaches past the hidden ones that carries a trailer, and the values it
+    /// has on it, oldest first, leaving out commits that don't carry it
     ///
     /// A trailer is read as git reads one: from the message's last paragraph, its token matched
     /// whatever its case.
@@ -468,44 +550,91 @@ impl Checkout {
         hidden: &[&str],
         token: &str,
     ) -> anyhow::Result<Vec<Trailed>> {
-        // every commit the head reaches past the hidden ones, as `git log head ^hidden` lists
-        let hidden = hidden
-            .iter()
-            .map(|commit| id(commit))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let walk = self.repo.rev_walk([id(head)?]).with_hidden(hidden).all()?;
-        let mut trailed = Vec::new();
-        for info in walk {
-            let commit = info?.object()?;
-            let message = commit.message()?;
-            // the trailer's values in the message's last paragraph, if it has a body
-            let values: Vec<String> = message
-                .body()
-                .map(|body| {
-                    body.trailers()
-                        .filter(|trailer| trailer.token.eq_ignore_ascii_case(token.as_bytes()))
-                        .map(|trailer| trailer.value.to_str_lossy().into_owned())
-                        .collect()
+        // each commit walked that carries the trailer
+        let trailed = self
+            .walk(head, hidden)?
+            .into_iter()
+            .filter_map(|walked| {
+                let values = walked.values(token);
+                (!values.is_empty()).then_some(Trailed {
+                    commit: walked.commit,
+                    values,
                 })
-                .unwrap_or_default();
-            if values.is_empty() {
-                continue;
-            }
-            // who wrote it, and when, which a rebase or an amend keeps
-            let author = commit.author()?;
-            trailed.push(Trailed {
-                commit: ResolvingCommit {
-                    commit: commit.id.to_string(),
-                    summary: message.summary().to_str_lossy().into_owned(),
-                    author: author.email.to_str_lossy().into_owned(),
-                    authored: author.time()?.seconds,
-                },
-                values,
-            });
-        }
-        // the walk comes newest first, and the oldest commit answers first
-        trailed.reverse();
+            })
+            .collect();
         Ok(trailed)
+    }
+
+    /// The commit a head reaches past the hidden ones that is a change, by its id or, once it was
+    /// rewritten, by its author, when it was authored and its summary, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `head` - The commit to walk back from
+    /// * `hidden` - The commits whose history is left out, such as the base branch's
+    /// * `change` - The change to find
+    pub fn find_change(
+        &self,
+        head: &str,
+        hidden: &[&str],
+        change: &ResolvingCommit,
+    ) -> anyhow::Result<Option<String>> {
+        // only hidden commits the repo still has can hide anything
+        let mut kept = Vec::with_capacity(hidden.len());
+        for commit in hidden {
+            if self.has_object(commit)? {
+                kept.push(*commit);
+            }
+        }
+        // the newest commit that is the change, itself or rewritten, and never a merge
+        let found = self
+            .walk(head, &kept)?
+            .into_iter()
+            .rev()
+            .filter(|walked| !walked.merges)
+            .find(|walked| {
+                walked.commit.commit == change.commit || walked.commit.same_change(change)
+            })
+            .map(|walked| walked.commit.commit);
+        Ok(found)
+    }
+
+    /// The remote branch that holds a commit, if any does, so a rewrite of it would need a
+    /// force-push
+    ///
+    /// # Arguments
+    ///
+    /// * `commit` - The commit's full id
+    pub fn on_remote(&self, commit: &str) -> anyhow::Result<Option<String>> {
+        // every remote branch's name, read before any is peeled
+        let names: Vec<String> = self
+            .repo
+            .references()?
+            .remote_branches()?
+            .filter_map(Result::ok)
+            .map(|reference| reference.name().as_bstr().to_str_lossy().into_owned())
+            .collect();
+        // the first whose history holds the commit
+        for name in names {
+            let Some(tip) = self.ref_id(&name)? else {
+                continue;
+            };
+            if self.is_ancestor(commit, &tip)? {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether a commit has no parent
+    ///
+    /// # Arguments
+    ///
+    /// * `commit` - The commit's full id
+    pub fn is_root(&self, commit: &str) -> anyhow::Result<bool> {
+        // a root commit names no parent
+        let found = self.repo.find_commit(id(commit)?)?;
+        Ok(found.parent_ids().next().is_none())
     }
 
     /// Whether an object is in the repo's store

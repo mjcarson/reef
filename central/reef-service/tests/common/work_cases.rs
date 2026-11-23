@@ -75,7 +75,7 @@ pub async fn recorded<B: Backend>(
     replaces: Option<u64>,
 ) -> anyhow::Result<WorkRecord> {
     match start(fx, id, read, replaces).await? {
-        Started::Recorded { record } => Ok(record),
+        Started::Recorded { record, .. } => Ok(record),
         other => panic!("starting `{id}` was not recorded: {other:?}"),
     }
 }
@@ -147,6 +147,7 @@ pub fn capture(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
         conflicts: Vec::new(),
         files,
         resolves: Vec::new(),
+        commits: Vec::new(),
         draft: false,
     }
 }
@@ -385,7 +386,7 @@ pub async fn each_project_has_its_own_work<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
         start: start_in(&repo, "A", 'b'),
         replaces: None,
     };
-    let Started::Recorded { record } = fx.store.start_work(&theirs, request).await? else {
+    let Started::Recorded { record, .. } = fx.store.start_work(&theirs, request).await? else {
         panic!("a node of another project wasn't recorded");
     };
     // and reef's A, which the same key in another partition doesn't make stale
@@ -460,9 +461,25 @@ pub async fn captures_are_kept_as_numbered_revisions<B: Reopen>(fx: Fx<B>) -> an
         )
         .await?;
     assert!(matches!(late, Captured::Restarted { .. }), "{late:?}");
-    let r3 = kept(&fx, &node, capture(&second.start.pinned, 'f', Vec::new())).await?;
+    // a capture of nothing from the new start keeps no revision, so none outdates a thread,
+    // and its SHAs name the latest, which the earlier start took
+    let nothing = fx
+        .store
+        .add_capture(&node, capture(&second.start.pinned, 'f', Vec::new()))
+        .await?;
+    let Captured::Unchanged { revision, .. } = nothing else {
+        panic!("a capture of nothing after a restart was {nothing:?}");
+    };
+    assert_eq!(revision, r2);
+    // and its first change is numbered after the earlier start's
+    let r3 = kept(
+        &fx,
+        &node,
+        capture(&second.start.pinned, 'g', vec![added_file("g.rs", "g\n")]),
+    )
+    .await?;
     assert_eq!(r3.revision, 3);
-    assert!(r3.files.is_empty());
+    assert_eq!(r3.counts(), (1, 0));
     // and all of it reads back once the store is reopened over the same rows
     let fx = fx.reopen().await?;
     assert_eq!(fx.store.revisions(&node).await?, [r1, r2.clone(), r3]);

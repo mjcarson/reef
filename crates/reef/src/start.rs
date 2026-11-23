@@ -104,7 +104,7 @@ pub async fn start<W: Write>(
     };
     // a start refused wrote nothing, so its pin is put back; a failure may have written, so not
     let record = match client.start_work(&node, &request).await? {
-        Started::Recorded { record } => record,
+        Started::Recorded { record, .. } => record,
         Started::Stale { record } => {
             checkout.unpin(&pinned)?;
             match record {

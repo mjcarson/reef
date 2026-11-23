@@ -489,15 +489,22 @@ pub async fn session_start<W: Write>(
         return Ok(());
     };
     let loops = client.loops().await?;
-    let Ending::Next { next, .. } = task::upcoming(client, &feeding, done.clone(), &loops).await?
+    let Ending::Next { next, round, .. } =
+        task::upcoming(client, &feeding, done.clone(), &loops).await?
     else {
         out.flush()?;
         return Ok(());
     };
+    // what comes next: another node, or a round of a done node's open comments
+    let coming = match (round, next == done) {
+        (false, _) => format!("`{next}` is next"),
+        (true, true) => "its open comments come next, in a round of their own".to_string(),
+        (true, false) => format!("`{next}`'s open comments come next, in a round of their own"),
+    };
     // added to the new session's context, as Claude Code reads a SessionStart's JSON
     let context = format!(
-        "reef's loop in this pane is between nodes: `{done}` is done, and `{next}` is next. When \
-         the user says next, or asks for the next node, take it with reef's next_task tool \
+        "reef's loop in this pane is between nodes: `{done}` is done, and {coming}. When the user \
+         says next, or asks for the next node, take it with reef's next_task tool \
          (`mcp__reef__next_task`, or `reef loop take` where reef's tools aren't served), then \
          plan it in plan mode as the reef skill's loop says."
     );
@@ -765,6 +772,7 @@ mod tests {
         let next = Ending::Next {
             done: "reef/central/C61".parse().unwrap(),
             next: "reef/central/C71".parse().unwrap(),
+            round: false,
         };
         // a session in zellij, as Claude Code runs `! reef loop start` there
         let zellij = |name: &str| match name {

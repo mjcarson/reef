@@ -915,3 +915,146 @@ fn rebasing_is_read_from_the_worktrees_own_git_dir() {
     assert!(!Checkout::open(&repo).unwrap().rebasing());
     git(&linked, &["rebase", "--abort"]);
 }
+
+/// A walk lists a head's commits past those hidden, oldest first, as `git log --reverse` does,
+/// marking merges; a change is found again once a rebase rewrites it, by who wrote it, when and
+/// under what summary, but never past what is hidden; and a commit a remote branch holds says
+/// which
+#[test]
+fn a_change_is_found_again_after_a_rebase_and_a_remote_says_what_it_holds() {
+    let dir = fresh("changes");
+    let repo = repo(&dir.join("repo"));
+    let first = git(&repo, &["rev-parse", "HEAD"]);
+    // a branch with two commits, and a side branch merged into it
+    git(&repo, &["checkout", "-q", "-b", "work"]);
+    let a = commit(&repo, "b.txt", "two\n", "Add b");
+    git(&repo, &["checkout", "-q", "-b", "side", "main"]);
+    commit(&repo, "c.txt", "three\n", "Add c");
+    git(&repo, &["checkout", "-q", "work"]);
+    git(
+        &repo,
+        &["merge", "-q", "--no-ff", "-m", "Merge side", "side"],
+    );
+    commit(&repo, "d.txt", "four\n", "Add d");
+    let checkout = Checkout::open(&repo).unwrap();
+    let head = checkout.head().unwrap().unwrap();
+    // the walk past main is git log's, oldest first, the merge marked
+    let walked = checkout.walk(&head, &[&first]).unwrap();
+    let expected = git(&repo, &["log", "--reverse", "--format=%H", "main..HEAD"]);
+    let ids: Vec<&str> = walked
+        .iter()
+        .map(|walked| walked.commit.commit.as_str())
+        .collect();
+    assert_eq!(ids, expected.lines().collect::<Vec<_>>());
+    let merges: Vec<&str> = walked
+        .iter()
+        .filter(|walked| walked.merges)
+        .map(|walked| walked.commit.summary.as_str())
+        .collect();
+    assert_eq!(merges, ["Merge side"]);
+    // the change `Add b` was, as a capture read it
+    let change = walked
+        .iter()
+        .find(|walked| walked.commit.commit == a)
+        .unwrap()
+        .commit
+        .clone();
+    assert_eq!(
+        checkout.find_change(&head, &[&first], &change).unwrap(),
+        Some(a.clone())
+    );
+    // squashing a fixup into it rewrites it, and it is found again by the change it is
+    std::fs::write(repo.join("b.txt"), "two, fixed\n").unwrap();
+    git(
+        &repo,
+        &[
+            "commit",
+            "-qa",
+            &format!("--fixup={a}"),
+            "--trailer",
+            "Reef-Resolves: 12",
+        ],
+    );
+    let fixup = git(&repo, &["log", "-1", "--format=%B"]);
+    assert!(fixup.ends_with("Reef-Resolves: 12"), "{fixup}");
+    git(
+        &repo,
+        &[
+            "-c",
+            "sequence.editor=true",
+            "rebase",
+            "-q",
+            "-i",
+            "--autosquash",
+            "--rebase-merges",
+            &format!("{a}~1"),
+        ],
+    );
+    let checkout = Checkout::open(&repo).unwrap();
+    let head = checkout.head().unwrap().unwrap();
+    let rewritten = git(
+        &repo,
+        &["log", "--format=%H", "--grep=^Add b$", "main..HEAD"],
+    );
+    assert_ne!(rewritten, a);
+    assert_eq!(
+        git(&repo, &["show", &format!("{rewritten}:b.txt")]),
+        "two, fixed"
+    );
+    assert_eq!(
+        checkout.find_change(&head, &[&first], &change).unwrap(),
+        Some(rewritten.clone())
+    );
+    // the merge was kept, and the fixup folded away
+    assert_eq!(
+        git(&repo, &["log", "--merges", "--format=%s", "main..HEAD"]),
+        "Merge side"
+    );
+    assert!(
+        git(&repo, &["log", "--format=%s", "main..HEAD"])
+            .lines()
+            .all(|summary| !summary.starts_with("fixup!"))
+    );
+    // hidden, it is no change of the walk's, and a change never made is none either
+    assert_eq!(
+        checkout.find_change(&head, &[&rewritten], &change).unwrap(),
+        None
+    );
+    let never = reef_api::ResolvingCommit {
+        commit: "f".repeat(40),
+        summary: "Add b".to_string(),
+        author: change.author.clone(),
+        authored: change.authored + 1,
+    };
+    assert_eq!(
+        checkout.find_change(&head, &[&first], &never).unwrap(),
+        None
+    );
+    // a hidden commit the repo doesn't have hides nothing
+    let missing = "e".repeat(40);
+    assert_eq!(
+        checkout
+            .find_change(&head, &[&missing, &first], &change)
+            .unwrap(),
+        Some(rewritten.clone())
+    );
+    // no remote holds it, until one is fetched that does, and not its descendants
+    assert_eq!(checkout.on_remote(&rewritten).unwrap(), None);
+    git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/work", &rewritten],
+    );
+    let checkout = Checkout::open(&repo).unwrap();
+    assert_eq!(
+        checkout.on_remote(&rewritten).unwrap().as_deref(),
+        Some("refs/remotes/origin/work")
+    );
+    assert_eq!(
+        checkout.on_remote(&first).unwrap().as_deref(),
+        Some("refs/remotes/origin/work")
+    );
+    assert_eq!(checkout.on_remote(&head).unwrap(), None);
+    // and only the first commit is a root
+    assert!(checkout.is_root(&first).unwrap());
+    assert!(!checkout.is_root(&rewritten).unwrap());
+}

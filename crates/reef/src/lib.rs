@@ -26,8 +26,8 @@
 //! - **Clearing between nodes** ([`clear`]): once a loop's node is done, Stop's injector types
 //!   `/clear` and the next node's kickoff into the session's zellij or tmux pane, once Claude is
 //!   idle and its input box empty.
-//! - **Comments** ([`comment`]): a thread resolved by hand, the revision that answered it
-//!   linked to it.
+//! - **Comments** ([`comment`]): a plan's threads listed whole, replied in, and resolved by
+//!   hand, the revision that answered one linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
 //!   moved, taken off and listed, each entry with what next makes of it.
 //! - **The loop** ([`loops`]): the terminal loop of the pane a session runs in, started,
@@ -35,7 +35,8 @@
 //!   SessionStart hook.
 //! - **next_task** ([`task`]): the next node taken for a pane's loop, the queue's first, started
 //!   in the session's checkout and handed back whole, or what everything waits on. A loop wider
-//!   than one node takes a group, each member worked by a session of its own.
+//!   than one node takes a group, each member worked by a session of its own. A done node whose
+//!   comments want an answer is taken again first, for a round of them.
 //! - **A node's worktree** ([`worktree`]): `.claude/worktrees/<id>` on `reef/<id>`, made for
 //!   `claude -w <id>` or `reef loop attach`, with the node started in it.
 //! - **A member's pane** ([`open`]): `claude -w <id>` opened beside the loop's, in its zellij
@@ -45,8 +46,8 @@
 //!   each link leading where it did.
 //! - **Export** ([`export`]): a plan written out as a new book, a file for each group with its
 //!   members inline and a file for each page, which imports back as the same plan.
-//! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
-//!   Code, the ones that only read marked so, which plan mode runs without a prompt.
+//! - **The MCP server** ([`mcp`]): the node, work and comment commands as tools over stdio, for
+//!   Claude Code, the ones that only read marked so, which plan mode runs without a prompt.
 //! - **The skill** ([`skill`]): the Claude skill for central reef, written to the
 //!   `.claude/skills/reef` of a repo, which keeps the plan in step with the work through the
 //!   MCP tools and the CLI.

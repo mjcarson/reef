@@ -256,6 +256,9 @@ pub struct Loop {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeName>,
     /// The node whose end it acted on last, so it never acts on one twice
+    ///
+    /// Holding that node again, for a round of its comments, clears it, so the round's end is
+    /// acted on as well.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted: Option<NodeName>,
     /// Whether it takes the next node once this one is done
@@ -449,6 +452,9 @@ pub enum LoopEdit {
     },
     /// Take a node, and a group's members beside it, none of which another loop may hold, or
     /// let go of everything it holds
+    ///
+    /// Taking again the node whose end it acted on, for a round of its comments, clears that
+    /// end, so the round's is acted on too.
     Hold {
         /// The node to take, or `None` to hold none
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -340,6 +340,45 @@ pub async fn a_loop_acts_on_a_nodes_end_once<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     Ok(())
 }
 
+/// Holding again the node whose end a loop acted on, for a round of its comments, clears that
+/// end, and holding another keeps it
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn holding_the_acted_node_again_clears_its_end<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // a loop that held C39 and acted on its end
+    let here = pane(1);
+    edited(&fx, &here, start(&fx, "s1")).await?;
+    let hold = |id: &str| LoopEdit::Hold {
+        node: Some(node_of(&fx, id)),
+        members: Vec::new(),
+    };
+    edited(&fx, &here, hold("C39")).await?;
+    let acted = LoopEdit::Acted {
+        node: node_of(&fx, "C39"),
+    };
+    edited(&fx, &here, acted.clone()).await?;
+    // holding another node keeps the end it acted on
+    let other = edited(&fx, &here, hold("C40")).await?;
+    assert_eq!(other.acted, Some(node_of(&fx, "C39")));
+    // holding C39 again, as a round of its comments does, clears it
+    let round = edited(&fx, &here, hold("C39")).await?;
+    assert_eq!(round.node, Some(node_of(&fx, "C39")));
+    assert_eq!(round.acted, None);
+    assert_eq!(fx.store.loop_in(&here).await?, Some(round));
+    // so the round's end is acted on, once
+    let ended = edited(&fx, &here, acted.clone()).await?;
+    assert_eq!(ended.acted, Some(node_of(&fx, "C39")));
+    assert!(matches!(
+        fx.store.edit_loop(&here, acted).await?,
+        LoopEdited::ActedAlready { .. }
+    ));
+    Ok(())
+}
+
 /// A start of a loop feeding the case's plan, as wide as named
 ///
 /// # Arguments

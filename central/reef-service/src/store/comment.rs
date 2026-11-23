@@ -30,7 +30,7 @@
 use reef_api::{
     Anchor, COMMENT_BODY_MAX, Comment, Commented, FileDiff, FollowedThread, MarkThread, Marked,
     NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves, Revision, Target, Thread,
-    ThreadState, TrailerOutcome, TrailerRead,
+    ThreadState, TrailerOutcome, TrailerRead, Writer,
 };
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,9 @@ struct Kept {
     node: String,
     /// When it was written, in milliseconds since the epoch
     at: u64,
+    /// Who wrote it, the user unless it says so, as rows kept before it was said read
+    #[serde(default, skip_serializing_if = "Writer::is_user")]
+    by: Writer,
     /// Its body, as markdown
     body: String,
     /// Whether it starts a thread or replies in one
@@ -191,6 +194,7 @@ impl<B: Backend> Store<B> {
         let kept = Kept {
             node: node.id.clone(),
             at: now_ms(),
+            by: new.by,
             body: new.body,
             on: KeptOn::Thread {
                 target: new.target,
@@ -240,6 +244,7 @@ impl<B: Backend> Store<B> {
         let kept = Kept {
             node,
             at: now_ms(),
+            by: reply.by,
             body: reply.body,
             on: KeptOn::Reply { thread },
         };
@@ -812,6 +817,7 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
         let comment = Comment {
             number,
             at: kept.at,
+            by: kept.by,
             body: kept.body,
             html: String::new(),
         };
@@ -856,7 +862,7 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
 mod tests {
     use super::{Kept, KeptOn, comment_row, next_number, sort_key};
     use crate::store::Store;
-    use reef_api::{Target, ThreadState};
+    use reef_api::{Target, ThreadState, Writer};
     use reef_model::PlanName;
 
     /// A general comment on a node, starting a thread
@@ -868,6 +874,7 @@ mod tests {
         Kept {
             node: node.to_string(),
             at: 1,
+            by: Writer::User,
             body: "Looks good".to_string(),
             on: KeptOn::Thread {
                 target: Target::Node,
@@ -915,6 +922,14 @@ mod tests {
         // and a thread with none linked is kept without the key, as the old binary wrote it
         let kept = serde_json::to_string(&general("C34"))?;
         assert!(!kept.contains("resolutions"), "{kept}");
+        // a comment kept before writers were said is the user's, and the user's says nothing
+        assert_eq!(threads[0].comments[0].by, Writer::User);
+        assert!(!kept.contains("\"by\""), "{kept}");
+        let claudes = Kept {
+            by: Writer::Claude,
+            ..general("C34")
+        };
+        assert!(serde_json::to_string(&claudes)?.contains(r#""by":"claude""#));
         Ok(())
     }
 

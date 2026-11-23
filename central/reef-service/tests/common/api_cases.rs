@@ -5,6 +5,7 @@
 //! the reef-model types they are built on, as the CLI will. Its plan is `reef/central`, of a
 //! project registered for a fresh git repo.
 
+use reef_api::Writer;
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
     Commented, EditLoop, ErrorCode, FileDiff, FollowedThread, Listing, Loop, LoopEdit, LoopEdited,
@@ -796,7 +797,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
     };
     let (status, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
     assert_eq!(status, StatusCode::OK);
-    let Started::Recorded { record } = started else {
+    let Started::Recorded { record, .. } = started else {
         anyhow::bail!("the start wasn't recorded: {started:?}");
     };
     let (_, read): (_, WorkRecord) = ax.client.get(&paths::node_work(&node)).await?;
@@ -837,6 +838,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         files: vec![file.clone()],
         resolves: Vec::new(),
         draft: false,
+        commits: Vec::new(),
     };
     let (status, added): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
@@ -894,6 +896,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         files: Vec::new(),
         resolves: Vec::new(),
         draft: false,
+        commits: Vec::new(),
     };
     let (status, late): (_, Captured) = ax.client.post(&paths::captures(&node), &other).await?;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -973,7 +976,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         replaces: None,
     };
     let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
-    let Started::Recorded { record } = started else {
+    let Started::Recorded { record, .. } = started else {
         anyhow::bail!("the start wasn't recorded: {started:?}");
     };
     let add = AddCapture {
@@ -988,6 +991,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         files: vec![added_file("src/a.rs", "one\ntwo\n")],
         resolves: Vec::new(),
         draft: false,
+        commits: Vec::new(),
     };
     let (status, _): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
@@ -1010,6 +1014,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
     let new = NewThread {
         target: line.clone(),
         body: "Why **two** <b>here</b>?".to_string(),
+        by: Writer::User,
     };
     let (status, added): (_, Commented) =
         ax.client.post(&paths::node_comments(&node), &new).await?;
@@ -1029,6 +1034,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
     let general = NewThread {
         target: Target::Node,
         body: "Looks good".to_string(),
+        by: Writer::User,
     };
     let (status, _): (_, Commented) = ax
         .client
@@ -1037,6 +1043,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
     assert_eq!(status, StatusCode::OK);
     let reply = NewReply {
         body: "Because.".to_string(),
+        by: Writer::User,
     };
     let (status, replied): (_, Commented) =
         ax.client.post(&paths::replies(&ax.plan, 1), &reply).await?;
@@ -1089,6 +1096,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
             line: 3,
         }),
         body: "Here?".to_string(),
+        by: Writer::User,
     };
     let (status, refused): (_, Commented) =
         ax.client.post(&paths::node_comments(&node), &off).await?;
@@ -1115,6 +1123,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
     // is said as such
     let empty = NewReply {
         body: " ".to_string(),
+        by: Writer::User,
     };
     let (status, error): (_, ApiError) =
         ax.client.post(&paths::replies(&ax.plan, 1), &empty).await?;
@@ -1181,7 +1190,7 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
         replaces: None,
     };
     let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
-    let Started::Recorded { record } = started else {
+    let Started::Recorded { record, .. } = started else {
         anyhow::bail!("the start wasn't recorded: {started:?}");
     };
     // a capture of a tree, holding `src/a.rs` as it is in a blob of the same letter
@@ -1199,6 +1208,7 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
             ..added_file("src/a.rs", text)
         }],
         resolves: Vec::new(),
+        commits: Vec::new(),
         draft: false,
     };
     let (status, _): (_, Captured) = ax
@@ -1220,10 +1230,12 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
             line,
         }),
         body: format!("Line {line}?"),
+        by: Writer::User,
     };
     let general = NewThread {
         target: Target::Node,
         body: "Overall?".to_string(),
+        by: Writer::User,
     };
     for new in [on_line(2), on_line(1), general] {
         let (status, _): (_, Commented) =
@@ -1323,7 +1335,7 @@ pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
         replaces: None,
     };
     let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
-    let Started::Recorded { record } = started else {
+    let Started::Recorded { record, .. } = started else {
         anyhow::bail!("the start wasn't recorded: {started:?}");
     };
     let capture = |tree: char, resolves: Vec<Resolves>| AddCapture {
@@ -1340,6 +1352,7 @@ pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
             ..added_file("src/a.rs", "one\n")
         }],
         resolves,
+        commits: Vec::new(),
         draft: false,
     };
     let (status, _): (_, Captured) = ax
@@ -1351,6 +1364,7 @@ pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
         let new = NewThread {
             target: Target::Node,
             body: body.to_string(),
+            by: Writer::User,
         };
         let (status, _): (_, Commented) =
             ax.client.post(&paths::node_comments(&node), &new).await?;

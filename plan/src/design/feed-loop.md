@@ -14,8 +14,9 @@ The loop runs in the user's own interactive Claude Code session, so questions an
 where they are today:
 
 1. **next_task** (an MCP tool) claims the next node, records its start and marks it in progress,
-   and returns its why, what, acceptance, docs and needs. If open comments are waiting, it
-   returns those first.
+   and returns its why, what, acceptance, docs, needs and open comment threads. A done node
+   whose comments want an answer comes first, taken again for a round of them
+   ([C43](code-and-comments.md#comments-in-the-loop)).
 2. **Claude enters plan mode** itself, with its EnterPlanMode tool, and plans the node.
 3. **The user answers Claude's questions** (AskUserQuestion) and **approves the plan**
    (ExitPlanMode), in the terminal.
@@ -105,6 +106,10 @@ where they are today:
   mix on one branch ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)). A loop works a
   group of nodes at once that way ([Groups of nodes at once](#groups-of-nodes-at-once)).
 - **Pausing stops the loop after the current node**, never in the middle of one.
+- **Comments before new work.** A round of a done node's comments is taken before any new node
+  or group, held alone in the loop's own session, and planned like a node. Its fix is squashed
+  into the node's commit unless a remote holds it
+  ([Comments in the loop](code-and-comments.md#comments-in-the-loop)).
 - **A plan's approval offers a clear.** `reef claude install` turns on
   `showClearContextOnPlanAccept`, so the approval dialog's first option drops the node's
   planning, 8k to 9k in X4's runs, and the node is implemented from the plan alone

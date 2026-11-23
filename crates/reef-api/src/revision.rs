@@ -19,6 +19,7 @@
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 
+use crate::comment::ResolvingCommit;
 use crate::work::CaptureShas;
 
 /// What happened to one file between a node's base and its worktree
@@ -229,6 +230,12 @@ pub struct Revision {
     pub conflicts: Vec<String>,
     /// Every changed file, by path, without its hunks
     pub files: Vec<FileSummary>,
+    /// The node's own commits the capture read, oldest first, none of them a merge: those its
+    /// head holds that its start and its base branch don't
+    ///
+    /// A revision kept before reef read them holds none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<ResolvingCommit>,
     /// Whether it is the node's draft, which the next capture rewrites under its number until a
     /// seal keeps it, so no comment names its lines yet
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -379,6 +386,7 @@ mod tests {
                 base: "e".repeat(40),
             },
             conflicts: Vec::new(),
+            commits: Vec::new(),
             files: vec![summary.clone(), summary],
             draft: false,
         };
@@ -410,6 +418,7 @@ mod tests {
                 base: "e".repeat(40),
             },
             conflicts: vec!["b.rs".to_string()],
+            commits: Vec::new(),
             files: vec![file.summary()],
             draft: false,
         };

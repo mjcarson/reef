@@ -171,10 +171,13 @@ async fn read_only_tools_say_so_and_writes_say_why_they_fail() -> anyhow::Result
     let expected = [
         ("accept", false),
         ("check", true),
+        ("comments", true),
         ("get", true),
         ("next", true),
         ("next_task", false),
         ("put", false),
+        ("reply", false),
+        ("resolve", false),
         ("status", false),
     ];
     let expected: Vec<(String, bool)> = expected
@@ -340,5 +343,122 @@ async fn next_task_skips_a_waiting_queued_node_and_says_why() -> anyhow::Result<
             (there, Some("A".to_string()))
         ]
     );
+    Ok(())
+}
+
+/// The comments tool lists a node's open threads whole, each comment with who wrote it, and
+/// reads; the reply and resolve tools write as Claude, resolve linking the thread's own node's
+/// latest revision, and a thread that isn't there is a tool error saying so
+#[tokio::test]
+async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()> {
+    // a twin with `reef/central` listed, and C1 started and captured once
+    let ax = common::Fx::memory("mcp-comments").await?.api().await?;
+    let mut session = Session::open(&ax).await?;
+    let yaml = "id: C1\ntitle: C1 Some work\ndescription:\n  why: Without C1, something is \
+                missing.\n  what: With C1, it is there.\n";
+    let (put, failed) = session.call("put", json!({"yaml": yaml})).await?;
+    assert!(!failed, "{put}");
+    let node = ax.plan.node("C1")?;
+    let start = reef_api::StartWork {
+        start: common::work_cases::start_in(&ax.repo, "C1", 'a'),
+        replaces: None,
+    };
+    let (_, started): (_, reef_api::Started) = ax
+        .client
+        .post(&reef_api::paths::node_work(&node), &start)
+        .await?;
+    let reef_api::Started::Recorded { record, .. } = started else {
+        anyhow::bail!("the start wasn't recorded: {started:?}");
+    };
+    let add = reef_api::AddCapture {
+        pinned: record.start.pinned.clone(),
+        shas: reef_api::CaptureShas {
+            head: "d".repeat(40),
+            tree: "e".repeat(40),
+            merge_base: None,
+            base: record.start.start_tree.clone(),
+        },
+        conflicts: Vec::new(),
+        files: vec![common::work_cases::added_file("src/a.rs", "one\ntwo\n")],
+        resolves: Vec::new(),
+        commits: Vec::new(),
+        draft: false,
+    };
+    let (_, _): (_, reef_api::Captured) = ax
+        .client
+        .post(&reef_api::paths::captures(&node), &add)
+        .await?;
+    // none open yet, then two threads the user started
+    let (listed, failed) = session.call("comments", json!({})).await?;
+    assert_eq!(
+        (listed.as_str(), failed),
+        ("`reef/central` has no open comment threads\n", false)
+    );
+    let mut numbers = Vec::new();
+    for body in ["Why one?", "And two?"] {
+        let new = reef_api::NewThread {
+            target: reef_api::Target::Node,
+            body: body.to_string(),
+            by: reef_api::Writer::User,
+        };
+        let (_, commented): (_, reef_api::Commented) = ax
+            .client
+            .post(&reef_api::paths::node_comments(&node), &new)
+            .await?;
+        let reef_api::Commented::Added { thread, .. } = commented else {
+            anyhow::bail!("the thread wasn't kept: {commented:?}");
+        };
+        numbers.push(thread.number);
+    }
+    // the node's open threads, whole
+    let (listed, failed) = session.call("comments", json!({"id": "C1"})).await?;
+    assert!(!failed, "{listed}");
+    assert!(
+        listed.starts_with("`reef/central/C1` has 2 open comment threads:"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!(
+            "#{} on `reef/central/C1`, the node as a whole: open\n    #{} by the user:\n        \
+             Why one?",
+            numbers[0], numbers[0]
+        )),
+        "{listed}"
+    );
+    // a question back leaves the first open, its last word Claude's
+    let (replied, failed) = session
+        .call("reply", json!({"thread": numbers[0], "body": "Which one?"}))
+        .await?;
+    assert!(!failed, "{replied}");
+    let client = client_of(&ax)?;
+    let first = client.thread(&ax.plan, numbers[0]).await?.unwrap();
+    assert!(first.is_open() && !first.wants_answer());
+    assert_eq!(first.comments[1].by, reef_api::Writer::Claude);
+    // the second resolved with no change, linking C1's latest revision, after Claude's reply
+    let (resolved, failed) = session
+        .call(
+            "resolve",
+            json!({"thread": numbers[1], "reply": "Two is the count."}),
+        )
+        .await?;
+    assert!(!failed, "{resolved}");
+    assert!(
+        resolved.ends_with(&format!(
+            "resolved #{} of `reef/central`, answered by revision 1 of `reef/central/C1`\n",
+            numbers[1]
+        )),
+        "{resolved}"
+    );
+    let second = client.thread(&ax.plan, numbers[1]).await?.unwrap();
+    assert!(!second.is_open());
+    assert_eq!(second.resolved_by().map(|by| by.revision), Some(1));
+    assert_eq!(second.comments[1].by, reef_api::Writer::Claude);
+    // listing every thread shows the resolved one too
+    let (all, _) = session.call("comments", json!({"all": true})).await?;
+    assert!(all.contains("the node as a whole: resolved"), "{all}");
+    // and a thread that isn't there is an error the tool says
+    let (missing, failed) = session.call("resolve", json!({"thread": 99})).await?;
+    assert!(failed);
+    assert!(missing.contains("has no comment thread 99"), "{missing}");
     Ok(())
 }

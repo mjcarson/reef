@@ -21,8 +21,8 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   plans. Where it has several, name one: `plan` on a tool, `--plan` on a command.
 - **Tools first, the CLI where there are none.** Claude Code serves reef's tools as
   `mcp__reef__*` when the repo's `.mcp.json` runs `reef mcp`. Plan mode blocks Bash, but it
-  runs `mcp__reef__next`, `mcp__reef__get` and `mcp__reef__check` without a prompt, since they
-  only read. The others write, so they wait until the plan is approved. Each tool's text is
+  runs `mcp__reef__next`, `mcp__reef__get`, `mcp__reef__check` and `mcp__reef__comments`
+  without a prompt, since they only read. The others write, so they wait until the plan is approved. Each tool's text is
   what its command prints.
 - **With no `mcp__reef__*` tools, the repo isn't set up for them.** `reef claude install`, run
   from the repo's root, writes the MCP entry, Claude Code's and git's hooks and this skill. It
@@ -44,6 +44,9 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   | Start its code here | | `reef start <ID>` |
   | Read or change a page | | `reef page ls`, `reef page get <PATH>`, `reef page put <PATH> <FILE>` |
   | See the user's order | | `reef queue ls` |
+  | List open comments | `mcp__reef__comments` | `reef comment ls` |
+  | Reply to a comment | `mcp__reef__reply` | `reef comment reply <N> <TEXT>` |
+  | Resolve one with no change | `mcp__reef__resolve` | `reef comment resolve <N> --reply <TEXT>` |
 
 - **If nothing answers**, the service isn't running. reef's error says where it looked: tell
   the user, rather than starting one.
@@ -53,16 +56,25 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   session's pane (`! reef loop start`), reef feeds the session one node at a time:
   1. **Call `mcp__reef__next_task` before plan mode,** since it writes. It takes the next node,
      the user's queue first, records its start in this checkout, marks it `in-progress`, and
-     returns it whole, with the queue's entries it passed over and why. Called again before the
-     node is done, it returns the same node. With nothing to take, it says what everything waits
-     on: tell the user, and stop.
+     returns it whole, with its open comment threads and the queue's entries it passed over and
+     why. Called again before the node is done, it returns the same node. With nothing to take,
+     it says what everything waits on: tell the user, and stop.
+     - **A done node with comments that want an answer comes back first,** as a round of them:
+       next_task takes it again, starts it again here and marks it `in-progress`, and returns
+       its threads and the steps that finish the round. Plan the round as a node, and put those
+       steps in the plan: the fix is committed as a `git commit --fixup` of the node's commit,
+       its `Reef-Resolves` trailer naming each thread it answers, and squashed in with the
+       `git rebase --autosquash` next_task names, unless a remote holds that commit already.
+     - **Answer a thread that needs no change** with `mcp__reef__resolve`, saying how, or ask
+       its writer with `mcp__reef__reply`, which leaves it waiting on them. Both write as
+       Claude, so a thread whose last word is yours never calls for another round.
   2. **Plan it in plan mode:** read its docs and needs, then enter plan mode (EnterPlanMode).
   3. **Ask what the plan needs answered** (AskUserQuestion), and exit plan mode (ExitPlanMode) for
      the user's approval.
   4. **Implement it, and finish it** as section 5 says: its status, its criteria, the commit.
   5. **End the turn once it is committed,** rather than taking the next node in the same
-     context. The Stop hook (`reef hook stop`) then names the next node, or says the loop is
-     paused or nothing else is ready. In a zellij or tmux pane, reef itself types `/clear` and
+     context. The Stop hook (`reef hook stop`) then names the next node, or a round of a done
+     node's comments, or says the loop is paused or nothing else is ready. In a zellij or tmux pane, reef itself types `/clear` and
      asks for the next node once Claude is idle and the input box is empty. Elsewhere, the user
      types `/clear` and `next`. After a paused node's end, or once reef stepped aside, the user's
      `! reef loop start` moves on the same way. Either way, the next node starts in a fresh
@@ -162,6 +174,8 @@ In the same change that finishes the work:
 
 - `status` `done` on the node. Never set a status on a group: a group is done when its members
   are, and "ready" is derived from `needs`.
+- A commit that answers a comment thread names it in a `Reef-Resolves: <N>` trailer, which
+  resolves the thread once the commit is captured.
 - Each acceptance criterion gets `met` or `unmet` with `accept`, numbered from 1 in the order
   its `acceptance` lists them, and the test that checks it. Leave a performance criterion with
   a `metric` and `at-least`/`at-most` alone: its status is derived from the `after` figure.

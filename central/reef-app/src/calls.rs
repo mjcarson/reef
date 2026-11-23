@@ -11,7 +11,7 @@ use reef_api::{
     Target, Thread, ThreadState,
 };
 #[cfg(feature = "server")]
-use reef_api::{MarkThread, NewReply, NewThread};
+use reef_api::{MarkThread, NewReply, NewThread, Writer};
 use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
@@ -235,7 +235,14 @@ pub async fn start_thread(
         .node(id)
         .map_err(|error| ServerFnError::new(error.to_string()))?;
     crate::server::service()
-        .start_thread(&node, NewThread { target, body })
+        .start_thread(
+            &node,
+            NewThread {
+                target,
+                body,
+                by: Writer::User,
+            },
+        )
         .await
         .map_err(failed)
 }
@@ -262,7 +269,14 @@ pub async fn reply_to(
     // a name that breaks the naming rule is refused before the store is read
     let name = plan_name(project, plan)?;
     crate::server::service()
-        .reply(&name, thread, NewReply { body })
+        .reply(
+            &name,
+            thread,
+            NewReply {
+                body,
+                by: Writer::User,
+            },
+        )
         .await
         .map_err(failed)
 }

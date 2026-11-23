@@ -1447,3 +1447,379 @@ async fn a_members_worktree_gets_the_local_settings() -> anyhow::Result<()> {
     assert_eq!(std::fs::read_to_string(c.join(reef::claude::LOCAL))?, "{}");
     Ok(())
 }
+
+/// Comments on a node of `cli/docs`, as the app does, returning the thread's number
+///
+/// # Arguments
+///
+/// * `hx` - The case
+/// * `id` - The node's id
+/// * `target` - What the thread is on
+/// * `body` - Its first comment
+async fn commented(hx: &Hx, id: &str, target: reef_api::Target, body: &str) -> anyhow::Result<u32> {
+    // a thread written by the user, through the JSON API
+    let node = PlanName::new("cli", "docs")?.node(id)?;
+    let new = reef_api::NewThread {
+        target,
+        body: body.to_string(),
+        by: reef_api::Writer::User,
+    };
+    let path = reef_api::paths::node_comments(&node);
+    let (_, commented): (_, reef_api::Commented) = hx.ax.client.post(&path, &new).await?;
+    match commented {
+        reef_api::Commented::Added { thread, .. } => Ok(thread.number),
+        other => panic!("a thread on `{node}` wasn't kept: {other:?}"),
+    }
+}
+
+/// A thread of `cli/docs`, which must be there
+///
+/// # Arguments
+///
+/// * `hx` - The case
+/// * `number` - The thread's number
+async fn thread_of(hx: &Hx, number: u32) -> anyhow::Result<reef_api::Thread> {
+    let plan = PlanName::new("cli", "docs")?;
+    Ok(hx
+        .client()?
+        .thread(&plan, number)
+        .await?
+        .expect("the thread is there"))
+}
+
+/// A line of `a.txt` in one of a node's revisions, on the side its worktree has
+///
+/// # Arguments
+///
+/// * `revision` - The revision's number
+/// * `line` - The line's number
+fn line_of(revision: u32, line: u32) -> reef_api::Target {
+    reef_api::Target::Line(reef_api::Anchor {
+        revision,
+        path: "a.txt".to_string(),
+        side: reef_api::Side::New,
+        line,
+    })
+}
+
+/// Squashes the fixups on a worktree's branch into their commits, off the runtime's threads,
+/// as a round's steps say
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `onto` - The commit the rebase starts after
+async fn squashed(dir: &Path, onto: &str) -> anyhow::Result<String> {
+    hooked(
+        dir,
+        &[
+            "-c",
+            "sequence.editor=true",
+            "rebase",
+            "-q",
+            "-i",
+            "--autosquash",
+            "--autostash",
+            "--rebase-merges",
+            onto,
+        ],
+    )
+    .await
+}
+
+/// A comment left on a done node comes back before any new node, as a round of it: the node is
+/// started again here and handed back with its threads and how its fix goes into its commit. The
+/// round's fixup resolves the thread it names, its squash leaves the node one commit holding the
+/// fix, and the round's revision holds only the fix. Its end is acted on as a node's, and a
+/// thread reopened since comes back for a second round, which resolves it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_comment_on_a_done_node_comes_back_as_a_round_squashed_into_its_commit()
+-> anyhow::Result<()> {
+    let hx = Hx::new("rounds", &["A", "B"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    let base = git::run(&hx.repo, &["rev-parse", "HEAD"])?;
+    // a loop takes A into a worktree of its own, and A's work is committed, done and sealed
+    let pane = "claude:4242";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/A`"), "{took}");
+    let first = committed(&a, "a.txt", "one\ntwo\n", "Add a").await?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(
+        said.ends_with("`cli/docs/B` is next: `/clear`, then say `next`"),
+        "{said}"
+    );
+    // the user comments on A's second line, and on A as a whole, once its end was acted on
+    let on_line = commented(&hx, "A", line_of(1, 2), "Two should be a number").await?;
+    let general = commented(&hx, "A", reef_api::Target::Node, "Why a.txt?").await?;
+    // so A comes back before B, started again here and in progress, its threads and its
+    // commit's fixup named
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, but 2 of its comment threads want an answer"),
+        "{took}"
+    );
+    assert!(!took.contains("cli/docs/B"), "{took}");
+    assert!(
+        took.contains(&format!(
+            "#{on_line} on `cli/docs/A`, a.txt:2 in revision 1: open"
+        )),
+        "{took}"
+    );
+    assert!(took.contains("        Two should be a number"), "{took}");
+    let fixup =
+        format!("git commit --fixup={first} --trailer 'Reef-Resolves: {on_line}, {general}'");
+    assert!(took.contains(&fixup), "{took}");
+    assert!(
+        took.contains(&format!("--rebase-merges {first}~1")),
+        "{took}"
+    );
+    assert!(took.contains("status: in-progress"), "{took}");
+    let record = hx
+        .client()?
+        .work_of(&PlanName::new("cli", "docs")?.node("A")?)
+        .await?;
+    assert_eq!(record.map(|record| record.start.start), Some(first.clone()));
+    // a second call mid-round hands out the round again
+    let again = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        again.contains("for a round of its open comments"),
+        "{again}"
+    );
+    assert!(again.contains(&fixup), "{again}");
+    // the round: the general thread answered with no change, as Claude, then A done
+    let client = hx.client()?;
+    let mut out = Vec::new();
+    reef::comment::resolve(
+        &client,
+        &a,
+        general,
+        reef::comment::Answering::Own,
+        None,
+        Some("It holds the numbers."),
+        reef_api::Writer::Claude,
+        &reef::cli::PlanPick::default(),
+        &mut out,
+    )
+    .await?;
+    let answered = thread_of(&hx, general).await?;
+    assert!(!answered.is_open());
+    assert_eq!(
+        answered.comments.last().map(|comment| comment.by),
+        Some(reef_api::Writer::Claude)
+    );
+    std::fs::write(a.join("a.txt"), "one\n2\n")?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.status_used(&a, "A", "done").await?;
+    // the fixup naming the line's thread resolves it when its post-commit captures it
+    hooked(
+        &a,
+        &[
+            "commit",
+            "-qa",
+            &format!("--fixup={first}"),
+            "--trailer",
+            &format!("Reef-Resolves: {on_line}"),
+        ],
+    )
+    .await?;
+    let resolved = thread_of(&hx, on_line).await?;
+    assert!(!resolved.is_open(), "{resolved:?}");
+    let by = resolved.resolved_by().expect("a change resolved it");
+    assert_eq!(by.revision, 2);
+    assert_eq!(
+        by.commit.as_ref().map(|commit| commit.summary.as_str()),
+        Some("fixup! Add a")
+    );
+    // squashed in, A is one commit again, holding the fix
+    squashed(&a, &format!("{first}~1")).await?;
+    let commits = git::run(&a, &["log", "--format=%s", &format!("{base}..HEAD")])?;
+    assert_eq!(commits, "Add a");
+    let rewritten = git::run(&a, &["rev-parse", "HEAD"])?;
+    assert_ne!(rewritten, first);
+    assert_eq!(git::run(&a, &["show", "HEAD:a.txt"])?, "one\n2");
+    // the round's end seals its revision, which holds only the fix, and names B next
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(said.starts_with("reef: sealed `A` as revision 2"), "{said}");
+    assert!(
+        said.ends_with("`cli/docs/B` is next: `/clear`, then say `next`"),
+        "{said}"
+    );
+    let node = PlanName::new("cli", "docs")?.node("A")?;
+    let revisions = client.revisions(&node).await?;
+    assert_eq!(revisions.len(), 2);
+    assert!(!revisions[1].draft);
+    assert_eq!(revisions[1].counts(), (1, 1));
+    assert!(
+        revisions[1].commits.is_empty(),
+        "{:?}",
+        revisions[1].commits
+    );
+    assert_eq!(
+        revisions[0]
+            .commits
+            .iter()
+            .map(|commit| commit.commit.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str()]
+    );
+    // the user reopens the line's thread, so A comes back for a second round, its commit found
+    // again though the squash rewrote it
+    let sealed = thread_of(&hx, on_line).await?;
+    assert_eq!(sealed.outdated, Some(2), "its line was edited");
+    let reopen = reef_api::MarkThread {
+        state: reef_api::ThreadState::Open,
+        read: sealed.version,
+    };
+    let path = reef_api::paths::thread_state(&PlanName::new("cli", "docs")?, on_line);
+    let (_, marked): (_, reef_api::Marked) = hx.ax.client.put(&path, &reopen).await?;
+    assert!(
+        matches!(marked, reef_api::Marked::Marked { .. }),
+        "{marked:?}"
+    );
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, but 1 of its comment threads wants an answer"),
+        "{took}"
+    );
+    assert!(
+        took.contains(&format!(
+            "git commit --fixup={rewritten} --trailer 'Reef-Resolves: {on_line}'"
+        )),
+        "{took}"
+    );
+    // a second fixup, a change of its own, resolves it again
+    std::fs::write(a.join("a.txt"), "1\n2\n")?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hooked(
+        &a,
+        &[
+            "commit",
+            "-qa",
+            &format!("--fixup={rewritten}"),
+            "--date=2030-01-01T00:00:00",
+            "--trailer",
+            &format!("Reef-Resolves: {on_line}"),
+        ],
+    )
+    .await?;
+    let again = thread_of(&hx, on_line).await?;
+    assert!(!again.is_open(), "{again:?}");
+    assert_eq!(again.resolutions.len(), 2);
+    squashed(&a, &format!("{rewritten}~1")).await?;
+    assert_eq!(
+        git::run(&a, &["log", "--format=%s", &format!("{base}..HEAD")])?,
+        "Add a"
+    );
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(said.starts_with("reef: sealed `A` as revision 3"), "{said}");
+    // and with nothing left to answer, B is taken
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/B`"), "{took}");
+    Ok(())
+}
+
+/// A thread Claude answered last, with a question back, waits on the user rather than calling
+/// for another round, and a round answered without a change keeps no empty revision; the user's
+/// answer brings the node back for a round again
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thread_claude_answered_last_waits_on_the_user() -> anyhow::Result<()> {
+    let hx = Hx::new("waits", &["A", "B"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    // A worked, done and sealed in a loop's worktree
+    let pane = "claude:4242";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    committed(&a, "a.txt", "one\ntwo\n", "Add a").await?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.stopped_in(&a, Some(pane), false).await?;
+    // a question on A's line takes A again for a round
+    let asked = commented(&hx, "A", line_of(1, 1), "Is one right?").await?;
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, but 1 of its"),
+        "{took}"
+    );
+    // Claude asks back, as reef's reply tool does, and marks A done with no change
+    let client = hx.client()?;
+    let mut out = Vec::new();
+    reef::comment::reply(
+        &client,
+        &a,
+        asked,
+        "Which one?",
+        reef_api::Writer::Claude,
+        &reef::cli::PlanPick::default(),
+        &mut out,
+    )
+    .await?;
+    let waiting = thread_of(&hx, asked).await?;
+    assert!(waiting.is_open() && !waiting.wants_answer());
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.status_used(&a, "A", "done").await?;
+    // its end keeps no empty revision, and B is next, not another round
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(!said.contains("sealed"), "{said}");
+    assert!(
+        said.ends_with("`cli/docs/B` is next: `/clear`, then say `next`"),
+        "{said}"
+    );
+    let node = PlanName::new("cli", "docs")?.node("A")?;
+    assert_eq!(client.revisions(&node).await?.len(), 1);
+    let listed = hx.reef(&a, &["comment", "ls"]).await?;
+    assert!(
+        listed.contains(&format!("#{asked} on `cli/docs/A`, a.txt:1 in revision 1: open, waiting on the user's answer to Claude")),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("    #2 by Claude:\n        Which one?"),
+        "{listed}"
+    );
+    // the user's answer brings A back before B
+    hx.reef(&a, &["comment", "reply", &asked.to_string(), "The first"])
+        .await?;
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, but 1 of its"),
+        "{took}"
+    );
+    Ok(())
+}
+
+/// A round on a node whose commit a remote branch holds already never rewrites it: its fix is
+/// a fixup of its own, left for a later squash
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pushed_nodes_round_leaves_its_fixup_unsquashed() -> anyhow::Result<()> {
+    let hx = Hx::new("pushed", &["A", "B"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    // A worked, done and sealed, then pushed, as a fetch would record it
+    let pane = "claude:4242";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    let first = committed(&a, "a.txt", "one\ntwo\n", "Add a").await?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.stopped_in(&a, Some(pane), false).await?;
+    git::run(&a, &["update-ref", "refs/remotes/origin/cli-a", &first])?;
+    // a comment brings A back, its fix a fixup of the pushed commit with no rebase
+    let asked = commented(&hx, "A", line_of(1, 2), "Two?").await?;
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        took.contains(
+            "is on `origin/cli-a` already, so it isn't rewritten: commit everything the round \
+             changed as a fixup of it"
+        ),
+        "{took}"
+    );
+    assert!(
+        took.contains(&format!(
+            "git commit --fixup={first} --trailer 'Reef-Resolves: {asked}'"
+        )),
+        "{took}"
+    );
+    assert!(!took.contains("GIT_SEQUENCE_EDITOR"), "{took}");
+    Ok(())
+}

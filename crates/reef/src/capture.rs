@@ -30,8 +30,8 @@
 use reef_api::comment::trailer_threads;
 use reef_api::work::on_worktree;
 use reef_api::{
-    AddCapture, CaptureShas, Captured, ErrorCode, FileDiff, RESOLVES_TRAILER, Resolves, Revision,
-    TrailerOutcome, TrailerRead, WorkRecord, WorkStart,
+    AddCapture, CaptureShas, Captured, ErrorCode, FileDiff, RESOLVES_TRAILER, Resolves,
+    ResolvingCommit, Revision, TrailerOutcome, TrailerRead, WorkRecord, WorkStart,
 };
 use reef_model::{PlanName, Status};
 use std::collections::HashMap;
@@ -40,7 +40,7 @@ use std::path::Path;
 
 use crate::cli::{self, PlanPick};
 use crate::client::{Client, is_code};
-use crate::git::Checkout;
+use crate::git::{Checkout, Walked};
 use crate::start::{checkout_in, where_started};
 
 /// Each trailer value that names no thread number: its commit and the value
@@ -78,6 +78,8 @@ pub struct Taken {
     pub files: Vec<FileDiff>,
     /// Each thread a `Reef-Resolves` trailer names, on the node's commits, oldest first
     pub resolves: Vec<Resolves>,
+    /// The node's own commits, oldest first, none of them a merge
+    pub commits: Vec<ResolvingCommit>,
     /// Each trailer value that names no thread number: its commit and the value
     pub unreadable: Unreadable,
 }
@@ -172,6 +174,7 @@ pub async fn capture_record<W: Write>(
         conflicts: taken.conflicts.clone(),
         files: taken.files,
         resolves: taken.resolves.clone(),
+        commits: taken.commits.clone(),
         draft: keep == Keep::Draft,
     };
     let id = &record.node.id;
@@ -319,10 +322,15 @@ pub fn take(checkout: &Checkout, start: &WorkStart) -> anyhow::Result<Taken> {
     // the worktree as a seal takes it, and the diff from the base to it
     let tree = checkout.seal_snapshot(&carry.tree)?;
     let files = checkout.diff(&carry.tree, &tree)?;
-    // the threads the node's own commits name: past its start, and not the base branch's
-    let mut hidden = vec![start.start.as_str()];
-    hidden.extend(merge_base.as_deref());
-    let (resolves, unreadable) = resolving(checkout, &head, &hidden)?;
+    // the node's own commits, past its start and not the base branch's, and the threads they
+    // name
+    let own = own_commits(checkout, &head, &start.start, merge_base.as_deref())?;
+    let (resolves, unreadable) = resolving(&own);
+    let commits = own
+        .into_iter()
+        .filter(|walked| !walked.merges)
+        .map(|walked| walked.commit)
+        .collect();
     Ok(Taken {
         shas: CaptureShas {
             head,
@@ -334,32 +342,74 @@ pub fn take(checkout: &Checkout, start: &WorkStart) -> anyhow::Result<Taken> {
         conflicts: carry.conflicts,
         files,
         resolves,
+        commits,
         unreadable,
     })
 }
 
-/// Reads the threads the `Reef-Resolves` trailers on a head's commits name, past the commits
-/// hidden, oldest first, and each value that names no thread number
+/// The node's own commits on a head, oldest first: those past its start that its base branch
+/// doesn't hold
+///
+/// A rebase that rewrote the start itself, as squashing a round's fix into an earlier commit
+/// does, leaves the start out of the head's history, so every commit it rewrote would read as
+/// the node's. Those are left out by the change each was: a head's commit that is the same change
+/// as one the start held is the start's, not the node's.
 ///
 /// # Arguments
 ///
 /// * `checkout` - The checkout the node's work happens in
 /// * `head` - The commit HEAD is at
-/// * `hidden` - The commits whose history is none of the node's
-fn resolving(
+/// * `start` - The commit HEAD was at when the node started
+/// * `merge_base` - Where HEAD meets the base branch, if there is one to meet
+fn own_commits(
     checkout: &Checkout,
     head: &str,
-    hidden: &[&str],
-) -> anyhow::Result<(Vec<Resolves>, Unreadable)> {
+    start: &str,
+    merge_base: Option<&str>,
+) -> anyhow::Result<Vec<Walked>> {
+    // past the start, and not the base branch's
+    let mut hidden = vec![start];
+    hidden.extend(merge_base);
+    let walked = checkout.walk(head, &hidden)?;
+    // a start still in the head's history hides everything before the node
+    if checkout.is_ancestor(start, head)? {
+        return Ok(walked);
+    }
+    // otherwise what the start held since it and the head parted is rewritten into the head
+    let Some(parted) = checkout.merge_base(head, start)? else {
+        return Ok(walked);
+    };
+    let mut before = vec![parted.as_str()];
+    before.extend(merge_base);
+    let held = checkout.walk(start, &before)?;
+    // so each commit the start held, rewritten, is left out
+    let own = walked
+        .into_iter()
+        .filter(|walked| {
+            !held
+                .iter()
+                .any(|was| was.commit.same_change(&walked.commit))
+        })
+        .collect();
+    Ok(own)
+}
+
+/// Reads the threads the `Reef-Resolves` trailers on a node's own commits name, oldest first,
+/// and each value that names no thread number
+///
+/// # Arguments
+///
+/// * `own` - The node's own commits, oldest first
+fn resolving(own: &[Walked]) -> (Vec<Resolves>, Unreadable) {
     let mut resolves = Vec::new();
     let mut unreadable = Vec::new();
-    for trailed in checkout.trailers(head, hidden, RESOLVES_TRAILER)? {
+    for walked in own {
         // each thread once a commit, however often its trailers name it
         let mut named = Vec::new();
-        for value in &trailed.values {
-            match trailer_threads(value) {
+        for value in walked.values(RESOLVES_TRAILER) {
+            match trailer_threads(&value) {
                 Some(threads) => named.extend(threads),
-                None => unreadable.push((trailed.commit.commit.clone(), value.clone())),
+                None => unreadable.push((walked.commit.commit.clone(), value.clone())),
             }
         }
         let mut seen = Vec::with_capacity(named.len());
@@ -370,11 +420,11 @@ fn resolving(
             seen.push(thread);
             resolves.push(Resolves {
                 thread,
-                commit: trailed.commit.clone(),
+                commit: walked.commit.clone(),
             });
         }
     }
-    Ok((resolves, unreadable))
+    (resolves, unreadable)
 }
 
 /// What a capture's trailers named, for saying what came of each
@@ -584,6 +634,7 @@ mod tests {
                 file(FileStatus::Renamed, Some("old.rs"), Some("new.rs"), false),
                 file(FileStatus::Added, None, Some("logo.png"), true),
             ],
+            commits: Vec::new(),
             draft: false,
         };
         let mut out = Vec::new();

@@ -78,7 +78,14 @@ impl<B: Backend> Service<B> {
         }
         // written under the project's work lock, and told to the change stream once it is
         let started = self.store.start_work(node, start).await?;
-        if let Started::Recorded { record } = &started {
+        if let Started::Recorded { record, sealed } = &started {
+            // a draft the restart sealed is a revision changed, as a capture's seal is
+            if let Some(revision) = sealed {
+                self.publish(Change::RevisionCaptured {
+                    node: node.clone(),
+                    revision: *revision,
+                });
+            }
             self.publish(Change::WorkRecorded {
                 node: node.clone(),
                 version: record.version,

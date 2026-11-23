@@ -38,10 +38,21 @@
 //!   so next_task takes no new group while a member's branch isn't in the loop's checkout's HEAD
 //!   yet, and names each one to merge. A branch that is gone, as a squash and a delete leave it,
 //!   is merged.
+//! - **Open comments before any new node.** A done node with a thread that wants an answer, one
+//!   open whose last comment is the user's, is taken again first, as a round of its comments
+//!   ([`Choice::Round`]): the loop's own group's first, then the node of the oldest thread. The
+//!   round is started again in this checkout and marked in progress, and handed back with its
+//!   threads and how its fix goes into the node's commit: a fixup naming each thread in a
+//!   `Reef-Resolves` trailer, squashed in by `git rebase --autosquash` unless a remote branch
+//!   holds the commit already. It is planned like a node, and its end is acted on like one.
+//! - **Every node handed out with its open threads,** so a comment left while it is worked on is
+//!   there each time it is handed out again.
 
 use reef_api::loops::{holder, member_of};
 use reef_api::work::on_worktree;
-use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
+use reef_api::{
+    EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane, RESOLVES_TRAILER, Revision, Thread,
+};
 use reef_model::next::entry_lines;
 use reef_model::{Next, NodeName, PlanName, Status};
 use std::collections::HashMap;
@@ -52,7 +63,7 @@ use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
 use crate::git::Checkout;
 use crate::open::Open;
-use crate::{node, start, work};
+use crate::{comment, node, start, work};
 
 /// What next_task does for a pane's loop, judged before anything is held
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +74,13 @@ pub enum Choice {
     Waiting(Vec<NodeName>),
     /// The loop is paused, and its node is done or it holds none, so it takes no new one
     Paused,
+    /// Take the first of these done nodes that no other loop takes meanwhile again, for a round
+    /// of the comments that want an answer of it, before any new node
+    Round {
+        /// The done nodes with a thread that wants an answer, the loop's own group's first,
+        /// that no other loop holds
+        candidates: Vec<NodeName>,
+    },
     /// Take the first of the candidates that no other loop takes meanwhile
     Take {
         /// The ready work, in the order next gives it, that no other loop holds
@@ -73,13 +91,15 @@ pub enum Choice {
 }
 
 /// Judges what next_task does for a pane's loop: hand out its node again, wait on its group,
-/// take nothing, or take the ready work no other loop holds
+/// take nothing, take a done node again for a round of its comments, or take the ready work no
+/// other loop holds
 ///
 /// # Arguments
 ///
 /// * `feeding` - The pane's loop
 /// * `held` - Where the node it holds stands, or `None` if it holds none or its plan lost it
 /// * `waiting` - The members of its group that aren't finished
+/// * `rounds` - The done nodes with a thread that wants an answer, in the order to take them
 /// * `next` - The ready work over the loop's plans, the queue's first
 /// * `loops` - Every loop of the project, the pane's included
 ///
@@ -105,13 +125,14 @@ pub enum Choice {
 ///     pid: None,
 ///     members: Vec::new(),
 /// };
-/// let again = choose(&feeding, Some(Status::InProgress), &[], &Next::default(), &[]);
+/// let again = choose(&feeding, Some(Status::InProgress), &[], &[], &Next::default(), &[]);
 /// assert_eq!(again, Choice::Again("reef/central/C40".parse().unwrap()));
 /// ```
 pub fn choose(
     feeding: &Loop,
     held: Option<Status>,
     waiting: &[NodeName],
+    rounds: &[NodeName],
     next: &Next,
     loops: &[Loop],
 ) -> Choice {
@@ -133,6 +154,16 @@ pub fn choose(
         .filter(|other| other.pane != feeding.pane)
         .cloned()
         .collect();
+    // a done node whose comments want an answer comes before any new node, unless another loop
+    // holds it
+    let again: Vec<NodeName> = rounds
+        .iter()
+        .filter(|node| feeding.covers(node) && holder(&others, node).is_none())
+        .cloned()
+        .collect();
+    if !again.is_empty() {
+        return Choice::Round { candidates: again };
+    }
     let mut candidates = Vec::new();
     let mut elsewhere = Vec::new();
     // the ready work in next's order, each named in full
@@ -179,6 +210,8 @@ pub enum Ending {
         done: NodeName,
         /// The node next_task takes next, as things stand
         next: NodeName,
+        /// Whether it is taken again for a round of its comments, rather than for the first time
+        round: bool,
     },
 }
 
@@ -226,14 +259,40 @@ impl Ending {
                  everything waits on"
             )),
             // reef clears the session itself in a multiplexer's pane
-            Ending::Next { done, next } if typed => Some(format!(
-                "`{done}` is done. `{next}` is next: reef clears the context and asks for it \
-                 once Claude is idle and the input box is empty"
+            Ending::Next { done, next, round } if typed => Some(format!(
+                "{}: reef clears the context and asks for {} once Claude is idle and the input \
+                 box is empty",
+                coming(done, next, *round),
+                if *round { "them" } else { "it" }
             )),
-            Ending::Next { done, next } => Some(format!(
-                "`{done}` is done. `{next}` is next: `/clear`, then say `next`"
+            Ending::Next { done, next, round } => Some(format!(
+                "{}: `/clear`, then say `next`",
+                coming(done, next, *round)
             )),
         }
+    }
+
+    /// The node that comes next, if one does, and whether it comes for a round of its comments
+    pub fn next(&self) -> Option<(&NodeName, bool)> {
+        match self {
+            Ending::Next { next, round, .. } => Some((next, *round)),
+            _ => None,
+        }
+    }
+}
+
+/// Says a node is done and what comes next: another node, or a round of a node's comments
+///
+/// # Arguments
+///
+/// * `done` - The node done
+/// * `next` - The node next_task takes next
+/// * `round` - Whether it is taken again for a round of its comments
+fn coming(done: &NodeName, next: &NodeName, round: bool) -> String {
+    match (round, done == next) {
+        (false, _) => format!("`{done}` is done. `{next}` is next"),
+        (true, true) => format!("`{done}` is done, and its open comments come next"),
+        (true, false) => format!("`{done}` is done. `{next}`'s open comments come next"),
     }
 }
 
@@ -347,24 +406,44 @@ fn listed(nodes: &[NodeName]) -> String {
     quoted.join(", ")
 }
 
-/// What comes after a node the loop holds is done: it stops if paused, else the first ready node
-/// no other loop holds is next, or nothing is
+/// What comes after a node the loop holds is done: it stops if paused, else a round of the first
+/// done node whose comments want an answer, else the first ready node no other loop holds, or
+/// nothing
 ///
 /// # Arguments
 ///
 /// * `feeding` - The pane's loop
 /// * `done` - The node it holds, which is done
+/// * `rounds` - The done nodes with a thread that wants an answer, in the order to take them
 /// * `next` - The ready work over the loop's plans, the queue's first
 /// * `loops` - Every loop of the project, the pane's included
-pub fn after(feeding: &Loop, done: NodeName, next: &Next, loops: &[Loop]) -> Ending {
+pub fn after(
+    feeding: &Loop,
+    done: NodeName,
+    rounds: &[NodeName],
+    next: &Next,
+    loops: &[Loop],
+) -> Ending {
     // next_task's own choice, as it will make it for a group done
-    match choose(feeding, Some(Status::Done), &[], next, loops) {
+    match choose(feeding, Some(Status::Done), &[], rounds, next, loops) {
         Choice::Paused => Ending::Paused(done),
-        Choice::Take { candidates, .. } => match candidates.into_iter().next() {
-            Some(next) => Ending::Next { done, next },
+        Choice::Round { candidates } => match candidates.into_iter().next() {
+            Some(next) => Ending::Next {
+                done,
+                next,
+                round: true,
+            },
             None => Ending::Finished(done),
         },
-        // a node done is never handed out again, and a group done waits on nothing
+        Choice::Take { candidates, .. } => match candidates.into_iter().next() {
+            Some(next) => Ending::Next {
+                done,
+                next,
+                round: false,
+            },
+            None => Ending::Finished(done),
+        },
+        // a node done is handed out again only for a round, and a group done waits on nothing
         Choice::Again(_) | Choice::Waiting(_) => Ending::Nothing,
     }
 }
@@ -507,15 +586,93 @@ pub async fn upcoming(
     done: NodeName,
     loops: &[Loop],
 ) -> anyhow::Result<Ending> {
-    // the ready work over the loop's plans, the queue's first
+    // the ready work over the loop's plans, the queue's first, and the rounds before it
     let next = next_for(client, feeding).await?;
+    let rounds = rounds_for(client, feeding).await?;
     // and the loops of its project, which hold what this one can't take
     let project: Vec<Loop> = loops
         .iter()
         .filter(|other| other.project == feeding.project)
         .cloned()
         .collect();
-    Ok(after(feeding, done, &next, &project))
+    Ok(after(feeding, done, &rounds, &next, &project))
+}
+
+/// The plans a loop takes work from: its one plan, or every plan of its project
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `feeding` - The loop
+async fn plans_of(client: &Client, feeding: &Loop) -> anyhow::Result<Vec<PlanName>> {
+    match &feeding.plan {
+        Some(plan) => Ok(vec![PlanName::new(
+            feeding.project.as_str(),
+            plan.as_str(),
+        )?]),
+        None => Ok(client
+            .plans(&feeding.project)
+            .await?
+            .into_iter()
+            .map(|info| info.name)
+            .collect()),
+    }
+}
+
+/// The done nodes of a loop's plans with a thread that wants an answer, in the order rounds
+/// take them: the loop's own group's first, then by each node's oldest such thread
+///
+/// A group, a node gone from its plan, and one not done are left out: a group can't be started,
+/// and a node to do or under way has its threads handed out with it.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `feeding` - The loop
+pub async fn rounds_for(client: &Client, feeding: &Loop) -> anyhow::Result<Vec<NodeName>> {
+    // each node with a thread that wants an answer, and when its oldest such thread was started
+    let mut wanting: Vec<(u64, NodeName)> = Vec::new();
+    for plan in plans_of(client, feeding).await? {
+        for thread in client.plan_threads(&plan).await? {
+            if !thread.wants_answer() {
+                continue;
+            }
+            let at = thread.comments.first().map_or(0, |comment| comment.at);
+            match wanting.iter_mut().find(|(_, node)| *node == thread.node) {
+                Some((oldest, _)) => *oldest = (*oldest).min(at),
+                None => wanting.push((at, thread.node.clone())),
+            }
+        }
+    }
+    if wanting.is_empty() {
+        return Ok(Vec::new());
+    }
+    // only nodes done, never a group, read once a plan
+    let mut listed: HashMap<PlanName, reef_api::Listing> = HashMap::new();
+    let mut done = Vec::new();
+    for (at, node) in wanting {
+        if !listed.contains_key(&node.plan) {
+            let listing = client.list(&node.plan).await?;
+            listed.insert(node.plan.clone(), listing);
+        }
+        let nodes = &listed[&node.plan].nodes;
+        let finished = nodes
+            .iter()
+            .any(|stored| stored.spec.id == node.id && stored.spec.status == Some(Status::Done));
+        let group = nodes
+            .iter()
+            .any(|stored| stored.spec.group.as_deref() == Some(node.id.as_str()));
+        if finished && !group {
+            done.push((at, node));
+        }
+    }
+    // the loop's own group's first, in its order, then the oldest thread's
+    let own: Vec<&NodeName> = feeding.group().collect();
+    done.sort_by_key(|(at, node)| {
+        let place = own.iter().position(|mine| *mine == node);
+        (place.is_none(), place, *at)
+    });
+    Ok(done.into_iter().map(|(_, node)| node).collect())
 }
 
 /// The ready work a loop takes from: its one plan's, or every plan's of its project
@@ -607,19 +764,30 @@ where
         .filter(|node| unfinished(stood(&statuses, node)))
         .collect();
     let next = next_for(client, &feeding).await?;
-    match choose(&feeding, held, &waiting, &next, &loops) {
+    let rounds = rounds_for(client, &feeding).await?;
+    match choose(&feeding, held, &waiting, &rounds, &next, &loops) {
         Choice::Again(node) => {
             // the node it is on, started here if it never was
             let mut started = Vec::new();
             started_here(client, cwd, &node, &mut started).await?;
             let status = held.unwrap_or_default();
+            // a round under way is handed out as its round again, since a clear may have lost it
+            if let Some(round) = Round::of(client, &checkout, &node).await? {
+                writeln!(
+                    out,
+                    "`{node}` is still this loop's, {}, for a round of its open comments: carry \
+                     on with it. A call before it is done hands it out again.\n",
+                    status.as_str()
+                )?;
+                return hand_out(client, &node, &next, &[], &started, Some(&round), out).await;
+            }
             writeln!(
                 out,
                 "`{node}` is still this loop's, {}: carry on with it. A call before it is done \
                  hands it out again.\n",
                 status.as_str()
             )?;
-            hand_out(client, &node, &next, &[], &started, out).await?;
+            hand_out(client, &node, &next, &[], &started, None, out).await?;
             members_stand(&feeding, &statuses, checkout.root(), out)
         }
         Choice::Waiting(on) => {
@@ -642,6 +810,37 @@ where
             )?;
             Ok(())
         }
+        Choice::Round { candidates } => {
+            // the last group's members back in this checkout first, since a round lets go of
+            // them, and its fix may go into a member's commit
+            let unmerged = unmerged(client, &checkout, &feeding).await?;
+            if !unmerged.is_empty() {
+                return merge_first(&feeding, &checkout, &unmerged, out);
+            }
+            let taking = Taking {
+                client,
+                cwd,
+                pane,
+                feeding: &feeding,
+                checkout: &checkout,
+                next: &next,
+                loops: &loops,
+            };
+            // a round taken is handed out, and else the ready work is taken as it would be
+            let mut passed = Vec::new();
+            if taking.round(candidates, &mut passed, out).await? {
+                return Ok(());
+            }
+            out.write_all(&passed)?;
+            let Choice::Take {
+                candidates,
+                elsewhere,
+            } = choose(&feeding, held, &waiting, &[], &next, &loops)
+            else {
+                return Ok(());
+            };
+            taking.take(candidates, elsewhere, &mut open, out).await
+        }
         Choice::Take {
             candidates,
             elsewhere,
@@ -656,7 +855,7 @@ where
                 cwd,
                 pane,
                 feeding: &feeding,
-                root: checkout.root(),
+                checkout: &checkout,
                 next: &next,
                 loops: &loops,
             };
@@ -675,8 +874,8 @@ struct Taking<'a> {
     pane: &'a Pane,
     /// The loop, as read
     feeding: &'a Loop,
-    /// The loop's checkout's root, which members' sessions are opened from
-    root: &'a Path,
+    /// The loop's checkout, whose root members' sessions are opened from
+    checkout: &'a Checkout,
     /// The ready work it takes from
     next: &'a Next,
     /// Every loop of the project
@@ -779,7 +978,8 @@ impl Taking<'_> {
     {
         let started = claimed(self.client, self.cwd, self.pane, node).await?;
         // each member's session opened beside the loop's, where reef can
-        let opened = open_members(held, self.root, open);
+        let root = self.checkout.root();
+        let opened = open_members(held, root, open);
         let beside = match held.members.len() {
             0 => String::new(),
             count => format!(
@@ -793,9 +993,363 @@ impl Taking<'_> {
              docs and needs, ask what you need to, and exit plan mode for approval.\n",
             self.pane.describe()
         )?;
-        hand_out(self.client, node, self.next, elsewhere, &started, out).await?;
-        group_said(&opened, self.root, out)
+        hand_out(self.client, node, self.next, elsewhere, &started, None, out).await?;
+        group_said(&opened, root, out)
     }
+
+    /// Holds the first of the done nodes no other loop holds again, alone, starts it again here
+    /// and marks it in progress, and hands it out for a round of its comments; or says why each
+    /// couldn't be, and that none was taken
+    ///
+    /// # Arguments
+    ///
+    /// * `candidates` - The done nodes with a thread that wants an answer, in the order to take
+    ///   them
+    /// * `passed` - Where to say why a candidate wasn't taken, printed only if none is
+    /// * `out` - Where to print the round taken
+    async fn round<W: Write>(
+        &self,
+        candidates: Vec<NodeName>,
+        passed: &mut Vec<u8>,
+        out: &mut W,
+    ) -> anyhow::Result<bool> {
+        for node in candidates {
+            // held alone, since a round is the loop's own session's to work
+            let hold = LoopEdit::Hold {
+                node: Some(node.clone()),
+                members: Vec::new(),
+            };
+            match edited(self.client, self.pane, hold).await? {
+                LoopEdited::Edited { .. } => {}
+                // another loop took it first, or it went from its plan, so the next is tried
+                LoopEdited::Held { .. }
+                | LoopEdited::NotInPlan { .. }
+                | LoopEdited::NotInLoop { .. } => continue,
+                LoopEdited::NoLoop { .. } => anyhow::bail!(
+                    "the loop in {} was stopped meanwhile, so nothing was taken",
+                    self.pane.describe()
+                ),
+                other => {
+                    anyhow::bail!(
+                        "the service answered {other:?} for the loop in {}",
+                        self.pane
+                    )
+                }
+            }
+            // started again here, or let go of again, saying why
+            let mut started = Vec::new();
+            if let Err(error) = restarted_here(self.client, self.cwd, &node, &mut started).await {
+                release(self.client, self.pane).await?;
+                writeln!(
+                    passed,
+                    "`{node}` has open comments, but couldn't be started again here for a round \
+                     of them, so the loop let go of it: {error:#}\n"
+                )?;
+                continue;
+            }
+            let Some(round) = Round::of(self.client, self.checkout, &node).await? else {
+                // its threads were answered meanwhile, so there is no round to work
+                writeln!(passed, "`{node}`'s comments were answered meanwhile.\n")?;
+                continue;
+            };
+            writeln!(
+                out,
+                "`{node}` is done, but {} of its comment threads {} an answer, so the loop in {} \
+                 took it again before any new node, for a round of them, started again here. Plan \
+                 the round now as you would a node: enter plan mode, read its threads and the \
+                 code they are on, ask what you need to, and exit plan mode for approval. Put the \
+                 steps that finish it, below, in your plan, since approving it may clear this \
+                 context.\n",
+                round.wanting.len(),
+                if round.wanting.len() == 1 {
+                    "wants"
+                } else {
+                    "want"
+                },
+                self.pane.describe()
+            )?;
+            hand_out(
+                self.client,
+                &node,
+                self.next,
+                &[],
+                &started,
+                Some(&round),
+                out,
+            )
+            .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+}
+
+/// A round of a node's comments: the threads that want an answer of it, and how its fix goes
+/// into its commit
+pub struct Round {
+    /// The numbers of its threads that want an answer
+    pub wanting: Vec<u32>,
+    /// How its fix goes into its commit
+    pub squash: Squash,
+}
+
+impl Round {
+    /// The round a node is worked for, if it has a thread that wants an answer and a sealed
+    /// revision, which a node worked before has
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The service's client
+    /// * `checkout` - The checkout the round is worked in
+    /// * `node` - The node
+    async fn of(
+        client: &Client,
+        checkout: &Checkout,
+        node: &NodeName,
+    ) -> anyhow::Result<Option<Round>> {
+        // the threads that want an answer of it
+        let threads = client.node_threads(node).await?;
+        let wanting: Vec<u32> = threads
+            .iter()
+            .filter(|thread| thread.wants_answer())
+            .map(|thread| thread.number)
+            .collect();
+        if wanting.is_empty() {
+            return Ok(None);
+        }
+        // a node with no sealed revision was never worked to its end, so it is no round
+        let revisions = client.revisions(node).await?;
+        if revisions.iter().all(|revision| revision.draft) {
+            return Ok(None);
+        }
+        let base = client
+            .work_of(node)
+            .await?
+            .and_then(|record| record.start.base_branch);
+        let squash = squash_target(checkout, &revisions, base.as_deref())?;
+        Ok(Some(Round { wanting, squash }))
+    }
+
+    /// The steps that finish the round, as next_task prints them
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The round's node
+    pub fn steps(&self, node: &NodeName) -> String {
+        // the trailer naming every thread that wants an answer
+        let numbers: Vec<String> = self.wanting.iter().map(u32::to_string).collect();
+        let trailer = format!("--trailer '{RESOLVES_TRAILER}: {}'", numbers.join(", "));
+        let mut steps = format!(
+            "How to finish the round:\n\
+             1. Fix what each thread asks. A thread that needs no change is resolved with reef's \
+             resolve tool, saying how it was answered; one you need the user's word on gets a \
+             question with the reply tool, and waits on them. Leave out of the trailer below any \
+             thread you didn't answer with the fix.\n\
+             2. Mark `{}` done, and its criteria, as the reef skill says.\n",
+            node.id
+        );
+        match &self.squash {
+            Squash::Into {
+                commit,
+                summary,
+                root,
+            } => {
+                let onto = match root {
+                    true => "--root".to_string(),
+                    false => format!("{commit}~1"),
+                };
+                steps.push_str(&format!(
+                    "3. Commit everything the round changed as a fixup of `{}`'s commit {} \
+                     (\"{summary}\"), naming the threads it answers:\n\
+                     \x20    git commit --fixup={commit} {trailer}\n\
+                     \x20  git's output should show reef's `resolved #N` line for each thread; \
+                     resolve any it doesn't with the resolve tool.\n\
+                     4. Squash it into that commit:\n\
+                     \x20    GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash --autostash \
+                     --rebase-merges {onto}\n\
+                     \x20  If the rebase stops for any reason, `git rebase --abort`, which leaves \
+                     the fixup commit for a later squash, and say so.\n\
+                     5. End the turn.\n",
+                    node.id,
+                    short(commit)
+                ));
+            }
+            Squash::Pushed {
+                commit,
+                summary,
+                remote,
+            } => steps.push_str(&format!(
+                "3. `{}`'s commit {} (\"{summary}\") is on `{remote}` already, so it isn't \
+                 rewritten: commit everything the round changed as a fixup of it, naming the \
+                 threads it answers, and leave it for a later `git rebase --autosquash`:\n\
+                 \x20    git commit --fixup={commit} {trailer}\n\
+                 \x20  git's output should show reef's `resolved #N` line for each thread; \
+                 resolve any it doesn't with the resolve tool.\n\
+                 4. End the turn.\n",
+                node.id,
+                short(commit)
+            )),
+            Squash::Unknown(why) => steps.push_str(&format!(
+                "3. {why}, so commit everything the round changed as a commit of its own, naming \
+                 the threads it answers with `{trailer}`. git's output should show reef's \
+                 `resolved #N` line for each thread; resolve any it doesn't with the resolve \
+                 tool.\n\
+                 4. End the turn.\n"
+            )),
+        }
+        steps
+    }
+}
+
+/// How a round's fix goes into its node's commit
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Squash {
+    /// The node's commit is in this checkout's history and on no remote, so the fix is squashed
+    /// into it
+    Into {
+        /// The commit's id
+        commit: String,
+        /// Its message's first line
+        summary: String,
+        /// Whether it has no parent, so the rebase starts at the root
+        root: bool,
+    },
+    /// The node's commit is on a remote branch, so the fix stays a fixup of its own, since a
+    /// rewrite would need a force-push
+    Pushed {
+        /// The commit's id
+        commit: String,
+        /// Its message's first line
+        summary: String,
+        /// The remote branch that holds it
+        remote: String,
+    },
+    /// No commit of the node's was found here, for this reason
+    Unknown(String),
+}
+
+/// Finds the commit a round's fix goes into: the newest commit of the node's oldest revision
+/// that read any, in HEAD's history apart from the base branch, by its id or, once rewritten, by
+/// the change it is
+///
+/// # Arguments
+///
+/// * `checkout` - The checkout the round is worked in
+/// * `revisions` - The node's revisions, oldest first
+/// * `base` - The base branch the node's record names, if it names one
+pub fn squash_target(
+    checkout: &Checkout,
+    revisions: &[Revision],
+    base: Option<&str>,
+) -> anyhow::Result<Squash> {
+    // the commit the node's first work ended on
+    let Some(first) = revisions
+        .iter()
+        .find(|revision| !revision.commits.is_empty())
+    else {
+        return Ok(Squash::Unknown(
+            "reef read no commit of the node's in any of its revisions: they were captured \
+             before reef read commits, or before it committed"
+                .to_string(),
+        ));
+    };
+    let Some(change) = first.commits.last() else {
+        return Ok(Squash::Unknown(
+            "its first revision read no commit".to_string(),
+        ));
+    };
+    let Some(head) = checkout.head()? else {
+        return Ok(Squash::Unknown("this checkout has no commit".to_string()));
+    };
+    // never anything the base branch holds, nor older than the node's work
+    let mut hidden: Vec<String> = Vec::new();
+    if let Some(branch) = base
+        && let Some(tip) = checkout.commit(branch)?
+        && let Some(meet) = checkout.merge_base(&head, &tip)?
+    {
+        hidden.push(meet);
+    }
+    hidden.extend(first.shas.merge_base.clone());
+    let hidden: Vec<&str> = hidden.iter().map(String::as_str).collect();
+    let Some(commit) = checkout.find_change(&head, &hidden, change)? else {
+        return Ok(Squash::Unknown(format!(
+            "the node's commit {} (\"{}\") isn't in this checkout's history apart from its base \
+             branch",
+            short(&change.commit),
+            change.summary
+        )));
+    };
+    // a commit a remote holds is never rewritten
+    let summary = change.summary.clone();
+    if let Some(remote) = checkout.on_remote(&commit)? {
+        let remote = remote
+            .strip_prefix("refs/remotes/")
+            .unwrap_or(&remote)
+            .to_string();
+        return Ok(Squash::Pushed {
+            commit,
+            summary,
+            remote,
+        });
+    }
+    let root = checkout.is_root(&commit)?;
+    Ok(Squash::Into {
+        commit,
+        summary,
+        root,
+    })
+}
+
+/// A commit's id cut to the length people read
+///
+/// # Arguments
+///
+/// * `commit` - The commit's full id
+fn short(commit: &str) -> &str {
+    commit.get(..10).unwrap_or(commit)
+}
+
+/// Lets go of everything a pane's loop holds
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `pane` - The pane whose loop to let go of its node
+async fn release(client: &Client, pane: &Pane) -> anyhow::Result<()> {
+    let hold = LoopEdit::Hold {
+        node: None,
+        members: Vec::new(),
+    };
+    edited(client, pane, hold).await?;
+    Ok(())
+}
+
+/// Starts a done node again in this checkout for a round of its comments, as `reef start
+/// --restart` does, sealing whatever draft its last start left, and marks it in progress
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, in the loop's checkout
+/// * `node` - The node's full name
+/// * `out` - Where to print what came of it
+async fn restarted_here<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    node: &NodeName,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // started again from here, or for the first time if it never was
+    let restart = client.work_of(node).await?.is_some();
+    let pick = PlanPick {
+        project: Pick {
+            project: Some(node.plan.project.clone()),
+        },
+        plan: Some(node.plan.plan.clone()),
+    };
+    start::start(client, cwd, &node.id, &pick, None, restart, out).await?;
+    // and in progress again, so its end is the round's
+    work::status(client, &node.plan, &node.id, Status::InProgress, out).await
 }
 
 /// How a member came to have a session, or how it can get one
@@ -1061,7 +1615,7 @@ async fn member_task<W: Write>(
         record.start.worktree.display(),
         record.start.branch.as_deref().unwrap_or("its own branch")
     )?;
-    hand_out(client, &node, &Next::default(), &[], &said, out).await
+    hand_out(client, &node, &Next::default(), &[], &said, None, out).await
 }
 
 /// The member a checkout's worktree is on, if it is one no pane joined
@@ -1203,8 +1757,9 @@ async fn started_here<W: Write>(
     start::start(client, cwd, &node.id, &pick, None, false, out).await
 }
 
-/// Prints a node handed out: the node as a node file, then the queue's entries passed over,
-/// the ready work another loop holds, and what its start printed
+/// Prints a node handed out: the node as a node file, its open comment threads, the steps that
+/// finish its round if it is taken for one, then the queue's entries passed over, the ready work
+/// another loop holds, and what its start printed
 ///
 /// # Arguments
 ///
@@ -1213,6 +1768,7 @@ async fn started_here<W: Write>(
 /// * `next` - The report it was chosen from
 /// * `elsewhere` - The ready work another loop holds, each with its pane
 /// * `started` - What starting it printed
+/// * `round` - The round of its comments it is taken for, if it is
 /// * `out` - Where to print it all
 async fn hand_out<W: Write>(
     client: &Client,
@@ -1220,10 +1776,23 @@ async fn hand_out<W: Write>(
     next: &Next,
     elsewhere: &[(NodeName, Pane)],
     started: &[u8],
+    round: Option<&Round>,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the node whole, as `reef node get --md` prints it
     node::get(client, &node.plan, &node.id, true, out).await?;
+    // its open threads, each whole
+    let mut threads = client.node_threads(node).await?;
+    threads.retain(Thread::is_open);
+    if !threads.is_empty() {
+        writeln!(out, "\nIts open comment threads ({}):\n", threads.len())?;
+        comment::show_threads(&threads, out)?;
+    }
+    // and how a round of them is finished
+    if let Some(round) = round {
+        writeln!(out)?;
+        write!(out, "{}", round.steps(node))?;
+    }
     // the queue's entries passed over, each with why
     if !next.skipped.is_empty() {
         writeln!(out, "\nSkipped in the queue ({}):", next.skipped.len())?;
@@ -1367,7 +1936,7 @@ mod tests {
         // to do or under way, C40 is handed out again, however much else is ready
         for status in [Status::Todo, Status::InProgress] {
             assert_eq!(
-                choose(&on, Some(status), &[], &next, &loops),
+                choose(&on, Some(status), &[], &[], &next, &loops),
                 Choice::Again(named("C40"))
             );
         }
@@ -1377,7 +1946,7 @@ mod tests {
             elsewhere: Vec::new(),
         };
         for held in [Some(Status::Done), Some(Status::Blocked), None] {
-            assert_eq!(choose(&on, held, &[], &next, &loops), take);
+            assert_eq!(choose(&on, held, &[], &[], &next, &loops), take);
         }
         // a paused loop keeps its node until it is done, then takes none
         let paused = Loop {
@@ -1385,11 +1954,11 @@ mod tests {
             ..on.clone()
         };
         assert_eq!(
-            choose(&paused, Some(Status::InProgress), &[], &next, &loops),
+            choose(&paused, Some(Status::InProgress), &[], &[], &next, &loops),
             Choice::Again(named("C40"))
         );
         assert_eq!(
-            choose(&paused, Some(Status::Done), &[], &next, &loops),
+            choose(&paused, Some(Status::Done), &[], &[], &next, &loops),
             Choice::Paused
         );
     }
@@ -1444,33 +2013,47 @@ mod tests {
             ..on.clone()
         };
         assert_eq!(
-            after(&paused, named("C40"), &next, std::slice::from_ref(&paused)),
+            after(
+                &paused,
+                named("C40"),
+                &[],
+                &next,
+                std::slice::from_ref(&paused)
+            ),
             Ending::Paused(named("C40"))
         );
         // nothing ready, or all of it another loop's, is the plan finished for this loop
         assert_eq!(
-            after(&on, named("C40"), &ready(&[]), std::slice::from_ref(&on)),
+            after(
+                &on,
+                named("C40"),
+                &[],
+                &ready(&[]),
+                std::slice::from_ref(&on)
+            ),
             Ending::Finished(named("C40"))
         );
         let there = looped(2, Some("C41"));
         let loops = [on.clone(), there];
         assert_eq!(
-            after(&on, named("C40"), &ready(&["C41"]), &loops),
+            after(&on, named("C40"), &[], &ready(&["C41"]), &loops),
             Ending::Finished(named("C40"))
         );
         // else the first ready node no other loop holds is next
         assert_eq!(
-            after(&on, named("C40"), &next, &loops),
+            after(&on, named("C40"), &[], &next, &loops),
             Ending::Next {
                 done: named("C40"),
-                next: named("C42")
+                next: named("C42"),
+                round: false,
             }
         );
         assert_eq!(
-            after(&on, named("C40"), &next, std::slice::from_ref(&on)),
+            after(&on, named("C40"), &[], &next, std::slice::from_ref(&on)),
             Ending::Next {
                 done: named("C40"),
-                next: named("C41")
+                next: named("C41"),
+                round: false,
             }
         );
         // and only an ending that acted says anything
@@ -1479,6 +2062,7 @@ mod tests {
         let told = Ending::Next {
             done: named("C40"),
             next: named("C41"),
+            round: false,
         };
         assert_eq!(
             told.message(false).as_deref(),
@@ -1496,6 +2080,7 @@ mod tests {
         let next = Ending::Next {
             done: named("C40"),
             next: named("C41"),
+            round: false,
         };
         assert_eq!(
             next.message(true).as_deref(),
@@ -1523,7 +2108,7 @@ mod tests {
         let here = looped(1, None);
         let there = looped(2, Some("C41"));
         let next = ready(&["C41", "C42"]);
-        let chosen = choose(&here, None, &[], &next, &[here.clone(), there.clone()]);
+        let chosen = choose(&here, None, &[], &[], &next, &[here.clone(), there.clone()]);
         assert_eq!(
             chosen,
             Choice::Take {
@@ -1537,7 +2122,7 @@ mod tests {
             ..looped(3, None)
         };
         assert_eq!(
-            choose(&other, None, &[], &next, std::slice::from_ref(&other)),
+            choose(&other, None, &[], &[], &next, std::slice::from_ref(&other)),
             Choice::Take {
                 candidates: Vec::new(),
                 elsewhere: Vec::new(),
@@ -1621,7 +2206,14 @@ mod tests {
         let loops = [wide.clone()];
         // its own done and C41 still under way, it waits on C41
         assert_eq!(
-            choose(&wide, Some(Status::Done), &[named("C41")], &next, &loops),
+            choose(
+                &wide,
+                Some(Status::Done),
+                &[named("C41")],
+                &[],
+                &next,
+                &loops
+            ),
             Choice::Waiting(vec![named("C41")])
         );
         // its own under way, it is handed out again whatever the members do
@@ -1630,6 +2222,7 @@ mod tests {
                 &wide,
                 Some(Status::InProgress),
                 &[named("C41")],
+                &[],
                 &next,
                 &loops
             ),
@@ -1637,7 +2230,7 @@ mod tests {
         );
         // all of it done, the ready work is taken in next's order
         assert_eq!(
-            choose(&wide, Some(Status::Done), &[], &next, &loops),
+            choose(&wide, Some(Status::Done), &[], &[], &next, &loops),
             Choice::Take {
                 candidates: vec![named("C42"), named("C43")],
                 elsewhere: Vec::new(),
@@ -1647,7 +2240,7 @@ mod tests {
         let here = looped(2, None);
         let both = [wide.clone(), here.clone()];
         assert_eq!(
-            choose(&here, None, &[], &ready(&["C41", "C42"]), &both),
+            choose(&here, None, &[], &[], &ready(&["C41", "C42"]), &both),
             Choice::Take {
                 candidates: vec![named("C42")],
                 elsewhere: vec![(named("C41"), wide.pane.clone())],
@@ -1655,10 +2248,11 @@ mod tests {
         );
         // and a group's end, all of it done, comes after as one node's would
         assert_eq!(
-            after(&wide, named("C40"), &next, &loops),
+            after(&wide, named("C40"), &[], &next, &loops),
             Ending::Next {
                 done: named("C40"),
-                next: named("C42")
+                next: named("C42"),
+                round: false,
             }
         );
     }
@@ -1685,5 +2279,108 @@ mod tests {
                 .unwrap()
                 .ends_with("this pane moves on once they are all done")
         );
+    }
+
+    /// A done node whose comments want an answer is taken again before any new node, unless the
+    /// loop is paused or another loop holds it, and the end of its round is acted on again
+    #[test]
+    fn a_round_of_comments_comes_before_any_new_node() {
+        // C40 done, its comments wanting an answer, and C41 ready
+        let on = looped(1, Some("C40"));
+        let next = ready(&["C41"]);
+        let loops = [on.clone()];
+        let round = |ids: &[&str]| Choice::Round {
+            candidates: ids.iter().map(|id| named(id)).collect(),
+        };
+        assert_eq!(
+            choose(&on, Some(Status::Done), &[], &[named("C40")], &next, &loops),
+            round(&["C40"])
+        );
+        // an older node's comments too, before any node, for a loop holding none as well
+        let none = looped(1, None);
+        let rounds = [named("C38"), named("C39")];
+        assert_eq!(
+            choose(
+                &none,
+                None,
+                &[],
+                &rounds,
+                &next,
+                std::slice::from_ref(&none)
+            ),
+            round(&["C38", "C39"])
+        );
+        // mid-node, the node it is on is handed out again, its threads with it
+        assert_eq!(
+            choose(&on, Some(Status::InProgress), &[], &rounds, &next, &loops),
+            Choice::Again(named("C40"))
+        );
+        // a paused loop stops at its node's end
+        let paused = Loop {
+            state: LoopState::Paused,
+            ..on.clone()
+        };
+        assert_eq!(
+            choose(&paused, Some(Status::Done), &[], &rounds, &next, &loops),
+            Choice::Paused
+        );
+        // a node another loop holds is that loop's round, never this one's
+        let there = looped(2, Some("C38"));
+        let both = [on.clone(), there];
+        assert_eq!(
+            choose(&on, Some(Status::Done), &[], &rounds, &next, &both),
+            round(&["C39"])
+        );
+        assert_eq!(
+            choose(&on, Some(Status::Done), &[], &[named("C38")], &next, &both),
+            Choice::Take {
+                candidates: vec![named("C41")],
+                elsewhere: Vec::new(),
+            }
+        );
+        // so after C40's end, its own round is next, and says so
+        let own = after(&on, named("C40"), &[named("C40")], &next, &loops);
+        assert_eq!(
+            own,
+            Ending::Next {
+                done: named("C40"),
+                next: named("C40"),
+                round: true,
+            }
+        );
+        assert_eq!(own.next(), Some((&named("C40"), true)));
+        assert_eq!(
+            own.message(false).as_deref(),
+            Some(
+                "`reef/central/C40` is done, and its open comments come next: `/clear`, then say \
+                 `next`"
+            )
+        );
+        let older = after(&on, named("C40"), &[named("C38")], &next, &loops);
+        assert_eq!(
+            older.message(true).as_deref(),
+            Some(
+                "`reef/central/C40` is done. `reef/central/C38`'s open comments come next: reef \
+                 clears the context and asks for them once Claude is idle and the input box is \
+                 empty"
+            )
+        );
+        // once its end was acted on, holding C40 again for its round clears that end, as the
+        // store's hold does, so the round's own end is acted on too
+        let done = [("C40", Status::Done)];
+        let acted = Loop {
+            acted: Some(named("C40")),
+            ..on.clone()
+        };
+        assert_eq!(judged(&acted, "C40", &done), GroupEnd::NotYet);
+        let again = Loop {
+            acted: None,
+            ..acted
+        };
+        assert_eq!(
+            judged(&again, "C40", &[("C40", Status::InProgress)]),
+            GroupEnd::NotYet
+        );
+        assert_eq!(judged(&again, "C40", &done), GroupEnd::Done(named("C40")));
     }
 }

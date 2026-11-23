@@ -16,7 +16,7 @@ use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::comment::{Resolves, TrailerRead};
+use crate::comment::{Resolves, ResolvingCommit, TrailerRead};
 use crate::revision::{FileDiff, Revision};
 
 /// Where a node's work happens and what it started from, as read from its own checkout
@@ -105,6 +105,10 @@ pub enum Started {
     Recorded {
         /// The node's record as it now stands
         record: WorkRecord,
+        /// The draft the record replaced left, sealed as it stood so no capture of the new start
+        /// writes over it, if it left one
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sealed: Option<u32>,
     },
     /// The node's record is not the one the start named, so nothing was written: it was started
     /// already, or started again since, or its record named is gone
@@ -136,6 +140,10 @@ pub struct AddCapture {
     /// its base branch doesn't hold
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolves: Vec<Resolves>,
+    /// The node's own commits since its start that its base branch doesn't hold, oldest first,
+    /// none of them a merge
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<ResolvingCommit>,
     /// Whether it only keeps the node's draft current, rather than sealing what it took, as a
     /// capture that doesn't say does
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -326,6 +334,7 @@ mod tests {
             conflicts: Vec::new(),
             files: Vec::new(),
             resolves: Vec::new(),
+            commits: Vec::new(),
             draft: false,
         };
         let json = serde_json::to_string(&add).unwrap();
