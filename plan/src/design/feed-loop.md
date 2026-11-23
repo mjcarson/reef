@@ -560,3 +560,28 @@ allowed each card as it showed.
   asked for nothing but Bash.
 - **Several plans confuse the tools.** In a project with two plans, status and accept refused a
   bare id, and Claude tried `live/allow` before `allow` ([C74](../milestones/m8.md)).
+
+### What C46 and C47 found
+
+Tried as C45 was, on the same scratch serve and repo: real Claude Code 2.1.330 with Sonnet 5.5 at
+low effort, a runner's loop started from the sessions panel, and a Playwright driver answering
+each card as it showed. Each node left a choice to the user. The driver picked a question's first
+option, rejected each node's first plan with feedback, and approved the next.
+
+- **Questions answered in the app.** On two nodes, Claude asked which greeting and which colour
+  as soon as it took the node. Each card showed the question with its choices, the first was
+  picked, and Claude carried on from it: *red, the colour you picked*. Each node was done and
+  committed for $0.11 to $0.12.
+- **Sonnet at low effort skipped plan mode** on all of them, going straight from the answer to the
+  work, so no plan came to approve. A runner started with `--permission-mode plan` starts each
+  session in plan mode, so every node's plan comes to the app before anything is written. There
+  next_task asks too, since plan mode asks for every write tool.
+- **A rejected plan came back revised.** Rejected with *write the welcome in capital letters
+  instead, and say so in the plan*, the plan came back 5 s later saying the file holds `HI`, *as
+  the user asked*. Approved, `welcome.txt` held `HI`, committed, for $0.15.
+- **A rejection a plan already meets comes back unchanged.** Rejected with *say which file the
+  change touches*, which its first step already did, Claude asked again with the same plan word
+  for word. The card now says when a plan is unchanged from the one asked before it.
+- **Nothing ready, nothing started.** After each pass's last node, the runner's session ended,
+  saying nothing else was ready, where before C47 the runner would have started a fresh session,
+  found nothing to take, and started another.

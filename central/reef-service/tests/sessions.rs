@@ -180,12 +180,13 @@ impl Stub {
         let var = |name: &str| std::env::var(name).ok();
         let pane = reef_api::Pane::from_env(var).expect("the runner names its pane");
         let client = reef::Client::new(&reef::Conf::load(None)?)?;
-        let loops = client.loops().await?;
-        let Some(node) = loops
-            .iter()
-            .find(|feeding| feeding.pane == pane)
-            .and_then(|feeding| feeding.node.clone())
-        else {
+        // the node next_task said it took, since a loop holds its last node done when none is ready
+        let took = taken
+            .lines()
+            .find_map(|line| line.strip_prefix("Took `"))
+            .and_then(|rest| rest.split('`').next())
+            .and_then(|name| name.parse::<reef_model::NodeName>().ok());
+        let Some(node) = took else {
             self.text("Nothing is ready to take.");
             return self.end();
         };
@@ -709,6 +710,96 @@ async fn an_answer_picked_in_the_app_reaches_the_session() -> anyhow::Result<()>
             if prompt == "ask-A" && answers["Which greeting for A?"] == "Hi")
     });
     assert!(answered, "the answer is in the transcript");
+    let _ = stop.send(());
+    runner.await??;
+    Ok(())
+}
+
+/// A plan rejected in the app with feedback comes back revised from it, as a prompt of its own,
+/// and once approved the session carries on to the node's end; each plan is rendered, and kept
+/// in the transcript in turn
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_plan_comes_back_revised() -> anyhow::Result<()> {
+    let sx = Sx::new("plan", &["A"], "plan").await?;
+    let (stop, runner) = sx.runner();
+    let session = sx
+        .session_when("the runner to attach", |session| {
+            session.state == SessionState::Idle
+        })
+        .await?;
+    sx.act(&session, SessionAct::Start).await?;
+    // the first plan, rendered for the app
+    let (session, first) = sx
+        .prompt_when("the first plan", |prompt| prompt.id == "plan-A-1")
+        .await?;
+    let PromptKind::Plan { plan, html } = &first.kind else {
+        panic!("a plan: {first:?}");
+    };
+    assert!(plan.starts_with("# Plan for A\n"), "{plan}");
+    assert!(html.contains("<h1"), "{html}");
+    // rejected with feedback, which the plan comes back revised from
+    let feedback = "Name the test that covers it.";
+    let reject = SessionAct::Answer {
+        prompt: first.id.clone(),
+        answer: Answer::Reject {
+            feedback: feedback.to_string(),
+        },
+    };
+    let acted = sx.act(&session, reject).await?;
+    assert!(matches!(acted, SessionActed::Ordered { .. }), "{acted:?}");
+    let (session, second) = sx
+        .prompt_when("the revised plan", |prompt| prompt.id == "plan-A-2")
+        .await?;
+    let PromptKind::Plan { plan, .. } = &second.kind else {
+        panic!("a plan: {second:?}");
+    };
+    assert!(
+        plan.contains("revised") && plan.contains(feedback),
+        "{plan}"
+    );
+    // approved, the session carries on to the node's end
+    let approve = SessionAct::Answer {
+        prompt: second.id.clone(),
+        answer: Answer::Approve,
+    };
+    sx.act(&session, approve).await?;
+    sx.session_when("the node's end", |session| {
+        session.state == SessionState::Idle
+    })
+    .await?;
+    assert!(sx.done("A").await?);
+    let transcript = sx.transcript().await?;
+    assert!(texts(&transcript).contains(&"Plan 2 was approved.".to_string()));
+    // each version kept in turn, each answer beside it
+    let plans: Vec<&str> = transcript
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Asked { prompt } => match &prompt.kind {
+                PromptKind::Plan { plan, .. } => Some(plan.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(plans.len(), 2, "{plans:?}");
+    let answers: Vec<&Answer> = transcript
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Answered { answer, .. } => Some(answer),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            &Answer::Reject {
+                feedback: feedback.to_string()
+            },
+            &Answer::Approve
+        ]
+    );
     let _ = stop.send(());
     runner.await??;
     Ok(())

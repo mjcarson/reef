@@ -186,6 +186,13 @@ code { font-size: 0.92em; }
 .reef-app-choice-text { overflow-wrap: anywhere; }
 .reef-app-own { font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.2rem 0.35rem; }
 .reef-app-entry-question { margin-left: 0.6rem; }
+.reef-app-plan-body { max-height: 26rem; overflow-y: auto; padding: 0.2rem 0.5rem; background: var(--panel); border-radius: 4px; white-space: normal; }
+.reef-app-plan-body h1 { font-size: 1.05rem; }
+.reef-app-plan-body h2 { font-size: 0.95rem; }
+.reef-app-entry.asked summary { cursor: pointer; }
+.reef-app-ended > summary { cursor: pointer; color: var(--muted); }
+.reef-app-unchanged { margin: 0; color: var(--reef-progress); font-size: 0.8rem; }
+.reef-app-ended > .reef-app-runners { margin-top: 0.3rem; opacity: 0.75; }
 "#;
 
 /// The app's pages, by path

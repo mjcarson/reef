@@ -328,7 +328,8 @@ reef loop run --permission-mode auto -- --model sonnet --effort low
 - **The repo is set up as for the terminal loop,** by `reef claude install`, since each session
   runs its `.mcp.json` and hooks. They find the runner's loop through `REEF_PANE`, which names
   its pane, `reef:<id>`. Nothing of the runner's own `CLAUDE*`, `ZELLIJ*` or `TMUX*` reaches them.
-- **One node at a time.** A loop on a runner's pane is one node wide.
+- **One node at a time.** A loop on a runner's pane is one node wide. Once nothing else is ready,
+  the runner ends its session and waits for the app to start the loop again.
 - **Every prompt waits for the app,** a tool's permission among them, since headless Claude Code
   starts in `default` mode unless `--permission-mode` says otherwise. Allow rules in the repo's
   settings still allow what they name.
@@ -365,7 +366,8 @@ the pages and the JSON API alike.
   pause and stop the loop, and a terminal's loops to read. The picked runner's transcript follows
   the project's stream, and each prompt it waits on is a card to answer, beside a box for a
   reply when Claude's turn ends mid-node. A question's card offers its choices and a box for the
-  user's own words.
+  user's own words, and a plan's shows the plan to approve, or to reject with feedback that
+  Claude plans again from.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under

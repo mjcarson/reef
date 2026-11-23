@@ -1307,6 +1307,45 @@ def c46_a_question_is_answered_in_the_app(page):
         stop_runner(process)
 
 
+def c47_a_rejected_plan_comes_back_revised(page):
+    """C47: a session's plan shows rendered, a rejection waits for feedback, the plan comes back
+    revised from it, and an approval carries the session on to the node's end."""
+    reef("plan", "new", "plans")
+    put("plans", node_yaml("P1", "P1 The planned one"))
+    process = runner("plans", "plan")
+    try:
+        open_sessions(page, "plans")
+        page.click(".reef-app-runner.picked button[data-act=start]")
+        card = ".reef-app-plan-card[data-prompt=plan-P1-1]"
+        page.wait_for_selector(card, timeout=20000)
+        heading = page.inner_text(f"{card} .reef-app-plan-body h1")
+        waits = page.is_disabled(f"{card} button[data-act=reject]")
+        page.fill(f"{card} textarea", "Name the test that covers it.")
+        page.screenshot(path=str(SHOTS / "reef-app-plan.png"))
+        page.click(f"{card} button[data-act=reject]")
+        # the plan again, revised from the feedback
+        card = ".reef-app-plan-card[data-prompt=plan-P1-2]"
+        page.wait_for_selector(card, timeout=20000)
+        revised = page.inner_text(f"{card} .reef-app-plan-body")
+        page.click(f"{card} button[data-act=approve]")
+        page.wait_for_function("() => document.querySelector('.reef-app-transcript').innerText"
+                               ".includes('Plan 2 was approved.')", timeout=20000)
+        page.wait_for_function("() => document.querySelector('.reef-app-runner.picked .reef-app-session-state')"
+                               ".innerText === 'idle'", timeout=20000)
+        kept = page.locator(".reef-app-entry.asked details").count()
+        said = page.inner_text(".reef-app-transcript")
+        check("C47 a rejected plan comes back revised, and an approved one carries on",
+              heading == "Plan for P1" and waits and "revised" in revised
+              and "Name the test that covers it." in revised and kept == 2
+              and "Answered: rejected: Name the test that covers it." in said
+              and "Answered: approved" in said and "nothing else is ready to take" in said
+              and "status: done" in reef("node", "get", "P1", "--plan", "plans"),
+              {"heading": heading, "reject waits for feedback": waits, "revised": revised, "plans kept": kept,
+               "said": said[-500:]})
+    finally:
+        stop_runner(process)
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -1361,6 +1400,7 @@ def main():
                 c56_drafts_in_the_sidebar,
                 c45_a_loop_started_from_the_app_streams_its_transcript,
                 c46_a_question_is_answered_in_the_app,
+                c47_a_rejected_plan_comes_back_revised,
             ]
             for step in checks:
                 # every check, or those `--only` names

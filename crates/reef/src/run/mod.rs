@@ -33,6 +33,8 @@ use std::time::Duration;
 use crate::clear::KICKOFF;
 use crate::cli::{self, PlanPick};
 use crate::client::Client;
+use crate::loops::between;
+use crate::task::{Ending, upcoming};
 use drive::{Claude, Line, Spawn};
 use transcript::Read;
 
@@ -103,15 +105,18 @@ pub enum Step {
 /// - **A turn under way:** it lets the turn go on.
 /// - **No session:** a running loop gets one when the runner attaches or is woken, never when a
 ///   session just ended, so a session that keeps failing can't spin it. A paused one waits.
-/// - **A turn ended:** between nodes, the next node starts in a fresh session. Paused with its
-///   node done, the session ends. Holding nothing, which next_task took nothing for, it ends,
-///   unless the app has just asked again. Mid-node, it waits for the user's reply.
+/// - **A turn ended:** between nodes, the next node starts in a fresh session, if one comes.
+///   With nothing ready after the node done, or paused with it done, the session ends. Holding
+///   nothing, which next_task took nothing for, it ends, unless the app has just asked again.
+///   Mid-node, it waits for the user's reply.
 ///
 /// # Arguments
 ///
 /// * `feeding` - The runner's loop, if it has one
 /// * `proc` - Where its Claude stands
 /// * `why` - What made it look
+/// * `coming` - Whether a node, or a round of one's comments, comes after the node its loop holds
+///   done, as next_task would take it
 ///
 /// # Examples
 ///
@@ -119,10 +124,10 @@ pub enum Step {
 /// use reef::run::{Proc, Step, Why, decide};
 /// use reef_api::SessionState;
 ///
-/// assert_eq!(decide(None, Proc::Idle, Why::TurnEnded), Step::End(SessionState::Idle));
-/// assert_eq!(decide(None, Proc::None, Why::Woken), Step::Stay(SessionState::Idle));
+/// assert_eq!(decide(None, Proc::Idle, Why::TurnEnded, false), Step::End(SessionState::Idle));
+/// assert_eq!(decide(None, Proc::None, Why::Woken, false), Step::Stay(SessionState::Idle));
 /// ```
-pub fn decide(feeding: Option<&Loop>, proc: Proc, why: Why) -> Step {
+pub fn decide(feeding: Option<&Loop>, proc: Proc, why: Why, coming: bool) -> Step {
     // a stopped loop, or none started, has no session
     let Some(feeding) = feeding else {
         return match proc {
@@ -144,7 +149,8 @@ pub fn decide(feeding: Option<&Loop>, proc: Proc, why: Why) -> Step {
         },
         // a turn ended: the next node, a pause, nothing taken, or a reply awaited
         Proc::Idle if done && paused => Step::End(SessionState::Paused),
-        Proc::Idle if done => Step::Restart,
+        Proc::Idle if done && coming => Step::Restart,
+        Proc::Idle if done => Step::End(SessionState::Idle),
         Proc::Idle if feeding.node.is_none() => match why {
             Why::Woken => Step::Restart,
             _ => Step::End(SessionState::Idle),
@@ -357,7 +363,16 @@ impl<W: Write> Runner<'_, W> {
         // its own pane's loop, if it has one
         let loops = self.client.loops().await?;
         let feeding = loops.iter().find(|feeding| feeding.pane == self.spawn.pane);
-        match decide(feeding, self.proc, why) {
+        // and whether anything comes after a node it holds done, as the Stop hook asks
+        let done = feeding.and_then(|feeding| between(feeding).map(|done| (feeding, done)));
+        let coming = match done {
+            Some((feeding, done)) => matches!(
+                upcoming(self.client, feeding, done, &loops).await?,
+                Ending::Next { .. }
+            ),
+            None => false,
+        };
+        match decide(feeding, self.proc, why, coming) {
             Step::Stay(state) => self.stand(state),
             Step::Spawn => self.start_session().await?,
             Step::Restart => {
@@ -373,8 +388,11 @@ impl<W: Write> Runner<'_, W> {
                 self.start_session().await?;
             }
             Step::End(state) => {
-                let said = match state {
-                    SessionState::Paused => "the loop is paused, so the session ends here",
+                // a pause, nothing ready after the node done, or no node at all
+                let finished = feeding.is_some_and(|feeding| between(feeding).is_some());
+                let said = match (state, finished) {
+                    (SessionState::Paused, _) => "the loop is paused, so the session ends here",
+                    (_, true) => "nothing else is ready to take, so the session ends here",
                     _ => "the session ends, with no node to work",
                 };
                 self.note(EntryKind::Note {
@@ -774,8 +792,9 @@ mod tests {
         }
     }
 
-    /// The runner starts a session only when asked, moves on between nodes, ends at a pause or
-    /// with nothing taken, waits mid-node, and never spins on a session that just ended
+    /// The runner starts a session only when asked, moves on between nodes while a node comes,
+    /// ends at a pause, with nothing after the node done or with nothing taken, waits mid-node,
+    /// and never spins on a session that just ended
     #[test]
     fn the_runner_follows_its_loop() {
         let running = LoopState::Running;
@@ -787,48 +806,59 @@ mod tests {
         let paused_mid = looped(paused, Some("C45"), false);
         // a session for a running loop when the runner attaches or is woken, and not after one
         // ended of its own accord
-        assert_eq!(decide(Some(&started), Proc::None, Why::Woken), Step::Spawn);
-        assert_eq!(decide(Some(&mid), Proc::None, Why::Attached), Step::Spawn);
         assert_eq!(
-            decide(Some(&mid), Proc::None, Why::Exited),
+            decide(Some(&started), Proc::None, Why::Woken, false),
+            Step::Spawn
+        );
+        assert_eq!(
+            decide(Some(&mid), Proc::None, Why::Attached, false),
+            Step::Spawn
+        );
+        assert_eq!(
+            decide(Some(&mid), Proc::None, Why::Exited, false),
             Step::Stay(SessionState::Idle)
         );
         assert_eq!(
-            decide(Some(&paused_done), Proc::None, Why::Woken),
+            decide(Some(&paused_done), Proc::None, Why::Woken, true),
             Step::Stay(SessionState::Paused)
         );
         // a turn under way goes on, unless its loop is gone
         assert_eq!(
-            decide(Some(&between), Proc::Busy, Why::Woken),
+            decide(Some(&between), Proc::Busy, Why::Woken, true),
             Step::Stay(SessionState::Working)
         );
         assert_eq!(
-            decide(None, Proc::Busy, Why::Woken),
+            decide(None, Proc::Busy, Why::Woken, false),
             Step::End(SessionState::Idle)
         );
         // at a turn's end: the next node, a pause, nothing taken, or a reply awaited
         assert_eq!(
-            decide(Some(&between), Proc::Idle, Why::TurnEnded),
+            decide(Some(&between), Proc::Idle, Why::TurnEnded, true),
             Step::Restart
         );
+        // and with nothing after it, the session ends rather than start one that takes nothing
         assert_eq!(
-            decide(Some(&paused_done), Proc::Idle, Why::TurnEnded),
-            Step::End(SessionState::Paused)
-        );
-        assert_eq!(
-            decide(Some(&started), Proc::Idle, Why::TurnEnded),
+            decide(Some(&between), Proc::Idle, Why::TurnEnded, false),
             Step::End(SessionState::Idle)
         );
         assert_eq!(
-            decide(Some(&started), Proc::Idle, Why::Woken),
+            decide(Some(&paused_done), Proc::Idle, Why::TurnEnded, true),
+            Step::End(SessionState::Paused)
+        );
+        assert_eq!(
+            decide(Some(&started), Proc::Idle, Why::TurnEnded, false),
+            Step::End(SessionState::Idle)
+        );
+        assert_eq!(
+            decide(Some(&started), Proc::Idle, Why::Woken, false),
             Step::Restart
         );
         assert_eq!(
-            decide(Some(&mid), Proc::Idle, Why::TurnEnded),
+            decide(Some(&mid), Proc::Idle, Why::TurnEnded, false),
             Step::Stay(SessionState::Waiting)
         );
         assert_eq!(
-            decide(Some(&paused_mid), Proc::Idle, Why::Woken),
+            decide(Some(&paused_mid), Proc::Idle, Why::Woken, false),
             Step::Stay(SessionState::Waiting)
         );
     }

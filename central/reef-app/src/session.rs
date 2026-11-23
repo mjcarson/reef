@@ -10,7 +10,8 @@
 //!   held, and follows the end as they come.
 //! - **Each prompt a card.** A tool's permission is allowed, or denied with what Claude is told.
 //!   A question shows each of Claude's questions with its choices, one or several picked, or an
-//!   answer in the user's own words, sent as Claude Code's own dialog sends them.
+//!   answer in the user's own words, sent as Claude Code's own dialog sends them. A plan shows
+//!   as the service rendered it, to approve, or to reject with feedback Claude plans again from.
 //! - **A runner's loop is started, paused and stopped here,** as `reef loop start`, `pause` and
 //!   `stop` do a terminal's. A terminal's loops are listed beside, to read.
 
@@ -191,6 +192,7 @@ pub fn SessionPanel() -> Element {
                 .filter(|feeding| !feeding.pane.runs())
                 .cloned()
                 .collect();
+            // each runner beside its loop: the live ones, and those that let go or went silent
             let rows: Vec<(Session, Option<Loop>)> = listing
                 .sessions
                 .iter()
@@ -199,22 +201,31 @@ pub fn SessionPanel() -> Element {
                     (session.clone(), feeding.cloned())
                 })
                 .collect();
+            let (live, ended): (Vec<_>, Vec<_>) =
+                rows.into_iter().partition(|(session, _)| session.live());
+            let row = |(session, feeding): (Session, Option<Loop>)| {
+                rsx! {
+                    RunnerRow {
+                        key: "{session.id}",
+                        picked: picked.as_deref() == Some(session.id.as_str()),
+                        session,
+                        feeding,
+                    }
+                }
+            };
             rsx! {
-                if rows.is_empty() {
+                if live.is_empty() {
                     p { class: "reef-app-muted",
                         "No runner is attached. Run "
                         code { "reef loop run" }
                         " in the project's repo to attach one."
                     }
                 }
-                ul { class: "reef-app-runners",
-                    for (session , feeding) in rows {
-                        RunnerRow {
-                            key: "{session.id}",
-                            picked: picked.as_deref() == Some(session.id.as_str()),
-                            session,
-                            feeding,
-                        }
+                ul { class: "reef-app-runners", {live.into_iter().map(row)} }
+                if !ended.is_empty() {
+                    details { class: "reef-app-ended",
+                        summary { "Ended ({ended.len()})" }
+                        ul { class: "reef-app-runners", {ended.into_iter().map(row)} }
                     }
                 }
                 if !terminals.is_empty() {
@@ -439,7 +450,12 @@ pub fn SessionView(id: String) -> Element {
             if let Some(shown) = &shown {
                 if shown.live() {
                     for prompt in shown.prompts.iter().cloned() {
-                        PromptCard { key: "{prompt.id}", session: id.clone(), prompt }
+                        PromptCard {
+                            key: "{prompt.id}",
+                            session: id.clone(),
+                            unchanged: unchanged(&held, &prompt),
+                            prompt,
+                        }
                     }
                     if shown.state == SessionState::Waiting {
                         ReplyBox { session: id.clone() }
@@ -520,6 +536,13 @@ fn entry_body(kind: &EntryKind) -> Element {
                     }
                 }
             },
+            // a plan kept as it was asked, each version of it in turn
+            PromptKind::Plan { html, .. } => rsx! {
+                details {
+                    summary { "Asked: Claude's plan, for approval" }
+                    div { class: "reef-app-plan-body reef-app-comment-body", dangerous_inner_html: "{html}" }
+                }
+            },
             _ => rsx! { "Asked: {prompt_line(prompt)}" },
         },
         EntryKind::Answered { answer, .. } => rsx! { "Answered: {answer.describe()}" },
@@ -551,18 +574,45 @@ fn choices_line(question: &Question) -> String {
     labels.join(" · ")
 }
 
+/// Whether a plan prompt asks for the same plan as the one asked before it, as when Claude asks
+/// again after a rejection without changing a word
+///
+/// # Arguments
+///
+/// * `entries` - The transcript held
+/// * `prompt` - The prompt
+pub fn unchanged(entries: &[Entry], prompt: &Prompt) -> bool {
+    let PromptKind::Plan { plan, .. } = &prompt.kind else {
+        return false;
+    };
+    // the last plan asked before this one
+    let before = entries.iter().rev().find_map(|entry| match &entry.kind {
+        EntryKind::Asked { prompt: asked } if asked.id != prompt.id => match &asked.kind {
+            PromptKind::Plan { plan, .. } => Some(plan),
+            _ => None,
+        },
+        _ => None,
+    });
+    before.is_some_and(|before| before.trim() == plan.trim())
+}
+
 /// A prompt's card: what it asks, and the buttons that answer it
 ///
 /// # Arguments
 ///
 /// * `session` - The session's id
 /// * `prompt` - The prompt
+/// * `unchanged` - Whether it is a plan asked again word for word
 #[component]
-fn PromptCard(session: String, prompt: Prompt) -> Element {
+fn PromptCard(session: String, prompt: Prompt, unchanged: bool) -> Element {
     match prompt.kind.clone() {
         // a question, answered by its choices or the user's own words
         PromptKind::Question { questions } => rsx! {
             QuestionCard { session, prompt, questions }
+        },
+        // a plan, approved or rejected with feedback
+        PromptKind::Plan { html, .. } => rsx! {
+            PlanCard { session, prompt, html, unchanged }
         },
         // anything else, allowed or denied
         _ => rsx! {
@@ -752,6 +802,79 @@ fn QuestionCard(session: String, prompt: Prompt, questions: Vec<Question>) -> El
     }
 }
 
+/// A plan's card: the plan as the service rendered it, to approve, or to reject with feedback
+/// that Claude plans again from
+///
+/// # Arguments
+///
+/// * `session` - The session's id
+/// * `prompt` - The prompt
+/// * `html` - The plan as HTML, raw HTML in it escaped
+/// * `unchanged` - Whether it is the plan asked before, word for word
+#[component]
+fn PlanCard(session: String, prompt: Prompt, html: String, unchanged: bool) -> Element {
+    let runners = use_context::<Runners>();
+    let mut feedback = use_signal(String::new);
+    let mut sent = use_signal(|| false);
+    let unsaid = feedback.read().trim().is_empty();
+    // answered once: approved as it is, or rejected with what to change
+    let answer = {
+        let (session, id) = (session.clone(), prompt.id.clone());
+        move |approve: bool| {
+            let (session, id) = (session.clone(), id.clone());
+            move |_| {
+                sent.set(true);
+                let answer = match approve {
+                    true => Answer::Approve,
+                    false => Answer::Reject {
+                        feedback: feedback.peek().trim().to_string(),
+                    },
+                };
+                runners.act(
+                    session.clone(),
+                    SessionAct::Answer {
+                        prompt: id.clone(),
+                        answer,
+                    },
+                );
+            }
+        }
+    };
+    rsx! {
+        div { class: "reef-app-prompt reef-app-plan-card", "data-prompt": "{prompt.id}",
+            p { class: "reef-app-prompt-head", "Claude's plan, for approval" }
+            if unchanged {
+                p { class: "reef-app-unchanged", "Unchanged from the plan asked before it." }
+            }
+            div { class: "reef-app-plan-body reef-app-comment-body", dangerous_inner_html: "{html}" }
+            textarea {
+                class: "reef-app-compose",
+                placeholder: "What to change, to reject it with: Claude plans again from it",
+                rows: "3",
+                value: "{feedback}",
+                oninput: move |event| feedback.set(event.value()),
+            }
+            div { class: "reef-app-actions",
+                button {
+                    class: "reef-button",
+                    "data-act": "approve",
+                    disabled: *sent.read(),
+                    onclick: answer(true),
+                    "Approve"
+                }
+                button {
+                    class: "reef-button",
+                    "data-act": "reject",
+                    disabled: unsaid || *sent.read(),
+                    title: "Claude plans again from what you write",
+                    onclick: answer(false),
+                    "Reject with feedback"
+                }
+            }
+        }
+    }
+}
+
 /// A card that allows what a prompt asks, or denies it with what Claude is told
 ///
 /// # Arguments
@@ -832,5 +955,66 @@ fn ReplyBox(session: String) -> Element {
                 button { class: "reef-button", "data-act": "reply", disabled: empty, onclick: send, "Reply" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unchanged;
+    use reef_api::{Answer, Entry, EntryKind, Prompt, PromptKind};
+
+    /// A plan prompt, by its id and text
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The prompt's id
+    /// * `plan` - The plan's markdown
+    fn plan(id: &str, plan: &str) -> Prompt {
+        Prompt {
+            id: id.to_string(),
+            kind: PromptKind::Plan {
+                plan: plan.to_string(),
+                html: String::new(),
+            },
+        }
+    }
+
+    /// An entry raising a prompt
+    ///
+    /// # Arguments
+    ///
+    /// * `prompt` - The prompt
+    fn asked(prompt: Prompt) -> Entry {
+        Entry {
+            at: 0,
+            kind: EntryKind::Asked { prompt },
+        }
+    }
+
+    /// A plan asked again word for word after a rejection is marked unchanged, and a revised one,
+    /// or the first, isn't
+    #[test]
+    fn a_plan_asked_again_unchanged_is_marked() {
+        let first = plan("p1", "# Plan\n\nWrite it.");
+        let rejected = Entry {
+            at: 1,
+            kind: EntryKind::Answered {
+                prompt: "p1".to_string(),
+                answer: Answer::Reject {
+                    feedback: "In capitals.".to_string(),
+                },
+            },
+        };
+        // the first plan has nothing before it
+        let entries = vec![asked(first.clone())];
+        assert!(!unchanged(&entries, &first));
+        // the same text asked again is unchanged, whatever its trailing space
+        let again = plan("p2", "# Plan\n\nWrite it.\n");
+        let entries = vec![asked(first.clone()), rejected.clone(), asked(again.clone())];
+        assert!(unchanged(&entries, &again));
+        // a revised one isn't
+        let revised = plan("p3", "# Plan\n\nWrite it in capitals.");
+        let entries = vec![asked(first), rejected, asked(revised.clone())];
+        assert!(!unchanged(&entries, &revised));
     }
 }

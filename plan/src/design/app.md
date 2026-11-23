@@ -320,3 +320,10 @@ the session waits on ([C45](../milestones/m9.md)).
   and sends each keyed by its question's text, several picks joined by `, ` in the order
   offered, as Claude Code's own dialog sends them. *Don't answer* tells Claude the user chose
   not to. The transcript keeps each question with its choices, and the answer given.
+- **A plan to approve, or to reject with feedback** ([C47](../milestones/m9.md)). The plan shows as the
+  service rendered it, raw HTML escaped as a comment's body is. *Approve* lets ExitPlanMode run.
+  *Reject with feedback* waits for what to change, and denies ExitPlanMode with it, which Claude
+  plans again from and asks again, so the revised plan comes back as a card of its own. The
+  transcript keeps each version of the plan, folded, beside the answer it got.
+- **Ended runners folded away.** The live runners come first; one that let go or went silent is
+  listed under *Ended*, still there to read its transcript.
