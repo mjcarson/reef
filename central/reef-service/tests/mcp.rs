@@ -11,6 +11,8 @@ mod common;
 use reef::Conf;
 use reef::cli::PlanPick;
 use reef::mcp::{self, Tools};
+use reef_api::{EditLoop, LoopEdit, Pane, Place, QueueEdit};
+use reef_model::PlanName;
 use reef_service::MemoryBackend;
 use serde_json::{Value, json};
 use tokio::io::{
@@ -39,11 +41,19 @@ impl Session {
     ///
     /// * `ax` - The served service, whose plan the tools work in
     async fn open(ax: &Ax<MemoryBackend>) -> anyhow::Result<Session> {
+        Session::open_in(ax, None).await
+    }
+
+    /// Starts the server over a pipe in a session's pane, and shakes hands with it
+    ///
+    /// # Arguments
+    ///
+    /// * `ax` - The served service, whose plan the tools work in
+    /// * `pane` - The pane the session runs in, whose loop next_task takes nodes for
+    async fn open_in(ax: &Ax<MemoryBackend>, pane: Option<Pane>) -> anyhow::Result<Session> {
         // the tools over a client of the served twin, started in the plan's repo
-        let mut conf = Conf::default();
-        conf.api.address = ax.address;
-        let client = reef::Client::new(&conf)?;
-        let tools = Tools::new(client, ax.repo.clone(), PlanPick::default());
+        let client = client_of(ax)?;
+        let tools = Tools::new(client, ax.repo.clone(), PlanPick::default()).in_pane(pane);
         // served over one end of a pipe, the session holding the other
         let (ours, theirs) = tokio::io::duplex(1 << 16);
         let (reader, writer) = tokio::io::split(theirs);
@@ -126,6 +136,18 @@ impl Session {
     }
 }
 
+/// The CLI's client of a served twin, as the MCP server holds one
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+fn client_of(ax: &Ax<MemoryBackend>) -> anyhow::Result<reef::Client> {
+    // a config naming the twin's port, and nothing else
+    let mut conf = Conf::default();
+    conf.api.address = ax.address;
+    reef::Client::new(&conf)
+}
+
 /// Exactly the tools that only read say so, the tools say what the CLI does, and a put that
 /// breaks the plan comes back as a tool error with check's message
 #[tokio::test]
@@ -151,6 +173,7 @@ async fn read_only_tools_say_so_and_writes_say_why_they_fail() -> anyhow::Result
         ("check", true),
         ("get", true),
         ("next", true),
+        ("next_task", false),
         ("put", false),
         ("status", false),
     ];
@@ -202,6 +225,117 @@ async fn read_only_tools_say_so_and_writes_say_why_they_fail() -> anyhow::Result
     assert!(
         refused.contains("`C1` has 0 acceptance criteria"),
         "{refused}"
+    );
+    Ok(())
+}
+
+/// next_task takes the queue's first ready node and starts it, passing over a waiting entry and
+/// saying why; hands the same node out again until it is done; never hands two loops one node;
+/// and says what everything waits on once nothing is left to take
+#[tokio::test]
+async fn next_task_skips_a_waiting_queued_node_and_says_why() -> anyhow::Result<()> {
+    // a twin with `reef/central` listed, and a session in a Claude Code process of its own
+    let ax = common::Fx::memory("mcp-next-task").await?.api().await?;
+    let client = client_of(&ax)?;
+    let here = Pane::Claude { pid: 4242 };
+    let there = Pane::Claude { pid: 4243 };
+    let mut first = Session::open_in(&ax, Some(here.clone())).await?;
+    // A, then B that needs A, then C
+    for (id, needs) in [("A", ""), ("B", "needs: [A]\n"), ("C", "")] {
+        let yaml = format!(
+            "id: {id}\ntitle: {id} Some work\n{needs}description:\n  why: Without {id}, \
+             something is missing.\n  what: With {id}, it is there.\n"
+        );
+        let (put, failed) = first.call("put", json!({"yaml": yaml})).await?;
+        assert!(!failed, "{put}");
+    }
+    // B queued ahead of C, and A not at all
+    let plan = PlanName::new("reef", "central")?;
+    for id in ["B", "C"] {
+        let add = QueueEdit::Add {
+            node: plan.node(id)?,
+            at: Place::Bottom,
+        };
+        client.edit_queue("reef", &add).await?;
+    }
+    // with no loop in the pane, it is refused, saying how to start one
+    let (refused, failed) = first.call("next_task", json!({})).await?;
+    assert!(failed, "{refused}");
+    assert!(refused.contains("`! reef loop start`"), "{refused}");
+    // a loop in each of two panes, over every plan of `reef`
+    for pane in [&here, &there] {
+        let start = EditLoop {
+            pane: pane.clone(),
+            edit: LoopEdit::Start {
+                project: "reef".to_string(),
+                plan: None,
+                session: None,
+            },
+        };
+        client.edit_loop(&start).await?;
+    }
+    // the first takes C, the queue's first ready entry, passing over B and saying why
+    let (took, failed) = first.call("next_task", json!({})).await?;
+    assert!(!failed, "{took}");
+    assert!(
+        took.starts_with("Took `reef/central/C` for the loop in Claude Code process 4242."),
+        "{took}"
+    );
+    assert!(took.contains("\n# version: 2\nid: C\n"), "{took}");
+    assert!(
+        took.contains(
+            "Skipped in the queue (1):\n  reef/central/B  B Some work\n      needs A (todo)\n"
+        ),
+        "{took}"
+    );
+    // and starts it here, in progress
+    assert!(took.contains("started `C` in "), "{took}");
+    assert!(took.contains("`C` is in-progress, at version 2"), "{took}");
+    assert!(client.work_of(&plan.node("C")?).await?.is_some());
+    // a second call before it is done hands out C again, starting nothing
+    let (again, failed) = first.call("next_task", json!({})).await?;
+    assert!(!failed, "{again}");
+    assert!(
+        again.starts_with("`reef/central/C` is still this loop's, in-progress: carry on"),
+        "{again}"
+    );
+    assert!(!again.contains("started `C`"), "{again}");
+    // the other loop never takes C, and takes A, the rest of the ready work in plan order
+    let mut second = Session::open_in(&ax, Some(there.clone())).await?;
+    let (other, failed) = second.call("next_task", json!({})).await?;
+    assert!(!failed, "{other}");
+    assert!(
+        other.starts_with("Took `reef/central/A` for the loop in Claude Code process 4243."),
+        "{other}"
+    );
+    // with C done, the first has nothing to take: A is the other loop's, and B waits on it
+    let (done, failed) = first
+        .call("status", json!({"id": "C", "status": "done"}))
+        .await?;
+    assert!(!failed, "{done}");
+    let (nothing, failed) = first.call("next_task", json!({})).await?;
+    assert!(!failed, "{nothing}");
+    assert!(
+        nothing.starts_with(
+            "Nothing is ready to take for the loop in Claude Code process 4242.\n\nHeld by \
+             other loops (1):\n  reef/central/A  by the loop in Claude Code process 4243\n"
+        ),
+        "{nothing}"
+    );
+    assert!(nothing.contains("Skipped in the queue (1):"), "{nothing}");
+    assert!(nothing.contains("needs A (in-progress)"), "{nothing}");
+    // and the loops say which node each holds
+    let loops = client.project_loops("reef").await?;
+    let held: Vec<(Pane, Option<String>)> = loops
+        .into_iter()
+        .map(|feeding| (feeding.pane, feeding.node.map(|node| node.id)))
+        .collect();
+    assert_eq!(
+        held,
+        [
+            (here, Some("C".to_string())),
+            (there, Some("A".to_string()))
+        ]
     );
     Ok(())
 }

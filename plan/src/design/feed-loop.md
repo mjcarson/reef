@@ -13,8 +13,9 @@ the next.
 The loop runs in the user's own interactive Claude Code session, so questions and approvals stay
 where they are today:
 
-1. **next_task** (an MCP tool) claims the next node, marking it in progress, and returns its why,
-   what, acceptance, docs and needs. If open comments are waiting, it returns those first.
+1. **next_task** (an MCP tool) claims the next node, records its start and marks it in progress,
+   and returns its why, what, acceptance, docs and needs. If open comments are waiting, it
+   returns those first.
 2. **Claude enters plan mode** itself, with its EnterPlanMode tool, and plans the node.
 3. **The user answers Claude's questions** (AskUserQuestion) and **approves the plan**
    (ExitPlanMode), in the terminal.
@@ -43,7 +44,10 @@ where they are today:
 - **Without a multiplexer, the user types `/clear`.** The Stop hook's message says which node is
   next, and SessionStart(clear) names it to Claude, so any short prompt after the clear starts
   it.
-- **next_task marks the node in progress,** before plan mode, since plan mode stops writes.
+- **next_task starts the node,** before plan mode, since plan mode stops writes. It records the
+  start in the session's checkout as `reef start` does, so the node's changes are captured as its
+  own, and marks it in progress ([C40](../milestones/m8.md)). A call before the node is done hands out the
+  same node, and a pane with no loop is refused, since starting a loop is the user's to do.
 - **The hook acts once per finished node.** It records the node whose end it acted on, and never
   acts on it again. `stop_hook_active` stays true across a whole chain, so it can't be the
   guard.
@@ -56,6 +60,10 @@ where they are today:
     `TMUX_PANE`. Without either, the pane is `CLAUDE_PID`, the Claude Code process, which a
     clear keeps. Claude Code 2.1.327 passes it to its Bash commands and to its SessionStart and
     Stop hooks, beside `CLAUDE_CODE_SESSION_ID`, the session's current id.
+  - **The MCP server finds its pane the same way, else by its parent.** It inherits its pane's
+    multiplexer variables, but Claude Code 2.1.330 hands an MCP server `CLAUDE_CODE_SESSION_ID`
+    and not `CLAUDE_PID`. It starts the server itself, so the server's parent is the Claude Code
+    process `CLAUDE_PID` names to Bash.
   - **Run in the session's own pane.** `reef loop start`, typed as `! reef loop start`, finds
     its pane and its session from Claude Code's variables, or `--pane` names one.
   - **A loop keeps** its project, the one plan it narrows to if any, its session, the node it

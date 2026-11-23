@@ -28,6 +28,7 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   | To | Tool | Command |
   |----|------|---------|
   | Find work | `mcp__reef__next` | `reef next` |
+  | Take the loop's next node | `mcp__reef__next_task` | `reef loop take` |
   | Read a node's YAML | `mcp__reef__get` | `reef node get <ID>` |
   | Read its body too | | `reef node get <ID> --md` |
   | Check the plan | `mcp__reef__check` | `reef check` |
@@ -43,6 +44,19 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   the user, rather than starting one.
 - **Take work from `next`**: the user's queue first, then ready work in plan order, then each
   piece of work that waits and the needs it waits on.
+- **In a terminal loop, take work from `next_task`.** Once the user starts a loop in the
+  session's pane (`! reef loop start`), reef feeds the session one node at a time:
+  1. **Call `mcp__reef__next_task` before plan mode,** since it writes. It takes the next node,
+     the user's queue first, records its start in this checkout, marks it `in-progress`, and
+     returns it whole, with the queue's entries it passed over and why. Called again before the
+     node is done, it returns the same node. With nothing to take, it says what everything waits
+     on: tell the user, and stop.
+  2. **Plan it in plan mode:** read its docs and needs, then enter plan mode (EnterPlanMode).
+  3. **Ask what the plan needs answered** (AskUserQuestion), and exit plan mode (ExitPlanMode) for
+     the user's approval.
+  4. **Implement it, and finish it** as section 5 says: its status, its criteria, the commit.
+  5. **End the turn once it is committed,** rather than taking the next node in the same
+     context. The next node starts after a `/clear`, with next_task again.
 - **Before starting work, read its node** by id with `get`. Read its `needs`, its group, and
   its `docs` page (`reef page get <PATH>`, or the repo's file at that path): they say what the
   work is gated on and how it was meant to be done.
@@ -99,7 +113,7 @@ If the work has no node, add one.
 
 - **When the code starts,** run `reef start <ID>` in the checkout where it happens. It records
   the node's start, so its changes are captured as its own, and marks it `in-progress`. Where
-  that can't run, set `in-progress` with `status`.
+  that can't run, set `in-progress` with `status`. A node `next_task` took is started already.
 - A decision that adds, moves or drops work changes the plan when the decision is made: add the
   node, change its `needs`, or ask the user to remove it.
 - Split a node when only part of it waits on something.

@@ -126,13 +126,14 @@ layout = "page"         # fill the page; at most one per page, no height
 
 ## Tools
 
-Claude Code names reef's MCP tools `mcp__reef__<name>`. Each takes a `plan` where the project
-has several, and says what its command prints. A write that is stale or adds a problem is a
-tool error carrying the message, and writes nothing.
+Claude Code names reef's MCP tools `mcp__reef__<name>`. Each but next_task takes a `plan` where
+the project has several, and says what its command prints. A write that is stale or adds a
+problem is a tool error carrying the message, and writes nothing.
 
 | Tool | Reads or writes | Takes | Its command |
 |------|-----------------|-------|-------------|
 | `mcp__reef__next` | reads | `plan` | `reef next` |
+| `mcp__reef__next_task` | writes | nothing: the pane's loop names the plans | `reef loop take` |
 | `mcp__reef__get` | reads | `id` | `reef node get <ID>` |
 | `mcp__reef__check` | reads | `plan` | `reef check` |
 | `mcp__reef__put` | writes | `yaml` | `reef node put <FILE>` |
@@ -160,6 +161,8 @@ reef page ls                         # the plan's own pages, each at its version
 reef page get design/feed-loop.md    # a page's markdown, after its `<!-- version: N -->` line
 reef page put design/feed-loop.md feed-loop.md   # put it back, keeping that line
 reef queue ls                        # the user's order, and what next makes of each entry
+reef loop start                      # start a loop in this pane, typed as `! reef loop start`
+reef loop take                       # the loop's next node, started here, as next_task takes it
 reef export plan --replace           # write the plan back over the book it was exported to
 reef skill                           # rewrite this skill from the installed reef
 ```

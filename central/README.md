@@ -22,9 +22,10 @@ status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, 
 `reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
 a node's changes in its worktree as a revision and resolves the comments its commits'
 `Reef-Resolves` trailers name, `reef comment resolve`, which resolves one by hand, `reef loop
-start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in, `reef hook
-session-start`, which hands it to each session that starts there, and `reef import` and `reef
-export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
+start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in, `reef loop
+take`, which takes that loop's next node and starts it, as the MCP tool next_task does, `reef
+hook session-start`, which hands the loop to each session that starts there, and `reef import`
+and `reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
 a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
 the address `[api] address` names and say so when nothing answers there.
 

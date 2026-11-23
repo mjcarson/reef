@@ -77,6 +77,36 @@ impl Here {
     }
 }
 
+/// The pane an MCP server Claude Code started runs in: its multiplexer's, else the Claude Code
+/// process, named by `CLAUDE_PID` or else by being the server's parent
+///
+/// Claude Code hands the processes it starts its pane's variables, but `CLAUDE_PID` only to its
+/// Bash commands and hooks. It starts each MCP server itself, so the server's parent is the
+/// process `CLAUDE_PID` names to the session's Bash.
+///
+/// # Arguments
+///
+/// * `var` - Reads one of the server's environment variables
+/// * `parent` - The server's parent process's id
+///
+/// # Examples
+///
+/// ```
+/// use reef::loops::server_pane;
+/// use reef_api::Pane;
+///
+/// let pane = server_pane(|_| None, 4242);
+/// assert_eq!(pane, Some(Pane::Claude { pid: 4242 }));
+/// ```
+pub fn server_pane<F: Fn(&str) -> Option<String>>(var: F, parent: u32) -> Option<Pane> {
+    // the multiplexer's pane, or the process its variables name
+    if let Some(pane) = Pane::from_env(var) {
+        return Some(pane);
+    }
+    // else the process that started the server, unless the server was orphaned to init
+    (parent > 1).then_some(Pane::Claude { pid: parent })
+}
+
 /// What Claude Code's SessionStart hook is handed on standard input, the parts reef reads
 #[derive(Debug, Deserialize)]
 struct SessionStarted {
@@ -351,8 +381,35 @@ fn listed(feeding: &Loop) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Here, listed};
+    use super::{Here, listed, server_pane};
     use reef_api::{Loop, LoopState, Pane};
+
+    /// An MCP server's pane is its multiplexer's, then `CLAUDE_PID`'s, then its parent's
+    #[test]
+    fn a_servers_pane_falls_back_to_its_parent() {
+        // zellij's pane wins over the parent
+        let zellij = |name: &str| match name {
+            "ZELLIJ_SESSION_NAME" => Some("reef".to_string()),
+            "ZELLIJ_PANE_ID" => Some("0".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            server_pane(zellij, 4242),
+            Some(Pane::Zellij {
+                session: "reef".to_string(),
+                pane: "0".to_string()
+            })
+        );
+        // `CLAUDE_PID` names the process when it is passed
+        let named = |name: &str| (name == "CLAUDE_PID").then(|| "7".to_string());
+        assert_eq!(server_pane(named, 4242), Some(Pane::Claude { pid: 7 }));
+        // else the parent, unless the server was orphaned to init
+        assert_eq!(
+            server_pane(|_| None, 4242),
+            Some(Pane::Claude { pid: 4242 })
+        );
+        assert_eq!(server_pane(|_| None, 1), None);
+    }
 
     /// A pane named is that one with no session, and this process's own comes with the session
     /// Claude Code named, or with none

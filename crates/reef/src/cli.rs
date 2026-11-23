@@ -29,6 +29,7 @@
 //! reef [--conf PATH] loop pause [--pane KEY]
 //! reef [--conf PATH] loop stop [--pane KEY]
 //! reef [--conf PATH] loop ls [--project NAME]
+//! reef [--conf PATH] loop take [--pane KEY] [--project NAME]
 //! reef [--conf PATH] hook session-start [--pane KEY]
 //! reef [--conf PATH] hook post-commit
 //! reef [--conf PATH] hook post-rewrite <KIND>
@@ -48,12 +49,13 @@
 //! the working directory's worktree is on, unless `--node` names one. `next` and the queue span
 //! the project's plans, and `--plan` narrows `next` to one. `loop` works on the loop of the pane
 //! it runs in, zellij's or tmux's or else the Claude Code process that ran it, unless `--pane`
-//! names one, and a loop spans the project's plans unless `--plan` names one. The capture hooks
-//! work on the node the working directory's worktree is on, and do nothing where there is none.
-//! `import` picks the
-//! project the book is in, and lists the plan `--plan` names if it isn't listed. `export` picks
-//! the project the new book's directory is in. `skill` writes into the repo that holds its
-//! directory, and needs neither reef's config nor its service.
+//! names one, and a loop spans the project's plans unless `--plan` names one. `loop take`, as
+//! the MCP tool next_task, takes the loop's next node and starts it in the working directory's
+//! checkout. The capture hooks work on the node the working directory's worktree is on, and do
+//! nothing where there is none. `import` picks the project the book is in, and lists the plan
+//! `--plan` names if it isn't listed. `export` picks the project the new book's directory is in.
+//! `skill` writes into the repo that holds its directory, and needs neither reef's config nor
+//! its service.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -76,6 +78,7 @@ use crate::page;
 use crate::queue;
 use crate::skill;
 use crate::start;
+use crate::task;
 use crate::work;
 
 /// reef's terminal client: projects, plans and nodes, through the service's JSON API
@@ -264,10 +267,12 @@ pub enum Command {
     /// standard input
     #[command(subcommand)]
     Hook(HookCommand),
-    /// Serve get, check, next, put, status and accept as MCP tools over standard input and
-    /// output, for Claude Code
+    /// Serve get, check, next, next_task, put, status and accept as MCP tools over standard
+    /// input and output, for Claude Code
     ///
     /// get, check and next only read, and say so, so plan mode runs them without a prompt.
+    /// next_task takes nodes for the loop of the pane the server runs in: its multiplexer's,
+    /// else the Claude Code process that started it.
     Mcp {
         /// The project and plan the tools work in, if not the working directory's and its
         /// only plan
@@ -416,6 +421,16 @@ pub enum LoopCommand {
     /// its session
     Ls {
         /// The project whose loops to list, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+    /// Take this pane's loop's next node and start it here, as the MCP tool next_task does: the
+    /// same node again until it is done, else the queue's first ready one no other loop holds
+    Take {
+        /// The pane, as `reef loop ls` prints it, else this one
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+        /// The project whose node to take, if not the working directory's
         #[command(flatten)]
         pick: Pick,
     },
@@ -766,6 +781,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                     let here = reef_api::Pane::from_env(var);
                     loops::ls(&client, cwd, here.as_ref(), &pick, out).await
                 }
+                LoopCommand::Take { pane, pick } => {
+                    let here = loops::Here::find(pane.as_deref(), var)?;
+                    task::next_task(&client, cwd, Some(&here.pane), &pick, out).await
+                }
             }
         }
         Command::Hook(HookCommand::SessionStart { pane }) => {
@@ -790,8 +809,11 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             hook::stop(&client, cwd, &input, out).await
         }
         Command::Mcp { pick } => {
+            // the pane the session runs in, its multiplexer's else the Claude Code that started it
+            let var = |name: &str| std::env::var(name).ok();
+            let pane = loops::server_pane(var, std::os::unix::process::parent_id());
             // the protocol owns standard output, so nothing is printed to `out`
-            let tools = Tools::new(client, cwd.to_path_buf(), pick);
+            let tools = Tools::new(client, cwd.to_path_buf(), pick).in_pane(pane);
             mcp::serve(tools, tokio::io::stdin(), tokio::io::stdout()).await
         }
         // written above, before the config was read
@@ -1307,6 +1329,15 @@ mod tests {
         // ls lists a project's loops, so it takes no plan
         assert!(Cli::try_parse_from(["reef", "loop", "ls", "--project", "reef"]).is_ok());
         assert!(Cli::try_parse_from(["reef", "loop", "ls", "--plan", "central"]).is_err());
+        // take takes a pane or none, and a project, but no plan, which the loop names
+        let take = Cli::try_parse_from(["reef", "loop", "take", "--pane", "claude:7"]).unwrap();
+        match take.command {
+            Command::Loop(LoopCommand::Take { pane, pick }) => {
+                assert_eq!((pane.as_deref(), pick.project), (Some("claude:7"), None));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["reef", "loop", "take", "--plan", "central"]).is_err());
         // and the SessionStart hook takes a pane or none
         let hook = Cli::try_parse_from(["reef", "hook", "session-start"]).unwrap();
         assert!(matches!(

@@ -30,6 +30,8 @@
 //! - **The loop** ([`loops`]): the terminal loop of the pane a session runs in, started,
 //!   paused, stopped and listed, and handed to each session that starts in its pane by the
 //!   SessionStart hook.
+//! - **next_task** ([`task`]): the next node taken for a pane's loop, the queue's first, started
+//!   in the session's checkout and handed back whole, or what everything waits on.
 //! - **Import** ([`import`]): a book's plan read from its files, checked, and written into a
 //!   plan as one revision, each inline member a node of its own, each page the plan's own, and
 //!   each link leading where it did.
@@ -66,6 +68,7 @@ pub mod page;
 pub mod queue;
 pub mod skill;
 pub mod start;
+pub mod task;
 pub mod work;
 
 pub use cli::{Cli, run};

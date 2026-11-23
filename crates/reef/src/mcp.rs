@@ -13,12 +13,17 @@
 //!   plans writes (X4).
 //! - **Writes are the CLI's:** `put` takes a node's YAML, as `reef node put` does, and
 //!   `status` and `accept` set a node's status and a criterion's.
+//! - **`next_task` takes a node for the session's loop,** as `reef loop take` does, and starts
+//!   it, so Claude calls it before plan mode. The loop is the pane's the server runs in: its
+//!   multiplexer's, else the Claude Code process that started it
+//!   ([`server_pane`](crate::loops::server_pane)).
 //! - **Each tool says what the CLI prints.** A tool runs the same function its command does,
 //!   so its text is the command's. A write that is stale or breaks the plan, or a service that
 //!   isn't running, comes back as a tool error carrying the message, which Claude reads, rather
 //!   than a protocol error, which it can't.
 //! - **Nothing else writes to standard output** while it serves, since the protocol runs there.
 
+use reef_api::Pane;
 use reef_model::{Met, PlanName, Status};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -31,7 +36,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::cli::{Pick, PlanPick, picked, picked_plan};
 use crate::client::Client;
-use crate::{node, work};
+use crate::{node, task, work};
 
 /// The tools one session's server offers, over the service reef's config names
 #[derive(Clone)]
@@ -42,6 +47,8 @@ pub struct Tools {
     cwd: PathBuf,
     /// The project and plan named when it was started, if any
     pick: PlanPick,
+    /// The pane the session that started it runs in, whose loop `next_task` takes nodes for
+    pane: Option<Pane>,
 }
 
 /// Names a plan, if not the one the server was started for
@@ -169,7 +176,30 @@ impl Tools {
             client: Arc::new(client),
             cwd,
             pick,
+            pane: None,
         }
+    }
+
+    /// The same tools, taking nodes for the loop of a pane
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The pane the session runs in, if it could be found
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef::cli::PlanPick;
+    /// use reef::mcp::Tools;
+    /// use reef_api::Pane;
+    ///
+    /// let client = reef::Client::new(&reef::Conf::default()).unwrap();
+    /// let tools = Tools::new(client, "/repo".into(), PlanPick::default())
+    ///     .in_pane(Some(Pane::Claude { pid: 4242 }));
+    /// ```
+    pub fn in_pane(mut self, pane: Option<Pane>) -> Tools {
+        self.pane = pane;
+        self
     }
 
     /// The plan a tool works in: the one it names, else the server's, else the project's only
@@ -269,6 +299,46 @@ impl Tools {
         said(out, done)
     }
 
+    /// Takes the next node for this session's loop, starts it here, and hands it back whole
+    #[tool(
+        description = "Take the next reef node for the loop of the pane this session runs in, \
+                       and call it before plan mode, since it writes: the user's queue first, \
+                       then ready work in plan order, passing over any node another loop holds. \
+                       It records the node's start in this checkout, marks it in progress, and \
+                       returns it whole (why, what, acceptance, docs, needs and body), with the \
+                       queue's entries it passed over and why. Called again before the node is \
+                       done, it returns the same node. With nothing to take, it says what \
+                       everything waits on. A pane with no loop is refused: the user starts one \
+                       with `! reef loop start`."
+    )]
+    async fn next_task(&self) -> Result<String, String> {
+        // the node `reef loop take` takes, for the pane the server was started in
+        let client = self.client.clone();
+        let cwd = self.cwd.clone();
+        let pane = self.pane.clone();
+        let pick = self.pick.project.clone();
+        // a start reads its checkout through gix, whose handles aren't `Sync`, so it runs on a
+        // blocking thread of its own, driven by the server's runtime
+        let runtime = tokio::runtime::Handle::current();
+        let taken = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            let done = runtime.block_on(task::next_task(
+                &client,
+                &cwd,
+                pane.as_ref(),
+                &pick,
+                &mut out,
+            ));
+            (out, done)
+        })
+        .await;
+        match taken {
+            Ok((out, done)) => said(out, done),
+            // a panic or a cancel, said rather than lost
+            Err(error) => Err(format!("next_task stopped before it answered: {error}")),
+        }
+    }
+
     /// Puts a node's YAML
     #[tool(
         description = "Put a reef node's YAML, with its inline members, checked against the whole \
@@ -333,8 +403,9 @@ impl Tools {
     instructions = "reef keeps this repo's plan: a graph of nodes, each a piece of work with a \
                     why, a what, needs and acceptance criteria. `next` says what is ready to \
                     start, the user's queue first, `get` reads a node as YAML and `check` lists \
-                    the plan's problems; these only read. `put` writes a node's YAML, `status` \
-                    sets where its work \
+                    the plan's problems; these only read. `next_task` takes the next node for \
+                    this session's loop and starts it, before plan mode. `put` writes a node's \
+                    YAML, `status` sets where its work \
                     stands and `accept` whether a criterion is met. Every write is checked \
                     against the whole plan, and one that is stale or adds a problem writes \
                     nothing and says why."
