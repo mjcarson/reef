@@ -6,9 +6,10 @@
 //! ```
 //!
 //! - **Committed, so every worktree has them:** `.mcp.json` runs `reef mcp` as the server
-//!   `reef`, and `.claude/settings.json` runs `reef hook …` on SessionStart, Stop, PostToolUse
-//!   after reef's status tool, WorktreeCreate and WorktreeRemove. A group's member is checked out
-//!   from HEAD, so these reach its session once they are committed, as the skill does.
+//!   `reef`, and `.claude/settings.json` runs `reef hook …` on SessionStart, Stop, SessionEnd,
+//!   PostToolUse after reef's status tool, WorktreeCreate and WorktreeRemove. A group's member is
+//!   checked out from HEAD, so these reach its session once they are committed, as the skill
+//!   does.
 //! - **Local, so trust stays the user's:** `.claude/settings.local.json` enables the server and
 //!   allows its tools, which skips both prompts once the folder is trusted, as X4 found, and
 //!   offers to clear the planning's context when a plan is approved. It goes in the repo's
@@ -96,6 +97,11 @@ pub const HOOKS: &[ClaudeHook] = &[
         event: "Stop",
         matcher: None,
         sub: "stop",
+    },
+    ClaudeHook {
+        event: "SessionEnd",
+        matcher: None,
+        sub: "session-end",
     },
     ClaudeHook {
         event: "PostToolUse",

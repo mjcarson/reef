@@ -28,6 +28,9 @@
 //!   idle and its input box empty.
 //! - **The runner** ([`run`]): `reef loop run` runs a loop's sessions headless here, a fresh one
 //!   a node, and relays each one's transcript and prompts through central reef to the app.
+//! - **Decisions** ([`decisions`]): each plan a session asked approval for and its verdict, and
+//!   each question and the answer picked, read from its transcript, which Stop and SessionEnd
+//!   keep with the nodes they were made on.
 //! - **Comments** ([`comment`]): a plan's threads listed whole, replied in, and resolved by
 //!   hand, the revision that answered one linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
@@ -73,6 +76,7 @@ pub mod cli;
 pub mod client;
 pub mod comment;
 pub mod conf;
+pub mod decisions;
 pub mod export;
 pub mod git;
 pub mod hook;

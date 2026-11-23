@@ -174,7 +174,7 @@ async fn two_runs_leave_one_entry_and_one_of_each_hook() -> anyhow::Result<()> {
     // the first run writes each file at the root, and says to commit the shared ones
     for line in [
         "wrote .mcp.json: the reef MCP server, `reef mcp`",
-        "wrote .claude/settings.json: reef's hooks on SessionStart, Stop, PostToolUse, \
+        "wrote .claude/settings.json: reef's hooks on SessionStart, Stop, SessionEnd, PostToolUse, \
          WorktreeCreate and WorktreeRemove",
         "wrote .claude/settings.local.json: reef's server enabled, its tools allowed",
         "wrote .git/hooks/post-commit: git's post-commit running `reef hook post-commit`",

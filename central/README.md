@@ -286,14 +286,13 @@ reef claude install                        # the MCP entry, the hooks and the sk
   body as well. YAML alone keeps the body stored. A body's links lead from the repo's root, as
   the plan keeps them ([C69](../plan/src/milestones/m6.md)).
 - **One command sets a repo up for the loop.** `reef claude install` writes `.mcp.json`, running
-  `reef mcp`, and `.claude/settings.json`, running `reef hook …` on SessionStart, Stop,
-  PostToolUse after reef's status tool, WorktreeCreate and WorktreeRemove. Both are committed,
-  so every worktree checks them out. `.claude/settings.local.json` enables the server, allows
-  its tools and offers a clear at a plan's approval. It stays out of git, and WorktreeCreate
-  copies it into each worktree it makes. git's post-commit and post-rewrite go where git runs
-  hooks, `core.hooksPath`'s dir if set, a shell hook already there keeping its own lines. Then
-  trusting the folder is the only prompt. Running it again changes nothing, so run it after a
-  reinstall too.
+  `reef mcp`, and `.claude/settings.json`, running `reef hook …` on SessionStart, Stop, SessionEnd,
+  PostToolUse after reef's status tool, WorktreeCreate and WorktreeRemove. Both are committed, so
+  every worktree checks them out. `.claude/settings.local.json` enables the server, allows its tools
+  and offers a clear at a plan's approval. It stays out of git, and WorktreeCreate copies it into
+  each worktree it makes. git's post-commit and post-rewrite go where git runs hooks,
+  `core.hooksPath`'s dir if set, a shell hook already there keeping its own lines. Then trusting the
+  folder is the only prompt. Running it again changes nothing, so run it after a reinstall too.
 - **The skill comes from the binary.** `reef skill`, and `reef claude install`, write
   `crates/reef/assets/skill` to `../.claude/skills/reef`, over the mdbook skill, so it names the
   tools and commands of the reef that wrote it. Run it again after a reinstall that changed the
@@ -310,6 +309,14 @@ reef claude install                        # the MCP entry, the hooks and the sk
   C34's `CommentRow` needed none either, nor did C37's resolutions, which a thread's row keeps
   only once it has one, so a row kept before reads back with none. C39's `LoopRow` moved the
   schema's pin but needed none: its binary read back the nodes and comments C37's wrote.
+
+### Plans and choices kept
+
+Each node keeps every plan its sessions asked approval for, with its verdict and feedback, and
+every question with its choices and the answer picked. reef's Stop and SessionEnd hooks read them
+from each session's transcript, whether it ran in a terminal or under `reef loop run`, so a repo
+set up before SessionEnd was added needs `reef claude install` run again. `GET
+/api/v1/projects/{project}/plans/{plan}/nodes/{id}/decisions` lists a node's.
 
 ### A loop the app runs
 

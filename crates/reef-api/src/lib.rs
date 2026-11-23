@@ -23,6 +23,8 @@
 //!   changes that resolved it, and what came of a comment, a mark or a resolve.
 //! - **Loops** ([`loops`]): the terminal loop's state: the pane a session feeds a project in,
 //!   the node it holds, the node whose end it acted on, and whether it is paused.
+//! - **Decisions** ([`decision`]): each plan a node's sessions asked approval for and its
+//!   verdict, and each question and the answer picked, read from the sessions' transcripts.
 //! - **Sessions** ([`session`]): the sessions a runner the user started runs headless, as
 //!   central reef relays them: each one's transcript and prompts, what the app asks of it, and the
 //!   orders the runner takes.
@@ -37,6 +39,7 @@
 pub mod change;
 pub mod comment;
 pub mod config;
+pub mod decision;
 pub mod error;
 pub mod loops;
 pub mod node;
@@ -53,6 +56,9 @@ pub use comment::{
     COMMENT_BODY_MAX, Comment, Commented, MarkReview, MarkThread, Marked, NewReply, NewThread,
     RESOLVES_TRAILER, Resolution, ResolveThread, Resolved, Resolves, ResolvingCommit, Review,
     ReviewState, Reviewed, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, Writer,
+};
+pub use decision::{
+    Decided, Decision, DecisionKind, DecisionsRecorded, Outcome, RecordDecisions, Via,
 };
 pub use error::{ApiError, ErrorCode};
 pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};

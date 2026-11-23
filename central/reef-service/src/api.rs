@@ -76,11 +76,12 @@ use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Change, Checked, Commented,
-    EditLoop, ErrorCode, FileDiff, Listing, Loop, LoopEdited, MarkReview, MarkThread, Marked,
-    NewPlan, NewProject, NewReply, NewThread, Ordered, PageEdit, PageEdited, PageListing, PlanInfo,
-    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, Report, ResolveThread, Resolved,
-    Review, Reviewed, Revision, Rewrite, Session, SessionAct, SessionActed, StartWork, Started,
-    StoredNode, StoredPage, Thread, Transcript, WRITE_BODY_MAX, WorkRecord, paths,
+    Decision, DecisionsRecorded, EditLoop, ErrorCode, FileDiff, Listing, Loop, LoopEdited,
+    MarkReview, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, Ordered, PageEdit,
+    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
+    RecordDecisions, Report, ResolveThread, Resolved, Review, Reviewed, Revision, Rewrite, Session,
+    SessionAct, SessionActed, StartWork, Started, StoredNode, StoredPage, Thread, Transcript,
+    WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -188,6 +189,12 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(
             paths::NODE_REVIEW,
             get(node_review::<S>).put(mark_review::<S>),
+        )
+        .route(
+            paths::NODE_DECISIONS,
+            get(node_decisions::<S>)
+                .post(record_decisions::<S>)
+                .layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
         )
         .route(paths::THREAD, get(thread::<S>))
         .route(paths::REPLIES, axum::routing::post(reply::<S>))
@@ -1238,6 +1245,47 @@ async fn node_threads<S: Serves>(
         .node_threads(&node, query.pending())
         .await?;
     Ok(Json(threads))
+}
+
+/// Lists a node's decisions, by number, each plan rendered
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+#[instrument(name = "api::node_decisions", skip_all, err(Debug))]
+async fn node_decisions<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+) -> Result<Json<Vec<Decision>>, Failure> {
+    let node = segments.name()?;
+    // none for a node no session decided on
+    let decisions = serves.service().node_decisions(&node).await?;
+    Ok(Json(decisions))
+}
+
+/// Keeps a node's decisions, each by the call that asked: 200 if kept, 422 if the node isn't
+/// in its plan
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+/// * `record` - The decisions a hook read from a session's transcript
+#[instrument(name = "api::record_decisions", skip_all, err(Debug))]
+async fn record_decisions<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+    Body(record): Body<RecordDecisions>,
+) -> Result<(StatusCode, Json<DecisionsRecorded>), Failure> {
+    let node = segments.name()?;
+    // under the project's decisions' lock, told to the change stream if anything was new
+    let recorded = serves.service().record_decisions(&node, record).await?;
+    let status = match recorded {
+        DecisionsRecorded::Recorded { .. } => StatusCode::OK,
+        DecisionsRecorded::NotInPlan { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(recorded)))
 }
 
 /// Starts a thread on a node or one of its lines: 200 if kept, 422 if the node isn't in its

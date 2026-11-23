@@ -70,6 +70,7 @@ use crate::store::{
 };
 
 mod comments;
+mod decisions;
 mod loops;
 mod sessions;
 mod work;

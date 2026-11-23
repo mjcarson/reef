@@ -154,6 +154,11 @@ pub enum Change {
         /// The pane whose loop it is
         pane: Pane,
     },
+    /// A node's decisions were kept: new ones, or answers to ones kept before
+    DecisionsRecorded {
+        /// The node
+        node: NodeName,
+    },
     /// A runner's session attached, reported, was acted on, or let go
     SessionChanged {
         /// The project its runner takes nodes from
@@ -185,6 +190,7 @@ impl Change {
             Change::ThreadsFollowed { .. } => "threads-followed",
             Change::ReviewMarked { .. } => "review-marked",
             Change::LoopChanged { .. } => "loop-changed",
+            Change::DecisionsRecorded { .. } => "decisions-recorded",
             Change::SessionChanged { .. } => "session-changed",
             Change::Missed { .. } => "missed",
         }
@@ -206,7 +212,8 @@ impl Change {
             | Change::CommentAdded { node, .. }
             | Change::ThreadMarked { node, .. }
             | Change::ThreadsFollowed { node, .. }
-            | Change::ReviewMarked { node, .. } => Some(node.plan.project.as_str()),
+            | Change::ReviewMarked { node, .. }
+            | Change::DecisionsRecorded { node } => Some(node.plan.project.as_str()),
             Change::Missed { .. } => None,
         }
     }
@@ -225,7 +232,8 @@ impl Change {
             | Change::CommentAdded { node, .. }
             | Change::ThreadMarked { node, .. }
             | Change::ThreadsFollowed { node, .. }
-            | Change::ReviewMarked { node, .. } => Some(&node.plan),
+            | Change::ReviewMarked { node, .. }
+            | Change::DecisionsRecorded { node } => Some(&node.plan),
             Change::ProjectAdded { .. }
             | Change::QueueChanged { .. }
             | Change::LoopChanged { .. }

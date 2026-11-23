@@ -47,6 +47,7 @@
 //!   lock, so two loops never hold one node.
 
 mod comment;
+mod decision;
 mod follow;
 mod loops;
 mod revision;
@@ -178,6 +179,8 @@ pub struct Store<B = ShoalBackend> {
     comments: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The loops' lock, held alone by their writes, since every loop shares one partition
     loop_lock: tokio::sync::Mutex<()>,
+    /// Each project's decisions' lock, held alone by their writes
+    decisions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Store<ShoalBackend> {
@@ -231,6 +234,7 @@ impl<B: Backend> Store<B> {
             works: Mutex::new(HashMap::new()),
             comments: Mutex::new(HashMap::new()),
             loop_lock: tokio::sync::Mutex::new(()),
+            decisions: Mutex::new(HashMap::new()),
         }
     }
 

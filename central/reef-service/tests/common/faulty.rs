@@ -6,8 +6,8 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    CommentRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow,
-    RevisionFileRow, RevisionRow, WorkRow,
+    CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
+    QueueRow, RevisionFileRow, RevisionRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -599,5 +599,25 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `row` - The row to delete, as it was read
     async fn delete_loop(&self, row: &LoopRow) -> anyhow::Result<Written> {
         self.inner.delete_loop(row).await
+    }
+
+    /// Reads a node's decision rows
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the node's plan belongs to
+    /// * `node` - The node's name within its project, `plan/id`
+    async fn decisions(&self, project: &str, node: &str) -> anyhow::Result<Vec<DecisionRow>> {
+        self.inner.decisions(project, node).await
+    }
+
+    /// Writes one decision row, if its condition holds
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_decision(&self, row: DecisionRow, expect: Expect) -> anyhow::Result<Written> {
+        self.inner.write_decision(row, expect).await
     }
 }

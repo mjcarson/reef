@@ -114,4 +114,5 @@ suite!(
     holding_the_acted_node_again_clears_its_end,
     a_loop_holds_its_group_as_one,
     a_pane_joins_a_member,
+    decisions_are_kept_by_call,
 );

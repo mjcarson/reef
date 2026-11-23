@@ -13,12 +13,13 @@ use tracing::instrument;
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    CommentRow, CommentRowFilter, CommentRowGet, LOOPS, LoopRow, LoopRowDelete, LoopRowFilter,
-    LoopRowGet, NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey,
-    PageRow, PageRowDelete, PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet,
-    PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter,
-    QueueRowGet, ReefClient, ReefQueryKinds, RevisionFileRow, RevisionFileRowGet, RevisionRow,
-    RevisionRowFilter, RevisionRowGet, WorkRow, WorkRowFilter, WorkRowGet,
+    CommentRow, CommentRowFilter, CommentRowGet, DecisionRow, DecisionRowFilter, DecisionRowGet,
+    LOOPS, LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey, NodeRow, NodeRowDelete,
+    NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter,
+    PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet,
+    QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient, ReefQueryKinds,
+    RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter, RevisionRowGet, WorkRow,
+    WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -831,6 +832,41 @@ impl Backend for ShoalBackend {
             version: Some(vec![row.version]),
         };
         written(self.client.send_one(delete.if_matches(filter)).await)
+    }
+
+    /// Reads a node's decision rows, in number order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the node's plan belongs to
+    /// * `node` - The node's name within its project, `plan/id`
+    #[instrument(name = "ShoalBackend::decisions", skip_all, err(Debug))]
+    async fn decisions(&self, project: &str, node: &str) -> anyhow::Result<Vec<DecisionRow>> {
+        // a node's decisions sit in the node's partition
+        let get = DecisionRowGet::new(vec![(project.to_string(), node.to_string())]);
+        self.read::<_, DecisionRow>(get).await
+    }
+
+    /// Writes one decision row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_decision", skip_all, err(Debug))]
+    async fn write_decision(&self, row: DecisionRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = DecisionRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
     }
 }
 

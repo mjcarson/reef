@@ -52,16 +52,19 @@
 //!   which git ignores and Claude Code shows without stopping.
 //! - **Each line it prints starts `reef:`**, since git shows it among a commit's own output.
 
+use reef_api::loops::member_of;
 use reef_api::work::on_worktree;
-use reef_api::{Pane, WorkRecord};
-use reef_model::Status;
+use reef_api::{Pane, RecordDecisions, Via, WorkRecord};
+use reef_model::{NodeName, Status};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::capture::{Keep, Report, capture_record, seal_if_done};
 use crate::clear::{self, Clear};
 use crate::client::Client;
+use crate::decisions;
 use crate::git::Checkout;
 use crate::work::parse_status;
 use crate::{task, worktree};
@@ -117,6 +120,20 @@ struct Stopped {
     /// The session's working directory
     #[serde(default)]
     cwd: Option<PathBuf>,
+    /// The session's transcript, which its decisions are read from
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
+}
+
+/// What Claude Code hands SessionEnd: the session's transcript, and where it was
+#[derive(Debug, Deserialize)]
+struct Ended {
+    /// The session's working directory
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    /// The session's transcript, which its decisions are read from
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
 }
 
 /// Drafts the node the worktree is on after a commit, unless a rebase is under way or the commit
@@ -257,6 +274,14 @@ where
         let mut sealed = Vec::new();
         seal_if_done(client, &checkout, &record, Report::Line, &mut sealed).await?;
         prefixed(&sealed, &mut said)?;
+    }
+    // the plans and questions of the turn, kept with their nodes, a failure said but no stop
+    let transcript = stopped.transcript_path.as_deref();
+    if let Err(error) = keep_decisions(client, dir, transcript, pane, Place::Session).await {
+        writeln!(
+            said,
+            "reef: keeping the session's decisions failed: {error:#}"
+        )?;
     }
     // then the end of the loop's node, or of its group, acted on once, wherever the session runs
     let ended = match pane {
@@ -433,6 +458,146 @@ async fn draft<W: Write>(client: &Client, checkout: &Checkout, out: &mut W) -> a
     )
     .await?;
     prefixed(&said, out)
+}
+
+/// Where a hook keeps the decisions its transcript names no node for
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// On the node the session is on now, as Stop finds it before the loop moves on
+    Session,
+    /// Nowhere: only those the transcript's own next_task placed are kept, since by a
+    /// session's end its pane's loop may hold the next node already
+    Named,
+}
+
+/// Claude Code's SessionEnd: keeps the plans and questions of a session that ends, a clear's or
+/// a plan approval's included, with the nodes its next_task named
+///
+/// Stop reads them at each turn's end, but a clear ends the session before its turn does. Its
+/// last lines may not be written yet when this runs, so an approval that clears is read again
+/// from the session the clear starts, by that session's Stop.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The hook's working directory
+/// * `input` - What Claude Code handed the hook on standard input
+/// * `pane` - The pane the session runs in, if it runs in one
+/// * `out` - Where the hook's output goes
+pub async fn session_end<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    input: &str,
+    pane: Option<&Pane>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the session's directory and transcript
+    let ended: Ended = serde_json::from_str(input)
+        .map_err(|error| anyhow::anyhow!("SessionEnd's input doesn't read as one: {error}"))?;
+    let dir = ended.cwd.as_deref().unwrap_or(cwd);
+    let transcript = ended.transcript_path.as_deref();
+    keep_decisions(client, dir, transcript, pane, Place::Named).await?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Keeps a session's decisions, read from its transcript, with the nodes they were made on,
+/// returning how many were new or changed
+///
+/// Each is kept on the node the session's last next_task named before it. One asked before any
+/// is kept, if `place` says so, on the node its pane's loop holds, else on the node its checkout
+/// was started on. One with no node to go on is left out.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `dir` - The session's working directory
+/// * `transcript` - The session's transcript, if Claude Code named one
+/// * `pane` - The pane the session runs in, if it runs in one
+/// * `place` - Where those its transcript names no node for go
+pub async fn keep_decisions(
+    client: &Client,
+    dir: &Path,
+    transcript: Option<&Path>,
+    pane: Option<&Pane>,
+    place: Place,
+) -> anyhow::Result<u32> {
+    // a transcript not named, or not written yet, holds nothing
+    let Some(text) = transcript.and_then(|path| std::fs::read_to_string(path).ok()) else {
+        return Ok(0);
+    };
+    // answered in the app for a runner's session, in the terminal for any other
+    let via = match pane.is_some_and(Pane::runs) {
+        true => Via::App,
+        false => Via::Terminal,
+    };
+    let read = decisions::read(&text, via);
+    if read.is_empty() {
+        return Ok(0);
+    }
+    // the node for those asked before any next_task, found only if one was and may be placed
+    let unplaced = read.iter().any(|decision| decision.node.is_none());
+    let fallback = match (unplaced, place) {
+        (true, Place::Session) => session_node(client, dir, pane).await?,
+        _ => None,
+    };
+    let mut by_node: BTreeMap<NodeName, RecordDecisions> = BTreeMap::new();
+    for decision in read {
+        let Some(node) = decision.node.or_else(|| fallback.clone()) else {
+            continue;
+        };
+        by_node
+            .entry(node)
+            .or_insert_with(|| RecordDecisions {
+                decisions: Vec::new(),
+            })
+            .decisions
+            .push(decision.decided);
+    }
+    // each node's kept at once, counting what was new or changed
+    let mut kept = 0;
+    for (node, record) in by_node {
+        if let reef_api::DecisionsRecorded::Recorded { added, updated, .. } =
+            client.record_decisions(&node, &record).await?
+        {
+            kept += added + updated;
+        }
+    }
+    Ok(kept)
+}
+
+/// The node a session is on: the one its pane's loop holds, as its own or a member's, else the
+/// one its checkout was started on
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `dir` - The session's working directory
+/// * `pane` - The pane the session runs in, if it runs in one
+async fn session_node(
+    client: &Client,
+    dir: &Path,
+    pane: Option<&Pane>,
+) -> anyhow::Result<Option<NodeName>> {
+    // the pane's loop's node, or the member it works
+    if let Some(pane) = pane {
+        let loops = client.loops().await?;
+        if let Some(node) = loops
+            .iter()
+            .find(|feeding| feeding.pane == *pane)
+            .and_then(|feeding| feeding.node.clone())
+        {
+            return Ok(Some(node));
+        }
+        if let Some((_, member)) = member_of(&loops, pane) {
+            return Ok(Some(member.node.clone()));
+        }
+    }
+    // else the node the checkout was started on
+    let Some(checkout) = open(dir) else {
+        return Ok(None);
+    };
+    Ok(on_node(client, &checkout).await?.map(|record| record.node))
 }
 
 /// Opens the checkout a hook runs in, or `None` outside git or in a bare repo

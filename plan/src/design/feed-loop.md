@@ -408,9 +408,9 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
 - **One command sets up a repo** ([C42](../milestones/m8.md)). `reef claude install [DIR]` writes all of
   it, and needs no config or service, as `reef skill` doesn't.
   - **Committed, so every worktree checks them out:** `.mcp.json` runs `reef mcp` as the server
-    `reef`. `.claude/settings.json` runs `reef hook …` on SessionStart, Stop, PostToolUse after
-    `mcp__reef__status`, WorktreeCreate and WorktreeRemove. A group's member is checked out from
-    HEAD, so these, and the skill, reach its session once committed.
+    `reef`. `.claude/settings.json` runs `reef hook …` on SessionStart, Stop, SessionEnd,
+    PostToolUse after `mcp__reef__status`, WorktreeCreate and WorktreeRemove. A group's member is
+    checked out from HEAD, so these, and the skill, reach its session once committed.
   - **Local, since trust is the user's:** `.claude/settings.local.json` holds
     `enabledMcpjsonServers`, the `mcp__reef` allow rule and `showClearContextOnPlanAccept`, and
     `/.claude/settings.local.json` goes in `info/exclude`. WorktreeCreate copies the file into
@@ -505,6 +505,28 @@ the app, and the app's answers back ([M9](../milestones/m9.md)).
     after the last it read, so a reconnect misses none, and each poll says it is alive.
   - A runner unheard from for a minute reads as gone. One whose service restarted attaches again
     with its pane, and sends the transcript it holds.
+- **Plans and choices kept with their nodes** ([C75](../milestones/m9.md)). Every plan a session asked
+  approval for, its verdict and its feedback, and every question with its choices and the
+  answer picked, are kept in central reef on the node they were made on, from terminal sessions
+  and a runner's alike.
+  - **Read from the session's transcript,** which Claude Code writes the same way wherever the
+    session runs: each ExitPlanMode and AskUserQuestion call, then its result. Stop reads it at
+    each turn's end, and SessionEnd at the session's.
+  - **Kept by the call that asked,** so reading again keeps nothing twice, and an answer read
+    later fills its question in. Each node's are numbered in the order first kept.
+  - **On the node the session's last next_task named.** One asked before any is placed by Stop
+    on the node the session is on, its pane's loop's or its checkout's. SessionEnd places only
+    what its transcript names, since by then the loop may hold the next node.
+  - **Where it was answered:** in the app for a runner's session, in the terminal for any other.
+    A terminal's feedback is what follows Claude Code's *the user said:*, and a runner's its
+    message as sent.
+  - **An approval that clears is read from the new session.** Approving with *clear context*
+    ends the planning session's ExitPlanMode as a refusal with no words, and its last lines may
+    not be written when SessionEnd runs. The new session's first message carries the plan, as
+    `planContent`, beside a record naming the planning call, so its Stop keeps that call
+    approved, and an approval stands against any later read.
+  - **Only decisions, in shoal.** A row a decision, partitioned by node. Transcripts stay in
+    memory and on disk, as Claude Code keeps them.
 - **Answering is approving.** Whoever can answer a session's prompts can let its tools run on the
   runner's machine, so sign-in ([C48](../milestones/m10.md)) guards these routes as it guards every write.
   Until then the service listens on loopback only.
@@ -585,3 +607,27 @@ option, rejected each node's first plan with feedback, and approved the next.
 - **Nothing ready, nothing started.** After each pass's last node, the runner's session ended,
   saying nothing else was ready, where before C47 the runner would have started a fresh session,
   found nothing to take, and started another.
+
+### What C75 found
+
+Tried with Claude Code 2.1.330 and Sonnet 5.5 at low effort, on C45's scratch serve and repo,
+`reef claude install` run again to add SessionEnd. Two terminal sessions ran a loop on a node
+each in a private tmux pane. In each, the question was answered in Claude Code's own dialog, the
+first plan was rejected with *write it in capital letters instead, and say so in the plan*, and
+the revision was approved with *Yes, clear context*. C47's runner session was read again by its
+own SessionEnd.
+
+- **Terminal and runner sessions keep the same decisions.** The terminal node kept its
+  question with *Cheers* picked, its rejected plan with the feedback as typed, and its approved
+  revision, each answered in the terminal. The runner's node kept the same three, answered in
+  the app.
+- **An approval that clears looks like a refusal.** In the planning session's transcript,
+  *Yes, clear context* ends ExitPlanMode as `User rejected tool use`, with the words a refusal
+  without feedback has. And SessionEnd ran before those last lines were written, so the first
+  run kept the question and the rejection but not the approval. The clear's new session
+  begins with the plan as `planContent`, and a `data-flow-records` line naming the planning
+  call, from which the second run kept it approved.
+- **A question the user escapes is kept unanswered.** An interrupted session's question was kept
+  as not answered, with no words.
+- **They outlast the service.** Read back after the server restarted, over the data directory
+  an older binary wrote, with no fresh data directory, since the table was only added.

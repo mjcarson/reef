@@ -9,8 +9,8 @@ use reef_model::PlanName;
 use std::future::Future;
 
 use crate::schema::{
-    CommentRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow,
-    RevisionFileRow, RevisionRow, WorkRow,
+    CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
+    QueueRow, RevisionFileRow, RevisionRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -439,4 +439,28 @@ pub trait Backend: Send + Sync {
     ///
     /// * `row` - The row to delete, as it was read
     fn delete_loop(&self, row: &LoopRow) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads a node's decision rows, in number order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the node's plan belongs to
+    /// * `node` - The node's name within its project, `plan/id`
+    fn decisions(
+        &self,
+        project: &str,
+        node: &str,
+    ) -> impl Future<Output = anyhow::Result<Vec<DecisionRow>>> + Send;
+
+    /// Writes one decision row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_decision(
+        &self,
+        row: DecisionRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 }

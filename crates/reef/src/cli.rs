@@ -537,10 +537,18 @@ pub enum HookCommand {
     /// is on it
     PostToolUse,
     /// Stop: seal the node this worktree is on once it is done, its draft or its first revision,
-    /// then act once on the end of the node this pane's loop holds, clearing the session in a
-    /// zellij or tmux pane when another node is next
+    /// keep the session's plans and questions with their nodes, then act once on the end of the
+    /// node this pane's loop holds, clearing the session in a zellij or tmux pane when another
+    /// node is next
     Stop {
         /// The pane, else the one the session runs in
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+    },
+    /// SessionEnd: keep the plans and questions of the session that ended, a clear's included,
+    /// with their nodes
+    SessionEnd {
+        /// The pane, else the one the session ran in
         #[arg(long, value_name = "KEY")]
         pane: Option<String>,
     },
@@ -1000,6 +1008,16 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Hook(HookCommand::PostToolUse) => {
             let input = stdin()?;
             hook::post_tool_use(&client, cwd, &input, out).await
+        }
+        Command::Hook(HookCommand::SessionEnd { pane }) => {
+            // the pane named, else the session's, which says where its answers were given
+            let var = |name: &str| std::env::var(name).ok();
+            let pane = match pane {
+                Some(key) => Some(key.parse::<reef_api::Pane>()?),
+                None => reef_api::Pane::from_env(var),
+            };
+            let input = stdin()?;
+            hook::session_end(&client, cwd, &input, pane.as_ref(), out).await
         }
         Command::Hook(HookCommand::Stop { pane }) => {
             // the pane named, else the session's, and none is no loop to end a node of

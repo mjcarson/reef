@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::{
-    CommentRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow, QueueRow,
-    RevisionFileRow, RevisionRow, WorkRow,
+    CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
+    QueueRow, RevisionFileRow, RevisionRow, WorkRow,
 };
 use crate::schema::{LOOPS, PROJECTS};
 
@@ -47,6 +47,8 @@ struct Tables {
     comments: BTreeMap<PlanPartition, BTreeMap<String, CommentRow>>,
     /// Every loop, by the partition it is kept in and then by pane
     loops: BTreeMap<String, BTreeMap<String, LoopRow>>,
+    /// Each node's decisions, by padded number
+    decisions: BTreeMap<NodePartition, BTreeMap<String, DecisionRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -850,6 +852,43 @@ impl Backend for MemoryBackend {
         if partition.is_empty() {
             tables.loops.remove(&row.list);
         }
+        Ok(Written::Applied)
+    }
+
+    /// Reads a node's decision rows, in number order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the node's plan belongs to
+    /// * `node` - The node's name within its project, `plan/id`
+    async fn decisions(&self, project: &str, node: &str) -> anyhow::Result<Vec<DecisionRow>> {
+        let tables = self.tables();
+        // the node's partition, whole
+        let key = (project.to_string(), node.to_string());
+        Ok(tables
+            .decisions
+            .get(&key)
+            .map(|partition| partition.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Writes one decision row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_decision(&self, row: DecisionRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its keys hash
+        let key = (row.project.clone(), row.node.clone());
+        let partition = tables.decisions.entry(key).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.number).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.number.clone(), row);
         Ok(Written::Applied)
     }
 }

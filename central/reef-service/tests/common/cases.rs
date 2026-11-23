@@ -10,6 +10,7 @@ use super::{Fx, Reopen, git, ids, node};
 // same suite, which the other suites sharing `common` don't use
 #[allow(unused_imports)]
 pub use super::comment_cases::*;
+pub use super::decision_cases::*;
 #[allow(unused_imports)]
 pub use super::loop_cases::*;
 #[allow(unused_imports)]

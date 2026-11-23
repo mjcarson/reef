@@ -10,6 +10,7 @@
 pub mod api_cases;
 pub mod cases;
 pub mod comment_cases;
+pub mod decision_cases;
 pub mod faulty;
 pub mod git;
 pub mod http;

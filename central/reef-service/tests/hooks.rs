@@ -2210,3 +2210,267 @@ async fn three_queued_nodes_run_end_to_end() -> anyhow::Result<()> {
     assert_eq!(held(&hx, "B").await?, vec![(true, file("b.txt"), (1, 0))]);
     Ok(())
 }
+
+/// One line of a session's transcript, as Claude Code writes it: a call or a result, at a time
+///
+/// # Arguments
+///
+/// * `second` - The second of 2026-11-23T17:00 it was written at
+/// * `block` - The call or result
+/// * `record` - Claude Code's own record of a result, if it kept one
+fn said(second: u32, block: serde_json::Value, record: Option<serde_json::Value>) -> String {
+    // a call is the assistant's, a result the user's
+    let kind = match block["type"].as_str() {
+        Some("tool_use") => "assistant",
+        _ => "user",
+    };
+    let mut line = serde_json::json!({
+        "type": kind,
+        "sessionId": "s1",
+        "timestamp": format!("2026-11-23T17:00:{second:02}.000Z"),
+        "message": { "role": kind, "content": [block] },
+    });
+    if let Some(record) = record {
+        line["toolUseResult"] = record;
+    }
+    line.to_string()
+}
+
+/// A session's plans and questions are kept with the nodes its next_task took, read from its
+/// transcript at each turn's end and at the session's, each once, an answer read later filling
+/// its question in; a plan approved with a clear is read as approved from the session the clear
+/// starts, and stays so; one asked before any next_task goes, at a turn's end, to the node its
+/// checkout was started on
+#[tokio::test]
+async fn a_sessions_decisions_are_kept_with_its_nodes() -> anyhow::Result<()> {
+    use reef_api::{DecisionKind, Outcome, Via};
+    use serde_json::json;
+    let hx = Hx::new("decisions", &["A", "B"]).await?;
+    let client = hx.client()?;
+    let (a, b): (reef_model::NodeName, reef_model::NodeName) =
+        ("cli/docs/A".parse()?, "cli/docs/B".parse()?);
+    let question = json!({"questions": [{
+        "question": "Which greeting?", "header": "Greeting", "multiSelect": false,
+        "options": [{"label": "Hello", "description": ""}, {"label": "Hi", "description": ""}],
+    }]});
+    let terminal_no = "The user doesn't want to proceed with this tool use. The tool use was \
+                       rejected. To tell you how to proceed, the user said:\nName the test.";
+    // a turn: A taken, its question answered, a plan rejected in the terminal, the next approved,
+    // then B taken and its question asked, each line written twice as Claude Code does
+    let mut lines = vec![
+        said(
+            1,
+            json!({"type": "tool_use", "id": "n1", "name": "mcp__reef__next_task", "input": {}}),
+            None,
+        ),
+        said(
+            2,
+            json!({"type": "tool_result", "tool_use_id": "n1", "content": [{"type": "text", "text": "Took `cli/docs/A` for the loop in tmux pane %3."}]}),
+            None,
+        ),
+        said(
+            3,
+            json!({"type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": question}),
+            None,
+        ),
+        said(
+            5,
+            json!({"type": "tool_result", "tool_use_id": "q1", "content": "Your questions have been answered: \"Which greeting?\"=\"Hi\"."}),
+            Some(json!({"answers": {"Which greeting?": "Hi"}})),
+        ),
+        said(
+            6,
+            json!({"type": "tool_use", "id": "p1", "name": "ExitPlanMode", "input": {"plan": "# Plan\n\nWrite it."}}),
+            None,
+        ),
+        said(
+            9,
+            json!({"type": "tool_result", "tool_use_id": "p1", "content": terminal_no, "is_error": true}),
+            None,
+        ),
+        said(
+            10,
+            json!({"type": "tool_use", "id": "p2", "name": "ExitPlanMode", "input": {"plan": "# Plan\n\nWrite it, tested."}}),
+            None,
+        ),
+        said(
+            12,
+            json!({"type": "tool_result", "tool_use_id": "p2", "content": "User has approved your plan."}),
+            None,
+        ),
+        said(
+            20,
+            json!({"type": "tool_use", "id": "n2", "name": "mcp__reef__next_task", "input": {}}),
+            None,
+        ),
+        said(
+            21,
+            json!({"type": "tool_result", "tool_use_id": "n2", "content": [{"type": "text", "text": "Took `cli/docs/B` for the loop in tmux pane %3."}]}),
+            None,
+        ),
+        said(
+            22,
+            json!({"type": "tool_use", "id": "q2", "name": "AskUserQuestion", "input": question}),
+            None,
+        ),
+    ];
+    lines.extend(lines.clone());
+    let transcript = hx.ax.dir.join("s1.jsonl");
+    std::fs::write(&transcript, lines.join("\n") + "\n")?;
+    let input =
+        json!({ "session_id": "s1", "cwd": hx.repo, "transcript_path": transcript }).to_string();
+    // the turn's end keeps them, in a terminal
+    let mut out = Vec::new();
+    reef::hook::stop(&client, &hx.repo, &input, None, None, |_| Ok(()), &mut out).await?;
+    let kept = client.decisions(&a).await?;
+    assert_eq!(kept.len(), 3, "{kept:#?}");
+    assert!(
+        kept.iter()
+            .all(|decision| decision.decided.via == Via::Terminal)
+    );
+    assert_eq!(
+        kept.iter()
+            .map(|decision| decision.number)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let answers =
+        std::collections::BTreeMap::from([("Which greeting?".to_string(), "Hi".to_string())]);
+    assert_eq!(
+        kept[0].decided.outcome,
+        Some(Outcome::Answered {
+            answers: answers.clone()
+        })
+    );
+    assert_eq!(
+        kept[1].decided.outcome,
+        Some(Outcome::Rejected {
+            feedback: "Name the test.".to_string()
+        })
+    );
+    assert!(
+        matches!(&kept[2].decided.kind, DecisionKind::Plan { html, .. } if html.contains("<h1"))
+    );
+    assert_eq!(kept[2].decided.outcome, Some(Outcome::Approved));
+    let pending = client.decisions(&b).await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].decided.outcome, None);
+    // the session's end, B's question answered since: nothing twice, and B's filled in
+    let answer = said(
+        30,
+        json!({"type": "tool_result", "tool_use_id": "q2", "content": "Your questions have been answered: \"Which greeting?\"=\"Hello\"."}),
+        None,
+    );
+    std::fs::write(&transcript, lines.join("\n") + "\n" + &answer + "\n")?;
+    reef::hook::session_end(&client, &hx.repo, &input, None, &mut out).await?;
+    assert_eq!(client.decisions(&a).await?, kept, "A's are as they were");
+    let answered = client.decisions(&b).await?;
+    assert_eq!((answered.len(), answered[0].version), (1, 2));
+    let hello =
+        std::collections::BTreeMap::from([("Which greeting?".to_string(), "Hello".to_string())]);
+    assert_eq!(
+        answered[0].decided.outcome,
+        Some(Outcome::Answered { answers: hello })
+    );
+    assert_eq!(
+        answered[0].decided.answered_at,
+        Some(answered[0].decided.asked_at + 8000)
+    );
+    // a plan approved with a clear: refused with no words in the planning session, whose end
+    // keeps that, then approved as that call's in the session the clear starts, on A, which the
+    // checkout was started on
+    hx.reef(&hx.repo, &["start", "A"]).await?;
+    let planning = [
+        said(
+            50,
+            json!({"type": "tool_use", "id": "n3", "name": "mcp__reef__next_task", "input": {}}),
+            None,
+        ),
+        said(
+            51,
+            json!({"type": "tool_result", "tool_use_id": "n3", "content": "`cli/docs/A` is still this loop's, in progress: carry on with it."}),
+            None,
+        ),
+        said(
+            52,
+            json!({"type": "tool_use", "id": "p4", "name": "ExitPlanMode", "input": {"plan": "# Plan\n\nIn capitals."}}),
+            None,
+        ),
+        said(
+            55,
+            json!({"type": "tool_result", "tool_use_id": "p4", "is_error": true, "content": "The user doesn't want to proceed with this tool use. STOP what you are doing."}),
+            Some(json!("User rejected tool use")),
+        ),
+    ];
+    let planned = hx.ax.dir.join("s3.jsonl");
+    std::fs::write(&planned, planning.join("\n") + "\n")?;
+    let ended = json!({ "cwd": hx.repo, "transcript_path": planned }).to_string();
+    reef::hook::session_end(&client, &hx.repo, &ended, None, &mut out).await?;
+    let refused = client.decisions(&a).await?;
+    assert_eq!(refused.len(), 4);
+    assert_eq!(
+        refused[3].decided.outcome,
+        Some(Outcome::Rejected {
+            feedback: String::new()
+        })
+    );
+    let carried = [
+        json!({"type": "user", "timestamp": "2026-11-23T17:00:56.000Z", "message": {"role": "user", "content": "Implement the following plan:\n\n# Plan"}, "planContent": "# Plan\n\nIn capitals."}).to_string(),
+        json!({"type": "data-flow-records", "sessionId": "s4", "records": [{"tool_name": "ExitPlanMode", "tool_use_id": "p4"}]}).to_string(),
+    ];
+    let cleared = hx.ax.dir.join("s4.jsonl");
+    std::fs::write(&cleared, carried.join("\n") + "\n")?;
+    let stopped =
+        json!({ "session_id": "s4", "cwd": hx.repo, "transcript_path": cleared }).to_string();
+    reef::hook::stop(
+        &client,
+        &hx.repo,
+        &stopped,
+        None,
+        None,
+        |_| Ok(()),
+        &mut out,
+    )
+    .await?;
+    // the approval stands, however often the planning session is read again
+    reef::hook::session_end(&client, &hx.repo, &ended, None, &mut out).await?;
+    let approved = client.decisions(&a).await?;
+    assert_eq!(approved.len(), 4, "{approved:#?}");
+    assert_eq!(approved[3].decided.outcome, Some(Outcome::Approved));
+    assert_eq!(approved[3].decided.session, "s1");
+    // a session that asks before any next_task: its end places nothing, since its pane's loop may
+    // have moved on, and its Stop places it on the node its checkout is on, B, via a runner's app
+    hx.reef(&hx.repo, &["start", "B"]).await?;
+    let early = [
+        said(
+            40,
+            json!({"type": "tool_use", "id": "p3", "name": "ExitPlanMode", "input": {"plan": "# B's plan"}}),
+            None,
+        ),
+        said(
+            41,
+            json!({"type": "tool_result", "tool_use_id": "p3", "content": "User has approved your plan."}),
+            None,
+        ),
+    ];
+    let second = hx.ax.dir.join("s2.jsonl");
+    std::fs::write(&second, early.join("\n") + "\n")?;
+    let input = json!({ "cwd": hx.repo, "transcript_path": second }).to_string();
+    let runner: reef_api::Pane = "reef:k3x9-4242".parse()?;
+    reef::hook::session_end(&client, &hx.repo, &input, Some(&runner), &mut out).await?;
+    assert_eq!(client.decisions(&b).await?.len(), 1);
+    reef::hook::stop(
+        &client,
+        &hx.repo,
+        &input,
+        Some(&runner),
+        None,
+        |_| Ok(()),
+        &mut out,
+    )
+    .await?;
+    let on_b = client.decisions(&b).await?;
+    assert_eq!(on_b.len(), 2, "{on_b:#?}");
+    assert_eq!((on_b[1].number, on_b[1].decided.via), (2, Via::App));
+    Ok(())
+}

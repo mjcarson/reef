@@ -11,6 +11,16 @@
         "matcher": "mcp__reef__status"
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "reef hook session-end",
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

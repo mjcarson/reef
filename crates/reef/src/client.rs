@@ -7,11 +7,12 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, EditLoop,
-    ErrorCode, FileDiff, Listing, Loop, LoopEdited, NewPlan, NewProject, NewReply, Ordered,
-    PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing,
-    Queued, Report, ResolveThread, Resolved, Revision, Rewrite, Session, SessionAct, SessionActed,
-    StartWork, Started, StoredNode, StoredPage, Thread, Transcript, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
+    DecisionsRecorded, EditLoop, ErrorCode, FileDiff, Listing, Loop, LoopEdited, NewPlan,
+    NewProject, NewReply, Ordered, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project,
+    Puts, QueueEdit, QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved,
+    Revision, Rewrite, Session, SessionAct, SessionActed, StartWork, Started, StoredNode,
+    StoredPage, Thread, Transcript, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -494,6 +495,34 @@ impl Client {
         let path = paths::LOOPS;
         let request = self.http.post(self.url(path)).json(edit);
         self.send(request, path).await
+    }
+
+    /// Lists a node's decisions, by number, each plan rendered
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub async fn decisions(&self, node: &NodeName) -> anyhow::Result<Vec<Decision>> {
+        let path = paths::node_decisions(node);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Keeps a node's decisions, each by the call that asked
+    ///
+    /// A node that isn't in its plan is an answer, not an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `record` - The decisions, as read from a session's transcript
+    pub async fn record_decisions(
+        &self,
+        node: &NodeName,
+        record: &RecordDecisions,
+    ) -> anyhow::Result<DecisionsRecorded> {
+        let path = paths::node_decisions(node);
+        let request = self.http.post(self.url(&path)).json(record);
+        self.send(request, &path).await
     }
 
     /// Attaches a runner's session, or attaches it again with what it holds

@@ -372,6 +372,35 @@ pub struct LoopRow {
     pub record: String,
 }
 
+/// One decision made on a node's work: a plan a session asked approval for, or questions it
+/// asked, and what came of it
+///
+/// Each node's decisions share a partition, sorted by number, as its revisions do. Its record is
+/// one JSON field, so what a decision keeps can change without changing this table. A new one is
+/// written `if_absent`, and an answer to one kept already over the version read.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct DecisionRow {
+    /// The project the node's plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The node's name within its project, `plan/id`
+    #[shoal(partition)]
+    pub node: String,
+    /// The decision's number on its node, padded with zeros to ten digits so the partition sorts
+    /// by it
+    #[shoal(sort)]
+    pub number: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// The decision as JSON, its node and number left to the fields beside it
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -401,6 +430,8 @@ pub struct Reef {
     pub comments: PersistentSortedTable<CommentRow, FileSystem>,
     /// Every terminal loop, by pane
     pub loops: PersistentSortedTable<LoopRow, FileSystem>,
+    /// Each node's decisions, by number
+    pub decisions: PersistentSortedTable<DecisionRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -409,7 +440,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 8077356931606017743;
+    const SCHEMA_ID: u64 = 3071008669871081648;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -423,6 +454,7 @@ mod tests {
         ("RevisionFileRow", 2270476186678581084),
         ("CommentRow", 11872189191251839750),
         ("LoopRow", 8656995277351789761),
+        ("DecisionRow", 18226743367225770895),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

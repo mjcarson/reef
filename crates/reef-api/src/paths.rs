@@ -30,9 +30,14 @@
 //! | `GET` | [`PLAN_COMMENTS`] |
 //! | `GET`, `POST` | [`NODE_COMMENTS`] |
 //! | `GET`, `PUT` | [`NODE_REVIEW`] |
+//! | `GET`, `POST` | [`NODE_DECISIONS`] |
 //! | `GET` | [`THREAD`] |
 //! | `POST` | [`REPLIES`] |
 //! | `PUT` | [`THREAD_STATE`] |
+//! | `POST` | [`SESSIONS`] |
+//! | `GET ?after=`, `POST`, `DELETE` | [`SESSION`] |
+//! | `GET ?after=&wait=`, `POST` | [`SESSION_ORDERS`] |
+//! | `GET` | [`PROJECT_SESSIONS`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 
 use reef_model::{NodeName, PlanName};
@@ -119,6 +124,10 @@ pub const NODE_COMMENTS: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{
 
 /// A node's open review: read by `GET`, submitted or discarded by `PUT`
 pub const NODE_REVIEW: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/review";
+
+/// A node's decisions: listed by `GET`, those a hook read from a session's transcript kept by
+/// `POST`
+pub const NODE_DECISIONS: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/decisions";
 
 /// The query a thread's routes take to serve threads pending in a review too, which they leave
 /// out otherwise
@@ -477,6 +486,15 @@ pub fn node_review(node: &NodeName) -> String {
     format!("{}/review", self::node(&node.plan, &node.id))
 }
 
+/// The path of a node's decisions
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+pub fn node_decisions(node: &NodeName) -> String {
+    format!("{}/decisions", self::node(&node.plan, &node.id))
+}
+
 /// The path of one comment thread
 ///
 /// # Arguments
@@ -654,6 +672,7 @@ mod tests {
         assert_eq!(super::plan_comments(&plan), fill(super::PLAN_COMMENTS));
         assert_eq!(super::node_comments(&node), fill(super::NODE_COMMENTS));
         assert_eq!(super::node_review(&node), fill(super::NODE_REVIEW));
+        assert_eq!(super::node_decisions(&node), fill(super::NODE_DECISIONS));
         assert_eq!(super::thread(&plan, 7), fill(super::THREAD));
         assert_eq!(super::replies(&plan, 7), fill(super::REPLIES));
         assert_eq!(super::thread_state(&plan, 7), fill(super::THREAD_STATE));
