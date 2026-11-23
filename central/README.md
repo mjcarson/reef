@@ -368,6 +368,9 @@ the pages and the JSON API alike.
   or what it was reopened after. The canvas reads the plan's threads once a change, for all
   three.
 
+- **A node's Decisions tab** lists every plan its sessions asked approval for, with its verdict
+  and feedback, and every question with the choice picked, each saying where and when it was
+  answered, and follows the plan's stream for new ones.
 - **The sessions panel** opens from the bar, whose button counts the live sessions and the
   prompts waiting. It lists each runner, its state and its loop's node, with buttons that start,
   pause and stop the loop, and a terminal's loops to read. The picked runner's transcript follows

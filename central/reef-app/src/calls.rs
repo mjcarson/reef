@@ -7,9 +7,9 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, FileDiff, Loop, Marked, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review,
-    ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, Target, Thread,
-    ThreadState, Transcript,
+    Commented, Decision, FileDiff, Loop, Marked, PlanInfo, Project, QueueEdit, QueueListing,
+    Queued, Review, ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, Target,
+    Thread, ThreadState, Transcript,
 };
 #[cfg(feature = "server")]
 use reef_api::{MarkReview, MarkThread, NewReply, NewThread, Writer};
@@ -127,6 +127,34 @@ pub async fn edit_queue(project: String, edit: QueueEdit) -> Result<Queued, Serv
     // under the queue's lock, told to the change stream once it is made
     crate::server::service()
         .edit_queue(&project, edit)
+        .await
+        .map_err(failed)
+}
+
+/// A node's decisions: each plan its sessions asked approval for and each question they asked,
+/// and what came of it, each plan rendered
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+#[get("/app/decisions?project&plan&id")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::node_decisions", skip_all, err(Debug))
+)]
+pub async fn node_decisions(
+    project: String,
+    plan: String,
+    id: String,
+) -> Result<Vec<Decision>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    crate::server::service()
+        .node_decisions(&node)
         .await
         .map_err(failed)
 }

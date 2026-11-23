@@ -290,6 +290,28 @@ diff, and on the node as a whole ([C35](../milestones/m7.md)), over the threads 
   sent over the version read. The open counts, in the tab and the toolbar, leave pending threads
   out until they are published.
 
+## The Decisions tab
+
+Every plan a node's sessions asked approval for and every question they asked is kept with the
+node, with what came of it ([C75](../milestones/m9.md)). The node's sidebar shows them beside its changes
+and comments ([C76](../milestones/m9.md)).
+
+### Design choices
+
+- **A tab of the node's sidebar,** after Comments, since a decision belongs to the node it
+  shaped, however its session ran: in a terminal or under a runner.
+- **Read with the node's work.** `decisions-recorded` bumps the plan's work counter, as a
+  capture or a comment does, so the tab reads them again without reading the plan, and a
+  decision kept while the tab is open shows up there.
+- **In the order kept, a card each,** numbered, with its verdict, and where and when it was
+  answered: in reef's app, or in the terminal.
+- **A plan as the service rendered it,** raw HTML escaped. Its rejection's feedback is quoted
+  above it, and only the last approved plan is unfolded, so the plan a node was built from is
+  the one open.
+- **A question shows every choice it offered,** the ones picked ticked. Several picks are
+  joined by `, ` as Claude Code joins them, so an answer whose parts are all labels is read as
+  those picks, and any other as the user's own words, shown as written.
+
 ## The sessions panel
 
 A runner the user started, `reef loop run`, runs a loop's sessions headless, and central reef

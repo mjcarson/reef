@@ -192,6 +192,23 @@ code { font-size: 0.92em; }
 .reef-app-entry.asked summary { cursor: pointer; }
 .reef-app-ended > summary { cursor: pointer; color: var(--muted); }
 .reef-app-unchanged { margin: 0; color: var(--reef-progress); font-size: 0.8rem; }
+.reef-app-decisions { margin-top: 0.6rem; font-size: 0.85rem; display: grid; gap: 0.5rem; }
+.reef-app-decision { border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 6px; padding: 0.4rem 0.55rem; background: var(--bg); display: grid; gap: 0.3rem; }
+.reef-app-decision.approved, .reef-app-decision.answered { border-left-color: var(--reef-done); }
+.reef-app-decision.rejected { border-left-color: var(--reef-blocked); }
+.reef-app-decision.waiting { border-left-color: var(--reef-progress); }
+.reef-app-decision-head { display: flex; gap: 0.45rem; align-items: baseline; flex-wrap: wrap; }
+.reef-app-decision-number { font-family: monospace; color: var(--muted); }
+.reef-app-decision-when { font-size: 0.75rem; margin-left: auto; }
+.reef-app-verdict.approved, .reef-app-verdict.answered { color: var(--reef-done); border-color: var(--reef-done); }
+.reef-app-verdict.rejected { color: var(--reef-blocked); border-color: var(--reef-blocked); }
+.reef-app-verdict.waiting { color: var(--reef-progress); border-color: var(--reef-progress); }
+.reef-app-feedback { margin: 0; padding: 0.2rem 0.5rem; border-left: 3px solid var(--reef-blocked); background: var(--panel); white-space: pre-wrap; }
+.reef-app-decision-plan > summary { cursor: pointer; color: var(--muted); }
+.reef-app-decision-asked { margin: 0; }
+.reef-app-decision-choices { margin: 0.15rem 0 0; padding-left: 1.1rem; }
+.reef-app-decision-choices li.picked { color: var(--reef-done); }
+.reef-app-own-answer { margin: 0.15rem 0 0; font-style: italic; }
 .reef-app-ended > .reef-app-runners { margin-top: 0.3rem; opacity: 0.75; }
 "#;
 

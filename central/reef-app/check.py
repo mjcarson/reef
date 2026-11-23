@@ -1346,6 +1346,65 @@ def c47_a_rejected_plan_comes_back_revised(page):
         stop_runner(process)
 
 
+def keep_decisions(plan, node, decisions):
+    """Keeps a node's decisions through the JSON API, as reef's hooks do."""
+    body = json.dumps({"decisions": decisions}).encode()
+    url = f"{URL}/api/v1/projects/check/plans/{plan}/nodes/{node}/decisions"
+    request = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        return json.load(answer)
+
+
+def c76_a_nodes_decisions_show_in_its_sidebar(page):
+    """C76: a node's Decisions tab shows each question with the choice picked, each plan with its
+    verdict and feedback, the last approved one open, and a new decision appears live."""
+    reef("plan", "new", "decide")
+    put("decide", node_yaml("D1", "D1 Decided on"))
+    question = {"question": "Which greeting?", "header": "Greeting", "multiSelect": False,
+                "options": [{"label": "Hello", "description": "The usual"}, {"label": "Hi", "description": "Shorter"}]}
+    keep_decisions("decide", "D1", [
+        {"call": "q1", "session": "s1", "via": "terminal", "asked_at": 1795400000000, "answered_at": 1795400005000,
+         "kind": "question", "questions": [question],
+         "outcome": {"outcome": "answered", "answers": {"Which greeting?": "Hi"}}},
+        {"call": "p1", "session": "s1", "via": "terminal", "asked_at": 1795400010000, "answered_at": 1795400020000,
+         "kind": "plan", "plan": "# Plan\n\nWrite it.",
+         "outcome": {"outcome": "rejected", "feedback": "In capitals, please."}},
+        {"call": "p2", "session": "s1", "via": "app", "asked_at": 1795400030000, "answered_at": 1795400040000,
+         "kind": "plan", "plan": "# Plan, revised\n\nWrite it in capitals.", "outcome": {"outcome": "approved"}},
+    ])
+    page.goto(URL + "/plans/check/decide")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="D1 Decided on").click()
+    page.wait_for_selector(".reef-side", timeout=5000)
+    page.click("button[data-tab=decisions]")
+    page.wait_for_selector(".reef-app-decision[data-decision='3']", timeout=10000)
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    cards = page.locator(".reef-app-decision").evaluate_all(
+        "els => els.map(e => [e.dataset.decision, e.querySelector('.reef-app-verdict').innerText])")
+    picked = page.locator(".reef-app-decision-choices li.picked").evaluate_all("els => els.map(e => e.dataset.choice)")
+    feedback = page.inner_text(".reef-app-decision.rejected .reef-app-feedback")
+    opened = page.locator(".reef-app-decision-plan[open]").evaluate_all(
+        "els => els.map(e => e.closest('.reef-app-decision').dataset.decision)")
+    heading = page.inner_text(".reef-app-decision[data-decision='3'] .reef-app-plan-body h1")
+    where = page.inner_text(".reef-app-decision[data-decision='3'] .reef-app-decision-when")
+    page.screenshot(path=str(SHOTS / "reef-app-decisions.png"))
+    # a question answered in the user's own words, kept while the tab is open
+    keep_decisions("decide", "D1", [
+        {"call": "q2", "session": "s2", "via": "terminal", "asked_at": 1795400050000, "answered_at": 1795400055000,
+         "kind": "question", "questions": [question],
+         "outcome": {"outcome": "answered", "answers": {"Which greeting?": "Howdy"}}},
+    ])
+    page.wait_for_selector(".reef-app-decision[data-decision='4']", timeout=10000)
+    own = page.inner_text(".reef-app-decision[data-decision='4'] .reef-app-own-answer")
+    check("C76 a node's decisions show in its sidebar, a new one live",
+          cards == [["1", "Answered"], ["2", "Rejected"], ["3", "Approved"]] and picked == ["Hi"]
+          and feedback == "In capitals, please." and opened == ["3"] and heading == "Plan, revised"
+          and where.startswith("in reef's app") and own.endswith("Howdy")
+          and page.evaluate("() => window.__kept") == "same page",
+          {"cards": cards, "picked": picked, "feedback": feedback, "open": opened, "heading": heading,
+           "where": where, "own words": own})
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -1401,6 +1460,7 @@ def main():
                 c45_a_loop_started_from_the_app_streams_its_transcript,
                 c46_a_question_is_answered_in_the_app,
                 c47_a_rejected_plan_comes_back_revised,
+                c76_a_nodes_decisions_show_in_its_sidebar,
             ]
             for step in checks:
                 # every check, or those `--only` names
