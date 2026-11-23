@@ -6,6 +6,7 @@
 //! reef hook post-rewrite <KIND>  # git: draft it once a rebase ends; an amend is post-commit's
 //! reef hook post-tool-use        # Claude Code, after reef's status tool: draft a node marked done
 //! reef hook stop [--pane KEY]    # Claude Code: seal the node done here, and end the loop's node
+//! reef hook clear ...            # Stop's, in the background: clear the session, ask for the next
 //! ```
 //!
 //! - **git's hooks keep the draft current.** post-commit drafts the node the worktree is on
@@ -24,6 +25,10 @@
 //!   or that nothing else is ready, as a `systemMessage`, since Claude Code shows the user a
 //!   Stop's output only as JSON. Mid-node Claude is waiting on the user, so Stop says nothing.
 //!   Stop never blocks, since Claude Code shows a block as a problem.
+//! - **Then it clears between nodes.** With another node next in a zellij or tmux pane, Stop
+//!   starts the injector in the background ([`crate::clear`]), which types `/clear` and the
+//!   next node's kickoff into the pane once Claude is idle and its input box empty. Anywhere
+//!   else, or if the injector can't start, the user types `/clear` and `next`.
 //! - **Nothing to do is no failure.** A directory outside git or outside every project, a
 //!   worktree no node was started in, or a node marked something other than done: the hook says
 //!   nothing and succeeds. A capture that fails, or a service that doesn't answer, is an error,
@@ -38,6 +43,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::capture::{Keep, Report, capture_record, seal_if_done};
+use crate::clear::Clear;
 use crate::client::Client;
 use crate::git::Checkout;
 use crate::task;
@@ -68,9 +74,12 @@ struct StatusSet {
     plan: Option<String>,
 }
 
-/// What Claude Code hands Stop: where the session is
+/// What Claude Code hands Stop: the session, and where it is
 #[derive(Debug, Deserialize)]
 struct Stopped {
+    /// The session that stopped, which the injector clears
+    #[serde(default)]
+    session_id: Option<String>,
     /// The session's working directory
     #[serde(default)]
     cwd: Option<PathBuf>,
@@ -171,7 +180,8 @@ pub async fn post_tool_use<W: Write>(
 }
 
 /// Seals the node the worktree is on once it is done, its draft or its first revision if it has
-/// none, then acts once on the end of the node the pane's loop holds
+/// none, then acts once on the end of the node the pane's loop holds, starting the injector
+/// that clears the session when another node is next and the pane can be typed into
 ///
 /// # Arguments
 ///
@@ -179,14 +189,22 @@ pub async fn post_tool_use<W: Write>(
 /// * `cwd` - The working directory, unless the input names the session's
 /// * `input` - The event Claude Code handed the hook, as JSON
 /// * `pane` - The pane the session runs in, if it could be found
+/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
+/// * `spawn` - Starts the injector in the background, as [`crate::clear::spawn`] does
 /// * `out` - Where to print what came of it
-pub async fn stop<W: Write>(
+pub async fn stop<W, S>(
     client: &Client,
     cwd: &Path,
     input: &str,
     pane: Option<&Pane>,
+    pid: Option<u32>,
+    spawn: S,
     out: &mut W,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    W: Write,
+    S: FnOnce(&Clear) -> anyhow::Result<()>,
+{
     // the session's directory, which its worktree is found from
     let stopped: Stopped = serde_json::from_str(input)
         .map_err(|error| anyhow::anyhow!("Stop's input doesn't read as one: {error}"))?;
@@ -206,7 +224,14 @@ pub async fn stop<W: Write>(
         Some(pane) => task::ended(client, pane).await?,
         None => task::Ending::Nothing,
     };
-    let Some(message) = ending.message() else {
+    // another node next clears the session, wherever reef can type into its pane
+    let order = clearing(&ending, pane, stopped.session_id, pid);
+    let (typed, failed) = match order.map(|order| spawn(&order)) {
+        Some(Ok(())) => (true, None),
+        Some(Err(error)) => (false, Some(error)),
+        None => (false, None),
+    };
+    let Some(message) = ending.message(typed) else {
         // nothing for the user: the seal's lines as they are
         out.write_all(&said)?;
         return Ok(());
@@ -214,8 +239,41 @@ pub async fn stop<W: Write>(
     // Claude Code shows a Stop's output to the user only when all of it is JSON
     let mut told = String::from_utf8_lossy(&said).into_owned();
     told.push_str(&format!("reef: {message}"));
+    if let Some(error) = failed {
+        told.push_str(&format!(" (reef couldn't clear it itself: {error:#})"));
+    }
     writeln!(out, "{}", serde_json::json!({ "systemMessage": told }))?;
     Ok(())
+}
+
+/// What the injector is handed, when a node's end has another next and the session can be typed
+/// into: its pane is a multiplexer's, and its session and Claude Code process are known
+///
+/// # Arguments
+///
+/// * `ending` - What the Stop made of the turn's end
+/// * `pane` - The pane the session runs in, if it could be found
+/// * `session` - The session that stopped, as Stop's input names it
+/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`
+fn clearing(
+    ending: &task::Ending,
+    pane: Option<&Pane>,
+    session: Option<String>,
+    pid: Option<u32>,
+) -> Option<Clear> {
+    // only the end of a node with another next is cleared after
+    let task::Ending::Next { done, .. } = ending else {
+        return None;
+    };
+    // and only in a pane reef can type into, watching a session it can name
+    let pane = pane.filter(|pane| pane.typed())?;
+    let session = session.filter(|session| !session.trim().is_empty())?;
+    Some(Clear {
+        pane: pane.clone(),
+        session,
+        pid: pid?,
+        after: done.clone(),
+    })
 }
 
 /// The status reef's status tool set a node to, if the tool was it and the status was done
@@ -301,7 +359,10 @@ fn prefixed<W: Write>(said: &[u8], out: &mut W) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolUsed, marked_done};
+    use super::{ToolUsed, clearing, marked_done};
+    use crate::clear::Clear;
+    use crate::task::Ending;
+    use reef_api::Pane;
 
     /// Reads a PostToolUse input
     ///
@@ -362,5 +423,52 @@ mod tests {
             "tool_input": { "id": "C56", "status": "finished-ish" },
         }));
         assert!(marked_done(&odd).is_none());
+    }
+
+    /// The injector is handed a node's end only when another is next, in a zellij or tmux pane,
+    /// with the session and its Claude Code process named
+    #[test]
+    fn only_a_next_node_in_a_typed_pane_is_cleared_after() {
+        let done: reef_model::NodeName = "reef/central/C41".parse().unwrap();
+        let next = Ending::Next {
+            done: done.clone(),
+            next: "reef/central/C61".parse().unwrap(),
+        };
+        let zellij: Pane = "zellij:work:3".parse().unwrap();
+        let session = || Some("s1".to_string());
+        // a zellij or tmux pane, its session and its process named, is cleared after
+        assert_eq!(
+            clearing(&next, Some(&zellij), session(), Some(4242)),
+            Some(Clear {
+                pane: zellij.clone(),
+                session: "s1".to_string(),
+                pid: 4242,
+                after: done.clone(),
+            })
+        );
+        let tmux: Pane = "tmux:/tmp/tmux-1000/default:%3".parse().unwrap();
+        assert!(clearing(&next, Some(&tmux), session(), Some(4242)).is_some());
+        // a Claude Code process with no multiplexer, or no pane, is the user's to clear
+        let bare = Pane::Claude { pid: 4242 };
+        assert_eq!(clearing(&next, Some(&bare), session(), Some(4242)), None);
+        assert_eq!(clearing(&next, None, session(), Some(4242)), None);
+        // as is a session or a process Claude Code didn't name
+        assert_eq!(clearing(&next, Some(&zellij), None, Some(4242)), None);
+        assert_eq!(
+            clearing(&next, Some(&zellij), Some(" ".to_string()), Some(4242)),
+            None
+        );
+        assert_eq!(clearing(&next, Some(&zellij), session(), None), None);
+        // and a pause, a finished plan or nothing to act on clears nothing
+        for ending in [
+            Ending::Paused(done.clone()),
+            Ending::Finished(done.clone()),
+            Ending::Nothing,
+        ] {
+            assert_eq!(
+                clearing(&ending, Some(&zellij), session(), Some(4242)),
+                None
+            );
+        }
     }
 }

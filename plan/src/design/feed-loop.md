@@ -37,13 +37,30 @@ where they are today:
   It types only into the pane the session already runs in, and only from that session's own
   hook.
 - **Cleared by typing into the pane.** No hook output, tool or command clears an interactive
-  session. Once a node is done, the Stop hook lets Claude stop and starts an injector in the
-  background. The injector waits until the session is idle, then types `/clear` and the
-  kickoff into the session's own zellij or tmux pane, found from the hook's
-  `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`, or `TMUX_PANE`.
-- **Without a multiplexer, the user types `/clear`.** The Stop hook's message says which node is
-  next, and SessionStart(clear) names it to Claude, so any short prompt after the clear starts
-  it.
+  session. Once a node is done and another is next, the Stop hook lets Claude stop and starts an
+  injector in the background, `reef hook clear` ([C61](../milestones/m8.md)). The injector waits
+  until the session is idle, then types `/clear` and the kickoff into the session's own zellij
+  or tmux pane, found from the hook's `ZELLIJ_SESSION_NAME` and `ZELLIJ_PANE_ID`, or `TMUX`'s
+  socket and `TMUX_PANE`.
+  - **Idle as `claude agents --json` says,** for the interactive session of the Claude Code
+    process `CLAUDE_PID` names. That process keeps its pid across a clear, and lists the clear's
+    new session within 0.25 s, so the injector waits on the new session before the kickoff.
+  - **It types only while the loop is between nodes:** running, holding the node whose end it
+    acted on, its Claude Code process running the session it waits on. Otherwise it quits.
+  - **In its own process group,** with nothing piped back to Claude Code, and what it did
+    appended to `$XDG_STATE_HOME/reef/clear.log`.
+- **A draft is never typed over.** The injector reads the pane's input box with its colours,
+  through zellij's `dump-screen --ansi` or tmux's `capture-pane -e`: the last `❯` line right
+  under a rule, up to the rule that closes it. It waits while the box holds anything that isn't
+  faint, since Claude Code draws its own placeholder and suggested prompt faint. A pane showing
+  no box, such as a dialog's or a shell's, is never typed into.
+  - **Enter only on its own line.** After typing, it reads the box back, and presses Enter only
+    if the box holds what it typed, so a key the user pressed meanwhile never sends their line.
+  - **It steps aside** once a turn starts that it didn't type, such as the user sending their
+    draft, or after ten minutes. The user's own `/clear` and `next` then start the next node.
+- **Without a multiplexer, the user types `/clear` and `next`.** The Stop hook's message says
+  which node is next, and SessionStart(clear) names it to Claude, so one word after the clear
+  starts it. A clear mid-node, a plan approval's, is told nothing.
 - **next_task starts the node,** before plan mode, since plan mode stops writes. It records the
   start in the session's checkout as `reef start` does, so the node's changes are captured as its
   own, and marks it in progress ([C40](../milestones/m8.md)). A call before the node is done hands out the
@@ -129,11 +146,29 @@ ran inside zellij and two in plain tmux. A stand-in user answered and approved t
   included. An injector started with another session's environment types into that session.
   The spike's test sessions scrub their environment for this reason.
 
+### What C61 found
+
+Tried with Claude Code 2.1.330, running Sonnet 5.5, on a scratch reef-serve. One loop ran in
+zellij, one in plain tmux and one with neither, each on a private tmux server with a scrubbed
+environment. A stand-in user approved through tmux.
+
+- **Typing into the pane clears between nodes, in both.** In zellij and in tmux, a node's end
+  cleared the session and started the next node's next_task with nothing typed. The new
+  session's first turn ran at 44.4k, a fresh session's context. It began with SessionStart's
+  context naming the node, then `/clear`, then the kickoff.
+- **Claude Code draws its own text in the box faint** (SGR 2): the placeholder (`Try "…"`), and
+  the suggested prompt that appears a second or two after a turn ends. A plain read of the
+  screen takes either for a draft.
+- **A named session's top rule holds its name,** as `──── write-a-txt-file ─`, so a rule is
+  dashes end to end around any label.
+- **A draft held the injector until it was gone.** A draft typed while a node ran was still in
+  the box, untouched, after the node's end. Erased, the injector cleared and kicked off within
+  3 s. Sent instead, the injector stepped aside.
+- **Without a multiplexer, `/clear` and `next` started the next node** through SessionStart's
+  context.
+
 ### Open questions
 
-- **A draft in the input box.** The injector types once the session is idle, and the user may be
-  typing a prompt by then. It should read the pane's input line first
-  ([C61](../milestones/m8.md)).
 - **Approval's clear as well?** It drops a node's planning before its implementation, 8k to 9k
   for the stub's nodes. Whether `reef claude install` turns it on is
   [C42](../milestones/m8.md)'s call.

@@ -20,7 +20,8 @@
 //! - **The Stop hook ends a node once** ([`ended`]). While the node the loop holds isn't done,
 //!   Claude is waiting on the user, and the hook lets it stop. Once it is done, the hook acts on
 //!   its end once, recorded as [`LoopEdit::Acted`], whatever `stop_hook_active` says: it names
-//!   the next node, or says the loop is paused or nothing else is ready.
+//!   the next node, or says the loop is paused or nothing else is ready. In a zellij or tmux
+//!   pane, reef then clears the session and asks for the next node itself ([`crate::clear`]).
 
 use reef_api::loops::holder;
 use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
@@ -138,16 +139,21 @@ pub enum Ending {
 impl Ending {
     /// What the hook tells the user of it, if it acted
     ///
+    /// # Arguments
+    ///
+    /// * `typed` - Whether reef types `/clear` and the next node's kickoff into the pane, else
+    ///   the user does
+    ///
     /// # Examples
     ///
     /// ```
     /// use reef::task::Ending;
     ///
     /// let paused = Ending::Paused("reef/central/C41".parse().unwrap());
-    /// assert!(paused.message().unwrap().contains("the loop is paused"));
-    /// assert_eq!(Ending::Nothing.message(), None);
+    /// assert!(paused.message(false).unwrap().contains("the loop is paused"));
+    /// assert_eq!(Ending::Nothing.message(true), None);
     /// ```
-    pub fn message(&self) -> Option<String> {
+    pub fn message(&self, typed: bool) -> Option<String> {
         match self {
             Ending::Nothing => None,
             Ending::Paused(done) => Some(format!(
@@ -158,8 +164,13 @@ impl Ending {
                 "`{done}` is done, and nothing else is ready to take: `reef next` says what \
                  everything waits on"
             )),
+            // reef clears the session itself in a multiplexer's pane
+            Ending::Next { done, next } if typed => Some(format!(
+                "`{done}` is done. `{next}` is next: reef clears the context and asks for it \
+                 once Claude is idle and the input box is empty"
+            )),
             Ending::Next { done, next } => Some(format!(
-                "`{done}` is done. `{next}` is next: `/clear`, then ask for it"
+                "`{done}` is done. `{next}` is next: `/clear`, then say `next`"
             )),
         }
     }
@@ -255,13 +266,7 @@ pub async fn ended(client: &Client, pane: &Pane) -> anyhow::Result<Ending> {
         return Ok(Ending::Nothing);
     };
     // what comes after it, over the loops of its project
-    let next = next_for(client, feeding).await?;
-    let project: Vec<Loop> = loops
-        .iter()
-        .filter(|other| other.project == feeding.project)
-        .cloned()
-        .collect();
-    let ending = after(feeding, done.clone(), &next, &project);
+    let ending = upcoming(client, feeding, done.clone(), &loops).await?;
     // recorded before it is told, and told only by the Stop that recorded it
     match edited(client, pane, LoopEdit::Acted { node: done }).await? {
         LoopEdited::Edited { .. } => Ok(ending),
@@ -269,6 +274,35 @@ pub async fn ended(client: &Client, pane: &Pane) -> anyhow::Result<Ending> {
         LoopEdited::ActedAlready { .. } | LoopEdited::NoLoop { .. } => Ok(Ending::Nothing),
         other => anyhow::bail!("the service answered {other:?} for the loop in {pane}"),
     }
+}
+
+/// What comes after a node a loop holds that is done, as next_task will take it: the pause, the
+/// first ready node no other loop of its project holds, or nothing
+///
+/// The SessionStart hook asks it of a clear between nodes, so it reads whether the node's end
+/// was acted on no more than [`after`] does.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `feeding` - The pane's loop
+/// * `done` - The node it holds, which is done
+/// * `loops` - Every loop the service keeps, whichever project they feed
+pub async fn upcoming(
+    client: &Client,
+    feeding: &Loop,
+    done: NodeName,
+    loops: &[Loop],
+) -> anyhow::Result<Ending> {
+    // the ready work over the loop's plans, the queue's first
+    let next = next_for(client, feeding).await?;
+    // and the loops of its project, which hold what this one can't take
+    let project: Vec<Loop> = loops
+        .iter()
+        .filter(|other| other.project == feeding.project)
+        .cloned()
+        .collect();
+    Ok(after(feeding, done, &next, &project))
 }
 
 /// The ready work a loop takes from: its one plan's, or every plan's of its project
@@ -757,17 +791,46 @@ mod tests {
             }
         );
         // and only an ending that acted says anything
-        assert_eq!(Ending::Nothing.message(), None);
+        assert_eq!(Ending::Nothing.message(false), None);
+        assert_eq!(Ending::Nothing.message(true), None);
         let told = Ending::Next {
             done: named("C40"),
             next: named("C41"),
         };
         assert_eq!(
-            told.message().as_deref(),
+            told.message(false).as_deref(),
             Some(
-                "`reef/central/C40` is done. `reef/central/C41` is next: `/clear`, then ask for it"
+                "`reef/central/C40` is done. `reef/central/C41` is next: `/clear`, then say `next`"
             )
         );
+    }
+
+    /// The next node's message says reef clears the context where it types into the pane, and
+    /// that the user does elsewhere, while a pause or a finished plan reads the same either way
+    #[test]
+    fn the_next_nodes_message_says_who_clears() {
+        // reef types into a multiplexer's pane
+        let next = Ending::Next {
+            done: named("C40"),
+            next: named("C41"),
+        };
+        assert_eq!(
+            next.message(true).as_deref(),
+            Some(
+                "`reef/central/C40` is done. `reef/central/C41` is next: reef clears the context \
+                 and asks for it once Claude is idle and the input box is empty"
+            )
+        );
+        // and the user clears and says one word anywhere else
+        assert!(
+            next.message(false)
+                .unwrap()
+                .ends_with("is next: `/clear`, then say `next`")
+        );
+        // a pause or a finished plan types nothing, so it reads the same
+        for ending in [Ending::Paused(named("C40")), Ending::Finished(named("C40"))] {
+            assert_eq!(ending.message(true), ending.message(false));
+        }
     }
 
     /// A node another loop holds is never a candidate, and is listed with the pane holding it

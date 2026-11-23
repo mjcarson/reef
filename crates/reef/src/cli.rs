@@ -35,6 +35,7 @@
 //! reef [--conf PATH] hook post-rewrite <KIND>
 //! reef [--conf PATH] hook post-tool-use
 //! reef [--conf PATH] hook stop [--pane KEY]
+//! reef [--conf PATH] hook clear --pane KEY --session ID --pid PID --after NODE
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
@@ -65,6 +66,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::capture;
+use crate::clear;
 use crate::client::Client;
 use crate::comment;
 use crate::conf::Conf;
@@ -458,11 +460,28 @@ pub enum HookCommand {
     /// is on it
     PostToolUse,
     /// Stop: seal the node this worktree is on once it is done, its draft or its first revision,
-    /// then act once on the end of the node this pane's loop holds
+    /// then act once on the end of the node this pane's loop holds, clearing the session in a
+    /// zellij or tmux pane when another node is next
     Stop {
         /// The pane, else the one the session runs in
         #[arg(long, value_name = "KEY")]
         pane: Option<String>,
+    },
+    /// Stop's injector, which Stop starts in the background: once the session is idle and its
+    /// input box empty, type `/clear` and the next node's kickoff into its zellij or tmux pane
+    Clear {
+        /// The pane to type into, as `reef loop ls` prints it
+        #[arg(long, value_name = "KEY")]
+        pane: String,
+        /// The session that stopped, which is cleared
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// The Claude Code process the session runs in, `CLAUDE_PID`
+        #[arg(long, value_name = "PID")]
+        pid: u32,
+        /// The node whose end the Stop acted on, which the loop must still hold
+        #[arg(long, value_name = "NODE")]
+        after: String,
     },
 }
 
@@ -640,7 +659,8 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         };
     }
     // the config named, read from the working directory, else the one the service reads
-    let conf = Conf::load(cli.conf.map(|path| cwd.join(path)).as_deref())?;
+    let named = cli.conf.map(|path| cwd.join(path));
+    let conf = Conf::load(named.as_deref())?;
     let client = Client::new(&conf)?;
     match cli.command {
         Command::Project(ProjectCommand::Add { name, repo }) => {
@@ -816,8 +836,29 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                 Some(key) => Some(key.parse::<reef_api::Pane>()?),
                 None => reef_api::Pane::from_env(var),
             };
+            // the Claude Code process, which the injector asks whether the session is idle
+            let pid = var("CLAUDE_PID").and_then(|pid| pid.trim().parse().ok());
             let input = stdin()?;
-            hook::stop(&client, cwd, &input, pane.as_ref(), out).await
+            // the injector reaches the same service, through the config this reef was named
+            let spawn = |order: &clear::Clear| clear::spawn(order, named.as_deref());
+            hook::stop(&client, cwd, &input, pane.as_ref(), pid, spawn, out).await
+        }
+        Command::Hook(HookCommand::Clear {
+            pane,
+            session,
+            pid,
+            after,
+        }) => {
+            // what Stop handed it, each part as Stop wrote it
+            let order = clear::Clear {
+                pane: pane.parse()?,
+                session,
+                pid,
+                after: after
+                    .parse()
+                    .map_err(|error| anyhow::anyhow!("`{after}` names no node: {error}"))?,
+            };
+            clear::run(&client, &order, &mut std::io::stderr()).await
         }
         Command::Mcp { pick } => {
             // the pane the session runs in, its multiplexer's else the Claude Code that started it

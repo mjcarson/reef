@@ -14,17 +14,20 @@
 //!   is run in the session's own pane, as `! reef loop start`, or names one with `--pane`.
 //! - **The session is the pane's.** A start in the session's own pane records the session that
 //!   ran it, `CLAUDE_CODE_SESSION_ID`, and the SessionStart hook hands the pane's loop to each
-//!   session that starts there, a clear's included, so the loop follows its pane.
+//!   session that starts there, a clear's included, so the loop follows its pane. A clear
+//!   between nodes is told which node is next ([`between`]).
 //! - **Every plan, or one.** A loop takes the project's ready work across its plans, unless
 //!   `--plan` names one.
 
 use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
+use reef_model::NodeName;
 use serde::Deserialize;
 use std::io::Write;
 use std::path::Path;
 
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
+use crate::task::{self, Ending};
 
 /// The pane a loop command works on, and the session running there if it is this one
 pub struct Here {
@@ -112,6 +115,9 @@ pub fn server_pane<F: Fn(&str) -> Option<String>>(var: F, parent: u32) -> Option
 struct SessionStarted {
     /// The session that started, a clear's new one included
     session_id: String,
+    /// Why it started: `startup`, `resume`, `clear` or `compact`
+    #[serde(default)]
+    source: String,
 }
 
 /// Starts a loop in a pane feeding the picked project, or one plan of it, or sets the pane's
@@ -261,17 +267,20 @@ pub async fn ls<W: Write>(
 }
 
 /// Hands the pane's loop to the session that just started there, as Claude Code's SessionStart
-/// hook, a clear's new session included
+/// hook, a clear's new session included, and names the next node to a clear's between nodes
 ///
-/// It prints nothing, since what a SessionStart hook prints is added to the session's context.
-/// A pane with no loop is left as it is.
+/// What a SessionStart hook prints is added to the session's context. So it prints nothing,
+/// except after a clear while the loop is between nodes: its node done and its end acted on, and
+/// another next. Then it names that node and how to take it, so `next`, or the kickoff reef
+/// types, starts it. A plan approval's clear, mid-node, is told nothing. A pane with no loop is
+/// left as it is.
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `input` - What the hook was handed on standard input
 /// * `pane` - The pane the session runs in
-/// * `out` - Where the hook's output goes, which this leaves empty
+/// * `out` - Where the hook's output goes
 pub async fn session_start<W: Write>(
     client: &Client,
     input: &str,
@@ -285,14 +294,80 @@ pub async fn session_start<W: Write>(
     let edit = LoopEdit::Session {
         session: started.session_id,
     };
-    match edited(client, pane, edit).await? {
+    let feeding = match edited(client, pane, edit).await? {
         // handed over, or no loop to hand: either way the session goes on
-        LoopEdited::Edited { .. } | LoopEdited::NoLoop { .. } => {
+        LoopEdited::Edited { r#loop } => r#loop,
+        LoopEdited::NoLoop { .. } => {
             out.flush()?;
-            Ok(())
+            return Ok(());
         }
-        other => unexpected(pane, other),
+        other => return unexpected(pane, other),
+    };
+    // only a clear between nodes is told what is next
+    let Some(done) = between(&feeding, &started.source) else {
+        out.flush()?;
+        return Ok(());
+    };
+    let loops = client.loops().await?;
+    let Ending::Next { next, .. } = task::upcoming(client, &feeding, done.clone(), &loops).await?
+    else {
+        out.flush()?;
+        return Ok(());
+    };
+    // added to the new session's context, as Claude Code reads a SessionStart's JSON
+    let context = format!(
+        "reef's loop in this pane is between nodes: `{done}` is done, and `{next}` is next. When \
+         the user says next, or asks for the next node, take it with reef's next_task tool \
+         (`mcp__reef__next_task`, or `reef loop take` where reef's tools aren't served), then \
+         plan it in plan mode as the reef skill's loop says."
+    );
+    let said = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    });
+    writeln!(out, "{said}")?;
+    Ok(())
+}
+
+/// The node a loop holds when a clear finds it between nodes: running, its node done and that
+/// node's end acted on by the Stop hook, which acts only on a node that is done
+///
+/// # Arguments
+///
+/// * `feeding` - The pane's loop, handed to the session that started
+/// * `source` - Why the session started, as Claude Code's SessionStart names it
+///
+/// # Examples
+///
+/// ```
+/// use reef::loops::between;
+/// use reef_api::{Loop, LoopState, Pane};
+///
+/// let node = Some("reef/central/C61".parse().unwrap());
+/// let feeding = Loop {
+///     pane: Pane::Claude { pid: 7 },
+///     project: "reef".to_string(),
+///     plan: None,
+///     session: Some("s2".to_string()),
+///     node: node.clone(),
+///     acted: node.clone(),
+///     state: LoopState::Running,
+///     version: 5,
+///     started_at: 1,
+/// };
+/// assert_eq!(between(&feeding, "clear"), node);
+/// assert_eq!(between(&feeding, "startup"), None);
+/// ```
+pub fn between(feeding: &Loop, source: &str) -> Option<NodeName> {
+    // only a clear, and only of a running loop
+    if source != "clear" || feeding.state != LoopState::Running {
+        return None;
     }
+    // whose node's end was acted on, so a plan approval's clear mid-node is passed by
+    let node = feeding.node.as_ref()?;
+    (feeding.acted.as_ref() == Some(node)).then(|| node.clone())
 }
 
 /// Sends a change to a pane's loop

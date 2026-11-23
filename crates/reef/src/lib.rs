@@ -23,6 +23,9 @@
 //! - **Hooks** ([`hook`]): git's post-commit and post-rewrite, and Claude Code's PostToolUse on
 //!   reef's status tool, keep the draft of the node a worktree is on current, and Stop seals it
 //!   once the node is done.
+//! - **Clearing between nodes** ([`clear`]): once a loop's node is done, Stop's injector types
+//!   `/clear` and the next node's kickoff into the session's zellij or tmux pane, once Claude is
+//!   idle and its input box empty.
 //! - **Comments** ([`comment`]): a thread resolved by hand, the revision that answered it
 //!   linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
@@ -53,6 +56,7 @@
 //! against a service they serve.
 
 pub mod capture;
+pub mod clear;
 pub mod cli;
 pub mod client;
 pub mod comment;

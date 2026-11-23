@@ -87,6 +87,22 @@ impl Pane {
         Some(Pane::Claude { pid })
     }
 
+    /// Whether reef can type into the pane: a multiplexer's can be written to, but a Claude Code
+    /// process with none has no pane but the user's own terminal
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::loops::Pane;
+    ///
+    /// assert!("zellij:work:3".parse::<Pane>().unwrap().typed());
+    /// assert!(!Pane::Claude { pid: 4242 }.typed());
+    /// ```
+    pub fn typed(&self) -> bool {
+        // zellij's actions and tmux's keys reach their panes, and nothing reaches a bare terminal
+        matches!(self, Pane::Zellij { .. } | Pane::Tmux { .. })
+    }
+
     /// The pane as a person reads it
     pub fn describe(&self) -> String {
         match self {
