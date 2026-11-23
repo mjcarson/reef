@@ -34,13 +34,15 @@
 //! | `GET …/plans/{plan}/work/{id}/revisions` | `revisions` | every [`Revision`] of the node, oldest first |
 //! | `GET …/plans/{plan}/work/{id}/revisions/{revision}` | `node_revision` | the [`Revision`], or 404 |
 //! | `GET …/plans/{plan}/work/{id}/revisions/{revision}/files/{*path}` | `revision_file` | the [`FileDiff`] the revision lists, or 404 |
-//! | `GET …/plans/{plan}/comments` | `threads` | every [`Thread`] of the plan, by number |
-//! | `GET …/plans/{plan}/nodes/{id}/comments` | `node_threads` | every [`Thread`] on the node, by number |
+//! | `GET …/plans/{plan}/comments?pending=true` | `threads` | every [`Thread`] of the plan, by number, those pending in a review only if asked for |
+//! | `GET …/plans/{plan}/nodes/{id}/comments?pending=true` | `node_threads` | every [`Thread`] on the node, by number, those pending in a review only if asked for |
 //! | `POST …/plans/{plan}/nodes/{id}/comments` | `start_thread` | [`Commented`]: 200, 422 if not in its plan or on no line of its revisions |
-//! | `GET …/plans/{plan}/comments/{thread}` | `thread` | the [`Thread`], or 404 |
+//! | `GET …/plans/{plan}/nodes/{id}/review` | `node_review` | the node's open [`Review`], or `null` |
+//! | `PUT …/plans/{plan}/nodes/{id}/review` | `mark_review` | [`Reviewed`]: 200, 409 if stale, 422 if the node has no open review |
+//! | `GET …/plans/{plan}/comments/{thread}?pending=true` | `thread` | the [`Thread`], or 404, as a pending one is unless asked for |
 //! | `POST …/plans/{plan}/comments/{thread}/replies` | `reply` | [`Commented`]: 200, or 422 if no thread starts there |
-//! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there |
-//! | `POST …/plans/{plan}/comments/{thread}/resolution` | `resolve_thread` | [`Resolved`]: 200, 409 if stale, 422 if no thread starts there or the revision isn't stored |
+//! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there or it is pending in a review |
+//! | `POST …/plans/{plan}/comments/{thread}/resolution` | `resolve_thread` | [`Resolved`]: 200, 409 if stale, 422 if no thread starts there, it is pending in a review, or the revision isn't stored |
 //! | `GET /api/v1/loops` | `loops` | every [`Loop`], by pane |
 //! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written or joined, 409 if the pane's loop is busy or another loop or pane holds the node, 422 if the pane has no loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than the loop |
 //! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
@@ -74,10 +76,11 @@ use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, Commented, EditLoop,
-    ErrorCode, FileDiff, Listing, Loop, LoopEdited, MarkThread, Marked, NewPlan, NewProject,
-    NewReply, NewThread, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
-    QueueEdit, QueueListing, Queued, ResolveThread, Resolved, Revision, Rewrite, StartWork,
-    Started, StoredNode, StoredPage, Thread, WRITE_BODY_MAX, WorkRecord, paths,
+    ErrorCode, FileDiff, Listing, Loop, LoopEdited, MarkReview, MarkThread, Marked, NewPlan,
+    NewProject, NewReply, NewThread, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite,
+    Project, Puts, QueueEdit, QueueListing, Queued, ResolveThread, Resolved, Review, Reviewed,
+    Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread, WRITE_BODY_MAX,
+    WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -95,7 +98,7 @@ use tracing::instrument;
 use crate::backend::Backend;
 use crate::conf::Conf;
 use crate::service::Service;
-use crate::store::{NotListed, NotRegistered, Unkeepable};
+use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
 
 /// A handle on a service that a router holds and clones into every request
 ///
@@ -181,6 +184,10 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(
             paths::NODE_COMMENTS,
             get(node_threads::<S>).post(start_thread::<S>),
+        )
+        .route(
+            paths::NODE_REVIEW,
+            get(node_review::<S>).put(mark_review::<S>),
         )
         .route(paths::THREAD, get(thread::<S>))
         .route(paths::REPLIES, axum::routing::post(reply::<S>))
@@ -497,6 +504,24 @@ struct PageSegments {
 struct FindQuery {
     /// The directory, absolute, as the service's host sees it
     dir: PathBuf,
+}
+
+/// The query a thread's routes take, to serve threads and comments pending in a review too
+#[derive(Deserialize)]
+struct PendingQuery {
+    /// Whether to serve what is pending, which is left out unless asked for
+    #[serde(default)]
+    pending: bool,
+}
+
+impl PendingQuery {
+    /// What the store is asked for
+    fn pending(&self) -> Pending {
+        match self.pending {
+            true => Pending::Include,
+            false => Pending::Leave,
+        }
+    }
 }
 
 /// The query that narrows the change stream
@@ -1142,10 +1167,11 @@ async fn revision_file<S: Serves>(
 async fn threads<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<PlanSegments>,
+    Params(query): Params<PendingQuery>,
 ) -> Result<Json<Vec<Thread>>, Failure> {
     let plan = segments.name()?;
     // every thread on every node of it, none for a plan never commented on
-    let threads = serves.service().threads(&plan).await?;
+    let threads = serves.service().threads(&plan, query.pending()).await?;
     Ok(Json(threads))
 }
 
@@ -1159,10 +1185,14 @@ async fn threads<S: Serves>(
 async fn node_threads<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<NodeSegments>,
+    Params(query): Params<PendingQuery>,
 ) -> Result<Json<Vec<Thread>>, Failure> {
     let node = segments.name()?;
     // every thread on it, none for a node never commented on
-    let threads = serves.service().node_threads(&node).await?;
+    let threads = serves
+        .service()
+        .node_threads(&node, query.pending())
+        .await?;
     Ok(Json(threads))
 }
 
@@ -1196,10 +1226,14 @@ async fn start_thread<S: Serves>(
 async fn thread<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<ThreadSegments>,
+    Params(query): Params<PendingQuery>,
 ) -> Result<Json<Thread>, Failure> {
     let plan = segments.name()?;
     // the thread, or a 404 naming it
-    match serves.service().thread(&plan, segments.thread).await? {
+    let read = serves
+        .service()
+        .thread(&plan, segments.thread, query.pending());
+    match read.await? {
         Some(thread) => Ok(Json(thread)),
         None => Err(Failure::new(
             ErrorCode::NotFound,
@@ -1253,9 +1287,51 @@ async fn mark_thread<S: Serves>(
     let status = match marked {
         Marked::Marked { .. } => StatusCode::OK,
         Marked::Stale { .. } => StatusCode::CONFLICT,
-        Marked::NoThread { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        Marked::NoThread { .. } | Marked::Pending { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };
     Ok((status, Json(marked)))
+}
+
+/// Gets a node's open review, or `null` if it has none
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+#[instrument(name = "api::node_review", skip_all, err(Debug))]
+async fn node_review<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+) -> Result<Json<Option<Review>>, Failure> {
+    let node = segments.name()?;
+    // the review still being written, if one is
+    let review = serves.service().node_review(&node).await?;
+    Ok(Json(review))
+}
+
+/// Submits a node's open review or discards it: 200 if marked, 409 if stale, 422 if the node
+/// has no open review
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+/// * `mark` - Whether it is submitted or discarded, and the version it was marked against
+#[instrument(name = "api::mark_review", skip_all, err(Debug))]
+async fn mark_review<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+    Body(mark): Body<MarkReview>,
+) -> Result<(StatusCode, Json<Reviewed>), Failure> {
+    let node = segments.name()?;
+    // the review's row written again, under the project's comment lock
+    let reviewed = serves.service().mark_review(&node, mark).await?;
+    let status = match reviewed {
+        Reviewed::Marked { .. } => StatusCode::OK,
+        Reviewed::Stale { .. } => StatusCode::CONFLICT,
+        Reviewed::NoReview { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(reviewed)))
 }
 
 /// Resolves a thread by hand, a revision linked to it: 200 if resolved, 409 if stale, 422 if no
@@ -1281,7 +1357,9 @@ async fn resolve_thread<S: Serves>(
     let status = match resolved {
         Resolved::Resolved { .. } => StatusCode::OK,
         Resolved::Stale { .. } => StatusCode::CONFLICT,
-        Resolved::NoThread { .. } | Resolved::NoRevision { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        Resolved::NoThread { .. } | Resolved::NoRevision { .. } | Resolved::Pending { .. } => {
+            StatusCode::UNPROCESSABLE_ENTITY
+        }
     };
     Ok((status, Json(resolved)))
 }

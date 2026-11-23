@@ -400,6 +400,7 @@ async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()>
             target: reef_api::Target::Node,
             body: body.to_string(),
             by: reef_api::Writer::User,
+            review: false,
         };
         let (_, commented): (_, reef_api::Commented) = ax
             .client

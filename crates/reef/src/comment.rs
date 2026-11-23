@@ -204,6 +204,7 @@ async fn replied(
     let reply = NewReply {
         body: body.to_string(),
         by,
+        review: false,
     };
     match client.reply(plan, thread, &reply).await? {
         Commented::Added { comment, .. } => Ok(comment),
@@ -284,6 +285,10 @@ pub async fn resolve<W: Write>(
         Resolved::NoThread { .. } => {
             anyhow::bail!("#{thread} went from `{plan}` meanwhile: nothing was written")
         }
+        Resolved::Pending { .. } => anyhow::bail!(
+            "#{thread} of `{plan}` is pending in a review not yet submitted, so it can't be \
+             resolved yet"
+        ),
         Resolved::NoRevision { node, revision } => anyhow::bail!(
             "`{node}` has no revision {revision}: `reef node capture` keeps one, and `reef work \
              {}` shows where it is worked",

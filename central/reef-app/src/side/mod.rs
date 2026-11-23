@@ -81,7 +81,7 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
         threads
             .of(&id)
             .iter()
-            .filter(|thread| thread.is_open())
+            .filter(|thread| thread.is_open_published())
             .count()
     });
     // a newly selected node is read from its top, with none of its files open, while a newer

@@ -59,6 +59,7 @@ suite!(
     comment_routes_answer_with_their_status,
     a_capture_announces_the_threads_it_followed,
     resolves_answer_with_their_status,
+    reviews_answer_with_their_status,
     loop_routes_answer_with_their_status,
 );
 

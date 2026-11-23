@@ -29,6 +29,7 @@
 //! | `GET` | [`REVISION_FILE`] |
 //! | `GET` | [`PLAN_COMMENTS`] |
 //! | `GET`, `POST` | [`NODE_COMMENTS`] |
+//! | `GET`, `PUT` | [`NODE_REVIEW`] |
 //! | `GET` | [`THREAD`] |
 //! | `POST` | [`REPLIES`] |
 //! | `PUT` | [`THREAD_STATE`] |
@@ -115,6 +116,13 @@ pub const PLAN_COMMENTS: &str = "/api/v1/projects/{project}/plans/{plan}/comment
 
 /// One node's comment threads, read by `GET`, and a new one started by `POST`
 pub const NODE_COMMENTS: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/comments";
+
+/// A node's open review: read by `GET`, submitted or discarded by `PUT`
+pub const NODE_REVIEW: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/review";
+
+/// The query a thread's routes take to serve threads pending in a review too, which they leave
+/// out otherwise
+pub const PENDING_QUERY: &str = "pending=true";
 
 /// One comment thread, by its number in its plan
 pub const THREAD: &str = "/api/v1/projects/{project}/plans/{plan}/comments/{thread}";
@@ -446,6 +454,15 @@ pub fn node_comments(node: &NodeName) -> String {
     format!("{}/comments", self::node(&node.plan, &node.id))
 }
 
+/// The path of a node's open review
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+pub fn node_review(node: &NodeName) -> String {
+    format!("{}/review", self::node(&node.plan, &node.id))
+}
+
 /// The path of one comment thread
 ///
 /// # Arguments
@@ -594,6 +611,7 @@ mod tests {
         };
         assert_eq!(super::plan_comments(&plan), fill(super::PLAN_COMMENTS));
         assert_eq!(super::node_comments(&node), fill(super::NODE_COMMENTS));
+        assert_eq!(super::node_review(&node), fill(super::NODE_REVIEW));
         assert_eq!(super::thread(&plan, 7), fill(super::THREAD));
         assert_eq!(super::replies(&plan, 7), fill(super::REPLIES));
         assert_eq!(super::thread_state(&plan, 7), fill(super::THREAD_STATE));

@@ -432,11 +432,14 @@ fn revisions_are_served_a_file_at_a_time() -> anyhow::Result<()> {
 }
 
 /// Comments are kept and read through the app's server functions: a thread on the node and one
-/// on a line of its revision, a reply, and a mark over the version read, a stale one refused
+/// on a line of its revision, a reply, and a mark over the version read, a stale one refused;
+/// then a review started, its comments read back pending and unmarkable, and submitted at once
 #[test]
 fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
-    use reef_api::{Anchor, Commented, Marked, Side, Target, ThreadState};
-    use reef_app::calls::{mark_thread, plan_threads, reply_to, start_thread};
+    use reef_api::{Anchor, Commented, Marked, ReviewState, Reviewed, Side, Target, ThreadState};
+    use reef_app::calls::{
+        mark_review, mark_thread, plan_reviews, plan_threads, reply_to, start_thread,
+    };
     let fx = fx();
     fx.runtime.block_on(async {
         // A1 started and captured with one new file
@@ -461,6 +464,7 @@ fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
             "A1".into(),
             Target::Node,
             "Looks *good*".into(),
+            false,
         )
         .await
         .map_err(failed)?;
@@ -480,6 +484,7 @@ fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
             "A1".into(),
             line.clone(),
             "Why two?".into(),
+            false,
         )
         .await
         .map_err(failed)?;
@@ -488,7 +493,7 @@ fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
             "{on_line:?}"
         );
         // a reply in the line's thread, then the plan's threads read back rendered
-        let replied = reply_to(project(), plan(), 2, "Because.".into())
+        let replied = reply_to(project(), plan(), 2, "Because.".into(), false)
             .await
             .map_err(failed)?;
         assert!(
@@ -514,6 +519,66 @@ fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
             .await
             .map_err(failed)?;
         assert!(matches!(stale, Marked::Stale { .. }), "{stale:?}");
+        // a thread started in a review, which starts one, and a reply added to it
+        let pending = start_thread(
+            project(),
+            plan(),
+            "A1".into(),
+            Target::Node,
+            "Later, maybe.".into(),
+            true,
+        )
+        .await
+        .map_err(failed)?;
+        let Commented::Added { thread, comment } = pending else {
+            anyhow::bail!("the review's thread wasn't kept: {pending:?}");
+        };
+        assert!(thread.pending && thread.comments[0].review.is_some());
+        assert_eq!(comment, 5);
+        let added = reply_to(project(), plan(), 5, "And this.".into(), true)
+            .await
+            .map_err(failed)?;
+        assert!(
+            matches!(added, Commented::Added { comment: 6, .. }),
+            "{added:?}"
+        );
+        let reviews = plan_reviews(project(), plan()).await.map_err(failed)?;
+        assert_eq!(reviews.len(), 1);
+        assert_eq!((reviews[0].number, reviews[0].comments), (4, 2));
+        // the app reads it pending, and it can't be marked until the review is submitted
+        let threads = plan_threads(project(), plan()).await.map_err(failed)?;
+        assert!(
+            threads
+                .iter()
+                .any(|thread| thread.number == 5 && thread.pending)
+        );
+        let early = mark_thread(project(), plan(), 5, ThreadState::Resolved, 1)
+            .await
+            .map_err(failed)?;
+        assert!(matches!(early, Marked::Pending { thread: 5 }), "{early:?}");
+        // submitted over the version read, it is published, and no review is open
+        let submitted = mark_review(
+            project(),
+            plan(),
+            "A1".into(),
+            ReviewState::Submitted,
+            reviews[0].version,
+        )
+        .await
+        .map_err(failed)?;
+        assert!(
+            matches!(submitted, Reviewed::Marked { .. }),
+            "{submitted:?}"
+        );
+        let threads = plan_threads(project(), plan()).await.map_err(failed)?;
+        let published = threads.iter().find(|thread| thread.number == 5).unwrap();
+        assert!(!published.pending && published.comments.iter().all(|c| c.review.is_none()));
+        assert!(
+            plan_reviews(project(), plan())
+                .await
+                .map_err(failed)?
+                .is_empty()
+        );
         anyhow::Ok(())
     })
 }

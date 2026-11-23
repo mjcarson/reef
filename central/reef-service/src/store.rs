@@ -52,7 +52,7 @@ mod loops;
 mod revision;
 mod work;
 
-pub use comment::Followed;
+pub use comment::{Followed, Pending};
 
 pub use revision::FILE_ROW_MAX;
 
@@ -67,8 +67,8 @@ pub use reef_api::{
     Rewrite, Rewritten, StalePut, StoredNode, StoredPage, records,
 };
 pub use reef_api::{
-    Comment, Commented, MarkThread, Marked, NewReply, NewThread, Resolution, ResolveThread,
-    Resolved, Resolves, Thread, TrailerRead,
+    Comment, Commented, MarkReview, MarkThread, Marked, NewReply, NewThread, Resolution,
+    ResolveThread, Resolved, Resolves, Review, ReviewState, Reviewed, Thread, TrailerRead,
 };
 use reef_api::{PLAN_PAGES_MAX_BYTES, check_page_path};
 use reef_model::{Diagnostic, NodeName, PlanName, Record};

@@ -1463,6 +1463,7 @@ async fn commented(hx: &Hx, id: &str, target: reef_api::Target, body: &str) -> a
         target,
         body: body.to_string(),
         by: reef_api::Writer::User,
+        review: false,
     };
     let path = reef_api::paths::node_comments(&node);
     let (_, commented): (_, reef_api::Commented) = hx.ax.client.post(&path, &new).await?;
@@ -1821,5 +1822,87 @@ async fn a_pushed_nodes_round_leaves_its_fixup_unsquashed() -> anyhow::Result<()
         "{took}"
     );
     assert!(!took.contains("GIT_SEQUENCE_EDITOR"), "{took}");
+    Ok(())
+}
+
+/// A comment written in a review is hidden from Claude until the review is submitted: no round
+/// of it, nothing in `reef comment ls`, no resolve by hand; once submitted, it comes back as a
+/// round before anything else
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_is_hidden_from_the_loop_until_submitted() -> anyhow::Result<()> {
+    let hx = Hx::new("reviews", &["A", "B", "C"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    // A worked, done and sealed in a loop's worktree
+    let pane = "claude:4242";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    committed(&a, "a.txt", "one\ntwo\n", "Add a").await?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.stopped_in(&a, Some(pane), false).await?;
+    // the user writes a comment on A in a review, which stays pending
+    let node = PlanName::new("cli", "docs")?.node("A")?;
+    let new = reef_api::NewThread {
+        target: line_of(1, 2),
+        body: "Two should be a number".to_string(),
+        by: reef_api::Writer::User,
+        review: true,
+    };
+    let (_, commented): (_, reef_api::Commented) = hx
+        .ax
+        .client
+        .post(&reef_api::paths::node_comments(&node), &new)
+        .await?;
+    let reef_api::Commented::Added { thread, .. } = commented else {
+        anyhow::bail!("the review's comment wasn't kept: {commented:?}");
+    };
+    // so the loop takes B, Claude's listing shows nothing, and it can't be resolved by hand
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/B`"), "{took}");
+    assert!(!took.contains("comment thread"), "{took}");
+    let listed = hx.reef(&a, &["comment", "ls"]).await?;
+    assert_eq!(listed, "`cli/docs` has no open comment threads\n");
+    let number = thread.number.to_string();
+    let refused = hx
+        .reef(&a, &["comment", "resolve", &number, "--node", "A"])
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("has no comment thread"),
+        "{refused:#}"
+    );
+    // B done, the review submitted: B's end names A's comments next, and A is taken again
+    hx.reef(&a, &["status", "B", "done"]).await?;
+    let review: Option<reef_api::Review> = hx
+        .ax
+        .client
+        .get(&reef_api::paths::node_review(&node))
+        .await?
+        .1;
+    let review = review.expect("A's review is open");
+    let submit = reef_api::MarkReview {
+        state: reef_api::ReviewState::Submitted,
+        read: review.version,
+    };
+    let (_, reviewed): (_, reef_api::Reviewed) = hx
+        .ax
+        .client
+        .put(&reef_api::paths::node_review(&node), &submit)
+        .await?;
+    assert!(
+        matches!(reviewed, reef_api::Reviewed::Marked { .. }),
+        "{reviewed:?}"
+    );
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(
+        said.ends_with("`cli/docs/B` is done. `cli/docs/A`'s open comments come next: `/clear`, then say `next`"),
+        "{said}"
+    );
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, but 1 of its comment threads wants an answer"),
+        "{took}"
+    );
+    assert!(took.contains("Two should be a number"), "{took}");
     Ok(())
 }

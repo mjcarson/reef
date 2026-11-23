@@ -9,6 +9,11 @@
 //!   client shows its HTML as it is.
 //! - **Resolved by hand, a revision linked.** A thread resolved by hand names a revision of a node
 //!   in its project that answered it, which must be stored, or it is [`Resolved::NoRevision`].
+//! - **Pending comments are served only where asked for.** A comment written in a review not yet
+//!   submitted is left out of a read unless it asks for [`Pending::Include`], as the app does for
+//!   its reviewer; everything else, Claude's tools included, never sees it.
+//! - **A review is submitted or discarded at once,** over the version read, which is a change,
+//!   [`Change::ReviewMarked`].
 //! - **Each comment kept is a change**, [`Change::CommentAdded`], and each mark or resolve one,
 //!   [`Change::ThreadMarked`]. A comment, a mark or a resolve that wrote nothing sends none.
 
@@ -19,7 +24,8 @@ use tracing::instrument;
 use super::Service;
 use crate::backend::Backend;
 use crate::store::{
-    Commented, MarkThread, Marked, NewReply, NewThread, ResolveThread, Resolved, Thread,
+    Commented, MarkReview, MarkThread, Marked, NewReply, NewThread, Pending, ResolveThread,
+    Resolved, Review, Reviewed, Thread,
 };
 
 impl<B: Backend> Service<B> {
@@ -28,11 +34,12 @@ impl<B: Backend> Service<B> {
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
+    /// * `pending` - Whether to serve what is pending in a review not yet submitted
     #[instrument(name = "Service::threads", skip_all, err(Debug))]
-    pub async fn threads(&self, plan: &PlanName) -> anyhow::Result<Vec<Thread>> {
+    pub async fn threads(&self, plan: &PlanName, pending: Pending) -> anyhow::Result<Vec<Thread>> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(plan).await?;
-        let threads = self.store.threads(plan).await?;
+        let threads = self.store.threads(plan, pending).await?;
         Ok(threads.into_iter().map(rendered).collect())
     }
 
@@ -43,11 +50,16 @@ impl<B: Backend> Service<B> {
     /// # Arguments
     ///
     /// * `node` - The node's full name
+    /// * `pending` - Whether to serve what is pending in a review not yet submitted
     #[instrument(name = "Service::node_threads", skip_all, err(Debug))]
-    pub async fn node_threads(&self, node: &NodeName) -> anyhow::Result<Vec<Thread>> {
+    pub async fn node_threads(
+        &self,
+        node: &NodeName,
+        pending: Pending,
+    ) -> anyhow::Result<Vec<Thread>> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(&node.plan).await?;
-        let threads = self.store.node_threads(node).await?;
+        let threads = self.store.node_threads(node, pending).await?;
         Ok(threads.into_iter().map(rendered).collect())
     }
 
@@ -58,12 +70,66 @@ impl<B: Backend> Service<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `number` - The thread's number
+    /// * `pending` - Whether to serve it if it is pending in a review not yet submitted
     #[instrument(name = "Service::thread", skip_all, err(Debug))]
-    pub async fn thread(&self, plan: &PlanName, number: u32) -> anyhow::Result<Option<Thread>> {
+    pub async fn thread(
+        &self,
+        plan: &PlanName,
+        number: u32,
+        pending: Pending,
+    ) -> anyhow::Result<Option<Thread>> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(plan).await?;
-        let thread = self.store.thread(plan, number).await?;
+        let thread = self.store.thread(plan, number, pending).await?;
         Ok(thread.map(rendered))
+    }
+
+    /// Lists a plan's open reviews, by number
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Service::open_reviews", skip_all, err(Debug))]
+    pub async fn open_reviews(&self, plan: &PlanName) -> anyhow::Result<Vec<Review>> {
+        // refused if the project isn't registered, or its plan isn't listed
+        self.listed(plan).await?;
+        self.store.open_reviews(plan).await
+    }
+
+    /// Gets a node's open review, if it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    #[instrument(name = "Service::node_review", skip_all, err(Debug))]
+    pub async fn node_review(&self, node: &NodeName) -> anyhow::Result<Option<Review>> {
+        // refused if the project isn't registered, or its plan isn't listed
+        self.listed(&node.plan).await?;
+        self.store.node_review(node).await
+    }
+
+    /// Submits a node's open review, publishing every comment in it at once, or discards it,
+    /// over the version its writer read
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `mark` - Whether it is submitted or discarded, and the version it was marked against
+    #[instrument(name = "Service::mark_review", skip_all, err(Debug))]
+    pub async fn mark_review(&self, node: &NodeName, mark: MarkReview) -> anyhow::Result<Reviewed> {
+        // refused if the project isn't registered, or its plan isn't listed
+        self.listed(&node.plan).await?;
+        // written under the project's comment lock, and told to the change stream once it is
+        let reviewed = self.store.mark_review(node, mark).await?;
+        if let Reviewed::Marked { review } = &reviewed {
+            self.publish(Change::ReviewMarked {
+                node: review.node.clone(),
+                review: review.number,
+                state: review.state,
+                version: review.version,
+            });
+        }
+        Ok(reviewed)
     }
 
     /// Starts a thread on a node, or on a line of one of its revisions
@@ -137,7 +203,7 @@ impl<B: Backend> Service<B> {
             Marked::Stale { thread } => Marked::Stale {
                 thread: rendered(thread),
             },
-            Marked::NoThread { thread } => Marked::NoThread { thread },
+            other => other,
         })
     }
 

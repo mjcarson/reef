@@ -305,6 +305,37 @@ The rules:
   last, with a question back, waits on the user, and calls for no round until the user answers.
   Rows kept before writers were said read as the user's.
 
+### Reviews
+
+The user reviews a node's work as a merge request is reviewed: comments written in a review wait
+until the review is submitted, so Claude never works half of what the user has to say
+([C73](../milestones/m8.md)).
+
+#### Design choices
+
+- **One review a node, open until submitted or discarded.** A comment written in a review joins
+  the node's open review, or starts one. The review is a row of its own in the plan's comment
+  partition, numbered as a comment is, holding whether it is open, submitted or discarded, and
+  each comment in it names it.
+- **Pending comments are shown only where asked for.** Every thread route leaves out what is
+  pending in an open review unless it is asked for with `?pending=true`, which only the app
+  does, for its reviewer. So `reef comment ls`, reef's MCP tools and next_task's rounds never see
+  it, an older `reef` included, and the loop doesn't wait on a review: once it is submitted, its
+  comments come back as a round at the next point between nodes.
+- **Pending can't be resolved.** A mark, a resolve by hand and a `Reef-Resolves` trailer each
+  leave a pending thread as it is, saying it is pending. A trailer naming one resolves it at the
+  first capture after the review is submitted, since each capture reads the node's commits again.
+- **Replies follow their thread.** A reply to a pending thread is kept only in its review, and
+  one in a review to a published thread is pending itself until the review is submitted.
+- **Submitted or discarded at once.** Submitting is one write of the review's row, over the
+  version read, so every comment in it is published at once, and discarding it drops them and
+  their threads' replies, never served again. A review is never opened again.
+- **Followed while pending.** A pending thread on a line follows its line through each capture,
+  so it is where its line is once published. A discarded one is followed no more.
+- **Rows kept before reviews read as published**, so the comments table needed no fresh data
+  directory. A review row can't be read by an older service, so rolling back past C73 isn't safe
+  once a review is written.
+
 ### Comments in the loop
 
 Claude answers the comments on a node's work before the loop moves on ([C43](../milestones/m8.md)).

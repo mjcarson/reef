@@ -14,7 +14,7 @@ Build the app first, from central/reef-app, with no `RUSTFLAGS` exported:
 
 then, with Playwright installed:
 
-    python check.py [screenshot dir] [--release] [--only=c33,c35,c36,c56]
+    python check.py [screenshot dir] [--release] [--only=c33,c35,c36,c56,c73]
 
 `--release` runs the server `dx build ... --release` built instead, which the timings in the
 plan's figures are taken on. `--only` runs the checks whose names start with one of those given.
@@ -881,6 +881,60 @@ def c35_comment_threads_in_the_diff(page):
           {"live": live, "entries": entries, "went to": went, "shown in diff": shown})
 
 
+def c73_a_review_holds_comments_until_submitted(page):
+    """C73: Start a review keeps a comment pending, tagged so and unresolvable, off the open
+    counts and out of the JSON API's threads unless asked for, and the Comments tab's review bar
+    submits it, publishing it at once. Runs after C33, on its plan."""
+    page.goto(URL + "/plans/check/changes")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
+    page.click(".reef-side .reef-app-tab:nth-child(3)")
+    page.wait_for_selector(".reef-app-comments > .reef-app-composer", timeout=10000)
+    before = open_counts(page)
+    composer = ".reef-app-comments > .reef-app-composer"
+    buttons = page.eval_on_selector_all(f"{composer} .reef-app-actions button", "bs => bs.map(b => b.textContent)")
+    # a general comment written in a review, which starts one
+    page.fill(f"{composer} textarea", "Held for *later*.")
+    page.click(f"{composer} [data-act=review]")
+    page.wait_for_selector(".reef-app-review-bar", timeout=10000)
+    pending = page.evaluate("""() => {
+        const t = [...document.querySelectorAll('.reef-app-comments .reef-app-thread')]
+            .find(t => t.textContent.includes('Held for later.'));
+        return [t?.classList.contains('pending'), t?.querySelector('.reef-app-pending')?.textContent,
+                t?.querySelector('.reef-app-mark') === null,
+                document.querySelector('.reef-app-review-sum')?.textContent];
+    }""")
+    after = open_counts(page)
+    in_review = page.eval_on_selector_all(f"{composer} .reef-app-actions button", "bs => bs.map(b => b.textContent)")
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-review.png"))
+
+    # the JSON API leaves it out unless asked for it
+    def bodies(query):
+        path = f"{URL}/api/v1/projects/check/plans/changes/nodes/K1/comments{query}"
+        with urllib.request.urlopen(path, timeout=5) as answer:
+            threads = json.loads(answer.read())
+        return [c["body"] for t in threads for c in t["comments"] if "later" in c["body"]]
+
+    hidden = {"plain": bodies(""), "asked": bodies("?pending=true")}
+    check("C73 Start a review keeps a comment pending, tagged so, unresolvable and off the open counts",
+          buttons == ["Comment", "Start a review"] and pending == [True, "pending", True, "Review · 1 pending"]
+          and after == before and in_review == ["Comment now", "Add to review"],
+          {"buttons": buttons, "pending": pending, "counts": [before, after], "in review": in_review})
+    check("C73 the JSON API leaves a pending comment out unless asked for it",
+          hidden == {"plain": [], "asked": ["Held for *later*."]}, hidden)
+    # submitted, it is published at once and counted
+    page.click(".reef-app-review-bar [data-act=submit]")
+    page.wait_for_selector(".reef-app-review-bar", state="detached", timeout=10000)
+    count = str(int(before[0] or "0") + 1)
+    submitted = {
+        "counts": wait_counts(page, count),
+        "pending": page.evaluate("() => document.querySelectorAll('.reef-app-comments .reef-app-thread.pending').length"),
+        "api": bodies(""),
+    }
+    check("C73 submitting the review publishes its comment at once",
+          submitted == {"counts": [count, count], "pending": 0, "api": ["Held for *later*."]}, submitted)
+
+
 def c36_comments_follow_the_code(page):
     """C36: a capture that moves a commented line shows its thread at the line's new place, resolved
     or not, one that deletes a commented line shows its thread as outdated, and an older revision
@@ -1098,6 +1152,7 @@ def main():
                 c33_changes_in_the_sidebar,
                 c35_comment_threads_in_the_diff,
                 c36_comments_follow_the_code,
+                c73_a_review_holds_comments_until_submitted,
                 c56_drafts_in_the_sidebar,
             ]
             for step in checks:

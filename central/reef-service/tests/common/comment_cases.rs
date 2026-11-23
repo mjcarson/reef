@@ -3,11 +3,12 @@
 
 use reef_api::{
     Anchor, COMMENT_BODY_MAX, Commented, FileStatus, FollowedThread, Hunk, Line, LineKind,
-    MarkThread, Marked, NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves,
-    ResolvingCommit, Side, Target, Thread, ThreadState, TrailerOutcome, Writer,
+    MarkReview, MarkThread, Marked, NewReply, NewThread, Resolution, ResolveThread, Resolved,
+    Resolves, ResolvingCommit, ReviewState, Reviewed, Side, Target, Thread, ThreadState,
+    TrailerOutcome, Writer,
 };
 use reef_model::NodeName;
-use reef_service::{Backend, FileDiff, Unkeepable};
+use reef_service::{Backend, FileDiff, Pending, Unkeepable};
 
 use super::work_cases::{added_file, capture, drafted, kept, named, recorded, start_in};
 use super::{Fx, Reopen};
@@ -154,6 +155,7 @@ async fn started<B: Backend>(
         target,
         body: body.to_string(),
         by: Writer::User,
+        review: false,
     };
     match fx.store.start_thread(node, new).await? {
         Commented::Added { thread, comment } => Ok((thread, comment)),
@@ -172,6 +174,7 @@ async fn replied<B: Backend>(fx: &Fx<B>, thread: u32, body: &str) -> anyhow::Res
     let reply = NewReply {
         body: body.to_string(),
         by: Writer::User,
+        review: false,
     };
     match fx.store.reply(&fx.plan, thread, reply).await? {
         Commented::Added { thread, comment } => Ok((thread, comment)),
@@ -205,7 +208,12 @@ async fn mark<B: Backend>(
 /// * `fx` - The store and its plan
 pub async fn a_comment_and_its_reply_survive_a_restart<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a plan never commented on has no threads
-    assert!(fx.store.threads(&fx.plan).await?.is_empty());
+    assert!(
+        fx.store
+            .threads(&fx.plan, Pending::Include)
+            .await?
+            .is_empty()
+    );
     // a thread on a line of A's first revision, and one on A as a whole
     let a = captured(&fx, "A", vec![added_file("src/a.rs", "one\ntwo\n")]).await?;
     let line = on_line(1, "src/a.rs", Side::New, 2);
@@ -238,12 +246,12 @@ pub async fn a_comment_and_its_reply_survive_a_restart<B: Reopen>(fx: Fx<B>) -> 
     let (other, _) = started(&fx, &b, Target::Node, "And B?").await?;
     assert_eq!(other.number, 5);
     // the plan's threads are every node's, and a node's only its own
-    let threads = fx.store.threads(&fx.plan).await?;
+    let threads = fx.store.threads(&fx.plan, Pending::Include).await?;
     let numbers: Vec<u32> = threads.iter().map(|thread| thread.number).collect();
     assert_eq!(numbers, [1, 2, 5]);
     let on_a: Vec<u32> = fx
         .store
-        .node_threads(&a)
+        .node_threads(&a, Pending::Include)
         .await?
         .iter()
         .map(|thread| thread.number)
@@ -251,13 +259,21 @@ pub async fn a_comment_and_its_reply_survive_a_restart<B: Reopen>(fx: Fx<B>) -> 
     assert_eq!(on_a, [1, 2]);
     // all of it reads back once the store is reopened over the same rows
     let fx = fx.reopen().await?;
-    assert_eq!(fx.store.threads(&fx.plan).await?, threads);
+    assert_eq!(fx.store.threads(&fx.plan, Pending::Include).await?, threads);
     assert_eq!(
-        fx.store.thread(&fx.plan, 2).await?.as_ref(),
+        fx.store
+            .thread(&fx.plan, 2, Pending::Include)
+            .await?
+            .as_ref(),
         Some(&threads[1])
     );
     // a reply's number names no thread
-    assert!(fx.store.thread(&fx.plan, 3).await?.is_none());
+    assert!(
+        fx.store
+            .thread(&fx.plan, 3, Pending::Include)
+            .await?
+            .is_none()
+    );
     // and the next comment is numbered after the last one kept before the restart
     let (_, reply) = replied(&fx, 1, "One more thing").await?;
     assert_eq!(reply, 6);
@@ -289,6 +305,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
             target: target.clone(),
             body: "Here?".to_string(),
             by: Writer::User,
+            review: false,
         };
         let answer = fx.store.start_thread(&a, new).await?;
         assert_eq!(answer, Commented::NoLine { target });
@@ -299,6 +316,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         target: on_line(1, "src/m.rs", Side::New, 1),
         body: "Here?".to_string(),
         by: Writer::User,
+        review: false,
     };
     assert!(matches!(
         fx.store.start_thread(&b, new).await?,
@@ -308,6 +326,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
     let reply = NewReply {
         body: "Hm".to_string(),
         by: Writer::User,
+        review: false,
     };
     let answer = fx.store.reply(&fx.plan, 1, reply.clone()).await?;
     assert_eq!(answer, Commented::NoThread { thread: 1 });
@@ -317,6 +336,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
             target: Target::Node,
             body: body.to_string(),
             by: Writer::User,
+            review: false,
         };
         let error = fx
             .store
@@ -326,7 +346,12 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         assert!(error.downcast_ref::<Unkeepable>().is_some(), "{error:#}");
     }
     // nothing was written
-    assert!(fx.store.threads(&fx.plan).await?.is_empty());
+    assert!(
+        fx.store
+            .threads(&fx.plan, Pending::Include)
+            .await?
+            .is_empty()
+    );
     // while the removed line on its base's side, the kept one and the added one take threads
     for (side, line) in [(Side::Old, 1), (Side::New, 1), (Side::New, 2)] {
         started(&fx, &a, on_line(1, "src/m.rs", side, line), "Here.").await?;
@@ -418,7 +443,7 @@ pub async fn deleting_a_commented_line_outdates_its_thread<B: Reopen>(
     assert_eq!(followed.revision, 2);
     assert_eq!(followed.threads, [outdated(1), outdated(2)]);
     // each thread is outdated from revision 2, and still on its line in revision 1
-    let threads = fx.store.threads(&fx.plan).await?;
+    let threads = fx.store.threads(&fx.plan, Pending::Include).await?;
     for thread in &threads {
         assert_eq!(thread.outdated, Some(2));
         assert!(thread.followed.is_empty());
@@ -434,7 +459,7 @@ pub async fn deleting_a_commented_line_outdates_its_thread<B: Reopen>(
     assert_eq!(fx.store.follow_threads(&a).await?, None);
     // and they read back so once the store is reopened
     let fx = fx.reopen().await?;
-    assert_eq!(fx.store.threads(&fx.plan).await?, threads);
+    assert_eq!(fx.store.threads(&fx.plan, Pending::Include).await?, threads);
     Ok(())
 }
 
@@ -472,7 +497,7 @@ pub async fn captures_follow_their_nodes_threads<B: Reopen>(fx: Fx<B>) -> anyhow
     assert_eq!(followed.revision, 2);
     assert_eq!(followed.threads, [moved(1, 2), moved(2, 3)]);
     // each moved down by two, the resolved one still resolved, and the others as they were
-    let threads = fx.store.threads(&fx.plan).await?;
+    let threads = fx.store.threads(&fx.plan, Pending::Include).await?;
     assert_eq!(threads[0].followed, [new_line(2, "src/a.rs", 4)]);
     assert_eq!(threads[1].followed, [new_line(2, "src/a.rs", 5)]);
     assert_eq!(threads[1].state, ThreadState::Resolved);
@@ -498,7 +523,7 @@ pub async fn captures_follow_their_nodes_threads<B: Reopen>(fx: Fx<B>) -> anyhow
         panic!("a capture that moved two lines followed no thread");
     };
     assert_eq!(followed.threads, [moved(1, 3), moved(2, 4)]);
-    let threads = fx.store.threads(&fx.plan).await?;
+    let threads = fx.store.threads(&fx.plan, Pending::Include).await?;
     assert_eq!(
         threads[0].latest_anchor(),
         Some(&new_line(3, "src/a.rs", 3))
@@ -507,7 +532,7 @@ pub async fn captures_follow_their_nodes_threads<B: Reopen>(fx: Fx<B>) -> anyhow
     assert_eq!(threads[4], late);
     // and all of it reads back once the store is reopened
     let fx = fx.reopen().await?;
-    assert_eq!(fx.store.threads(&fx.plan).await?, threads);
+    assert_eq!(fx.store.threads(&fx.plan, Pending::Include).await?, threads);
     Ok(())
 }
 
@@ -537,6 +562,7 @@ pub async fn drafts_hold_no_thread_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow:
         target: on_line(2, "src/a.rs", Side::New, 1),
         body: "Zero?".to_string(),
         by: Writer::User,
+        review: false,
     };
     let refused = fx.store.start_thread(&a, new).await?;
     assert!(matches!(refused, Commented::NoLine { .. }), "{refused:?}");
@@ -559,7 +585,7 @@ pub async fn drafts_hold_no_thread_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow:
         panic!("sealing the draft followed no thread");
     };
     assert_eq!(followed.revision, 2);
-    let threads = fx.store.threads(&fx.plan).await?;
+    let threads = fx.store.threads(&fx.plan, Pending::Include).await?;
     assert_eq!(threads[0].followed, [new_line(2, "src/a.rs", 3)]);
     assert_eq!(threads[1].followed, [new_line(2, "src/a.rs", 2)]);
     // and a sealed revision's lines take threads
@@ -622,7 +648,7 @@ async fn trailed<B: Backend>(
 /// * `fx` - The store and its plan
 /// * `number` - The thread's number
 async fn thread_of<B: Backend>(fx: &Fx<B>, number: u32) -> anyhow::Result<Thread> {
-    match fx.store.thread(&fx.plan, number).await? {
+    match fx.store.thread(&fx.plan, number, Pending::Include).await? {
         Some(thread) => Ok(thread),
         None => panic!("thread {number} isn't there"),
     }
@@ -716,9 +742,9 @@ pub async fn trailers_resolve_each_thread_once_a_change<B: Reopen>(
     assert_eq!(four.node, a);
     assert_eq!(four.resolutions[0].node, b);
     // and everything reads back the same once the store is reopened
-    let before = fx.store.threads(&fx.plan).await?;
+    let before = fx.store.threads(&fx.plan, Pending::Include).await?;
     let fx = fx.reopen().await?;
-    assert_eq!(fx.store.threads(&fx.plan).await?, before);
+    assert_eq!(fx.store.threads(&fx.plan, Pending::Include).await?, before);
     Ok(())
 }
 
@@ -772,5 +798,214 @@ pub async fn resolving_by_hand_is_over_the_version_read<B: Reopen>(
     // and a thread that isn't there is named
     let missing = fx.store.resolve_thread(&fx.plan, 9, resolve(1)).await?;
     assert_eq!(missing, Resolved::NoThread { thread: 9 });
+    Ok(())
+}
+
+/// A comment written in a review is pending: left out of every read but one asking for it,
+/// never marked or resolved, by hand or by a trailer, and replied to only in its review, until
+/// the review is submitted over the version read, which publishes all of it at once. A review
+/// discarded drops its comments, its threads' replies with them, and all of it reads back the
+/// same after a restart
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // C73 captured once, a thread published on it, #1
+    let node = captured(&fx, "C73", vec![added_file("src/a.rs", "one\ntwo\n")]).await?;
+    let (published, _) = started(&fx, &node, Target::Node, "Now").await?;
+    assert_eq!(published.number, 1);
+    // a thread written in a review starts the node's review, #2, and is #3
+    let in_review = |body: &str| NewThread {
+        target: on_line(1, "src/a.rs", Side::New, 2),
+        body: body.to_string(),
+        by: Writer::User,
+        review: true,
+    };
+    let Commented::Added {
+        thread: pending,
+        comment,
+    } = fx.store.start_thread(&node, in_review("Later")).await?
+    else {
+        panic!("a thread in a review wasn't kept");
+    };
+    assert_eq!((pending.number, comment), (3, 3));
+    assert!(pending.pending && pending.comments[0].review == Some(2));
+    let review = fx
+        .store
+        .node_review(&node)
+        .await?
+        .expect("a review is open");
+    assert_eq!(
+        (review.number, review.state, review.comments),
+        (2, ReviewState::Open, 1)
+    );
+    // a second thread joins the same review, #4
+    let Commented::Added { comment: four, .. } =
+        fx.store.start_thread(&node, in_review("And this")).await?
+    else {
+        panic!("a second thread in the review wasn't kept");
+    };
+    assert_eq!(four, 4);
+    // a pending reply in the published thread; a pending thread takes replies only in its review
+    let reply = |body: &str, review| NewReply {
+        body: body.to_string(),
+        by: Writer::User,
+        review,
+    };
+    let in_published = fx.store.reply(&fx.plan, 1, reply("Also", true)).await?;
+    assert!(
+        matches!(&in_published, Commented::Added { thread, comment: 5 } if !thread.pending
+            && thread.comments[1].review == Some(2)),
+        "{in_published:?}"
+    );
+    assert_eq!(
+        fx.store.reply(&fx.plan, 3, reply("Now?", false)).await?,
+        Commented::NoThread { thread: 3 }
+    );
+    let in_pending = fx.store.reply(&fx.plan, 3, reply("Yes", true)).await?;
+    assert!(
+        matches!(in_pending, Commented::Added { comment: 6, .. }),
+        "{in_pending:?}"
+    );
+    // left out of every read but one that asks for them
+    let published_only = fx.store.threads(&fx.plan, Pending::Leave).await?;
+    let read: Vec<(u32, usize)> = published_only
+        .iter()
+        .map(|thread| (thread.number, thread.comments.len()))
+        .collect();
+    assert_eq!(read, [(1, 1)]);
+    assert!(
+        fx.store
+            .thread(&fx.plan, 3, Pending::Leave)
+            .await?
+            .is_none()
+    );
+    assert_eq!(fx.store.node_threads(&node, Pending::Leave).await?.len(), 1);
+    let all = fx.store.threads(&fx.plan, Pending::Include).await?;
+    let read: Vec<(u32, bool, usize)> = all
+        .iter()
+        .map(|thread| (thread.number, thread.pending, thread.comments.len()))
+        .collect();
+    assert_eq!(read, [(1, false, 2), (3, true, 2), (4, true, 1)]);
+    // never marked or resolved while pending, by hand or by a trailer
+    assert_eq!(
+        mark(&fx, 3, ThreadState::Resolved, pending.version).await?,
+        Marked::Pending { thread: 3 }
+    );
+    let resolve = ResolveThread {
+        node: node.clone(),
+        revision: 1,
+        read: pending.version,
+    };
+    assert_eq!(
+        fx.store.resolve_thread(&fx.plan, 3, resolve).await?,
+        Resolved::Pending { thread: 3 }
+    );
+    let commit = ResolvingCommit {
+        commit: "a".repeat(40),
+        summary: "Take the lock".to_string(),
+        author: "dev@example.com".to_string(),
+        authored: 1_700_000_000,
+    };
+    let trailed = vec![Resolves {
+        thread: 3,
+        commit: commit.clone(),
+    }];
+    let read = fx.store.resolve_by_trailers(&node, 1, trailed).await?;
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].0.outcome, TrailerOutcome::Pending);
+    assert!(read[0].1.is_none());
+    // submitted over an older version is stale, a mark to open it is refused, and one over its
+    // own version publishes all of it at once
+    let stale = MarkReview {
+        state: ReviewState::Submitted,
+        read: review.version + 1,
+    };
+    assert!(matches!(
+        fx.store.mark_review(&node, stale).await?,
+        Reviewed::Stale { .. }
+    ));
+    let reopen = MarkReview {
+        state: ReviewState::Open,
+        read: review.version,
+    };
+    let refused = fx.store.mark_review(&node, reopen).await.unwrap_err();
+    assert!(
+        refused.downcast_ref::<Unkeepable>().is_some(),
+        "{refused:#}"
+    );
+    let submit = MarkReview {
+        state: ReviewState::Submitted,
+        read: review.version,
+    };
+    let Reviewed::Marked { review: submitted } = fx.store.mark_review(&node, submit).await? else {
+        panic!("the review wasn't submitted");
+    };
+    assert_eq!(
+        (submitted.state, submitted.comments, submitted.version),
+        (ReviewState::Submitted, 4, review.version + 1)
+    );
+    assert!(fx.store.node_review(&node).await?.is_none());
+    let now = fx.store.threads(&fx.plan, Pending::Leave).await?;
+    let read: Vec<(u32, bool, usize)> = now
+        .iter()
+        .map(|thread| (thread.number, thread.pending, thread.comments.len()))
+        .collect();
+    assert_eq!(read, [(1, false, 2), (3, false, 2), (4, false, 1)]);
+    assert!(
+        now.iter()
+            .flat_map(|thread| &thread.comments)
+            .all(|c| c.review.is_none())
+    );
+    // published, it is marked as any thread is
+    let three = fx.store.thread(&fx.plan, 3, Pending::Leave).await?.unwrap();
+    assert!(matches!(
+        mark(&fx, 3, ThreadState::Resolved, three.version).await?,
+        Marked::Marked { .. }
+    ));
+    // a second review, discarded, drops its thread, its thread's reply, and its reply elsewhere
+    let Commented::Added { thread: scrap, .. } =
+        fx.store.start_thread(&node, in_review("Scrap")).await?
+    else {
+        panic!("a thread in a second review wasn't kept");
+    };
+    assert_eq!(scrap.number, 8);
+    fx.store.reply(&fx.plan, 8, reply("Gone", true)).await?;
+    fx.store.reply(&fx.plan, 1, reply("Gone too", true)).await?;
+    let second = fx
+        .store
+        .node_review(&node)
+        .await?
+        .expect("a second review is open");
+    assert_eq!((second.number, second.comments), (7, 3));
+    let discard = MarkReview {
+        state: ReviewState::Discarded,
+        read: second.version,
+    };
+    assert!(matches!(
+        fx.store.mark_review(&node, discard).await?,
+        Reviewed::Marked { .. }
+    ));
+    let kept = fx.store.threads(&fx.plan, Pending::Include).await?;
+    let read: Vec<(u32, usize)> = kept
+        .iter()
+        .map(|thread| (thread.number, thread.comments.len()))
+        .collect();
+    assert_eq!(read, [(1, 2), (3, 2), (4, 1)]);
+    assert_eq!(
+        fx.store.reply(&fx.plan, 8, reply("Back?", true)).await?,
+        Commented::NoThread { thread: 8 }
+    );
+    assert_eq!(
+        mark(&fx, 8, ThreadState::Resolved, scrap.version).await?,
+        Marked::NoThread { thread: 8 }
+    );
+    // and all of it reads back once the store is reopened over the same rows
+    let fx = fx.reopen().await?;
+    assert_eq!(fx.store.threads(&fx.plan, Pending::Include).await?, kept);
+    assert!(fx.store.node_review(&node).await?.is_none());
     Ok(())
 }

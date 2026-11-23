@@ -5,7 +5,6 @@
 //! the reef-model types they are built on, as the CLI will. Its plan is `reef/central`, of a
 //! project registered for a fresh git repo.
 
-use reef_api::Writer;
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
     Commented, EditLoop, ErrorCode, FileDiff, FollowedThread, Listing, Loop, LoopEdit, LoopEdited,
@@ -15,6 +14,7 @@ use reef_api::{
     ResolvingCommit, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode, StoredPage,
     Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord, paths,
 };
+use reef_api::{MarkReview, Review, ReviewState, Reviewed, Writer};
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
 };
@@ -1015,6 +1015,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         target: line.clone(),
         body: "Why **two** <b>here</b>?".to_string(),
         by: Writer::User,
+        review: false,
     };
     let (status, added): (_, Commented) =
         ax.client.post(&paths::node_comments(&node), &new).await?;
@@ -1035,6 +1036,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         target: Target::Node,
         body: "Looks good".to_string(),
         by: Writer::User,
+        review: false,
     };
     let (status, _): (_, Commented) = ax
         .client
@@ -1044,6 +1046,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
     let reply = NewReply {
         body: "Because.".to_string(),
         by: Writer::User,
+        review: false,
     };
     let (status, replied): (_, Commented) =
         ax.client.post(&paths::replies(&ax.plan, 1), &reply).await?;
@@ -1097,6 +1100,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         }),
         body: "Here?".to_string(),
         by: Writer::User,
+        review: false,
     };
     let (status, refused): (_, Commented) =
         ax.client.post(&paths::node_comments(&node), &off).await?;
@@ -1124,6 +1128,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
     let empty = NewReply {
         body: " ".to_string(),
         by: Writer::User,
+        review: false,
     };
     let (status, error): (_, ApiError) =
         ax.client.post(&paths::replies(&ax.plan, 1), &empty).await?;
@@ -1231,11 +1236,13 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
         }),
         body: format!("Line {line}?"),
         by: Writer::User,
+        review: false,
     };
     let general = NewThread {
         target: Target::Node,
         body: "Overall?".to_string(),
         by: Writer::User,
+        review: false,
     };
     for new in [on_line(2), on_line(1), general] {
         let (status, _): (_, Commented) =
@@ -1365,6 +1372,7 @@ pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
             target: Target::Node,
             body: body.to_string(),
             by: Writer::User,
+            review: false,
         };
         let (status, _): (_, Commented) =
             ax.client.post(&paths::node_comments(&node), &new).await?;
@@ -1645,6 +1653,136 @@ pub async fn loop_routes_answer_with_their_status<B: Backend + 'static>(
         pane: Pane::Claude { pid },
     };
     for expected in [changed(1), changed(1), changed(2), changed(1), changed(2)] {
+        let event = events.next().await?.expect("the stream sent the write");
+        assert_eq!(event.event, expected.kind());
+        let change: Change = serde_json::from_str(&event.data)?;
+        assert_eq!(change, expected);
+    }
+    Ok(())
+}
+
+/// The thread routes leave a comment pending in a review out unless asked for it, a node's
+/// review is served at its review route, and submitting it answers 200, told to the stream,
+/// while a stale mark answers 409 and one on a node with no open review 422
+///
+/// # Arguments
+///
+/// * `ax` - The served service and a client of it
+pub async fn reviews_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // C73 in the plan, with a thread written in a review, which starts it
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C73", &[], 0), None))
+        .await?;
+    let node = ax.plan.node("C73")?;
+    let response = ax
+        .client
+        .open(&paths::changes(Some("reef"), Some("central")))
+        .await?;
+    let mut events = Events::new(response);
+    let new = NewThread {
+        target: Target::Node,
+        body: "Later".to_string(),
+        by: Writer::User,
+        review: true,
+    };
+    let (status, commented): (_, Commented) =
+        ax.client.post(&paths::node_comments(&node), &new).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(&commented, Commented::Added { thread, comment: 2 } if thread.pending),
+        "{commented:?}"
+    );
+    // left out of the plan's, the node's and the thread's routes unless asked for
+    let pending = |path: String| format!("{path}?{}", paths::PENDING_QUERY);
+    let (_, plain): (_, Vec<Thread>) = ax.client.get(&paths::plan_comments(&ax.plan)).await?;
+    assert!(plain.is_empty());
+    let (_, plain): (_, Vec<Thread>) = ax.client.get(&paths::node_comments(&node)).await?;
+    assert!(plain.is_empty());
+    let (status, _): (_, ApiError) = ax.client.get(&paths::thread(&ax.plan, 2)).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, asked): (_, Vec<Thread>) = ax
+        .client
+        .get(&pending(paths::plan_comments(&ax.plan)))
+        .await?;
+    assert_eq!(asked.len(), 1);
+    assert!(asked[0].pending);
+    let (status, one): (_, Thread) = ax.client.get(&pending(paths::thread(&ax.plan, 2))).await?;
+    assert_eq!((status, one.number), (StatusCode::OK, 2));
+    // the node's review, and a mark of it refused while pending, 422
+    let (status, review): (_, Option<Review>) = ax.client.get(&paths::node_review(&node)).await?;
+    let review = review.expect("a review is open");
+    assert_eq!(
+        (status, review.number, review.comments),
+        (StatusCode::OK, 1, 1)
+    );
+    let early = MarkThread {
+        state: ThreadState::Resolved,
+        read: one.version,
+    };
+    let (status, marked): (_, Marked) = ax
+        .client
+        .put(&paths::thread_state(&ax.plan, 2), &early)
+        .await?;
+    assert_eq!(
+        (status, marked),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Marked::Pending { thread: 2 }
+        )
+    );
+    // submitted over a stale version, 409, then over its own, 200
+    let mark = |read| MarkReview {
+        state: ReviewState::Submitted,
+        read,
+    };
+    let (status, stale): (_, Reviewed) = ax
+        .client
+        .put(&paths::node_review(&node), &mark(review.version + 1))
+        .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(matches!(stale, Reviewed::Stale { .. }), "{stale:?}");
+    let (status, submitted): (_, Reviewed) = ax
+        .client
+        .put(&paths::node_review(&node), &mark(review.version))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let Reviewed::Marked { review: submitted } = submitted else {
+        anyhow::bail!("the review wasn't submitted: {submitted:?}");
+    };
+    // published, so every route serves it, and the node has no review open, 422 to a mark
+    let (_, plain): (_, Vec<Thread>) = ax.client.get(&paths::plan_comments(&ax.plan)).await?;
+    assert_eq!((plain.len(), plain[0].pending), (1, false));
+    let (_, none): (_, Option<Review>) = ax.client.get(&paths::node_review(&node)).await?;
+    assert!(none.is_none());
+    let (status, missing): (_, Reviewed) = ax
+        .client
+        .put(&paths::node_review(&node), &mark(submitted.version))
+        .await?;
+    assert_eq!(
+        (status, missing),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Reviewed::NoReview { node: node.clone() }
+        )
+    );
+    // and the stream heard of the comment, then of the review submitted
+    let expected = [
+        Change::CommentAdded {
+            node: node.clone(),
+            thread: 2,
+            comment: 2,
+        },
+        Change::ReviewMarked {
+            node: node.clone(),
+            review: 1,
+            state: ReviewState::Submitted,
+            version: submitted.version,
+        },
+    ];
+    for expected in expected {
         let event = events.next().await?.expect("the stream sent the write");
         assert_eq!(event.event, expected.kind());
         let change: Change = serde_json::from_str(&event.data)?;

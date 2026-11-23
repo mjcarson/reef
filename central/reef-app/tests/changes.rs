@@ -231,7 +231,9 @@ fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
             by: reef_api::Writer::User,
             body: body.to_string(),
             html: format!("<p>{body}</p>"),
+            review: None,
         }],
+        pending: false,
     }
 }
 

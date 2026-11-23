@@ -74,6 +74,7 @@ const WORK_KINDS: &[&str] = &[
     "comment-added",
     "thread-marked",
     "threads-followed",
+    "review-marked",
     "missed",
 ];
 

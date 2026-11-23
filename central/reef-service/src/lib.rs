@@ -38,7 +38,7 @@ pub use memory::MemoryBackend;
 pub use service::Service;
 pub use store::{
     AddCapture, AddedProject, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX, FileDiff,
-    FileSummary, Followed, Listing, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
+    FileSummary, Followed, Listing, Pending, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
     PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Proposal,
     Put, Puts, QueueEdit, Queued, Ranked, Revision, Rewrite, Rewritten, StalePut, StartWork,
     Started, Store, StoredNode, StoredPage, Unkeepable, WorkRecord, WorkStart,

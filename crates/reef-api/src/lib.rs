@@ -46,9 +46,9 @@ pub mod work;
 
 pub use change::{Change, FollowedThread, PutNode, PutPage};
 pub use comment::{
-    COMMENT_BODY_MAX, Comment, Commented, MarkThread, Marked, NewReply, NewThread,
-    RESOLVES_TRAILER, Resolution, ResolveThread, Resolved, Resolves, ResolvingCommit, Target,
-    Thread, ThreadState, TrailerOutcome, TrailerRead, Writer,
+    COMMENT_BODY_MAX, Comment, Commented, MarkReview, MarkThread, Marked, NewReply, NewThread,
+    RESOLVES_TRAILER, Resolution, ResolveThread, Resolved, Resolves, ResolvingCommit, Review,
+    ReviewState, Reviewed, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, Writer,
 };
 pub use error::{ApiError, ErrorCode};
 pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};

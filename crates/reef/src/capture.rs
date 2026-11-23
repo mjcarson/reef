@@ -475,6 +475,11 @@ impl Read<'_> {
                     "{RESOLVES_TRAILER}: {thread} in {short} names no thread of `{}`",
                     self.plan
                 )?,
+                TrailerOutcome::Pending => writeln!(
+                    out,
+                    "left #{thread} open: it is pending in a review not yet submitted, and a \
+                     commit naming it resolves it once the review is"
+                )?,
                 TrailerOutcome::Seen => {}
             }
         }

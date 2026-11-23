@@ -8,12 +8,19 @@
 //!
 //! A thread on a line is named where its line is in the latest revision it was followed to, and
 //! one whose line a later revision lost says it is outdated.
+//!
+//! A comment may be written in its node's review instead, as a merge request's review is: it is
+//! pending, tagged so and shown only here, never resolved, until the review is submitted from the
+//! Comments tab, which publishes all of it at once.
 
 use super::when;
 use crate::calls;
 use crate::live::use_work_changes;
 use dioxus::prelude::*;
 use reef_api::{Anchor, Commented, Marked, Side, Target, Thread, ThreadState};
+
+/// A node's review, as the plan's open reviews were read last
+pub type NodeReview = reef_api::Review;
 
 /// The plan's comment threads, as the canvas read them last, and the plan they are of
 #[derive(Clone, Copy, PartialEq)]
@@ -22,8 +29,11 @@ pub struct Threads {
     pub project: ReadSignal<String>,
     /// The plan's name within it
     pub plan: ReadSignal<String>,
-    /// Every thread of the plan, by number, read again after each change to them
+    /// Every thread of the plan, by number, those pending in a review included, read again
+    /// after each change to them
     pub list: Resource<Result<Vec<Thread>, ServerFnError>>,
+    /// The plan's open reviews, read with its threads
+    pub reviews: Resource<Result<Vec<NodeReview>, ServerFnError>>,
     /// A thread to bring into view, once it is drawn
     pub focus: Signal<Option<u32>>,
 }
@@ -48,10 +58,24 @@ impl Threads {
         threads
     }
 
-    /// Reads the threads again, after a write this page made
+    /// The open review of one node, read last, if it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node's id
+    pub fn review_of(&self, id: &str) -> Option<NodeReview> {
+        match &*self.reviews.read() {
+            Some(Ok(reviews)) => reviews.iter().find(|review| review.node.id == id).cloned(),
+            _ => None,
+        }
+    }
+
+    /// Reads the threads and reviews again, after a write this page made
     pub fn reread(&self) {
         let mut list = self.list;
         list.restart();
+        let mut reviews = self.reviews;
+        reviews.restart();
     }
 }
 
@@ -69,11 +93,16 @@ pub fn use_threads(project: ReadSignal<String>, plan: ReadSignal<String>) -> Thr
         let _ = work();
         calls::plan_threads(project(), plan()).await
     });
+    let reviews = use_resource(move || async move {
+        let _ = work();
+        calls::plan_reviews(project(), plan()).await
+    });
     let focus = use_signal(|| None::<u32>);
     use_context_provider(|| Threads {
         project,
         plan,
         list,
+        reviews,
         focus,
     })
 }
@@ -178,6 +207,8 @@ pub fn ThreadView(thread: Thread) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let focused = threads.is_some_and(|threads| *threads.focus.read() == Some(thread.number));
     let open = thread.is_open();
+    let pending = thread.pending;
+    let id = thread.node.id.clone();
     let (number, read, outdated) = (thread.number, thread.version, thread.outdated);
     // the change that answered it, its full commit id on hover
     let resolution = resolution_label(&thread);
@@ -187,10 +218,11 @@ pub fn ThreadView(thread: Thread) -> Element {
         .map(|commit| commit.commit.clone())
         .unwrap_or_default();
     let class = format!(
-        "reef-app-thread {}{}{}",
+        "reef-app-thread {}{}{}{}",
         if open { "open" } else { "resolved" },
         if focused { " focus" } else { "" },
         if outdated.is_some() { " outdated" } else { "" },
+        if pending { " pending" } else { "" },
     );
     rsx! {
         div {
@@ -210,6 +242,18 @@ pub fn ThreadView(thread: Thread) -> Element {
                     div { class: "reef-app-comment-head",
                         span { class: "reef-app-comment-number", "#{comment.number}" }
                         " · {when(comment.at)}"
+                        if comment.by == reef_api::Writer::Claude {
+                            " · Claude"
+                        }
+                        // a reply pending in a review, in a thread already published
+                        if comment.review.is_some() && !pending {
+                            " "
+                            span {
+                                class: "reef-app-tag reef-app-pending",
+                                title: "Written in a review not yet submitted",
+                                "pending"
+                            }
+                        }
                     }
                     div {
                         class: "reef-app-comment-body",
@@ -226,6 +270,15 @@ pub fn ThreadView(thread: Thread) -> Element {
                         "outdated"
                     }
                 }
+                // a thread pending in a review is said so, and can't be marked until it is
+                // submitted
+                if pending {
+                    span {
+                        class: "reef-app-tag reef-app-pending",
+                        title: "Written in a review not yet submitted",
+                        "pending"
+                    }
+                }
                 span { class: if open { "reef-app-thread-state open" } else { "reef-app-thread-state resolved" },
                     if open {
                         "open"
@@ -240,37 +293,43 @@ pub fn ThreadView(thread: Thread) -> Element {
                         "Reply"
                     }
                 }
-                button {
-                    class: "reef-button reef-app-mark",
-                    "data-act": if open { "resolve" } else { "reopen" },
-                    onclick: move |_| async move {
-                        let Some(threads) = threads else {
-                            return;
-                        };
-                        // marked over the version read, so a change since comes back stale
-                        let state = if open { ThreadState::Resolved } else { ThreadState::Open };
-                        let marked = calls::mark_thread(
-                                threads.project.peek().clone(),
-                                threads.plan.peek().clone(),
-                                number,
-                                state,
-                                read,
-                            )
-                            .await;
-                        problem.set(match marked {
-                            Ok(Marked::Marked { .. }) => None,
-                            Ok(Marked::Stale { .. }) => {
-                                Some("It changed since it was read, so here it is as it is now.".to_string())
-                            }
-                            Ok(Marked::NoThread { .. }) => Some("The thread is no longer there.".to_string()),
-                            Err(error) => Some(format!("Marking the thread failed: {error}")),
-                        });
-                        threads.reread();
-                    },
-                    if open {
-                        "Resolve"
-                    } else {
-                        "Reopen"
+                // a thread pending in a review is marked once the review is submitted
+                if !pending {
+                    button {
+                        class: "reef-button reef-app-mark",
+                        "data-act": if open { "resolve" } else { "reopen" },
+                        onclick: move |_| async move {
+                            let Some(threads) = threads else {
+                                return;
+                            };
+                            // marked over the version read, so a change since comes back stale
+                            let state = if open { ThreadState::Resolved } else { ThreadState::Open };
+                            let marked = calls::mark_thread(
+                                    threads.project.peek().clone(),
+                                    threads.plan.peek().clone(),
+                                    number,
+                                    state,
+                                    read,
+                                )
+                                .await;
+                            problem.set(match marked {
+                                Ok(Marked::Marked { .. }) => None,
+                                Ok(Marked::Stale { .. }) => {
+                                    Some("It changed since it was read, so here it is as it is now.".to_string())
+                                }
+                                Ok(Marked::NoThread { .. }) => Some("The thread is no longer there.".to_string()),
+                                Ok(Marked::Pending { .. }) => {
+                                    Some("It is pending in a review, so it is marked once that is submitted.".to_string())
+                                }
+                                Err(error) => Some(format!("Marking the thread failed: {error}")),
+                            });
+                            threads.reread();
+                        },
+                        if open {
+                            "Resolve"
+                        } else {
+                            "Reopen"
+                        }
                     }
                 }
             }
@@ -282,7 +341,11 @@ pub fn ThreadView(thread: Thread) -> Element {
             }
             if *replying.read() {
                 Composer {
-                    compose: Compose::Reply { thread: number },
+                    compose: Compose::Reply {
+                        thread: number,
+                        id: id.clone(),
+                        pending,
+                    },
                     label: "Reply",
                     on_close: move |_| replying.set(false),
                 }
@@ -305,12 +368,27 @@ pub enum Compose {
     Reply {
         /// The thread's number
         thread: u32,
+        /// The id of the node it is on
+        id: String,
+        /// Whether the thread is pending in a review, so its replies are too
+        pending: bool,
     },
 }
 
-/// A box to write a comment in, as markdown, and a button to keep it
+impl Compose {
+    /// The id of the node the comment is on
+    pub fn node(&self) -> &str {
+        match self {
+            Compose::Thread { id, .. } | Compose::Reply { id, .. } => id,
+        }
+    }
+}
+
+/// A box to write a comment in, as markdown, a button to keep it at once, and one to keep it
+/// pending in the node's review, starting one if none is open
 ///
-/// Once kept, the box empties and the plan's threads are read again.
+/// A reply in a pending thread is kept only in its review. Once kept, the box empties and the
+/// plan's threads are read again.
 ///
 /// # Arguments
 ///
@@ -330,6 +408,57 @@ pub fn Composer(
     let mut sending = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     let empty = text.read().trim().is_empty();
+    // whether the node has a review open, and whether this replies in a pending thread, which
+    // takes replies only in its review
+    let in_review = threads.is_some_and(|threads| threads.review_of(compose.node()).is_some());
+    let pending = matches!(compose, Compose::Reply { pending: true, .. });
+    // sends the box as it stands, at once or in the node's review
+    let send = {
+        let compose = compose.clone();
+        move |review: bool| {
+            let compose = compose.clone();
+            spawn(async move {
+                let Some(threads) = threads else {
+                    return;
+                };
+                // sent once, as it stands
+                sending.set(true);
+                let body = text.peek().clone();
+                let (project, plan) = (threads.project.peek().clone(), threads.plan.peek().clone());
+                let sent = match compose {
+                    Compose::Thread { id, target } => {
+                        calls::start_thread(project, plan, id, target, body, review).await
+                    }
+                    Compose::Reply { thread, .. } => {
+                        calls::reply_to(project, plan, thread, body, review).await
+                    }
+                };
+                sending.set(false);
+                // kept, it empties and the box closes; otherwise it says why
+                match sent {
+                    Ok(Commented::Added { .. }) => {
+                        text.set(String::new());
+                        problem.set(None);
+                        threads.reread();
+                        if let Some(on_close) = on_close {
+                            on_close.call(());
+                        }
+                    }
+                    Ok(Commented::NoLine { .. }) => problem.set(Some(
+                        "That line isn't in its revision any more.".to_string(),
+                    )),
+                    Ok(Commented::NotInPlan { .. }) => {
+                        problem.set(Some("The node isn't in its plan any more.".to_string()))
+                    }
+                    Ok(Commented::NoThread { .. }) => {
+                        problem.set(Some("The thread is no longer there.".to_string()))
+                    }
+                    Err(error) => problem.set(Some(format!("Keeping the comment failed: {error}"))),
+                }
+            });
+        }
+    };
+    let now = send.clone();
     rsx! {
         div { class: "reef-app-composer",
             textarea {
@@ -340,53 +469,31 @@ pub fn Composer(
                 oninput: move |event| text.set(event.value()),
             }
             div { class: "reef-app-actions",
-                button {
-                    class: "reef-button reef-app-send",
-                    disabled: empty || *sending.read(),
-                    onclick: {
-                        let compose = compose.clone();
-                        move |_| {
-                            let compose = compose.clone();
-                            async move {
-                                let Some(threads) = threads else {
-                                    return;
-                                };
-                                // sent once, as it stands
-                                sending.set(true);
-                                let body = text.peek().clone();
-                                let (project, plan) = (threads.project.peek().clone(), threads.plan.peek().clone());
-                                let sent = match compose {
-                                    Compose::Thread { id, target } => {
-                                        calls::start_thread(project, plan, id, target, body).await
-                                    }
-                                    Compose::Reply { thread } => calls::reply_to(project, plan, thread, body).await,
-                                };
-                                sending.set(false);
-                                // kept, it empties and the box closes; otherwise it says why
-                                match sent {
-                                    Ok(Commented::Added { .. }) => {
-                                        text.set(String::new());
-                                        problem.set(None);
-                                        threads.reread();
-                                        if let Some(on_close) = on_close {
-                                            on_close.call(());
-                                        }
-                                    }
-                                    Ok(Commented::NoLine { .. }) => {
-                                        problem.set(Some("That line isn't in its revision any more.".to_string()))
-                                    }
-                                    Ok(Commented::NotInPlan { .. }) => {
-                                        problem.set(Some("The node isn't in its plan any more.".to_string()))
-                                    }
-                                    Ok(Commented::NoThread { .. }) => {
-                                        problem.set(Some("The thread is no longer there.".to_string()))
-                                    }
-                                    Err(error) => problem.set(Some(format!("Keeping the comment failed: {error}"))),
-                                }
-                            }
+                // published at once, unless it replies in a pending thread
+                if !pending {
+                    button {
+                        class: "reef-button reef-app-send",
+                        disabled: empty || *sending.read(),
+                        onclick: move |_| now(false),
+                        if in_review {
+                            "{label} now"
+                        } else {
+                            "{label}"
                         }
-                    },
-                    "{label}"
+                    }
+                }
+                // or kept pending in the node's review, started for it if none is open
+                button {
+                    class: "reef-button reef-app-review-send",
+                    "data-act": "review",
+                    disabled: empty || *sending.read(),
+                    title: "Pending, shown only here, until the review is submitted",
+                    onclick: move |_| send(true),
+                    if in_review || pending {
+                        "Add to review"
+                    } else {
+                        "Start a review"
+                    }
                 }
                 if let Some(on_close) = on_close {
                     button {

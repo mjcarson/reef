@@ -22,19 +22,25 @@
 //!   row, so the link outlives the commit once it is squashed. A trailer whose change resolved
 //!   the thread once already, by its author, when it was authored and its summary, which a
 //!   rebase keeps, never resolves it again, so a thread reopened stays open.
+//! - **A review holds its comments pending.** A review is a row of its own in the plan's
+//!   partition, numbered as a comment is, holding whether it is open, submitted or discarded. A
+//!   comment written in it names it, and is pending while it is open: left out of every read but
+//!   one that asks for pending comments, and never marked or resolved. Submitting it is one write
+//!   of its row, so every comment in it is published at once, and discarding it drops them.
 //! - **Writes take a lock per project; reads take none.** Each comment is one row's write, so
 //!   every step leaves the plan's comments reading whole.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another plan's comments.
 
 use reef_api::{
-    Anchor, COMMENT_BODY_MAX, Comment, Commented, FileDiff, FollowedThread, MarkThread, Marked,
-    NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves, Revision, Target, Thread,
-    ThreadState, TrailerOutcome, TrailerRead, Writer,
+    Anchor, COMMENT_BODY_MAX, Comment, Commented, FileDiff, FollowedThread, MarkReview, MarkThread,
+    Marked, NewReply, NewThread, Resolution, ResolveThread, Resolved, Resolves, Review,
+    ReviewState, Reviewed, Revision, Target, Thread, ThreadState, TrailerOutcome, TrailerRead,
+    Writer,
 };
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -53,9 +59,12 @@ struct Kept {
     /// Who wrote it, the user unless it says so, as rows kept before it was said read
     #[serde(default, skip_serializing_if = "Writer::is_user")]
     by: Writer,
+    /// The review it was written in, if it was, as rows kept before reviews read
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    review: Option<u32>,
     /// Its body, as markdown
     body: String,
-    /// Whether it starts a thread or replies in one
+    /// Whether it starts a thread, replies in one, or is a review
     on: KeptOn,
 }
 
@@ -84,6 +93,31 @@ enum KeptOn {
         /// The thread's number
         thread: u32,
     },
+    /// A review of the node, whose comments are pending until it is submitted
+    Review {
+        /// Whether it is open, submitted or discarded
+        state: ReviewState,
+    },
+}
+
+/// Whether a read serves the threads and comments pending in a review not yet submitted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    /// Serve them, marked pending, as the app shows them to their reviewer
+    Include,
+    /// Leave them out, as everything but the app reads, Claude included
+    Leave,
+}
+
+/// Where a comment stands with the review it was written in
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// Published: written in no review, or in one submitted
+    Published,
+    /// Pending in this review, still open
+    Pending(u32),
+    /// Dropped with a review discarded, never served
+    Dropped,
 }
 
 /// One comment row as read: its number, the version its row is at, and what it keeps
@@ -123,11 +157,12 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
+    /// * `pending` - Whether to serve what is pending in a review not yet submitted
     #[instrument(name = "Store::threads", skip_all, err(Debug))]
-    pub async fn threads(&self, plan: &PlanName) -> anyhow::Result<Vec<Thread>> {
+    pub async fn threads(&self, plan: &PlanName, pending: Pending) -> anyhow::Result<Vec<Thread>> {
         // every comment of the plan, grouped into its thread
         let rows = self.comment_rows(plan).await?;
-        threads_of(plan, rows)
+        threads_of(plan, rows, pending)
     }
 
     /// Lists one node's comment threads, by number
@@ -135,10 +170,15 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `node` - The node's full name
+    /// * `pending` - Whether to serve what is pending in a review not yet submitted
     #[instrument(name = "Store::node_threads", skip_all, err(Debug))]
-    pub async fn node_threads(&self, node: &NodeName) -> anyhow::Result<Vec<Thread>> {
+    pub async fn node_threads(
+        &self,
+        node: &NodeName,
+        pending: Pending,
+    ) -> anyhow::Result<Vec<Thread>> {
         // the plan's threads, those on this node kept
-        let mut threads = self.threads(&node.plan).await?;
+        let mut threads = self.threads(&node.plan, pending).await?;
         threads.retain(|thread| thread.node.id == node.id);
         Ok(threads)
     }
@@ -149,11 +189,103 @@ impl<B: Backend> Store<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `number` - The thread's number
+    /// * `pending` - Whether to serve it if it is pending in a review not yet submitted
     #[instrument(name = "Store::thread", skip_all, err(Debug))]
-    pub async fn thread(&self, plan: &PlanName, number: u32) -> anyhow::Result<Option<Thread>> {
+    pub async fn thread(
+        &self,
+        plan: &PlanName,
+        number: u32,
+        pending: Pending,
+    ) -> anyhow::Result<Option<Thread>> {
         // the plan's threads, the one of this number kept, since its replies are anywhere after it
-        let threads = self.threads(plan).await?;
+        let threads = self.threads(plan, pending).await?;
         Ok(threads.into_iter().find(|thread| thread.number == number))
+    }
+
+    /// Lists a plan's open reviews, by number
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Store::open_reviews", skip_all, err(Debug))]
+    pub async fn open_reviews(&self, plan: &PlanName) -> anyhow::Result<Vec<Review>> {
+        // every review of the plan, those still being written kept
+        let rows = self.comment_rows(plan).await?;
+        let mut reviews = reviews_of(plan, &rows)?;
+        reviews.retain(|review| review.state == ReviewState::Open);
+        Ok(reviews)
+    }
+
+    /// Gets a node's open review, if it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    #[instrument(name = "Store::node_review", skip_all, err(Debug))]
+    pub async fn node_review(&self, node: &NodeName) -> anyhow::Result<Option<Review>> {
+        // the plan's open reviews, the one of this node kept
+        let reviews = self.open_reviews(&node.plan).await?;
+        Ok(reviews.into_iter().find(|review| review.node.id == node.id))
+    }
+
+    /// Submits a node's open review, publishing every comment in it at once, or discards it,
+    /// dropping them, over the version its writer read
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `mark` - Whether it is submitted or discarded, and the version it was marked against
+    #[instrument(name = "Store::mark_review", skip_all, err(Debug))]
+    pub async fn mark_review(&self, node: &NodeName, mark: MarkReview) -> anyhow::Result<Reviewed> {
+        // a review is only ever closed, never opened by a mark
+        if mark.state == ReviewState::Open {
+            let message = "a review is marked submitted or discarded, never open".to_string();
+            return Err(Unkeepable(message).into());
+        }
+        // the node's open review, under the project's comment lock
+        let lock = self.comment_lock(&node.plan.project);
+        let _held = lock.lock().await;
+        let rows = self.comment_rows(&node.plan).await?;
+        let Some(open) = open_review(&rows, &node.id) else {
+            return Ok(Reviewed::NoReview { node: node.clone() });
+        };
+        let Some((_, version, kept)) = rows.iter().find(|(number, _, _)| *number == open) else {
+            return Ok(Reviewed::NoReview { node: node.clone() });
+        };
+        // a mark made against another version than the one stored never saw what changed
+        let review = |rows: &[Read]| -> anyhow::Result<Review> {
+            reviews_of(&node.plan, rows)?
+                .into_iter()
+                .find(|review| review.number == open)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("review {open} of `{}` doesn't read back", node.plan)
+                })
+        };
+        if *version != mark.read {
+            return Ok(Reviewed::Stale {
+                review: review(&rows)?,
+            });
+        }
+        // its state changed in one write of its row, over the version read
+        let marked = Kept {
+            on: KeptOn::Review { state: mark.state },
+            ..kept.clone()
+        };
+        let row = comment_row(&node.plan, open, version + 1, &marked)?;
+        let written = self
+            .backend
+            .write_comment(row, Expect::Version(*version))
+            .await?;
+        let rows = self.comment_rows(&node.plan).await?;
+        match written {
+            Written::Applied => Ok(Reviewed::Marked {
+                review: review(&rows)?,
+            }),
+            // a refusal means another process wrote it since the read
+            Written::Refused(_) => Ok(Reviewed::Stale {
+                review: review(&rows)?,
+            }),
+        }
     }
 
     /// Starts a thread on a node, or on a line of one of its revisions
@@ -179,7 +311,15 @@ impl<B: Backend> Store<B> {
         let lock = self.comment_lock(&node.plan.project);
         let _held = lock.lock().await;
         let rows = self.comment_rows(&node.plan).await?;
-        let number = next_number(&rows)?;
+        let mut number = next_number(&rows)?;
+        // written in the node's open review, started for it if it has none
+        let review = match new.review {
+            true => Some(
+                self.joined(&node.plan, &node.id, &rows, &mut number)
+                    .await?,
+            ),
+            false => None,
+        };
         // a line of an older revision is followed at once to the latest, read under the lock
         // so a capture's follow after it finds the thread where this left it
         let (followed, outdated) = match &new.target {
@@ -195,6 +335,7 @@ impl<B: Backend> Store<B> {
             node: node.id.clone(),
             at: now_ms(),
             by: new.by,
+            review,
             body: new.body,
             on: KeptOn::Thread {
                 target: new.target,
@@ -234,17 +375,29 @@ impl<B: Backend> Store<B> {
         let _held = lock.lock().await;
         let rows = self.comment_rows(plan).await?;
         // the thread must start at the number named, and a reply's number starts none
-        let Some(node) = rows.iter().find_map(|(number, _, kept)| {
+        let Some((node, standing)) = rows.iter().find_map(|(number, _, kept)| {
             (*number == thread && matches!(kept.on, KeptOn::Thread { .. }))
-                .then(|| kept.node.clone())
+                .then(|| (kept.node.clone(), standing(&rows, kept)))
         }) else {
             return Ok(Commented::NoThread { thread });
         };
-        let number = next_number(&rows)?;
+        let mut number = next_number(&rows)?;
+        // a pending thread takes replies only in its own review, and a dropped one none at all
+        let review = match (standing, reply.review) {
+            (Standing::Dropped, _) | (Standing::Pending(_), false) => {
+                return Ok(Commented::NoThread { thread });
+            }
+            (Standing::Pending(review), true) => Some(review),
+            (Standing::Published, true) => {
+                Some(self.joined(plan, &node, &rows, &mut number).await?)
+            }
+            (Standing::Published, false) => None,
+        };
         let kept = Kept {
             node,
             at: now_ms(),
             by: reply.by,
+            review,
             body: reply.body,
             on: KeptOn::Reply { thread },
         };
@@ -277,6 +430,13 @@ impl<B: Backend> Store<B> {
         let Some((version, mut kept)) = self.thread_row(plan, thread).await? else {
             return Ok(Marked::NoThread { thread });
         };
+        // a thread pending in a review is marked once the review is submitted, and one dropped
+        // with its review never
+        match self.standing_of(plan, &kept).await? {
+            Standing::Published => {}
+            Standing::Pending(_) => return Ok(Marked::Pending { thread }),
+            Standing::Dropped => return Ok(Marked::NoThread { thread }),
+        }
         // a mark made against another version than the one stored would undo what it never saw
         if version != mark.read {
             let thread = self.kept_thread(plan, thread).await?;
@@ -321,6 +481,13 @@ impl<B: Backend> Store<B> {
         let Some((version, mut kept)) = self.thread_row(plan, thread).await? else {
             return Ok(Resolved::NoThread { thread });
         };
+        // a thread pending in a review is resolved once the review is submitted, and one dropped
+        // with its review never
+        match self.standing_of(plan, &kept).await? {
+            Standing::Published => {}
+            Standing::Pending(_) => return Ok(Resolved::Pending { thread }),
+            Standing::Dropped => return Ok(Resolved::NoThread { thread }),
+        }
         // a resolve made against another version than the one stored never saw what changed
         if version != resolve.read {
             let thread = self.kept_thread(plan, thread).await?;
@@ -390,6 +557,18 @@ impl<B: Backend> Store<B> {
                 read.push((outcome(TrailerOutcome::NoThread), None));
                 continue;
             };
+            // a thread pending in a review stays open, and one dropped with its review is none
+            match self.standing_of(plan, &kept).await? {
+                Standing::Published => {}
+                Standing::Pending(_) => {
+                    read.push((outcome(TrailerOutcome::Pending), None));
+                    continue;
+                }
+                Standing::Dropped => {
+                    read.push((outcome(TrailerOutcome::NoThread), None));
+                    continue;
+                }
+            }
             let KeptOn::Thread {
                 state, resolutions, ..
             } = &mut kept.on
@@ -474,11 +653,14 @@ impl<B: Backend> Store<B> {
             return Ok(None);
         };
         let rows = self.comment_rows(&node.plan).await?;
+        let states = review_states(&rows);
         let mut files = Files::new();
         let mut written = Vec::new();
         for (number, version, mut kept) in rows {
-            // only this node's threads on a line, still on it, and behind its latest revision
-            if kept.node != node.id {
+            // only this node's threads on a line, still on it, and behind its latest revision;
+            // one pending in a review is followed too, so it is where its line is once published,
+            // and one dropped with its review never
+            if kept.node != node.id || standing_in(&states, &kept) == Standing::Dropped {
                 continue;
             }
             let KeptOn::Thread {
@@ -651,7 +833,7 @@ impl<B: Backend> Store<B> {
     /// * `plan` - The plan's full name
     /// * `thread` - The thread's number
     async fn kept_thread(&self, plan: &PlanName, thread: u32) -> anyhow::Result<Thread> {
-        match self.thread(plan, thread).await? {
+        match self.thread(plan, thread, Pending::Include).await? {
             Some(thread) => Ok(thread),
             None => anyhow::bail!("thread {thread} of `{plan}` was written, but doesn't read back"),
         }
@@ -676,6 +858,77 @@ impl<B: Backend> Store<B> {
                 refusal.describe()
             ),
         }
+    }
+
+    /// The number of a node's open review among a plan's comments, starting one under the next
+    /// number if it has none, which moves the next number on
+    ///
+    /// The caller holds the project's comment lock, and read the rows under it.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `node` - The node's id
+    /// * `rows` - The plan's comments, in number order
+    /// * `next` - The number the next row of the plan takes
+    async fn joined(
+        &self,
+        plan: &PlanName,
+        node: &str,
+        rows: &[Read],
+        next: &mut u32,
+    ) -> anyhow::Result<u32> {
+        // the node's review still being written, if it has one
+        if let Some(open) = open_review(rows, node) {
+            return Ok(open);
+        }
+        // else one started under the next number, before the comment it was started for
+        let number = *next;
+        let review = Kept {
+            node: node.to_string(),
+            at: now_ms(),
+            by: Writer::User,
+            review: None,
+            body: String::new(),
+            on: KeptOn::Review {
+                state: ReviewState::Open,
+            },
+        };
+        self.keep_comment(plan, number, review).await?;
+        *next = number
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("a plan can hold no more than {} comments", u32::MAX))?;
+        Ok(number)
+    }
+
+    /// Where a comment stands with the review it was written in, its review's row read alone
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `kept` - The comment
+    async fn standing_of(&self, plan: &PlanName, kept: &Kept) -> anyhow::Result<Standing> {
+        // written in no review, it is published
+        let Some(review) = kept.review else {
+            return Ok(Standing::Published);
+        };
+        // else as its review's row says
+        let key = sort_key(review);
+        let rows = self
+            .backend
+            .comments(&plan.project, &plan.plan, Some(&key))
+            .await?;
+        for row in rows {
+            if row.number != key {
+                continue;
+            }
+            let (_, _, row) = comment(plan, row)?;
+            if let KeptOn::Review { state } = row.on {
+                return Ok(standing_by(review, state));
+            }
+        }
+        // a review a comment names is written before it, so one not there drops it
+        Ok(Standing::Dropped)
     }
 
     /// Whether a node's sealed revisions hold the line an anchor names
@@ -806,18 +1059,39 @@ fn comment(plan: &PlanName, row: CommentRow) -> anyhow::Result<Read> {
 
 /// A plan's comments grouped into their threads, by number
 ///
+/// A comment pending in an open review is served only if pending ones are asked for, marked
+/// with its review, and one dropped with a discarded review never is, nor any reply to a thread
+/// left out.
+///
 /// # Arguments
 ///
 /// * `plan` - The plan the comments were read from
 /// * `rows` - Its comments, in number order
-fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
+/// * `pending` - Whether to serve what is pending in a review not yet submitted
+fn threads_of(plan: &PlanName, rows: Vec<Read>, pending: Pending) -> anyhow::Result<Vec<Thread>> {
+    // each review's state, by number, since a comment's review comes before it
+    let states = review_states(&rows);
     let mut threads: BTreeMap<u32, Thread> = BTreeMap::new();
+    let mut left_out: HashSet<u32> = HashSet::new();
     for (number, version, kept) in rows {
+        // a review is no comment, and a comment left out leaves out a thread it starts
+        let standing = standing_in(&states, &kept);
+        let review = match (standing, pending) {
+            (Standing::Published, _) => None,
+            (Standing::Pending(review), Pending::Include) => Some(review),
+            (Standing::Pending(_), Pending::Leave) | (Standing::Dropped, _) => {
+                if matches!(kept.on, KeptOn::Thread { .. }) {
+                    left_out.insert(number);
+                }
+                continue;
+            }
+        };
         // each comment as a thread shows it
         let comment = Comment {
             number,
             at: kept.at,
             by: kept.by,
+            review,
             body: kept.body,
             html: String::new(),
         };
@@ -842,25 +1116,134 @@ fn threads_of(plan: &PlanName, rows: Vec<Read>) -> anyhow::Result<Vec<Thread>> {
                         outdated,
                         state,
                         resolutions,
+                        pending: review.is_some(),
                         comments: vec![comment],
                     },
                 );
             }
-            // a reply follows in its thread, which comes before it
+            // a reply follows in its thread, which comes before it, unless that was left out
             KeptOn::Reply { thread } => match threads.get_mut(&thread) {
                 Some(thread) => thread.comments.push(comment),
+                None if left_out.contains(&thread) => {}
                 None => anyhow::bail!(
                     "comment {number} of `{plan}` replies in thread {thread}, which isn't stored"
                 ),
             },
+            // a review is no comment, and its state was read already
+            KeptOn::Review { .. } => {}
         }
     }
     Ok(threads.into_values().collect())
 }
 
+/// Each review of a plan's comments and where it stands, by number
+///
+/// # Arguments
+///
+/// * `rows` - The plan's comments, in number order
+fn review_states(rows: &[Read]) -> HashMap<u32, ReviewState> {
+    rows.iter()
+        .filter_map(|(number, _, kept)| match kept.on {
+            KeptOn::Review { state } => Some((*number, state)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Where a comment stands with the review it was written in, by the plan's reviews' states
+///
+/// A review is itself published, so it is never left out by its own state.
+///
+/// # Arguments
+///
+/// * `states` - Each review of the plan and where it stands
+/// * `kept` - The comment
+fn standing_in(states: &HashMap<u32, ReviewState>, kept: &Kept) -> Standing {
+    match kept.review {
+        None => Standing::Published,
+        // a review a comment names is written before it, so one not there drops it
+        Some(review) => match states.get(&review) {
+            Some(state) => standing_by(review, *state),
+            None => Standing::Dropped,
+        },
+    }
+}
+
+/// Where a comment written in a review stands, by the review's state
+///
+/// # Arguments
+///
+/// * `review` - The review's number
+/// * `state` - Where the review stands
+fn standing_by(review: u32, state: ReviewState) -> Standing {
+    match state {
+        ReviewState::Open => Standing::Pending(review),
+        ReviewState::Submitted => Standing::Published,
+        ReviewState::Discarded => Standing::Dropped,
+    }
+}
+
+/// Where a comment stands with its review, among a plan's comments
+///
+/// # Arguments
+///
+/// * `rows` - The plan's comments, in number order
+/// * `kept` - The comment
+fn standing(rows: &[Read], kept: &Kept) -> Standing {
+    standing_in(&review_states(rows), kept)
+}
+
+/// The number of a node's open review among a plan's comments, if it has one
+///
+/// # Arguments
+///
+/// * `rows` - The plan's comments, in number order
+/// * `node` - The node's id
+fn open_review(rows: &[Read], node: &str) -> Option<u32> {
+    rows.iter().find_map(|(number, _, kept)| {
+        // a review row of the node, still being written
+        let open = matches!(
+            kept.on,
+            KeptOn::Review {
+                state: ReviewState::Open
+            }
+        );
+        (kept.node == node && open).then_some(*number)
+    })
+}
+
+/// A plan's reviews, by number, each with how many comments are written in it
+///
+/// # Arguments
+///
+/// * `plan` - The plan the comments were read from
+/// * `rows` - Its comments, in number order
+fn reviews_of(plan: &PlanName, rows: &[Read]) -> anyhow::Result<Vec<Review>> {
+    let mut reviews = Vec::new();
+    for (number, version, kept) in rows {
+        let KeptOn::Review { state } = kept.on else {
+            continue;
+        };
+        // each comment that names it
+        let comments = rows
+            .iter()
+            .filter(|(_, _, comment)| comment.review == Some(*number))
+            .count();
+        reviews.push(Review {
+            node: plan.node(kept.node.clone())?,
+            number: *number,
+            version: *version,
+            state,
+            at: kept.at,
+            comments: u32::try_from(comments)?,
+        });
+    }
+    Ok(reviews)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Kept, KeptOn, comment_row, next_number, sort_key};
+    use super::{Kept, KeptOn, Pending, comment_row, next_number, sort_key};
     use crate::store::Store;
     use reef_api::{Target, ThreadState, Writer};
     use reef_model::PlanName;
@@ -875,6 +1258,7 @@ mod tests {
             node: node.to_string(),
             at: 1,
             by: Writer::User,
+            review: None,
             body: "Looks good".to_string(),
             on: KeptOn::Thread {
                 target: Target::Node,
@@ -915,7 +1299,7 @@ mod tests {
         };
         store.backend().plant_comment("reef", "central", row);
         // it reads as it was, linked to no change
-        let threads = store.threads(&plan).await?;
+        let threads = store.threads(&plan, Pending::Include).await?;
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].state, ThreadState::Resolved);
         assert!(threads[0].resolutions.is_empty());
@@ -933,6 +1317,52 @@ mod tests {
         Ok(())
     }
 
+    /// Rows kept before reviews read back published, whether or not pending ones are asked for,
+    /// and a comment in no review is kept without the key, as the old binary wrote it
+    #[tokio::test]
+    async fn rows_kept_before_reviews_read_back() -> anyhow::Result<()> {
+        // a thread and its reply as C43's binary kept them, with no review in their JSON
+        let store = Store::memory();
+        let plan = PlanName::new("reef", "central")?;
+        let rows = [
+            (
+                1,
+                r#"{"node":"C34","at":1,"body":"Why?","on":{"thread":{"target":{"on":"node"},"state":"open"}}}"#,
+            ),
+            (
+                2,
+                r#"{"node":"C34","at":2,"by":"claude","body":"Because.","on":{"reply":{"thread":1}}}"#,
+            ),
+        ];
+        for (number, record) in rows {
+            let row = crate::schema::CommentRow {
+                project: "reef".to_string(),
+                plan: "central".to_string(),
+                number: sort_key(number),
+                version: 1,
+                record: record.to_string(),
+            };
+            store.backend().plant_comment("reef", "central", row);
+        }
+        // both read as published, the same whichever reads them
+        let left = store.threads(&plan, Pending::Leave).await?;
+        assert_eq!(left, store.threads(&plan, Pending::Include).await?);
+        assert_eq!(left.len(), 1);
+        assert!(!left[0].pending);
+        assert!(
+            left[0]
+                .comments
+                .iter()
+                .all(|comment| comment.review.is_none())
+        );
+        assert_eq!(left[0].comments[1].by, Writer::Claude);
+        assert!(store.open_reviews(&plan).await?.is_empty());
+        // and a comment in no review says nothing of one
+        let kept = serde_json::to_string(&general("C34"))?;
+        assert!(!kept.contains("review"), "{kept}");
+        Ok(())
+    }
+
     /// Rows stored in a plan's partition under another plan's key are an error, never served
     #[tokio::test]
     async fn collided_comment_rows_are_errors() -> anyhow::Result<()> {
@@ -943,7 +1373,7 @@ mod tests {
         let stray = comment_row(&theirs, 1, 1, &general("C34"))?;
         store.backend().plant_comment("reef", "central", stray);
         let error = store
-            .threads(&ours)
+            .threads(&ours, Pending::Include)
             .await
             .expect_err("a collided row was served");
         assert!(format!("{error:#}").contains("collide"), "{error:#}");
@@ -956,7 +1386,7 @@ mod tests {
         let row = comment_row(&ours, 4, 1, &reply)?;
         store.backend().plant_comment("reef", "central", row);
         let error = store
-            .threads(&ours)
+            .threads(&ours, Pending::Include)
             .await
             .expect_err("a reply with no thread was served");
         assert!(format!("{error:#}").contains("isn't stored"), "{error:#}");

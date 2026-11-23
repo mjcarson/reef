@@ -7,11 +7,11 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, FileDiff, Marked, PlanInfo, Project, QueueEdit, QueueListing, Queued, Revision,
-    Target, Thread, ThreadState,
+    Commented, FileDiff, Marked, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review,
+    ReviewState, Reviewed, Revision, Target, Thread, ThreadState,
 };
 #[cfg(feature = "server")]
-use reef_api::{MarkThread, NewReply, NewThread, Writer};
+use reef_api::{MarkReview, MarkThread, NewReply, NewThread, Writer};
 use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
@@ -189,7 +189,8 @@ pub async fn revision_file(
         .map_err(failed)
 }
 
-/// A plan's comment threads, on every node of it, by number, each comment rendered
+/// A plan's comment threads, on every node of it, by number, each comment rendered, those
+/// pending in a review included, as their reviewer sees them
 ///
 /// # Arguments
 ///
@@ -204,7 +205,59 @@ pub async fn plan_threads(project: String, plan: String) -> Result<Vec<Thread>, 
     // a name that breaks the naming rule is refused before the store is read
     let name = plan_name(project, plan)?;
     crate::server::service()
-        .threads(&name)
+        .threads(&name, reef_service::Pending::Include)
+        .await
+        .map_err(failed)
+}
+
+/// A plan's open reviews, by number
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+#[get("/app/reviews?project&plan")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::plan_reviews", skip_all, err(Debug))
+)]
+pub async fn plan_reviews(project: String, plan: String) -> Result<Vec<Review>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .open_reviews(&name)
+        .await
+        .map_err(failed)
+}
+
+/// Submits a node's open review, publishing its comments at once, or discards it, over the
+/// version it was read at
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+/// * `state` - Whether it is submitted or discarded
+/// * `read` - The version of the review the mark was made against
+#[post("/app/review")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::mark_review", skip_all, err(Debug))
+)]
+pub async fn mark_review(
+    project: String,
+    plan: String,
+    id: String,
+    state: ReviewState,
+    read: u64,
+) -> Result<Reviewed, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    crate::server::service()
+        .mark_review(&node, MarkReview { state, read })
         .await
         .map_err(failed)
 }
@@ -218,6 +271,7 @@ pub async fn plan_threads(project: String, plan: String) -> Result<Vec<Thread>, 
 /// * `id` - The node's id
 /// * `target` - What the thread is on
 /// * `body` - Its first comment's body, as markdown
+/// * `review` - Whether it is written in the node's review, started for it if none is open
 #[post("/app/thread")]
 #[cfg_attr(
     feature = "server",
@@ -229,6 +283,7 @@ pub async fn start_thread(
     id: String,
     target: Target,
     body: String,
+    review: bool,
 ) -> Result<Commented, ServerFnError> {
     // a name that breaks the naming rule is refused before the store is read
     let node = plan_name(project, plan)?
@@ -241,6 +296,7 @@ pub async fn start_thread(
                 target,
                 body,
                 by: Writer::User,
+                review,
             },
         )
         .await
@@ -255,6 +311,7 @@ pub async fn start_thread(
 /// * `plan` - The plan's name within it
 /// * `thread` - The thread's number
 /// * `body` - The reply's body, as markdown
+/// * `review` - Whether it is written in the node's review, started for it if none is open
 #[post("/app/reply")]
 #[cfg_attr(
     feature = "server",
@@ -265,6 +322,7 @@ pub async fn reply_to(
     plan: String,
     thread: u32,
     body: String,
+    review: bool,
 ) -> Result<Commented, ServerFnError> {
     // a name that breaks the naming rule is refused before the store is read
     let name = plan_name(project, plan)?;
@@ -275,6 +333,7 @@ pub async fn reply_to(
             NewReply {
                 body,
                 by: Writer::User,
+                review,
             },
         )
         .await

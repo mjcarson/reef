@@ -9,7 +9,7 @@
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
 
-use crate::comment::ThreadState;
+use crate::comment::{ReviewState, ThreadState};
 use crate::loops::Pane;
 use crate::project::Project;
 
@@ -136,6 +136,17 @@ pub enum Change {
         /// Each thread it wrote, by number
         threads: Vec<FollowedThread>,
     },
+    /// A node's review was submitted, its comments published at once, or discarded
+    ReviewMarked {
+        /// The node it reviews
+        node: NodeName,
+        /// The review's number
+        review: u32,
+        /// What became of it
+        state: ReviewState,
+        /// The version its row is at now
+        version: u64,
+    },
     /// A pane's loop was started, changed or stopped
     LoopChanged {
         /// The project the loop feeds
@@ -165,6 +176,7 @@ impl Change {
             Change::CommentAdded { .. } => "comment-added",
             Change::ThreadMarked { .. } => "thread-marked",
             Change::ThreadsFollowed { .. } => "threads-followed",
+            Change::ReviewMarked { .. } => "review-marked",
             Change::LoopChanged { .. } => "loop-changed",
             Change::Missed { .. } => "missed",
         }
@@ -185,7 +197,8 @@ impl Change {
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
             | Change::ThreadMarked { node, .. }
-            | Change::ThreadsFollowed { node, .. } => Some(node.plan.project.as_str()),
+            | Change::ThreadsFollowed { node, .. }
+            | Change::ReviewMarked { node, .. } => Some(node.plan.project.as_str()),
             Change::Missed { .. } => None,
         }
     }
@@ -203,7 +216,8 @@ impl Change {
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
             | Change::ThreadMarked { node, .. }
-            | Change::ThreadsFollowed { node, .. } => Some(&node.plan),
+            | Change::ThreadsFollowed { node, .. }
+            | Change::ReviewMarked { node, .. } => Some(&node.plan),
             Change::ProjectAdded { .. }
             | Change::QueueChanged { .. }
             | Change::LoopChanged { .. }
@@ -318,6 +332,12 @@ mod tests {
                     version: 3,
                     outdated: true,
                 }],
+            },
+            Change::ReviewMarked {
+                node: "reef/central/C73".parse().unwrap(),
+                review: 4,
+                state: crate::ReviewState::Submitted,
+                version: 2,
             },
             Change::Missed { count: 3 },
         ];

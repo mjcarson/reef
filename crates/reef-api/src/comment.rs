@@ -15,6 +15,10 @@
 //! each, its target staying where it was started. Once a revision no longer holds the line, the
 //! thread is outdated from that revision on, and is followed no further.
 //!
+//! A comment may be written in a review of its node, as a merge request's review is: it stays
+//! pending, shown only where it is asked for and never resolved, until the review is submitted,
+//! which publishes every comment in it at once, or discarded, which drops them.
+//!
 //! A thread is resolved by a change. A commit's `Reef-Resolves: <n>` trailer, read when the commit
 //! is captured, resolves thread `n` of the capture's plan and links it to the revision the capture
 //! kept, as a [`Resolution`]. `reef comment resolve` links a revision by hand. The link names the
@@ -148,6 +152,9 @@ pub struct Comment {
     /// Who wrote it, the user unless it says so
     #[serde(default, skip_serializing_if = "Writer::is_user")]
     pub by: Writer,
+    /// The review it is pending in, unsubmitted, if it is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<u32>,
     /// Its body, as markdown, as it was written
     pub body: String,
     /// Its body rendered, raw HTML escaped, filled in as it is read
@@ -179,6 +186,10 @@ pub struct Thread {
     /// Each change linked to it as one that answered it, oldest first
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolutions: Vec<Resolution>,
+    /// Whether its first comment is pending in a review not yet submitted, so it is shown only
+    /// where pending threads are asked for, and can't be resolved
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
     /// Its comments, the first one first
     pub comments: Vec<Comment>,
 }
@@ -189,16 +200,26 @@ impl Thread {
         self.state == ThreadState::Open
     }
 
-    /// Whether it wants an answer from Claude: it is open, and the user wrote its last comment
+    /// Whether it wants an answer from Claude: it is open and published, and the user wrote its
+    /// last published comment
     ///
-    /// A thread Claude replied to last, with a question back, waits on the user instead.
+    /// A thread Claude replied to last, with a question back, waits on the user instead, and one
+    /// pending in a review waits on the review.
     pub fn wants_answer(&self) -> bool {
-        // open, and not left waiting on the user by Claude's own reply
+        // open, published, and not left waiting on the user by Claude's own reply
         self.is_open()
+            && !self.pending
             && self
                 .comments
-                .last()
+                .iter()
+                .rev()
+                .find(|comment| comment.review.is_none())
                 .is_none_or(|comment| comment.by.is_user())
+    }
+
+    /// Whether it is open and published, as the user counts what still wants an answer
+    pub fn is_open_published(&self) -> bool {
+        self.is_open() && !self.pending
     }
 
     /// The change linked to it last as the one that answered it, if one was
@@ -246,6 +267,7 @@ impl Thread {
     ///     outdated: Some(3),
     ///     state: ThreadState::Open,
     ///     resolutions: Vec::new(),
+    ///     pending: false,
     ///     comments: Vec::new(),
     /// };
     /// assert_eq!(thread.anchor_in(2).map(|anchor| anchor.line), Some(15));
@@ -271,6 +293,10 @@ pub struct NewThread {
     /// Who writes it, the user unless it says so
     #[serde(default, skip_serializing_if = "Writer::is_user")]
     pub by: Writer,
+    /// Whether it is written in the node's review, started for it if none is open, so it stays
+    /// pending until the review is submitted
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
 }
 
 /// A reply to a thread
@@ -281,6 +307,81 @@ pub struct NewReply {
     /// Who writes it, the user unless it says so
     #[serde(default, skip_serializing_if = "Writer::is_user")]
     pub by: Writer,
+    /// Whether it is written in the thread's node's review, started for it if none is open, so
+    /// it stays pending until the review is submitted; a reply to a pending thread must be
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
+}
+
+/// Where a review of a node stands
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewState {
+    /// Still being written: its comments are pending
+    Open,
+    /// Submitted: its comments are published, all at once
+    Submitted,
+    /// Discarded: its comments are dropped, never served again
+    Discarded,
+}
+
+impl ReviewState {
+    /// The name this state takes in JSON and on the command line
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewState::Open => "open",
+            ReviewState::Submitted => "submitted",
+            ReviewState::Discarded => "discarded",
+        }
+    }
+}
+
+/// A review of a node's work, as a merge request's review: comments written in it stay pending
+/// until it is submitted
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Review {
+    /// The node it reviews
+    pub node: NodeName,
+    /// Its number in its plan, numbered as comments are
+    pub number: u32,
+    /// The version its row is at, which a mark names to change it
+    pub version: u64,
+    /// Whether it is still being written, submitted or discarded
+    pub state: ReviewState,
+    /// When it was started, in milliseconds since the epoch
+    pub at: u64,
+    /// How many comments are written in it
+    pub comments: u32,
+}
+
+/// A node's open review submitted or discarded, over the version its writer read
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkReview {
+    /// What becomes of it: submitted or discarded
+    pub state: ReviewState,
+    /// The version of the review this was made against
+    pub read: u64,
+}
+
+/// What came of submitting or discarding a node's review
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reviewed {
+    /// The review was marked, its comments published or dropped at once
+    Marked {
+        /// The review as it now stands
+        review: Review,
+    },
+    /// The review has changed since the version named, so nothing was written
+    Stale {
+        /// The review as it stands
+        review: Review,
+    },
+    /// The node has no open review, so nothing was written
+    NoReview {
+        /// The node named
+        node: NodeName,
+    },
 }
 
 /// A thread marked open or resolved, over the version its writer read
@@ -384,6 +485,8 @@ pub enum TrailerOutcome {
     Reopened,
     /// No thread starts at its number, so nothing was written
     NoThread,
+    /// Its thread is pending in a review not yet submitted, so it was left open
+    Pending,
 }
 
 /// One thread a capture's trailers named, and what came of it
@@ -425,6 +528,11 @@ pub enum Resolved {
     },
     /// The thread isn't in the plan, so nothing was written
     NoThread {
+        /// The thread's number
+        thread: u32,
+    },
+    /// The thread is pending in a review not yet submitted, so it can't be resolved
+    Pending {
         /// The thread's number
         thread: u32,
     },
@@ -484,13 +592,19 @@ pub enum Marked {
         /// The thread's number
         thread: u32,
     },
+    /// The thread is pending in a review not yet submitted, so it can't be marked
+    Pending {
+        /// The thread's number
+        thread: u32,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Comment, Commented, Marked, NewReply, NewThread, Resolution, Resolved, ResolvingCommit,
-        Target, Thread, ThreadState, TrailerOutcome, TrailerRead, Writer, trailer_threads,
+        Comment, Commented, MarkReview, Marked, NewReply, NewThread, Resolution, Resolved,
+        ResolvingCommit, Review, ReviewState, Reviewed, Target, Thread, ThreadState,
+        TrailerOutcome, TrailerRead, Writer, trailer_threads,
     };
     use crate::revision::{Anchor, Side};
     use serde_json::json;
@@ -554,6 +668,7 @@ mod tests {
                     by: Writer::User,
                     body: "Why a lock?".to_string(),
                     html: String::new(),
+                    review: None,
                 },
                 Comment {
                     number: 6,
@@ -561,8 +676,10 @@ mod tests {
                     by: Writer::User,
                     body: "*Two* writers.".to_string(),
                     html: "<p><em>Two</em> writers.</p>\n".to_string(),
+                    review: None,
                 },
             ],
+            pending: false,
         };
         let value = serde_json::to_value(&thread).unwrap();
         assert_eq!(value["target"]["on"], "line");
@@ -610,6 +727,7 @@ mod tests {
             target: Target::Node,
             body: "Looks good".to_string(),
             by: Writer::User,
+            review: false,
         };
         let json = serde_json::to_string(&new).unwrap();
         assert_eq!(json, r#"{"target":{"on":"node"},"body":"Looks good"}"#);
@@ -688,6 +806,7 @@ mod tests {
             state: ThreadState::Resolved,
             resolutions: vec![by_trailer.clone(), by_hand.clone()],
             comments: Vec::new(),
+            pending: false,
         };
         let value = serde_json::to_value(&thread).unwrap();
         assert_eq!(value["resolutions"][0]["node"], "reef/central/C37");
@@ -751,6 +870,7 @@ mod tests {
             number,
             at: u64::from(number),
             by,
+            review: None,
             body: "Why?".to_string(),
             html: String::new(),
         };
@@ -764,6 +884,7 @@ mod tests {
             state: ThreadState::Open,
             resolutions: Vec::new(),
             comments: vec![said(1, Writer::User)],
+            pending: false,
         };
         // the user's leaves the writer unsaid, and Claude's says so
         let value = serde_json::to_value(&thread.comments[0]).unwrap();
@@ -806,11 +927,112 @@ mod tests {
         let reply = NewReply {
             body: "Is two enough?".to_string(),
             by: Writer::Claude,
+            review: false,
         };
         assert_eq!(
             serde_json::to_string(&reply).unwrap(),
             r#"{"body":"Is two enough?","by":"claude"}"#
         );
         assert_eq!(Writer::Claude.as_str(), "claude");
+    }
+
+    /// A thread pending in a review wants no answer and counts as no open one, its comments
+    /// name their review, and a review and what came of marking one are tagged in kebab-case
+    #[test]
+    fn pending_threads_wait_on_their_review() {
+        // a thread whose first comment is pending in review 3
+        let thread = Thread {
+            node: "reef/central/C73".parse().unwrap(),
+            number: 4,
+            version: 1,
+            target: Target::Node,
+            followed: Vec::new(),
+            outdated: None,
+            state: ThreadState::Open,
+            resolutions: Vec::new(),
+            pending: true,
+            comments: vec![Comment {
+                number: 4,
+                at: 1,
+                by: Writer::User,
+                review: Some(3),
+                body: "Why?".to_string(),
+                html: String::new(),
+            }],
+        };
+        assert!(thread.is_open() && !thread.is_open_published() && !thread.wants_answer());
+        let value = serde_json::to_value(&thread).unwrap();
+        assert_eq!(
+            (
+                value["pending"].clone(),
+                value["comments"][0]["review"].clone()
+            ),
+            (json!(true), json!(3))
+        );
+        assert_eq!(serde_json::from_value::<Thread>(value).unwrap(), thread);
+        // published, it wants an answer, and a pending reply after Claude's word doesn't count
+        let published = Thread {
+            pending: false,
+            comments: vec![
+                Comment {
+                    review: None,
+                    ..thread.comments[0].clone()
+                },
+                Comment {
+                    number: 5,
+                    by: Writer::Claude,
+                    review: None,
+                    ..thread.comments[0].clone()
+                },
+                Comment {
+                    number: 6,
+                    review: Some(7),
+                    ..thread.comments[0].clone()
+                },
+            ],
+            ..thread.clone()
+        };
+        assert!(published.is_open_published() && !published.wants_answer());
+        let value = serde_json::to_value(&published).unwrap();
+        assert!(value.get("pending").is_none() && value["comments"][0].get("review").is_none());
+        // a new thread in a review says so, and one published at once leaves it out
+        let new = NewThread {
+            target: Target::Node,
+            body: "Later".to_string(),
+            by: Writer::User,
+            review: true,
+        };
+        assert_eq!(serde_json::to_value(&new).unwrap()["review"], true);
+        let reply: NewReply = serde_json::from_value(json!({"body": "Now"})).unwrap();
+        assert!(!reply.review);
+        // a review, and what came of marking one
+        let review = Review {
+            node: "reef/central/C73".parse().unwrap(),
+            number: 3,
+            version: 2,
+            state: ReviewState::Submitted,
+            at: 1,
+            comments: 2,
+        };
+        assert_eq!(serde_json::to_value(&review).unwrap()["state"], "submitted");
+        assert_eq!(ReviewState::Discarded.as_str(), "discarded");
+        let none = Reviewed::NoReview {
+            node: "reef/central/C73".parse().unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_string(&none).unwrap(),
+            r#"{"no-review":{"node":"reef/central/C73"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Marked::Pending { thread: 4 }).unwrap(),
+            r#"{"pending":{"thread":4}}"#
+        );
+        assert_eq!(
+            serde_json::to_value(TrailerOutcome::Pending).unwrap(),
+            json!("pending")
+        );
+        let mark: MarkReview =
+            serde_json::from_value(json!({"state": "submitted", "read": 2})).unwrap();
+        assert_eq!(mark.state, ReviewState::Submitted);
     }
 }

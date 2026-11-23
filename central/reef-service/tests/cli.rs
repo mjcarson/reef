@@ -2748,6 +2748,7 @@ async fn comment_on(cx: &Cx, id: &str, body: &str) -> anyhow::Result<u32> {
         target: reef_api::Target::Node,
         body: body.to_string(),
         by: reef_api::Writer::User,
+        review: false,
     };
     let path = reef_api::paths::node_comments(&node);
     let (_, commented): (_, reef_api::Commented) = cx.ax.client.post(&path, &new).await?;

@@ -280,3 +280,12 @@ diff, and on the node as a whole ([C35](../milestones/m7.md)), over the threads 
 - **Shown as the service rendered it.** A comment's body comes rendered, raw HTML escaped, so
   the app shows its HTML as it is. A mark sends the version it read, and a stale one says so
   and shows the thread as it now is.
+- **A review, as a merge request has** ([C73](../milestones/m8.md)). Every comment box has a second button,
+  *Start a review*, or *Add to review* once the node has one open, beside *Comment now*. A
+  comment written in a review is drawn with a *pending* tag and a dotted edge, with no Resolve,
+  and a reply to a pending thread is only added to its review. The canvas reads the plan's open
+  reviews with its threads, pending ones included.
+- **The review bar heads the Comments tab** while the node has a review open: how many comments
+  are pending in it, *Submit review*, which publishes them all at once, and *Discard*. Each is
+  sent over the version read. The open counts, in the tab and the toolbar, leave pending threads
+  out until they are published.

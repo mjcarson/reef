@@ -165,7 +165,7 @@ fn OpenComments() -> Element {
     // whether the list is open, and the threads still open, oldest first
     let mut shown = use_signal(|| false);
     let mut open = threads.now();
-    open.retain(|thread| thread.is_open());
+    open.retain(reef_api::Thread::is_open_published);
     let count = open.len();
     rsx! {
         div { class: "reef-app-open-box",
