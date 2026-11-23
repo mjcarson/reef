@@ -37,6 +37,9 @@
 //!   members inline and a file for each page, which imports back as the same plan.
 //! - **The MCP server** ([`mcp`]): the node and work commands as tools over stdio, for Claude
 //!   Code, the ones that only read marked so, which plan mode runs without a prompt.
+//! - **The skill** ([`skill`]): the Claude skill for central reef, written to the
+//!   `.claude/skills/reef` of a repo, which keeps the plan in step with the work through the
+//!   MCP tools and the CLI.
 //! - **git** ([`git`]): the checkout a node's work happens in, read through gix, its worktree
 //!   written as a tree through git's CLI, its start pinned under `refs/reef/start/`, and its
 //!   diff, the carry of its start and its commits' trailers taken through gix.
@@ -61,6 +64,7 @@ pub mod mcp;
 pub mod node;
 pub mod page;
 pub mod queue;
+pub mod skill;
 pub mod start;
 pub mod work;
 

@@ -2,16 +2,18 @@
 
 ## A node's keys
 
+A node is the YAML `get` prints: a `# version:` line, then the keys a book's frontmatter takes.
+
 ```yaml
----
-id: F125                       # unique across the book; the only required key
-title: F125 Archive reads in runs   # default: the file's first heading, then the id
+# version: 3                   # the version it was read at; leave it out for a new node
+id: F125                       # unique across the plan; the only required key
+title: F125 Archive reads in runs   # default: the body's first heading, then the id
 status: in-progress            # todo | in-progress | done | blocked   (default: todo)
 optional: true                 # drawn dashed
 group: m23steps                # the group this belongs to (alias: parent)
 needs: [F124, w1]              # solid arrows from each; a group means all of it (aliases: after, requires)
 helps: [O171]                  # dashed arrows: helps, does not gate
-docs: [../features/page-reads-in-runs.md#design-choices]   # relative to this file (aliases: doc, links)
+docs: [design/page-reads.md#design-choices]   # from the repo's root, where the plan's pages lie (aliases: doc, links)
 collapsed: false               # on a group: start open (groups start collapsed)
 description:                   # why it is needed and what finishing it will do; see below
   why: A scan's archive reads wait on each other, one page at a time.
@@ -20,20 +22,19 @@ decisions:                     # the sidebar's design choices (alias: design; de
   - Runs cut in disk order, issued in the merge's order.
 acceptance: [...]              # see below (alias: criteria)
 performance: {...}             # see below (alias: perf)
-nodes:                         # members with no file of their own; same keys, plus body
+nodes:                         # a new group's members, each put as a node of its own; same keys, plus body
   - id: I346
     title: "Item 346: paced reads go to their device together"
     status: done
     needs: [F125]
     body: Markdown for the sidebar.
----
-# F125 Archive reads in runs
-
-The body is what the sidebar shows.
 ```
 
-- A node with members (a file with `nodes:`, or nodes naming it in `group:`) is a group. Its
-  status, progress (`7/9`) and readiness are derived; do not set `status` on it.
+- A node with members (nodes naming it in `group:`, or a group put with `nodes:`) is a group.
+  Its status, progress (`7/9`) and readiness are derived; do not set `status` on it.
+- A node's body is the markdown `reef node get <ID> --md` prints after its frontmatter. A put
+  of YAML keeps it, and a put of that file writes it. Its links lead from the repo's root, and
+  `node:<ID>` links a node.
 - Quote YAML strings that contain `:`, `#`, or start with a symbol.
 - Unknown keys (e.g. `tags:`) are ignored.
 
@@ -81,6 +82,7 @@ acceptance:
   `metric`; `metric` and `chart` don't go together.
 - Met or not: `status` if given; otherwise a performance criterion with a target is met when
   its metric's `after` median (every `after` point, for a sweep) is within it.
+- `accept` sets one by its number, from 1 in this order, with its `test`.
 
 ## performance
 
@@ -108,6 +110,8 @@ Checked: every metric has figures, ranges are `[median, lo, hi]` in order, no `b
 
 ## A view
 
+A ```reef fence in a node's body or a plan page draws part of the plan.
+
 ````markdown
 ```reef
 root = "scans"          # this group's members (default: the whole plan)
@@ -115,17 +119,47 @@ focus = "m23"           # or: this group open, its outside neighbours faded arou
 direction = "LR"        # TB (default) or LR
 expand = ["m23steps"]   # groups open at first; or "all" / "none"
 height = "80vh"
-page = "../plan.md"     # a "Full page" button linking to that chapter
+page = "plan.md"        # a "Full page" button linking to that page
 layout = "page"         # fill the page; at most one per page, no height
 ```
 ````
 
+## Tools
+
+Claude Code names reef's MCP tools `mcp__reef__<name>`. Each takes a `plan` where the project
+has several, and says what its command prints. A write that is stale or adds a problem is a
+tool error carrying the message, and writes nothing.
+
+| Tool | Reads or writes | Takes | Its command |
+|------|-----------------|-------|-------------|
+| `mcp__reef__next` | reads | `plan` | `reef next` |
+| `mcp__reef__get` | reads | `id` | `reef node get <ID>` |
+| `mcp__reef__check` | reads | `plan` | `reef check` |
+| `mcp__reef__put` | writes | `yaml` | `reef node put <FILE>` |
+| `mcp__reef__status` | writes | `id`, `status` | `reef status <ID> <STATUS>` |
+| `mcp__reef__accept` | writes | `id`, `criterion`, `status`, `test` | `reef accept <ID> <N> met --test <TEST>` |
+
 ## Commands
 
+Each picks the working directory's project, else `--project`, and its only plan, else `--plan`.
+
 ```sh
-mdbook-reef check [book]     # the build's checks, exit 1 on problems
-mdbook-reef next [book]      # ready work in plan order, then what each waiting item waits on
-mdbook-reef import plan.md --out src/plans/x [--fence N] [--root id]   # mermaid flowchart -> nodes
-mdbook-reef install [book]   # reef.js, reef.css, book.toml, and this skill
-mdbook-reef skill [book]     # rewrite this skill from the installed mdbook-reef
+reef project show                    # the project the working directory belongs to
+reef plan ls                         # its plans, each at its revision
+reef next                            # ready work, the queue's first, then what the rest waits on
+reef node get C38                    # a node's YAML, after its `# version:` line
+reef node get C38 --md               # as a node file: frontmatter, version inside, then its body
+reef node put c38.yml                # put YAML, or a node file to write its body too
+reef status C38 in-progress          # todo | in-progress | done | blocked
+reef accept C38                      # its criteria, numbered from 1
+reef accept C38 2 met --test tests/skill.rs::writes_twice   # met | unmet | todo
+reef check                           # the plan's problems, exit 1 on any
+reef start C38                       # record the node's start in this checkout, and mark it in progress
+reef work                            # the node this worktree is on, and what it started from
+reef page ls                         # the plan's own pages, each at its version
+reef page get design/feed-loop.md    # a page's markdown, after its `<!-- version: N -->` line
+reef page put design/feed-loop.md feed-loop.md   # put it back, keeping that line
+reef queue ls                        # the user's order, and what next makes of each entry
+reef export plan --replace           # write the plan back over the book it was exported to
+reef skill                           # rewrite this skill from the installed reef
 ```

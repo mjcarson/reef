@@ -264,6 +264,7 @@ systemctl --user daemon-reload && systemctl --user enable --now reef
 journalctl --user -u reef                  # what it said starting, and any warning
 reef project add reef                      # from the repo's root, once
 reef import plan --plan central            # the plan, from its book
+reef skill                                 # the Claude skill that works the plan through reef
 ```
 
 - **An edit goes through reef, then out to the book.** `reef node get|put`, `reef status`,
@@ -274,6 +275,11 @@ reef import plan --plan central            # the plan, from its book
   file, its `# version:` line inside the frontmatter, and `reef node put` of that file writes its
   body as well. YAML alone keeps the body stored. A body's links lead from the repo's root, as
   the plan keeps them ([C69](../plan/src/milestones/m6.md)).
+- **The skill comes from the binary.** `reef skill` writes `crates/reef/assets/skill` to
+  `../.claude/skills/reef`, over the mdbook skill, so it names the tools and commands of the
+  reef that wrote it. Run it again after a reinstall that changed the skill. `mdbook-reef
+  install` and `mdbook-reef skill` write the mdbook skill there instead, so pass `--no-skill`
+  to the first, and skip the second.
 - **A new binary is a reinstall and a restart.** Install both again, then
   `systemctl --user restart reef`. Stop the unit before running reef-app over the same data. A
   `reef` newer than the service it calls says the service has no route for what it asked.

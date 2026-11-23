@@ -341,6 +341,23 @@ impl Tools {
 )]
 impl ServerHandler for Tools {}
 
+/// The name of every tool the server offers, as its listing names them
+///
+/// # Examples
+///
+/// ```
+/// let names = reef::mcp::tool_names();
+/// assert!(names.iter().any(|name| name == "get"));
+/// ```
+pub fn tool_names() -> Vec<String> {
+    // the router `#[tool_router]` builds, which the server lists its tools from
+    Tools::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect()
+}
+
 /// Serves the tools over a reader and a writer until the client goes away
 ///
 /// # Arguments

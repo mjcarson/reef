@@ -183,7 +183,17 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
   its criteria met in the change that finishes it; record benchmark figures; run check after each
   edit. The central skill does all of this through reef's MCP tools and CLI, not by editing
   files.
-- **The mdbook skill stays** for the static mode.
+- **The mdbook skill stays** for the static mode, under the same name and in the same place,
+  `.claude/skills/reef` at the repo's root, so a repo holds one or the other. `reef skill`
+  writes the central one over it ([C38](../milestones/m8.md)), and `mdbook-reef skill` the
+  static one back.
+- **Tools first, the CLI where there are none.** While planning, the read-only tools read the
+  plan. The writes wait for the plan's approval. A session without reef's MCP server does the
+  same through the CLI, which alone also puts a node's body and a page, and records a start.
+- **Shipped in the binary.** The skill's text is built into `reef`, so the skill a repo gets
+  names the tools and commands of the reef that wrote it. A test fails when the MCP server has
+  a tool the skill doesn't name, or when the skill names a tool, a command or a flag reef doesn't
+  have. A new tool such as next_task is written into the skill in the change that adds it.
 - **One command sets up a repo:** `reef claude install` writes the MCP entry, the Stop hook and
   the skill, and running it twice changes nothing.
 

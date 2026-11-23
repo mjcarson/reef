@@ -37,6 +37,7 @@
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
+//! reef skill [DIR] [--print]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -51,7 +52,8 @@
 //! work on the node the working directory's worktree is on, and do nothing where there is none.
 //! `import` picks the
 //! project the book is in, and lists the plan `--plan` names if it isn't listed. `export` picks
-//! the project the new book's directory is in.
+//! the project the new book's directory is in. `skill` writes into the repo that holds its
+//! directory, and needs neither reef's config nor its service.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -72,6 +74,7 @@ use crate::mcp::{self, Tools};
 use crate::node;
 use crate::page;
 use crate::queue;
+use crate::skill;
 use crate::start;
 use crate::work;
 
@@ -270,6 +273,19 @@ pub enum Command {
         /// only plan
         #[command(flatten)]
         pick: PlanPick,
+    },
+    /// Write the Claude skill for central reef to `.claude/skills/reef` at the root of the repo
+    /// that holds a directory, over the mdbook skill if it is there
+    ///
+    /// It teaches Claude to keep the plan in step with the work through reef's MCP tools and
+    /// this CLI, and names the tools and commands of the reef that wrote it.
+    Skill {
+        /// A directory in the repo
+        #[arg(value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
+        /// Print its SKILL.md instead of writing it
+        #[arg(long)]
+        print: bool,
     },
 }
 
@@ -596,6 +612,13 @@ pub struct PlanPick {
 /// # }
 /// ```
 pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<()> {
+    // the skill only writes files, so a broken config or a stopped service can't stop it
+    if let Command::Skill { dir, print } = &cli.command {
+        return match print {
+            true => skill::print(out),
+            false => skill::write(&cwd.join(dir), out).map(|_| ()),
+        };
+    }
     // the config named, read from the working directory, else the one the service reads
     let conf = Conf::load(cli.conf.map(|path| cwd.join(path)).as_deref())?;
     let client = Client::new(&conf)?;
@@ -771,6 +794,8 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let tools = Tools::new(client, cwd.to_path_buf(), pick);
             mcp::serve(tools, tokio::io::stdin(), tokio::io::stdout()).await
         }
+        // written above, before the config was read
+        Command::Skill { .. } => unreachable!("the skill is written before the config is read"),
     }
 }
 
@@ -1362,6 +1387,28 @@ mod tests {
         // a thread is a number, and one is needed
         assert!(Cli::try_parse_from(["reef", "comment", "resolve"]).is_err());
         assert!(Cli::try_parse_from(["reef", "comment", "resolve", "#12"]).is_err());
+    }
+
+    /// The skill takes a directory or none, and whether to print it, and no project or plan
+    #[test]
+    fn skill_takes_a_directory() {
+        // a directory named, printed instead of written
+        let named = Cli::try_parse_from(["reef", "skill", "../other", "--print"]).unwrap();
+        match named.command {
+            Command::Skill { dir, print } => {
+                assert_eq!((dir.as_path(), print), (Path::new("../other"), true));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // none is the working directory, written
+        let here = Cli::try_parse_from(["reef", "skill"]).unwrap();
+        assert!(matches!(
+            here.command,
+            Command::Skill { dir, print: false } if dir == Path::new(".")
+        ));
+        // it writes into a repo, not a project's plan
+        assert!(Cli::try_parse_from(["reef", "skill", "--project", "reef"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "skill", "a", "b"]).is_err());
     }
 
     /// The first column is padded to its widest cell

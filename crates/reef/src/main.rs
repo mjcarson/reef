@@ -14,6 +14,7 @@
 //! reef check                   # the plan's problems, exiting 1 if it has any
 //! reef next                    # the work ready to start, and what the rest waits on
 //! reef mcp                     # serve these as MCP tools over stdio, for Claude Code
+//! reef skill                   # write the Claude skill that works the plan through them
 //! ```
 
 use clap::Parser;

@@ -41,6 +41,10 @@ it done and its acceptance criteria met in the change that finishes it, to recor
 figures in `performance`, and to run `mdbook-reef check` after every edit. After upgrading
 reef, `mdbook-reef skill [book]` refreshes it.
 
+A repo whose plan lives in central reef takes [the central skill](crates/reef/assets/skill/SKILL.md)
+instead: `reef skill [dir]` writes it to the same place, with the same rules, worked through
+reef's MCP tools and the `reef` CLI rather than a book's files. A repo holds one or the other.
+
 ## Writing nodes
 
 ```markdown
