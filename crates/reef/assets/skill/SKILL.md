@@ -69,6 +69,8 @@ The full key reference is in [reference.md](reference.md). Read it before writin
        its writer with `mcp__reef__reply`, which leaves it waiting on them. Both write as
        Claude, so a thread whose last word is yours never calls for another round.
   2. **Plan it in plan mode:** read its docs and needs, then enter plan mode (EnterPlanMode).
+     End the plan with the steps next_task gives for finishing it, the commit among them:
+     approving the plan may clear the context, leaving the plan alone.
   3. **Ask what the plan needs answered** (AskUserQuestion), and exit plan mode (ExitPlanMode) for
      the user's approval.
   4. **Implement it, and finish it** as section 5 says: its status, its criteria, the commit.

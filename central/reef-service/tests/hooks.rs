@@ -1906,3 +1906,307 @@ async fn a_review_is_hidden_from_the_loop_until_submitted() -> anyhow::Result<()
     assert!(took.contains("Two should be a number"), "{took}");
     Ok(())
 }
+
+/// Comments on a node of `cli/docs` in its review, as the app does, returning the thread's
+/// number: it stays pending until the review is submitted
+///
+/// # Arguments
+///
+/// * `hx` - The case
+/// * `id` - The node's id
+/// * `body` - Its first comment, on the node as a whole
+async fn reviewed(hx: &Hx, id: &str, body: &str) -> anyhow::Result<u32> {
+    // a thread written by the user in the node's review, through the JSON API
+    let node = PlanName::new("cli", "docs")?.node(id)?;
+    let new = reef_api::NewThread {
+        target: reef_api::Target::Node,
+        body: body.to_string(),
+        by: reef_api::Writer::User,
+        review: true,
+    };
+    let path = reef_api::paths::node_comments(&node);
+    let (_, commented): (_, reef_api::Commented) = hx.ax.client.post(&path, &new).await?;
+    match commented {
+        reef_api::Commented::Added { thread, .. } => Ok(thread.number),
+        other => panic!("a review's thread on `{node}` wasn't kept: {other:?}"),
+    }
+}
+
+/// Submits a node's open review in `cli/docs`, as the app's *Submit review* does, publishing
+/// its comments at once
+///
+/// # Arguments
+///
+/// * `hx` - The case
+/// * `id` - The node's id
+async fn submitted(hx: &Hx, id: &str) -> anyhow::Result<()> {
+    // the review as it stands, then submitted over the version read
+    let node = PlanName::new("cli", "docs")?.node(id)?;
+    let path = reef_api::paths::node_review(&node);
+    let (_, review): (_, Option<reef_api::Review>) = hx.ax.client.get(&path).await?;
+    let review = review.expect("the node's review is open");
+    let submit = reef_api::MarkReview {
+        state: reef_api::ReviewState::Submitted,
+        read: review.version,
+    };
+    let (_, reviewed): (_, reef_api::Reviewed) = hx.ax.client.put(&path, &submit).await?;
+    assert!(
+        matches!(reviewed, reef_api::Reviewed::Marked { .. }),
+        "{reviewed:?}"
+    );
+    Ok(())
+}
+
+/// The paths a node's revisions hold, each revision's in order, with whether it is sealed and
+/// its added and removed lines
+///
+/// # Arguments
+///
+/// * `hx` - The case
+/// * `id` - The node's id in `cli/docs`
+async fn held(hx: &Hx, id: &str) -> anyhow::Result<Vec<(bool, Vec<String>, (u32, u32))>> {
+    let node = PlanName::new("cli", "docs")?.node(id)?;
+    let revisions = hx.client()?.revisions(&node).await?;
+    Ok(revisions
+        .iter()
+        .map(|revision| {
+            let paths = revision
+                .files
+                .iter()
+                .map(|file| file.path().to_string())
+                .collect();
+            (!revision.draft, paths, revision.counts())
+        })
+        .collect())
+}
+
+/// The loop end to end, as C44 ran it live in zellij: three queued nodes taken in the queue's
+/// order in one pane, each handed out with the steps that finish it. A comment left on the
+/// first while it is planned comes back as a round of it before the second, and that node's
+/// file, which its first pass left untracked, comes into the round's revision rather than its
+/// start. A review of the second is hidden until it is submitted mid-node, and a pause made
+/// mid-node stops the loop once the node is done, clearing nothing; a start then moves it on to
+/// that node's round, squashed into its commit, then the third. Each node's end is acted on once,
+/// starting one injector while another node is next, and each node's revisions hold only its own
+/// file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_queued_nodes_run_end_to_end() -> anyhow::Result<()> {
+    let hx = Hx::new("end-to-end", &["A", "B", "C"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    let base = git::run(&hx.repo, &["rev-parse", "HEAD"])?;
+    // the user's queue, out of plan order
+    for id in ["C", "A", "B"] {
+        hx.reef(&hx.repo, &["queue", "add", id]).await?;
+    }
+    // a loop started in its session's own zellij pane, in a worktree of its own
+    let pane = "zellij:work:3";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    let (said, spawned) = hx.started_by(&a, pane, "s1", 4242).await?;
+    assert!(said.starts_with("started a loop in zellij"), "{said}");
+    assert!(spawned.is_empty(), "{spawned:?}");
+    // C, the queue's first, is taken first, with the steps that finish it for its plan
+    let (took, _) = hx.taken_in(&a, pane).await?;
+    assert!(took.starts_with("Took `cli/docs/C`"), "{took}");
+    assert!(
+        took.contains("End your plan with the steps that finish it"),
+        "{took}"
+    );
+    assert!(
+        took.contains(&reef::task::finish_steps(&"cli/docs/C".parse()?)),
+        "{took}"
+    );
+    // the user comments on C while it is planned; its first pass leaves c.txt untracked
+    let general = commented(&hx, "C", reef_api::Target::Node, "Give c.txt a second line").await?;
+    std::fs::write(a.join("c.txt"), "c\n")?;
+    hx.reef(&a, &["status", "C", "done"]).await?;
+    hx.status_used(&a, "C", "done").await?;
+    // so C's end seals nothing, and names its comments next, starting one injector
+    let (said, spawned) = hx
+        .stopped_by(&a, Some(pane), false, Some(4242), false)
+        .await?;
+    let said = told(&said);
+    assert!(
+        said.starts_with("reef: sealed `C` as revision 1, 0 files"),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(
+            "\nreef: `cli/docs/C` is done, and its open comments come next: reef clears the \
+             context and asks for them once Claude is idle and the input box is empty"
+        ),
+        "{said}"
+    );
+    let clear = |session: &str, after: &str| -> anyhow::Result<reef::clear::Clear> {
+        Ok(reef::clear::Clear {
+            pane: pane.parse()?,
+            session: session.to_string(),
+            pid: 4242,
+            after: after.parse()?,
+        })
+    };
+    assert_eq!(spawned, vec![clear("s1", "cli/docs/C")?]);
+    // the clear's session is told the round comes next, and takes C again before A
+    let context = hx.cleared_in(pane, "s2").await?;
+    assert!(
+        context.contains("`cli/docs/C` is done, and its open comments come next"),
+        "{context}"
+    );
+    let (took, _) = hx.taken_in(&a, pane).await?;
+    assert!(
+        took.starts_with("`cli/docs/C` is done, but 1 of its comment threads wants an answer"),
+        "{took}"
+    );
+    assert!(!took.contains("cli/docs/A"), "{took}");
+    assert!(took.contains("as a commit of its own"), "{took}");
+    // the round commits c.txt, naming the thread, which its post-commit resolves
+    std::fs::write(a.join("c.txt"), "c\nC\n")?;
+    hx.reef(&a, &["status", "C", "done"]).await?;
+    hx.status_used(&a, "C", "done").await?;
+    hooked(&a, &["add", "c.txt"]).await?;
+    let trailer = format!("Reef-Resolves: {general}");
+    hooked(&a, &["commit", "-q", "-m", "Add c", "--trailer", &trailer]).await?;
+    assert!(!thread_of(&hx, general).await?.is_open());
+    // the round's end seals c.txt whole, left out of the round's start, and names A next
+    let (said, spawned) = hx.stopped_as(&a, pane, "s2", 4242).await?;
+    let said = told(&said);
+    assert!(
+        said.starts_with("reef: sealed `C` as revision 2, 1 file +2 -0"),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(
+            "\nreef: `cli/docs/C` is done. `cli/docs/A` is next: reef clears the context and \
+             asks for it once Claude is idle and the input box is empty"
+        ),
+        "{said}"
+    );
+    assert_eq!(spawned, vec![clear("s2", "cli/docs/C")?]);
+    let context = hx.cleared_in(pane, "s3").await?;
+    assert!(context.contains("`cli/docs/A` is next"), "{context}");
+    let (took, _) = hx.taken_in(&a, pane).await?;
+    assert!(took.starts_with("Took `cli/docs/A`"), "{took}");
+    // mid-node, the user writes a review of A, which Claude can't see, pauses the loop, and
+    // submits the review
+    let review = reviewed(&hx, "A", "End the greeting with `!`").await?;
+    let listed = hx.reef(&a, &["comment", "ls"]).await?;
+    assert_eq!(listed, "`cli/docs` has no open comment threads\n");
+    let paused = hx.reef(&a, &["loop", "pause", "--pane", pane]).await?;
+    assert!(
+        paused.ends_with("it stops once `cli/docs/A` is done\n"),
+        "{paused}"
+    );
+    submitted(&hx, "A").await?;
+    let listed = hx.reef(&a, &["comment", "ls"]).await?;
+    assert!(
+        listed.contains(&format!(
+            "#{review} on `cli/docs/A`, the node as a whole: open"
+        )),
+        "{listed}"
+    );
+    // A committed and done: the loop stops there, clearing nothing, and says so once
+    let first_a = committed(&a, "a.txt", "hello\n", "Add a").await?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.status_used(&a, "A", "done").await?;
+    let (said, spawned) = hx.stopped_as(&a, pane, "s3", 4242).await?;
+    let said = told(&said);
+    assert!(
+        said.starts_with("reef: sealed `A` as revision 1, 1 file +1 -0"),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(
+            "\nreef: `cli/docs/A` is done, and the loop is paused: `! reef loop start` moves on \
+             to the next node"
+        ),
+        "{said}"
+    );
+    assert!(spawned.is_empty(), "{spawned:?}");
+    let (said, spawned) = hx
+        .stopped_by(&a, Some(pane), true, Some(4242), false)
+        .await?;
+    assert_eq!((said.as_str(), spawned.len()), ("", 0));
+    // a start in the pane moves it on to A's round, starting one injector
+    let (said, spawned) = hx.started_by(&a, pane, "s3", 4242).await?;
+    assert!(
+        said.ends_with(
+            "\n`cli/docs/A` is done, and its open comments come next: reef clears the context \
+             and asks for them once Claude is idle and the input box is empty\n"
+        ),
+        "{said}"
+    );
+    assert_eq!(spawned, vec![clear("s3", "cli/docs/A")?]);
+    hx.cleared_in(pane, "s4").await?;
+    let (took, _) = hx.taken_in(&a, pane).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, but 1 of its comment threads wants an answer"),
+        "{took}"
+    );
+    assert!(took.contains("End the greeting with `!`"), "{took}");
+    let fixup = format!("git commit --fixup={first_a} --trailer 'Reef-Resolves: {review}'");
+    assert!(took.contains(&fixup), "{took}");
+    // A's round: a fixup that resolves the review's thread, squashed into A's commit
+    std::fs::write(a.join("a.txt"), "hello!\n")?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    hx.status_used(&a, "A", "done").await?;
+    let trailer = format!("Reef-Resolves: {review}");
+    hooked(
+        &a,
+        &[
+            "commit",
+            "-qa",
+            &format!("--fixup={first_a}"),
+            "--trailer",
+            &trailer,
+        ],
+    )
+    .await?;
+    assert!(!thread_of(&hx, review).await?.is_open());
+    squashed(&a, &format!("{first_a}~1")).await?;
+    let (said, spawned) = hx.stopped_as(&a, pane, "s4", 4242).await?;
+    let said = told(&said);
+    assert!(
+        said.starts_with("reef: sealed `A` as revision 2, 1 file +1 -1"),
+        "{said}"
+    );
+    assert!(
+        said.ends_with(
+            "`cli/docs/A` is done. `cli/docs/B` is next: reef clears the context and \
+             asks for it once Claude is idle and the input box is empty"
+        ),
+        "{said}"
+    );
+    assert_eq!(spawned, vec![clear("s4", "cli/docs/A")?]);
+    // B, the queue's last, then nothing else is ready, and nothing is cleared
+    hx.cleared_in(pane, "s5").await?;
+    let (took, _) = hx.taken_in(&a, pane).await?;
+    assert!(took.starts_with("Took `cli/docs/B`"), "{took}");
+    committed(&a, "b.txt", "red\n", "Add b").await?;
+    hx.reef(&a, &["status", "B", "done"]).await?;
+    hx.status_used(&a, "B", "done").await?;
+    let (said, spawned) = hx.stopped_as(&a, pane, "s5", 4242).await?;
+    let said = told(&said);
+    assert!(
+        said.ends_with(
+            "reef: `cli/docs/B` is done, and nothing else is ready to take: `reef next` says \
+             what everything waits on"
+        ),
+        "{said}"
+    );
+    assert!(spawned.is_empty(), "{spawned:?}");
+    // each node is one commit, its round's fix squashed in where it had one
+    let commits = git::run(&a, &["log", "--format=%s", &format!("{base}..HEAD")])?;
+    assert_eq!(commits, "Add b\nAdd a\nAdd c");
+    assert_eq!(git::run(&a, &["show", "HEAD~1:a.txt"])?, "hello!");
+    // and each node's sealed revisions hold only its own file
+    let file = |path: &str| vec![path.to_string()];
+    assert_eq!(
+        held(&hx, "C").await?,
+        vec![(true, Vec::new(), (0, 0)), (true, file("c.txt"), (2, 0))]
+    );
+    assert_eq!(
+        held(&hx, "A").await?,
+        vec![(true, file("a.txt"), (1, 0)), (true, file("a.txt"), (1, 1))]
+    );
+    assert_eq!(held(&hx, "B").await?, vec![(true, file("b.txt"), (1, 0))]);
+    Ok(())
+}

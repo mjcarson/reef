@@ -43,6 +43,10 @@ on and when it is completed, and keeps what it read. That needs four things reef
   - A start still takes untracked files, so work an earlier node left is the start's. An
     untracked file the base holds is kept, so a start's leftover isn't shown as deleted, and an
     edit of one shows as an edit.
+  - A restart takes untracked files as a seal does, only those the start it replaces took
+    ([C44](../milestones/m8.md)). A file an earlier pass left untracked, which its seal left out, comes
+    into the round's revision once it is committed, rather than into the restart's start and so
+    into no revision at all.
 - **One draft, sealed at Stop** ([C56](../milestones/m7.md)).
   - git's post-commit and post-rewrite hooks, and PostToolUse on reef's status tool, keep a
     node's latest revision current as its draft. A capture over a draft rewrites it under its

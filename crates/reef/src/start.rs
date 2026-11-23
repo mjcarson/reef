@@ -16,6 +16,10 @@
 //!   can prune it after a rebase. A start the service refuses puts the pin back as it was.
 //! - **A node is started once.** A second start is refused, saying where the first one was, and
 //!   `--restart` starts it again from here, replacing its record.
+//! - **A restart takes untracked files as a seal does.** A first start takes every untracked
+//!   file, since what is there before the node is no work of its. A restart takes only those the
+//!   start it replaces took, so a file an earlier pass left untracked, which its seal left out,
+//!   comes into the node's next revision once it is committed, rather than into the start.
 //! - **A node to do goes in progress,** as `reef status` would put it; any other status stays.
 //! - **A worktree is on the node started there last**, which `reef work` shows without an id.
 //! - **A start seals the node it moves on from.** The node the worktree was on, if it is done,
@@ -76,9 +80,9 @@ pub async fn start<W: Write>(
         .status
         .is_none_or(|status| status == Status::Todo);
     // a node started already starts again only when asked to
-    let replaces = match (client.work_of(&node).await?, restart) {
+    let replaced = match (client.work_of(&node).await?, restart) {
         (None, _) => None,
-        (Some(record), true) => Some(record.version),
+        (Some(record), true) => Some(record),
         (Some(record), false) => anyhow::bail!(
             "`{id}` was started already, {}: `--restart` starts it again from here, replacing \
              that record",
@@ -94,13 +98,13 @@ pub async fn start<W: Write>(
         writeln!(out, "warning: `{}` wasn't sealed: {error:#}", last.node)?;
     }
     // what the start read, pinned so no gc prunes it after a rebase
-    let mut read = read_start(&checkout, &node, base)?;
+    let mut read = read_start(&checkout, &node, base, replaced.as_ref())?;
     let message = format!("reef: {node} started");
     let pinned = checkout.pin(&read.pin, &read.start_tree, &read.start, &message)?;
     read.pinned = pinned.id.clone();
     let request = StartWork {
         start: read,
-        replaces,
+        replaces: replaced.map(|record| record.version),
     };
     // a start refused wrote nothing, so its pin is put back; a failure may have written, so not
     let record = match client.start_work(&node, &request).await? {
@@ -212,10 +216,12 @@ pub(crate) async fn checkout_in(
 /// * `checkout` - The checkout the node's work happens in
 /// * `node` - The node being started, which names its pin
 /// * `base` - The base branch named, if one was
+/// * `replaced` - The record a restart replaces, if this is one
 fn read_start(
     checkout: &Checkout,
     node: &NodeName,
     base: Option<&str>,
+    replaced: Option<&WorkRecord>,
 ) -> anyhow::Result<WorkStart> {
     // what is checked out
     let branch = checkout.branch()?;
@@ -248,8 +254,20 @@ fn read_start(
         },
         None => None,
     };
-    // the worktree as it is, so anything left uncommitted is the start's, not this node's
-    let start_tree = checkout.snapshot()?;
+    // the start a restart replaces, if its tree is in this repo to say which untracked files
+    // it took
+    let earlier = match replaced {
+        Some(record) if checkout.has_object(&record.start.start_tree)? => {
+            Some(record.start.start_tree.as_str())
+        }
+        _ => None,
+    };
+    // the worktree as it is, so anything left uncommitted is the start's, not this node's; a
+    // restart takes untracked files as a seal does, so an earlier pass's are left to the node
+    let start_tree = match earlier {
+        Some(earlier) => checkout.seal_snapshot(earlier)?,
+        None => checkout.snapshot()?,
+    };
     Ok(WorkStart {
         worktree: checkout.root().to_path_buf(),
         branch,

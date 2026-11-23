@@ -17,6 +17,10 @@
 //!   that can't be started is let go of again.
 //! - **Handed back whole:** the node as `reef node get --md` prints it, then the queue's entries
 //!   passed over and why. With nothing to take, next's report says what everything waits on.
+//! - **With the steps that finish it,** for the plan to end with ([`finish_steps`]): its
+//!   criteria, its status, and a commit of everything it changed. Approving a plan may clear the
+//!   context, leaving the plan alone, and a seal takes only what is tracked, so a node a plan
+//!   never says to commit would be sealed without its new files.
 //! - **The Stop hook ends a node once** ([`ended`]). While the node the loop holds isn't done,
 //!   Claude is waiting on the user, and the hook lets it stop. Once it is done, the hook acts on
 //!   its end once, recorded as [`LoopEdit::Acted`], whatever `stop_hook_active` says: it names
@@ -990,7 +994,9 @@ impl Taking<'_> {
         writeln!(
             out,
             "Took `{node}` for the loop in {}{beside}. Plan it now: enter plan mode, read its \
-             docs and needs, ask what you need to, and exit plan mode for approval.\n",
+             docs and needs, ask what you need to, and exit plan mode for approval. End your \
+             plan with the steps that finish it, below, since approving it may clear this \
+             context.\n",
             self.pane.describe()
         )?;
         hand_out(self.client, node, self.next, elsewhere, &started, None, out).await?;
@@ -1609,8 +1615,9 @@ async fn member_task<W: Write>(
         out,
         "`{node}` is this session's, a member of the loop in {}'s group, started in {} on `{}`. \
          Work it there and nothing else. Plan it now: enter plan mode, read its docs and needs, \
-         ask what you need to, and exit plan mode for approval. Commit its work on that branch: \
-         the loop merges it once the group is done.\n",
+         ask what you need to, and exit plan mode for approval. End your plan with the steps \
+         that finish it, below, since approving it may clear this context. Commit its work on \
+         that branch: the loop merges it once the group is done.\n",
         by.pane.describe(),
         record.start.worktree.display(),
         record.start.branch.as_deref().unwrap_or("its own branch")
@@ -1758,8 +1765,8 @@ async fn started_here<W: Write>(
 }
 
 /// Prints a node handed out: the node as a node file, its open comment threads, the steps that
-/// finish its round if it is taken for one, then the queue's entries passed over, the ready work
-/// another loop holds, and what its start printed
+/// finish it, or its round if it is taken for one, then the queue's entries passed over, the
+/// ready work another loop holds, and what its start printed
 ///
 /// # Arguments
 ///
@@ -1788,10 +1795,11 @@ async fn hand_out<W: Write>(
         writeln!(out, "\nIts open comment threads ({}):\n", threads.len())?;
         comment::show_threads(&threads, out)?;
     }
-    // and how a round of them is finished
-    if let Some(round) = round {
-        writeln!(out)?;
-        write!(out, "{}", round.steps(node))?;
+    // and how it is finished, or a round of them
+    writeln!(out)?;
+    match round {
+        Some(round) => write!(out, "{}", round.steps(node))?,
+        None => write!(out, "{}", finish_steps(node))?,
     }
     // the queue's entries passed over, each with why
     if !next.skipped.is_empty() {
@@ -1813,6 +1821,38 @@ async fn hand_out<W: Write>(
         out.write_all(started)?;
     }
     Ok(())
+}
+
+/// The steps that finish a node taken for the first time, or handed out again mid-node, as
+/// next_task prints them
+///
+/// Approving a plan may clear the context, leaving the plan alone, so the plan carries them.
+/// A seal takes only what is tracked, so the commit is among them.
+///
+/// # Arguments
+///
+/// * `node` - The node handed out
+///
+/// # Examples
+///
+/// ```
+/// let steps = reef::task::finish_steps(&"reef/central/C44".parse().unwrap());
+/// assert!(steps.starts_with("How to finish it:\n1. Do what the approved plan says"));
+/// assert!(steps.contains("3. Commit everything it changed"));
+/// ```
+pub fn finish_steps(node: &NodeName) -> String {
+    format!(
+        "How to finish it:\n\
+         1. Do what the approved plan says.\n\
+         2. Set each of `{id}`'s acceptance criteria met or unmet with reef's accept tool, naming \
+         the test that checks it, and mark `{id}` done with the status tool, as the reef skill \
+         says.\n\
+         3. Commit everything it changed, with whatever the repo's own instructions put in the \
+         same change. A seal takes only what is tracked, so a file left untracked is in none of \
+         `{id}`'s revisions.\n\
+         4. End the turn.\n",
+        id = node.id
+    )
 }
 
 /// Prints the ready work another loop holds, each with the pane holding it, if there is any

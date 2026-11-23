@@ -14,9 +14,9 @@ The loop runs in the user's own interactive Claude Code session, so questions an
 where they are today:
 
 1. **next_task** (an MCP tool) claims the next node, records its start and marks it in progress,
-   and returns its why, what, acceptance, docs, needs and open comment threads. A done node
-   whose comments want an answer comes first, taken again for a round of them
-   ([C43](code-and-comments.md#comments-in-the-loop)).
+   and returns its why, what, acceptance, docs, needs and open comment threads, with the steps
+   that finish it. A done node whose comments want an answer comes first, taken again for a
+   round of them ([C43](code-and-comments.md#comments-in-the-loop)).
 2. **Claude enters plan mode** itself, with its EnterPlanMode tool, and plans the node.
 3. **The user answers Claude's questions** (AskUserQuestion) and **approves the plan**
    (ExitPlanMode), in the terminal.
@@ -115,6 +115,11 @@ where they are today:
   planning, 8k to 9k in X4's runs, and the node is implemented from the plan alone
   ([C42](../milestones/m8.md)). The user still picks it at each approval, and a setting they turned off
   stays off.
+- **The plan carries the steps that finish the node** ([C44](../milestones/m8.md)). next_task hands every
+  node out with them, its criteria, its status and a commit of everything it changed, and asks
+  for the plan to end with them, as a round's plan carries its own. An approval's clear leaves
+  the plan alone, and a seal takes only what is tracked, so a plan that never says to commit
+  leaves the node sealed without its new files.
 
 ### What X4 found
 
@@ -208,6 +213,46 @@ scrubbed environment.
   moved on the same way.
 - **Without a multiplexer, the start said `/clear`, then `next`,** and those two started the
   next node at 44.4k.
+
+### What C44 found
+
+Tried twice with Claude Code 2.1.330, running Sonnet 5.5 at low effort, on a scratch reef-serve.
+Each time one loop ran in zellij, on a private tmux server with a scrubbed environment, in a repo
+`reef claude install` set up. A stand-in script answered each question and approved each plan
+with its first option, *Yes, clear context and use auto mode*. Nodes A, B and C were queued C, A,
+B, and A and B each left a choice to the user. The stand-in commented on C while C's plan was up.
+While A's question was up, it started a review of A, paused the loop from outside and submitted
+the review. The second run came after next_task handed each node out with its finishing steps.
+
+- **The queue's order, each node from a cleared context.** Both runs took C, C's round, A, A's
+  round and B, in one pane. Each session a clear between nodes started took its node at 44.5k,
+  a fresh session's context. Each approval's clear started its implementing session at 33.3k to
+  33.7k.
+- **Questions and approvals in the terminal.** Planning A and B asked which greeting and which
+  colour with AskUserQuestion, and every plan was approved from its dialog.
+- **A comment left mid-node came back before the next node.** C's Stop named its open comments
+  next. The cleared session took C again as a round, and its commit's `Reef-Resolves` trailer
+  resolved the thread at post-commit. In the second run, the fix was a fixup squashed into C's
+  commit.
+- **A review stayed hidden until it was submitted.** While it was pending, `reef comment ls`
+  listed no thread. Submitted mid-node, it came back as A's round once A was done. In the first
+  run the round committed A's file with the trailer. In the second, Claude found nothing to
+  change and resolved the thread with a reply, keeping no empty revision.
+- **Pausing stopped the loop after the current node.** Paused while A was planned, A's end said
+  the loop was paused. For 40 s nothing was typed, no session started, and the loop stayed
+  between nodes. `! reef loop start` then cleared the session and took A's round.
+- **The approval's clear dropped the commit.**
+  - In the first run, C's and A's plans ended at marking the node done. Their implementing
+    sessions held only the plan, and never committed.
+  - Each was sealed with no files, since a seal takes only what is tracked. The round's restart
+    then took the untracked file into its start, so `gamma.txt`'s first line was in none of C's
+    revisions.
+  - B's plan named a commit, and B's revision held its file. Each round's plan carried the steps
+    next_task printed for it, commit and all, and committed.
+- **So every node is handed out with the steps that finish it,** and a restart takes untracked
+  files as a seal does ([Capturing a node's changes](code-and-comments.md#capturing-a-nodes-changes)).
+  In the second run every plan ended with the commit, every node was committed in its first
+  pass, and each node's revisions held only its own file.
 
 ## Groups of nodes at once
 
