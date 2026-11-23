@@ -456,13 +456,88 @@ private tmux server with a scrubbed environment.
 
 ## Later, the loop in the app
 
-Optional, once the terminal loop works. reef runs the session itself, headless, and relays its
-questions and plans to the app.
+Optional, once the terminal loop works. A runner the user starts on their own machine runs the
+session headless there, and central reef relays its transcript, its questions and its plans to
+the app, and the app's answers back ([M9](../milestones/m9.md)).
 
-### Open questions (X5)
+### Design choices
 
-- **`claude -p` with stream-json, driven from Rust**, or an Agent SDK sidecar in TypeScript or
-  Python. Which one can pause on AskUserQuestion and ExitPlanMode and wait for an answer from
-  elsewhere?
-- **How the session's transcript streams into the app**, and how an answer or an approval gets
-  back to the session.
+- **The server never runs Claude.** A server that spawned sessions would run code for anyone who
+  reached it. The user starts a runner, `reef loop run`, in their repo's checkout. It attaches
+  to central reef and spawns Claude itself, client side, and central reef only relays.
+- **`claude -p` over stream-json, driven from Rust** ([X5](#what-x5-found)). The runner spawns
+  `claude -p --input-format stream-json --output-format stream-json --verbose
+  --permission-prompt-tool stdio`.
+  - Every prompt the session would show a user arrives as a `control_request`, and waits for the
+    runner's `control_response`.
+  - The Agent SDKs drive this same protocol over the same CLI, so a sidecar would add a runtime
+    and change nothing.
+- **A runner is a pane of its own,** `reef:<id>`, which the runner names to each session in
+  `REEF_PANE`, the first thing a pane is found from. The session's MCP server and hooks find the
+  runner's loop by it, as a terminal session's find its multiplexer's pane. The runner scrubs
+  `ZELLIJ_*`, `TMUX*` and `CLAUDE_*` from what it hands Claude.
+- **A fresh process a node, rather than a clear.** Once the Stop hook has acted on a node's end,
+  which it does before the turn's `result`, the runner closes the session's stdin and starts the
+  next node in a new process, with the terminal loop's kickoff. Nothing is typed.
+- **The runner follows its loop.** At each turn's end, and whenever central reef wakes it, it
+  reads its loop:
+  - Between nodes and running: it starts the next node in a new process.
+  - Paused with its node done: it ends the process and waits.
+  - Stopped: it ends the process, and stays attached for the next start.
+  - Mid-node with the turn ended: it waits for the user's reply from the app, sent to the same
+    process as its next message.
+  - Holding nothing: it waits. It starts a node only on a start, never at a turn's end, so a
+    plan with nothing ready can't spin it.
+  - Holding a node with no process, after its own restart: it starts one, and next_task hands
+    the same node back.
+- **One node at a time.** A loop wider than one is refused on a runner's pane, since a group's
+  members would each need a session of their own.
+- **Every prompt goes to the app.** A question shows with its options, a plan to approve or to
+  reject with feedback, and anything else, such as a write tool plan mode stops, to allow or deny.
+  The runner answers only prompts it raised, each once.
+- **Relayed through central reef, in memory.** No table keeps a session: Claude Code keeps its
+  whole transcript on disk.
+  - The runner attaches, which names its session and pane, and appends each entry of the
+    transcript as it comes, a raised prompt among them. Each change is a `session-changed` on
+    the project's stream.
+  - The app's starts, pauses and stops change the runner's loop, and wake the runner. Its
+    answers and replies are orders queued for the runner. The runner long-polls for orders
+    after the last it read, so a reconnect misses none, and each poll says it is alive.
+  - A runner unheard from for a minute reads as gone. One whose service restarted attaches again
+    with its pane, and sends the transcript it holds.
+- **Answering is approving.** Whoever can answer a session's prompts can let its tools run on the
+  runner's machine, so sign-in ([C48](../milestones/m10.md)) guards these routes as it guards every write.
+  Until then the service listens on loopback only.
+
+### What X5 found
+
+Tried in `spikes/x5-headless`: a stub host, in Rust, drove `claude -p` over stream-json in X4's
+scratch repo, its stub MCP server and hooks wired in through the repo's own `.mcp.json` and
+`.claude/settings.json`. Claude Code 2.1.330 ran Sonnet 5.5 at low effort. The stub answered
+each question with its first option, rejected each node's first plan with feedback, approved
+the next, and allowed anything else.
+
+- **Questions and plans wait for the host.** Each comes as a `control_request`, `subtype`
+  `can_use_tool`, with the tool's name, its input and a `request_id`. The session waits until a
+  `control_response` names that id.
+  - A question is answered by allowing it, its input given back with `answers` added: each
+    question's text, and the label picked. Claude reads `"<question>"="<label>"`.
+  - A plan is approved by allowing ExitPlanMode, and rejected by denying it with a message.
+    Given *say which test covers the new function*, Claude edited its plan and called ExitPlanMode
+    again, the test named, both times it was tried.
+- **A question can wait minutes.** One was answered 200 s after it was asked, and the session
+  carried on from it at once.
+- **Prompts can come at once.** A write tool plan mode asked for, and a question, came within
+  0.1 s, each with its own id, and were answered apart.
+- **The repo's own setup runs.** Its `.mcp.json` server connected, and every hook ran:
+  SessionStart (`startup`), UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest, Stop
+  and SessionEnd. No handshake was needed before the first message.
+- **Plan mode as in the terminal.** EnterPlanMode needed no answer, every write tool was asked
+  for while planning, and an approval put the mode back to what it was, `default` or `auto`.
+  Headless starts in `default` unless `--permission-mode` says otherwise.
+- **Stop runs before the `result`.** Its `systemMessage` comes first, so by the turn's `result`
+  the Stop hook has acted on the node's end.
+- **A second message carries on.** Written after the `result`, it started a turn of the same
+  session. Closing stdin ended it, SessionEnd and all, within 0.4 s.
+- **Each node cost $0.15 to $0.17**, planned, rejected once, approved and done in 27 s when
+  answered at once.

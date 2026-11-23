@@ -1,0 +1,17 @@
+# X5's scratch crate: a stub host that drives a headless Claude Code session over stream-json,
+# answering its questions and its plans' approvals from outside the terminal.
+# It is a workspace of its own, like the other spikes.
+[workspace]
+
+[package]
+name = "x5-headless"
+description = "X5's spike: headless Claude Code, its questions and plans relayed to a host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "time", "sync"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
