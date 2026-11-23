@@ -12,6 +12,9 @@
 //!   side it is on ([`Anchor`]).
 //! - **A file too large to keep whole** is kept without its hunks and says so, as a binary file
 //!   is kept without them.
+//! - **The latest revision may be a draft.** git's hooks keep a draft current while the node is
+//!   worked on, each capture rewriting it under its number, and a seal makes it a revision for
+//!   good, which comments can name.
 
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
@@ -226,6 +229,10 @@ pub struct Revision {
     pub conflicts: Vec<String>,
     /// Every changed file, by path, without its hunks
     pub files: Vec<FileSummary>,
+    /// Whether it is the node's draft, which the next capture rewrites under its number until a
+    /// seal keeps it, so no comment names its lines yet
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
 }
 
 impl Revision {
@@ -373,6 +380,7 @@ mod tests {
             },
             conflicts: Vec::new(),
             files: vec![summary.clone(), summary],
+            draft: false,
         };
         assert_eq!(revision.counts(), (4, 2));
     }
@@ -403,13 +411,24 @@ mod tests {
             },
             conflicts: vec!["b.rs".to_string()],
             files: vec![file.summary()],
+            draft: false,
         };
         let json = serde_json::to_value(&revision).unwrap();
         assert_eq!(json["node"], "reef/central/C32");
         assert_eq!(json["base"], "e".repeat(40));
         assert_eq!(json["conflicts"][0], "b.rs");
         assert_eq!(json["files"][0]["added"], 2);
+        // a sealed revision says nothing of drafts, so one kept before drafts reads as sealed
+        assert!(json.get("draft").is_none());
         assert_eq!(serde_json::from_value::<Revision>(json).unwrap(), revision);
+        // and a draft says so
+        let draft = Revision {
+            draft: true,
+            ..revision
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["draft"], true);
+        assert_eq!(serde_json::from_value::<Revision>(json).unwrap(), draft);
     }
 
     /// A removed line is anchored in the base, and every other line where it is now

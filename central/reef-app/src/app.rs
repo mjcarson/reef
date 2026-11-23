@@ -89,6 +89,7 @@ code { font-size: 0.92em; }
 .reef-app-file-counts { flex: none; font-family: monospace; font-size: 0.8rem; }
 .reef-app-tag { flex: none; font-size: 0.72rem; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 0.3rem; }
 .reef-app-tag.conflicted { color: var(--reef-blocked); border-color: var(--reef-blocked); }
+.reef-app-tag.draft { color: var(--reef-progress); border-color: var(--reef-progress); }
 .reef-app-diff { overflow-x: auto; }
 .reef-app-diff-note { margin: 0.4rem 0.5rem; }
 .reef-app-diff-wait { margin: 0.4rem 0.5rem; }

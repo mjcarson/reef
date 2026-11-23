@@ -7,11 +7,13 @@
 //!   that read it, in the node's own checkout, so the service is the same once it is shared.
 //! - **Each record written is a change**, [`Change::WorkRecorded`], naming its node and the
 //!   version it is now at. A start or a capture that wrote nothing sends none. A capture kept as
-//!   a revision is [`Change::RevisionCaptured`] too, naming the revision.
+//!   a revision, or over the node's draft, is [`Change::RevisionCaptured`] too, naming the
+//!   revision.
 //! - **A capture brings its node's threads along.** Each capture from the node's start follows
-//!   the threads on its lines to its latest revision before any of it is told, so a reader told
-//!   of the revision finds them on it, and the threads it wrote are [`Change::ThreadsFollowed`].
-//!   One that kept no revision still follows any thread an earlier capture left behind.
+//!   the threads on its lines to its latest sealed revision before any of it is told, so a
+//!   reader told of the revision finds them on it, and the threads it wrote are
+//!   [`Change::ThreadsFollowed`]. A draft holds no thread until it is sealed. One that kept no
+//!   revision still follows any thread an earlier capture left behind.
 //! - **A capture resolves the threads its trailers name.** Each thread of the node's plan a
 //!   `Reef-Resolves` trailer names is resolved once the capture is kept and its threads followed,
 //!   linking the revision it kept, or the latest it matched, and each one written is
@@ -85,9 +87,10 @@ impl<B: Backend> Service<B> {
         Ok(started)
     }
 
-    /// Keeps a capture as its node's next revision, if it was taken from the node's start and
-    /// changed anything, adds the SHAs it read to the node's record, follows the threads on the
-    /// node's lines to its latest revision, and resolves the threads its trailers name
+    /// Keeps a capture as its node's next revision or over its draft, if it was taken from the
+    /// node's start and changed or sealed anything, adds the SHAs it read to the node's record,
+    /// follows the threads on the node's lines to its latest sealed revision, and resolves the
+    /// threads its trailers name
     ///
     /// A follow that fails comes back as the error, once what the capture kept is told, and no
     /// trailer is read.
@@ -110,7 +113,7 @@ impl<B: Backend> Service<B> {
         let mut captured = self.store.add_capture(node, add).await?;
         // the node's threads follow it before anything is told, under the comment lock
         let followed = match &captured {
-            Captured::Added { .. } | Captured::Unchanged { .. } => {
+            Captured::Added { .. } | Captured::Replaced { .. } | Captured::Unchanged { .. } => {
                 self.store.follow_threads(node).await
             }
             Captured::NotStarted { .. } | Captured::Restarted { .. } => Ok(None),
@@ -118,6 +121,9 @@ impl<B: Backend> Service<B> {
         // then told to the change stream, the threads last
         match &captured {
             Captured::Added {
+                record, revision, ..
+            }
+            | Captured::Replaced {
                 record, revision, ..
             } => {
                 self.publish(Change::RevisionCaptured {
@@ -144,6 +150,9 @@ impl<B: Backend> Service<B> {
         }
         // then the threads its trailers name, the revision it kept or matched linked to each
         if let Captured::Added {
+            revision, trailers, ..
+        }
+        | Captured::Replaced {
             revision, trailers, ..
         }
         | Captured::Unchanged {

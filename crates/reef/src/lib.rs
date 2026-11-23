@@ -20,6 +20,9 @@
 //! - **Capturing changes** ([`capture`]): a node's diff read in its own worktree, from its start
 //!   carried forward to what is tracked there, and sent to be kept as a revision, with the
 //!   threads its commits' `Reef-Resolves` trailers name.
+//! - **Hooks** ([`hook`]): git's post-commit and post-rewrite, and Claude Code's PostToolUse on
+//!   reef's status tool, keep the draft of the node a worktree is on current, and Stop seals it
+//!   once the node is done.
 //! - **Comments** ([`comment`]): a thread resolved by hand, the revision that answered it
 //!   linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
@@ -51,6 +54,7 @@ pub mod comment;
 pub mod conf;
 pub mod export;
 pub mod git;
+pub mod hook;
 pub mod import;
 pub mod loops;
 pub mod mcp;

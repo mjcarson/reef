@@ -99,7 +99,8 @@ pub enum Change {
         /// The version the record is now at
         version: u64,
     },
-    /// A capture of a node's changes was kept as a new revision
+    /// A capture of a node's changes was kept as a new revision, or over its draft, which may
+    /// now be sealed
     RevisionCaptured {
         /// The node whose changes it holds
         node: NodeName,

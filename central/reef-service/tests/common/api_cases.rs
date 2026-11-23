@@ -836,6 +836,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         conflicts: Vec::new(),
         files: vec![file.clone()],
         resolves: Vec::new(),
+        draft: false,
     };
     let (status, added): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
@@ -892,6 +893,7 @@ pub async fn work_routes_answer_with_their_status<B: Backend + 'static>(
         conflicts: Vec::new(),
         files: Vec::new(),
         resolves: Vec::new(),
+        draft: false,
     };
     let (status, late): (_, Captured) = ax.client.post(&paths::captures(&node), &other).await?;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -985,6 +987,7 @@ pub async fn comment_routes_answer_with_their_status<B: Backend + 'static>(
         conflicts: Vec::new(),
         files: vec![added_file("src/a.rs", "one\ntwo\n")],
         resolves: Vec::new(),
+        draft: false,
     };
     let (status, _): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
     assert_eq!(status, StatusCode::OK);
@@ -1196,6 +1199,7 @@ pub async fn a_capture_announces_the_threads_it_followed<B: Backend + 'static>(
             ..added_file("src/a.rs", text)
         }],
         resolves: Vec::new(),
+        draft: false,
     };
     let (status, _): (_, Captured) = ax
         .client
@@ -1336,6 +1340,7 @@ pub async fn resolves_answer_with_their_status<B: Backend + 'static>(
             ..added_file("src/a.rs", "one\n")
         }],
         resolves,
+        draft: false,
     };
     let (status, _): (_, Captured) = ax
         .client

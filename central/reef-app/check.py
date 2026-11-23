@@ -1,6 +1,6 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
-Each step checks one of M4's to M7's criteria in the browser, printing `ok` or `FAILED` and what
+Each step checks one of M4's to M7's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
 it saw; the script exits 1 if any failed.
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
@@ -14,7 +14,7 @@ Build the app first, from central/reef-app, with no `RUSTFLAGS` exported:
 
 then, with Playwright installed:
 
-    python check.py [screenshot dir] [--release] [--only=c33,c35,c36]
+    python check.py [screenshot dir] [--release] [--only=c33,c35,c36,c56]
 
 `--release` runs the server `dx build ... --release` built instead, which the timings in the
 plan's figures are taken on. `--only` runs the checks whose names start with one of those given.
@@ -698,6 +698,79 @@ def c33_changes_in_the_sidebar(page):
           figures)
 
 
+def c56_drafts_in_the_sidebar(page):
+    """C56: a node's draft says so in the Changes tab and takes no comment, an open file of it is
+    drawn again each time a hook rewrites it, and once Stop seals it, it is a revision like any."""
+    repo = WORK / "repo"
+    reef("plan", "new", "drafts")
+    put("drafts", node_yaml("D1", "D1 Draft the code"))
+    reef("start", "D1", "--plan", "drafts")
+    # a commit, which git's post-commit drafts
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "draft.rs").write_text("one\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "D1 one")
+    reef("hook", "post-commit")
+    page.goto(URL + "/plans/check/drafts")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="D1 Draft the code").click()
+    page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    page.wait_for_selector('.reef-app-file-head[data-path="src/draft.rs"]', timeout=10000)
+    page.click('.reef-app-file-head[data-path="src/draft.rs"]')
+    page.wait_for_selector('.reef-app-diff[data-path="src/draft.rs"] tr.reef-app-line', timeout=10000)
+    shown = page.evaluate("""() => ({
+        option: document.querySelector('.reef-app-revision option')?.textContent ?? null,
+        tag: document.querySelector('.reef-app-revision-sum .reef-app-tag.draft')?.textContent ?? null,
+        commenting: !!document.querySelector('.reef-app-diff.commenting'),
+        note: [...document.querySelectorAll('.reef-app-diff-note')].map(p => p.textContent),
+    })""")
+    page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-draft.png"))
+    check("C56 a draft says so in the Changes tab, and its lines take no comment",
+          shown["option"] is not None and "draft" in shown["option"] and shown["tag"] == "draft"
+          and not shown["commenting"] and "Comments open once this draft is sealed." in shown["note"],
+          shown)
+    # a second commit rewrites the draft under its number, and the open file is drawn again
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    (repo / "src" / "draft.rs").write_text("one\ntwo\n")
+    git("commit", "-q", "-a", "-m", "D1 two")
+    reef("hook", "post-commit")
+    try:
+        page.wait_for_function("() => document.querySelectorAll("
+                               "'.reef-app-diff[data-path=\"src/draft.rs\"] tr.reef-app-line').length === 2",
+                               timeout=10000)
+    except Exception:
+        pass
+    redrawn = {
+        "revisions": page.eval_on_selector_all(".reef-app-revision option", "os => os.map(o => o.value)"),
+        "rows": rows_of(page, "src/draft.rs"),
+        "no reload": page.evaluate("() => window.__kept"),
+    }
+    check("C56 a draft rewritten by a hook is drawn again in the open tab, under its number",
+          redrawn == {"revisions": ["1"], "rows": [["added", "", "1", "+one"], ["added", "", "2", "+two"]],
+                      "no reload": "same page"},
+          redrawn)
+    # D1 done, and the turn's end seals it, which opens its lines to comments
+    reef("status", "D1", "done", "--plan", "drafts")
+    stop = json.dumps({"cwd": str(repo), "hook_event_name": "Stop", "stop_hook_active": False})
+    sealed_out = subprocess.run([REEF / "target/debug/reef", "--conf", WORK / "reef.toml", "hook", "stop"],
+                                cwd=repo, input=stop, capture_output=True, text=True)
+    try:
+        page.wait_for_function("() => !document.querySelector('.reef-app-revision-sum .reef-app-tag.draft')"
+                               " && !!document.querySelector('.reef-app-diff.commenting')", timeout=10000)
+    except Exception:
+        pass
+    sealed = page.evaluate("""() => ({
+        option: document.querySelector('.reef-app-revision option')?.textContent ?? null,
+        tag: !!document.querySelector('.reef-app-revision-sum .reef-app-tag.draft'),
+        commenting: !!document.querySelector('.reef-app-diff.commenting'),
+    })""")
+    sealed["stop"] = sealed_out.stdout.strip()
+    check("C56 once Stop seals the draft, it is a revision whose lines take comments",
+          sealed["stop"] == "reef: sealed `D1` as revision 1, 1 file +2 -0" and "draft" not in (sealed["option"] or "draft")
+          and not sealed["tag"] and sealed["commenting"],
+          sealed)
+
+
 def open_counts(page):
     """How many open threads the Comments tab and the toolbar each say there are."""
     return page.evaluate("""() => [
@@ -1025,6 +1098,7 @@ def main():
                 c33_changes_in_the_sidebar,
                 c35_comment_threads_in_the_diff,
                 c36_comments_follow_the_code,
+                c56_drafts_in_the_sidebar,
             ]
             for step in checks:
                 # every check, or those `--only` names

@@ -11,6 +11,10 @@
 //!   pin points at, so the SHAs of a capture taken before a restart never join the new start's.
 //!   It is kept as the node's next [`revision`](super::revision), unless its base and tree are
 //!   the latest revision's, and its SHAs are added naming the revision either way.
+//! - **A draft is kept current, and sealed once.** A capture asks to keep the node's draft, as
+//!   git's hooks do, or to seal what it took. Either is written over the node's draft, if its
+//!   latest revision is one, under its number; after a sealed revision, either opens the next.
+//!   A seal of a draft it matches rewrites only the draft's row, sealed.
 //! - **Writes take a lock per project; reads take none.** A start is one row's write, and a
 //!   capture its revision's rows, then the record's.
 
@@ -20,10 +24,21 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
 
-use super::revision::check_files;
+use super::revision::{Slot, check_files};
 use super::{Store, Unkeepable};
 use crate::backend::{Backend, Expect, Written};
 use crate::schema::WorkRow;
+
+/// What a capture kept of its revision
+#[derive(Debug, Clone, Copy)]
+enum Outcome {
+    /// A new revision
+    Added,
+    /// The node's draft, written over or sealed
+    Replaced,
+    /// Nothing, since the latest revision matched
+    Matched,
+}
 
 /// What a work row keeps as JSON: everything of a record but its name and version
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,13 +159,22 @@ impl<B: Backend> Store<B> {
         }
     }
 
-    /// Keeps a capture as its node's next revision, and adds the SHAs it read to its record
+    /// Keeps a capture as its node's next revision, or over its draft, and adds the SHAs it read
+    /// to its record
     ///
     /// The capture names the start it was taken from by its pinned commit, so a capture of a
-    /// node started again since is [`Captured::Restarted`], and keeps nothing. One whose base and
-    /// tree are the node's latest revision's is [`Captured::Unchanged`]: no revision is added,
-    /// and its SHAs are added naming the latest. Otherwise its files are kept as the revision
-    /// after the latest, whichever start that was taken from, and then its SHAs added.
+    /// node started again since is [`Captured::Restarted`], and keeps nothing. Then, by the
+    /// node's latest revision:
+    ///
+    /// - **None, or a sealed one it changes,** keeps the capture as the next revision, a draft
+    ///   or sealed as it asks: [`Captured::Added`].
+    /// - **A sealed one of the same base and tree** keeps nothing: [`Captured::Unchanged`].
+    /// - **A draft it changes** writes the capture's files over the draft's, under its number,
+    ///   still a draft unless the capture seals: [`Captured::Replaced`].
+    /// - **A draft of the same base and tree** is sealed as it is by a seal, which is
+    ///   [`Captured::Replaced`], and left as it is by a draft, which is [`Captured::Unchanged`].
+    ///
+    /// Its SHAs are added naming the revision in every case but a restart.
     ///
     /// # Arguments
     ///
@@ -173,21 +197,36 @@ impl<B: Backend> Store<B> {
         }
         // the node's latest revision, which a capture of the same base and tree only matches
         let at = now_ms();
-        let latest = self.revisions(node).await?.pop();
-        let (revision, added) = match latest {
-            Some(latest)
-                if latest.shas.base == add.shas.base && latest.shas.tree == add.shas.tree =>
-            {
-                (latest, false)
+        let latest = self.latest_revision(node).await?;
+        let draft = add.draft;
+        let shas = add.shas.clone();
+        // whether the capture holds just what the latest revision does
+        let same = latest.as_ref().is_some_and(|latest| {
+            latest.revision.shas.base == add.shas.base && latest.revision.shas.tree == add.shas.tree
+        });
+        let (revision, outcome) = match latest {
+            // a draft it matches is sealed by a seal, and left as it is by a draft
+            Some(latest) if latest.revision.draft && same => match draft {
+                true => (latest.revision, Outcome::Matched),
+                false => {
+                    let sealed = self.seal_revision(node, latest, at, add.shas).await?;
+                    (sealed, Outcome::Replaced)
+                }
+            },
+            // a draft it changes is written over under its number
+            Some(latest) if latest.revision.draft => {
+                let number = latest.revision.revision;
+                let slot = Slot::Over(latest.version);
+                let written = self.keep_revision(node, number, slot, at, add).await?;
+                (written, Outcome::Replaced)
             }
+            // a sealed revision it matches keeps nothing
+            Some(latest) if same => (latest.revision, Outcome::Matched),
             latest => {
                 // the next number after the latest, whatever start it was taken from
-                let number = latest.map_or(1, |latest| latest.revision + 1);
-                let shas = add.shas.clone();
-                let kept = self
-                    .keep_revision(node, number, at, shas, add.conflicts, add.files)
-                    .await?;
-                (kept, true)
+                let number = latest.map_or(1, |latest| latest.revision.revision + 1);
+                let written = self.keep_revision(node, number, Slot::New, at, add).await?;
+                (written, Outcome::Added)
             }
         };
         // the record with the capture's SHAs after the others, over the version read
@@ -200,22 +239,28 @@ impl<B: Backend> Store<B> {
         kept.captures.push(CaptureRead {
             at,
             revision: Some(revision.revision),
-            shas: add.shas,
+            shas,
         });
         let row = work_row(node, read + 1, &kept)?;
         match self.backend.write_work(row, Expect::Version(read)).await? {
             Written::Applied => {
                 let record = recorded(node, read + 1, kept);
-                Ok(match added {
-                    true => Captured::Added {
+                let trailers = Vec::new();
+                Ok(match outcome {
+                    Outcome::Added => Captured::Added {
                         record,
                         revision,
-                        trailers: Vec::new(),
+                        trailers,
                     },
-                    false => Captured::Unchanged {
+                    Outcome::Replaced => Captured::Replaced {
                         record,
                         revision,
-                        trailers: Vec::new(),
+                        trailers,
+                    },
+                    Outcome::Matched => Captured::Unchanged {
+                        record,
+                        revision,
+                        trailers,
                     },
                 })
             }

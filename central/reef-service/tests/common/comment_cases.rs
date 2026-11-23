@@ -9,7 +9,7 @@ use reef_api::{
 use reef_model::NodeName;
 use reef_service::{Backend, FileDiff, Unkeepable};
 
-use super::work_cases::{added_file, capture, kept, named, recorded, start_in};
+use super::work_cases::{added_file, capture, drafted, kept, named, recorded, start_in};
 use super::{Fx, Reopen};
 
 /// Starts a node and keeps one capture of it as its revision 1, holding the files given
@@ -502,6 +502,62 @@ pub async fn captures_follow_their_nodes_threads<B: Reopen>(fx: Fx<B>) -> anyhow
     // and all of it reads back once the store is reopened
     let fx = fx.reopen().await?;
     assert_eq!(fx.store.threads(&fx.plan).await?, threads);
+    Ok(())
+}
+
+/// A draft's lines take no thread, and a thread follows past a draft only once it is sealed,
+/// to where its line is in the sealed revision
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn drafts_hold_no_thread_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // A's revision 1, sealed, with a thread on its `two`
+    let a = captured(&fx, "A", vec![added_as("src/a.rs", "one\ntwo\n", '1')]).await?;
+    let (on_two, _) = started(&fx, &a, on_line(1, "src/a.rs", Side::New, 2), "Two?").await?;
+    // revision 2, a draft adding a line above it
+    let pinned = fx
+        .store
+        .work_of(&a)
+        .await?
+        .expect("A was started")
+        .start
+        .pinned;
+    let draft = vec![added_as("src/a.rs", "zero\none\ntwo\n", '2')];
+    let r2 = kept(&fx, &a, drafted(&pinned, 'd', draft.clone())).await?;
+    assert!(r2.draft);
+    // a thread on the draft's lines names no line a comment can stay on
+    let new = NewThread {
+        target: on_line(2, "src/a.rs", Side::New, 1),
+        body: "Zero?".to_string(),
+    };
+    let refused = fx.store.start_thread(&a, new).await?;
+    assert!(matches!(refused, Commented::NoLine { .. }), "{refused:?}");
+    // the thread on revision 1 stays there, since no sealed revision follows it
+    assert_eq!(fx.store.follow_threads(&a).await?, None);
+    assert_eq!(thread_of(&fx, on_two.number).await?, on_two);
+    // and a thread started on revision 1 now is followed no further than it
+    let (late, _) = started(&fx, &a, on_line(1, "src/a.rs", Side::New, 1), "One?").await?;
+    assert!(late.followed.is_empty(), "{late:?}");
+    // once the draft is sealed, both follow to their lines in it
+    let sealed = fx
+        .store
+        .add_capture(&a, capture(&pinned, 'd', Vec::new()))
+        .await?;
+    assert!(
+        matches!(sealed, reef_service::Captured::Replaced { .. }),
+        "{sealed:?}"
+    );
+    let Some(followed) = fx.store.follow_threads(&a).await? else {
+        panic!("sealing the draft followed no thread");
+    };
+    assert_eq!(followed.revision, 2);
+    let threads = fx.store.threads(&fx.plan).await?;
+    assert_eq!(threads[0].followed, [new_line(2, "src/a.rs", 3)]);
+    assert_eq!(threads[1].followed, [new_line(2, "src/a.rs", 2)]);
+    // and a sealed revision's lines take threads
+    let (on_zero, _) = started(&fx, &a, on_line(2, "src/a.rs", Side::New, 1), "Zero?").await?;
+    assert_eq!(on_zero.target.anchor(), Some(&new_line(2, "src/a.rs", 1)));
     Ok(())
 }
 

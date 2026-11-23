@@ -815,3 +815,103 @@ fn trailers_match_git_log() {
             .is_empty()
     );
 }
+
+/// Runs git as the tests' own author, answering whether it succeeded, for a command that may
+/// stop partway, as a rebase that conflicts does
+///
+/// # Arguments
+///
+/// * `dir` - The directory to run in
+/// * `args` - Git's arguments
+fn succeeds(dir: &Path, args: &[&str]) -> bool {
+    // as `git` runs it, its failure an answer
+    Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.invalid",
+        ])
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("git runs")
+        .status
+        .success()
+}
+
+/// Whether git keeps a rebase's markers in a worktree's own git dir, as its prompt reads them
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+fn rebase_markers(dir: &Path) -> bool {
+    // each marker where git names it for this worktree
+    ["rebase-merge", "rebase-apply"].iter().any(|marker| {
+        let path = git(
+            dir,
+            &["rev-parse", "--path-format=absolute", "--git-path", marker],
+        );
+        Path::new(&path).exists()
+    })
+}
+
+/// A rebase stopped by a conflict is read from the worktree's own git dir, through either of
+/// git's backends, and no other worktree of the repo is rebasing for it
+#[test]
+fn rebasing_is_read_from_the_worktrees_own_git_dir() {
+    let dir = fresh("rebasing");
+    let repo = repo(&dir.join("repo"));
+    // a branch and main, each changing the same line
+    git(&repo, &["checkout", "-q", "-b", "node"]);
+    commit(&repo, "a.txt", "node's\n", "node's line");
+    git(&repo, &["checkout", "-q", "main"]);
+    commit(&repo, "a.txt", "main's\n", "main's line");
+    git(&repo, &["checkout", "-q", "node"]);
+    // a linked worktree of the repo, on a branch of its own
+    let linked = dir.join("linked");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            linked.to_str().unwrap(),
+            "main",
+        ],
+    );
+    let other = Checkout::open(&linked).unwrap();
+    // nothing is rebasing yet
+    assert!(!Checkout::open(&repo).unwrap().rebasing());
+    assert!(!rebase_markers(&repo));
+    for backend in ["--merge", "--apply"] {
+        // the rebase stops at the conflict, its markers left in the main worktree's git dir
+        assert!(!succeeds(&repo, &["rebase", backend, "main"]));
+        assert!(rebase_markers(&repo), "{backend} left no marker");
+        assert!(Checkout::open(&repo).unwrap().rebasing(), "{backend}");
+        // the linked worktree has its own git dir, which holds none
+        assert!(!rebase_markers(&linked));
+        assert!(!other.rebasing(), "{backend}");
+        // and once it is given up, nothing is rebasing again
+        git(&repo, &["rebase", "--abort"]);
+        assert!(!rebase_markers(&repo));
+        assert!(!Checkout::open(&repo).unwrap().rebasing(), "{backend}");
+    }
+    // a rebase in the linked worktree is its own too
+    git(&linked, &["checkout", "-q", "-b", "linked-node"]);
+    commit(&linked, "a.txt", "linked's\n", "linked's line");
+    git(&repo, &["checkout", "-q", "main"]);
+    commit(&repo, "a.txt", "main's again\n", "main's line again");
+    assert!(!succeeds(&linked, &["rebase", "main"]));
+    assert!(Checkout::open(&linked).unwrap().rebasing());
+    assert!(!Checkout::open(&repo).unwrap().rebasing());
+    git(&linked, &["rebase", "--abort"]);
+}

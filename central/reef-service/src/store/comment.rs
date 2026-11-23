@@ -8,13 +8,15 @@
 //! - **A thread's first comment holds the thread.** Its target and its state are kept on its
 //!   first comment's row, which a mark writes again over the version it read. A reply is a row
 //!   of its own, naming its thread, so a reply and a mark never write the same row.
-//! - **A line comment names a line of a stored revision.** A thread on a line is kept only if
-//!   the line's revision lists its file, and the file has a line of that number on that side.
+//! - **A line comment names a line of a sealed revision.** A thread on a line is kept only if
+//!   the line's revision is sealed and lists its file, and the file has a line of that number on
+//!   that side. A draft's lines change under it, so none is named until it is sealed.
 //! - **A line's thread follows its line.** Each capture follows the node's threads from the
-//!   revision their line was last in to the latest, a revision at a time, by comparing the two
-//!   revisions' hunks ([`follow`](super::follow)), and writes each one's row again over the
-//!   version read. A thread keeps where its line was in each revision, and the revision that
-//!   lost it, which outdates it. A thread started on an older revision is followed at once.
+//!   revision their line was last in to the latest sealed one, a revision at a time, passing
+//!   over any draft, by comparing the two revisions' hunks ([`follow`](super::follow)), and
+//!   writes each one's row again over the version read. A thread keeps where its line was in
+//!   each revision, and the revision that lost it, which outdates it. A thread started on an
+//!   older revision is followed at once.
 //! - **A change resolves a thread, and stays linked.** A resolve, by a commit's trailer at its
 //!   capture or by hand, marks the thread resolved and links a revision to it, kept on its first
 //!   row, so the link outlives the commit once it is squashed. A trailer whose change resolved
@@ -179,7 +181,7 @@ impl<B: Backend> Store<B> {
         // so a capture's follow after it finds the thread where this left it
         let (followed, outdated) = match &new.target {
             Target::Line(anchor) => {
-                let revisions = self.revisions(node).await?;
+                let revisions = self.sealed_revisions(node).await?;
                 let mut files = Files::new();
                 self.trail(node, &revisions, anchor.clone(), &mut files)
                     .await?
@@ -441,7 +443,8 @@ impl<B: Backend> Store<B> {
         Ok(read)
     }
 
-    /// Follows the threads on a node's lines to its latest revision, and answers what it wrote
+    /// Follows the threads on a node's lines to its latest sealed revision, and answers what it
+    /// wrote
     ///
     /// Each thread whose line was last in an earlier revision is followed a revision at a time,
     /// until it reaches the latest or a revision no longer holds its line, which outdates it,
@@ -459,9 +462,9 @@ impl<B: Backend> Store<B> {
         // its write
         let lock = self.comment_lock(&node.plan.project);
         let _held = lock.lock().await;
-        // the node's revisions, read under the lock, so a thread started before it was followed
-        // as far as its start saw
-        let revisions = self.revisions(node).await?;
+        // the node's sealed revisions, read under the lock, so a thread started before it was
+        // followed as far as its start saw; a draft holds no thread until it is sealed
+        let revisions = self.sealed_revisions(node).await?;
         let Some(latest) = revisions.last().map(|revision| revision.revision) else {
             return Ok(None);
         };
@@ -670,13 +673,21 @@ impl<B: Backend> Store<B> {
         }
     }
 
-    /// Whether a node's revisions hold the line an anchor names
+    /// Whether a node's sealed revisions hold the line an anchor names
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
     /// * `anchor` - The line's revision, file, side and number
     async fn names_a_line(&self, node: &NodeName, anchor: &Anchor) -> anyhow::Result<bool> {
+        // a draft's lines change under it, so only a sealed revision's are named
+        let sealed = self
+            .node_revision(node, anchor.revision)
+            .await?
+            .is_some_and(|revision| !revision.draft);
+        if !sealed {
+            return Ok(false);
+        }
         // the file as the revision lists it, if it does
         let Some(file) = self
             .revision_file(node, anchor.revision, &anchor.path)

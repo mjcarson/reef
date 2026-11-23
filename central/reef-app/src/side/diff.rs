@@ -26,6 +26,8 @@ type Spot = (bool, u32);
 /// * `plan` - The plan's name within it
 /// * `id` - The node's id
 /// * `revision` - The revision's number
+/// * `stamp` - When the revision was stored, which a draft's rewrite moves on
+/// * `draft` - Whether the revision is the node's draft, whose lines take no comment
 /// * `path` - The path the file is shown under
 #[component]
 pub fn FileView(
@@ -33,10 +35,14 @@ pub fn FileView(
     plan: ReadSignal<String>,
     id: ReadSignal<String>,
     revision: ReadSignal<u32>,
+    stamp: ReadSignal<u64>,
+    draft: ReadSignal<bool>,
     path: ReadSignal<String>,
 ) -> Element {
-    // the file's hunks, read when it opens, and again if it is opened in another revision
+    // the file's hunks, read when it opens, again if it is opened in another revision, and
+    // again each time its draft is rewritten
     let file = use_resource(move || async move {
+        let _ = stamp();
         calls::revision_file(project(), plan(), id(), revision(), path()).await
     });
     // the threads whose line is in this file in this revision, if the plan's are read
@@ -51,8 +57,10 @@ pub fn FileView(
                 .is_some_and(|anchor| anchor.path == *path.read())
         })
         .collect();
-    // a line is commented on only where the plan's threads are kept
-    let node = threads.map(|_| id());
+    // a line is commented on only where the plan's threads are kept, and never in a draft,
+    // whose lines change under it
+    let node = threads.filter(|_| !draft()).map(|_| id());
+    let held = threads.is_some() && draft();
     match &*file.read() {
         None => rsx! {
             p { class: "reef-app-muted reef-app-diff-wait", "Loading…" }
@@ -64,6 +72,11 @@ pub fn FileView(
             p { class: "reef-app-muted", "This revision no longer lists the file." }
         },
         Some(Ok(Some(file))) => rsx! {
+            if held {
+                p { class: "reef-app-muted reef-app-diff-note",
+                    "Comments open once this draft is sealed."
+                }
+            }
             Diff {
                 revision: revision(),
                 file: file.clone(),

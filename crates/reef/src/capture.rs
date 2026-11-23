@@ -1,4 +1,5 @@
-//! reef's command for capturing a node's changes from its own checkout, sealed as a revision
+//! reef's command for capturing a node's changes from its own checkout, sealed as a revision,
+//! and the capture git's and Claude Code's hooks take to keep a node's draft current
 //!
 //! ```text
 //! reef node capture [ID]   # the node this worktree is on, or the one named, worked here
@@ -17,6 +18,10 @@
 //!   the service is sent what was read, since it reads no checkout.
 //! - **A capture the node's latest revision already holds** adds no revision. Its SHAs are still
 //!   added to the node's record, naming that revision.
+//! - **A draft or a seal.** `reef node capture` seals what it takes, over the node's draft if its
+//!   latest revision is one, and the hooks ([`hook`](crate::hook)) keep the draft current. A
+//!   node done whose latest revision is a draft, or that has none, is sealed by the Stop hook,
+//!   and by the start of another node in its worktree ([`seal_if_done`]).
 //! - **A capture reads its node's `Reef-Resolves` trailers.** Each commit HEAD reaches past the
 //!   node's start and the base branch is read for them, and each thread one names is sent to be
 //!   resolved, linked to the revision the capture keeps or matches. A value that names no thread
@@ -25,21 +30,40 @@
 use reef_api::comment::trailer_threads;
 use reef_api::work::on_worktree;
 use reef_api::{
-    AddCapture, CaptureShas, Captured, FileDiff, RESOLVES_TRAILER, Resolves, Revision,
-    TrailerOutcome, TrailerRead, WorkStart,
+    AddCapture, CaptureShas, Captured, ErrorCode, FileDiff, RESOLVES_TRAILER, Resolves, Revision,
+    TrailerOutcome, TrailerRead, WorkRecord, WorkStart,
 };
-use reef_model::PlanName;
+use reef_model::{PlanName, Status};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
 use crate::cli::{self, PlanPick};
-use crate::client::Client;
+use crate::client::{Client, is_code};
 use crate::git::Checkout;
 use crate::start::{checkout_in, where_started};
 
 /// Each trailer value that names no thread number: its commit and the value
 pub type Unreadable = Vec<(String, String)>;
+
+/// What a capture does with what it took
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    /// Keeps the node's draft current, as git's hooks do while it is worked on
+    Draft,
+    /// Seals it, as `reef node capture` and the Stop hook do
+    Seal,
+}
+
+/// How much a capture prints of what came of it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Report {
+    /// The revision's SHAs and every file, as `reef node capture` prints them
+    Full,
+    /// One line for a revision written, and nothing for one unchanged, as a hook prints after
+    /// each commit
+    Line,
+}
 
 /// A capture taken from a checkout but not yet sent
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,14 +140,39 @@ pub async fn capture<W: Write>(
                 })?
         }
     };
+    // what the node changed, read here, then sealed by the service
+    capture_record(client, &checkout, &record, Keep::Seal, Report::Full, out).await?;
+    Ok(())
+}
+
+/// Captures the changes of a node worked in a checkout, as a draft or a seal, and prints what
+/// came of it
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `checkout` - The checkout the node's work happens in, which its record names
+/// * `record` - The node's work record
+/// * `keep` - Whether the capture keeps the node's draft current or seals it
+/// * `report` - How much to print
+/// * `out` - Where to print it
+pub async fn capture_record<W: Write>(
+    client: &Client,
+    checkout: &Checkout,
+    record: &WorkRecord,
+    keep: Keep,
+    report: Report,
+    out: &mut W,
+) -> anyhow::Result<Captured> {
     // what the node changed, read here, then kept by the service
-    let taken = take(&checkout, &record.start)?;
+    let taken = take(checkout, &record.start)?;
     let add = AddCapture {
         pinned: record.start.pinned.clone(),
         shas: taken.shas.clone(),
         conflicts: taken.conflicts.clone(),
         files: taken.files,
         resolves: taken.resolves.clone(),
+        draft: keep == Keep::Draft,
     };
     let id = &record.node.id;
     // each commit the trailers were read from, by id, for its summary
@@ -142,38 +191,97 @@ pub async fn capture<W: Write>(
         summaries: &summaries,
         unreadable: &taken.unreadable,
     };
-    match client.add_capture(&record.node, &add).await? {
+    let captured = client.add_capture(&record.node, &add).await?;
+    match &captured {
         Captured::Added {
             revision, trailers, ..
+        }
+        | Captured::Replaced {
+            revision, trailers, ..
         } => {
-            writeln!(
-                out,
-                "captured `{id}` as revision {} in {}",
-                revision.revision,
-                record.start.worktree.display()
-            )?;
-            show(&revision, taken.carried, out)?;
-            read.show(&trailers, out)
+            // what was written, said as what became of the node's draft
+            let number = revision.revision;
+            let what = match (&captured, revision.draft) {
+                (Captured::Added { .. }, true) => format!("drafted `{id}` as revision {number}"),
+                (Captured::Added { .. }, false) => format!("captured `{id}` as revision {number}"),
+                (_, true) => format!("updated `{id}`'s draft, revision {number}"),
+                (_, false) => format!("sealed `{id}` as revision {number}"),
+            };
+            match report {
+                Report::Full => {
+                    writeln!(out, "{what} in {}", record.start.worktree.display())?;
+                    show(revision, taken.carried, out)?;
+                }
+                Report::Line => {
+                    let (added, removed) = revision.counts();
+                    let files = revision.files.len();
+                    let noun = if files == 1 { "file" } else { "files" };
+                    writeln!(out, "{what}, {files} {noun} +{added} -{removed}")?;
+                }
+            }
+            read.show(trailers, out)?;
         }
         Captured::Unchanged {
             revision, trailers, ..
         } => {
-            writeln!(
-                out,
-                "`{id}` is unchanged since revision {}",
-                revision.revision
-            )?;
-            show(&revision, taken.carried, out)?;
-            read.show(&trailers, out)
+            // a hook says nothing of a capture that wrote no revision, but what its trailers did
+            if report == Report::Full {
+                let draft = if revision.draft { ", a draft" } else { "" };
+                writeln!(
+                    out,
+                    "`{id}` is unchanged since revision {}{draft}",
+                    revision.revision
+                )?;
+                show(revision, taken.carried, out)?;
+            }
+            read.show(trailers, out)?;
         }
         Captured::NotStarted { .. } => {
             anyhow::bail!("`{id}`'s record went meanwhile: nothing was captured")
         }
         Captured::Restarted { record } => anyhow::bail!(
             "`{id}` was started again meanwhile, {}: nothing was captured, so capture it again",
-            where_started(&record)
+            where_started(record)
         ),
     }
+    Ok(captured)
+}
+
+/// Seals a node's changes once it is done: its draft, or its first revision if it has none
+///
+/// A node not done, or whose latest revision is sealed already, or that its plan no longer
+/// has, is left as it is. Answers whether it sealed one.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `checkout` - The checkout the node's work happens in, which its record names
+/// * `record` - The node's work record
+/// * `report` - How much to print
+/// * `out` - Where to print it
+pub async fn seal_if_done<W: Write>(
+    client: &Client,
+    checkout: &Checkout,
+    record: &WorkRecord,
+    report: Report,
+    out: &mut W,
+) -> anyhow::Result<bool> {
+    // the node as its plan has it now, which may have dropped it since it started
+    let node = match client.node(&record.node.plan, &record.node.id).await {
+        Ok(node) => node,
+        Err(error) if is_code(&error, ErrorCode::NotFound) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if node.spec.status != Some(Status::Done) {
+        return Ok(false);
+    }
+    // a latest revision sealed already has nothing left to seal
+    let revisions = client.revisions(&record.node).await?;
+    if revisions.last().is_some_and(|latest| !latest.draft) {
+        return Ok(false);
+    }
+    capture_record(client, checkout, record, Keep::Seal, report, out).await?;
+    Ok(true)
 }
 
 /// Takes a capture of a node's changes in its checkout: its base, its worktree as a seal takes
@@ -476,6 +584,7 @@ mod tests {
                 file(FileStatus::Renamed, Some("old.rs"), Some("new.rs"), false),
                 file(FileStatus::Added, None, Some("logo.png"), true),
             ],
+            draft: false,
         };
         let mut out = Vec::new();
         show(&revision, true, &mut out).unwrap();

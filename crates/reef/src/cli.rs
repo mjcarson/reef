@@ -30,6 +30,10 @@
 //! reef [--conf PATH] loop stop [--pane KEY]
 //! reef [--conf PATH] loop ls [--project NAME]
 //! reef [--conf PATH] hook session-start [--pane KEY]
+//! reef [--conf PATH] hook post-commit
+//! reef [--conf PATH] hook post-rewrite <KIND>
+//! reef [--conf PATH] hook post-tool-use
+//! reef [--conf PATH] hook stop
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
@@ -43,7 +47,9 @@
 //! the working directory's worktree is on, unless `--node` names one. `next` and the queue span
 //! the project's plans, and `--plan` narrows `next` to one. `loop` works on the loop of the pane
 //! it runs in, zellij's or tmux's or else the Claude Code process that ran it, unless `--pane`
-//! names one, and a loop spans the project's plans unless `--plan` names one. `import` picks the
+//! names one, and a loop spans the project's plans unless `--plan` names one. The capture hooks
+//! work on the node the working directory's worktree is on, and do nothing where there is none.
+//! `import` picks the
 //! project the book is in, and lists the plan `--plan` names if it isn't listed. `export` picks
 //! the project the new book's directory is in.
 
@@ -59,6 +65,7 @@ use crate::client::Client;
 use crate::comment;
 use crate::conf::Conf;
 use crate::export;
+use crate::hook;
 use crate::import;
 use crate::loops;
 use crate::mcp::{self, Tools};
@@ -250,7 +257,8 @@ pub enum Command {
     /// in the session's own pane, as `! reef loop start`, or name one with `--pane`.
     #[command(subcommand)]
     Loop(LoopCommand),
-    /// Claude Code's hooks, each handed its event's input on standard input
+    /// Claude Code's and git's hooks, each of Claude Code's handed its event's input on
+    /// standard input
     #[command(subcommand)]
     Hook(HookCommand),
     /// Serve get, check, next, put, status and accept as MCP tools over standard input and
@@ -397,7 +405,7 @@ pub enum LoopCommand {
     },
 }
 
-/// Claude Code's hooks
+/// Claude Code's and git's hooks
 #[derive(Debug, Subcommand)]
 pub enum HookCommand {
     /// SessionStart: hand this pane's loop to the session that started, a clear's included
@@ -406,6 +414,20 @@ pub enum HookCommand {
         #[arg(long, value_name = "KEY")]
         pane: Option<String>,
     },
+    /// git's post-commit: draft the node this worktree is on, unless a rebase is under way
+    PostCommit,
+    /// git's post-rewrite: draft the node this worktree is on once a rebase ends
+    PostRewrite {
+        /// What rewrote the commits, as git passes it: `rebase`, or `amend`, which post-commit
+        /// drafted already
+        #[arg(value_name = "KIND")]
+        kind: String,
+    },
+    /// PostToolUse, after reef's status tool: draft the node it marked done, if this worktree
+    /// is on it
+    PostToolUse,
+    /// Stop: seal the node this worktree is on once it is done, its draft or its first revision
+    Stop,
 }
 
 /// What can be done with a plan's comment threads
@@ -727,9 +749,22 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             // the session's pane, then the event Claude Code handed the hook
             let var = |name: &str| std::env::var(name).ok();
             let here = loops::Here::find(pane.as_deref(), var)?;
-            let mut input = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+            let input = stdin()?;
             loops::session_start(&client, &input, &here.pane, out).await
+        }
+        Command::Hook(HookCommand::PostCommit) => hook::post_commit(&client, cwd, out).await,
+        Command::Hook(HookCommand::PostRewrite { kind }) => {
+            // git writes the commits it rewrote to the hook, which are drained unread
+            stdin()?;
+            hook::post_rewrite(&client, cwd, &kind, out).await
+        }
+        Command::Hook(HookCommand::PostToolUse) => {
+            let input = stdin()?;
+            hook::post_tool_use(&client, cwd, &input, out).await
+        }
+        Command::Hook(HookCommand::Stop) => {
+            let input = stdin()?;
+            hook::stop(&client, cwd, &input, out).await
         }
         Command::Mcp { pick } => {
             // the protocol owns standard output, so nothing is printed to `out`
@@ -737,6 +772,14 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             mcp::serve(tools, tokio::io::stdin(), tokio::io::stdout()).await
         }
     }
+}
+
+/// Reads all of standard input, as a hook is handed its event
+fn stdin() -> anyhow::Result<String> {
+    // the whole of it, which the hook's caller closes once written
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)?;
+    Ok(input)
 }
 
 /// Registers a project for the repo that holds a directory
@@ -1245,6 +1288,34 @@ mod tests {
             hook.command,
             Command::Hook(HookCommand::SessionStart { pane: None })
         ));
+    }
+
+    /// git's hooks take what git passes them, and Claude Code's take their input on standard
+    /// input alone
+    #[test]
+    fn capture_hooks_take_what_their_callers_pass() {
+        // post-commit takes nothing, and post-rewrite what rewrote the commits
+        let commit = Cli::try_parse_from(["reef", "hook", "post-commit"]).unwrap();
+        assert!(matches!(
+            commit.command,
+            Command::Hook(HookCommand::PostCommit)
+        ));
+        let rewrite = Cli::try_parse_from(["reef", "hook", "post-rewrite", "rebase"]).unwrap();
+        assert!(matches!(
+            rewrite.command,
+            Command::Hook(HookCommand::PostRewrite { kind }) if kind == "rebase"
+        ));
+        assert!(Cli::try_parse_from(["reef", "hook", "post-rewrite"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "hook", "post-commit", "x"]).is_err());
+        // PostToolUse and Stop take nothing on the command line
+        let used = Cli::try_parse_from(["reef", "hook", "post-tool-use"]).unwrap();
+        assert!(matches!(
+            used.command,
+            Command::Hook(HookCommand::PostToolUse)
+        ));
+        let stop = Cli::try_parse_from(["reef", "--conf", "a.toml", "hook", "stop"]).unwrap();
+        assert!(matches!(stop.command, Command::Hook(HookCommand::Stop)));
+        assert!(Cli::try_parse_from(["reef", "hook", "stop", "--pane", "x"]).is_err());
     }
 
     /// A resolve takes its thread's number, and the node and revision that answered it or none

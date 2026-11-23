@@ -8,8 +8,9 @@
 //! changes then sends its files, which the service keeps as a [`Revision`], and adds the SHAs it
 //! read, as provenance only: they may stop resolving once squashed. A capture also sends each
 //! thread a `Reef-Resolves` trailer on the node's commits names, which the service resolves,
-//! linking the revision. The service never reads a checkout, so everything here is what a client
-//! read in one.
+//! linking the revision. A capture is a draft or a seal: git's hooks keep the node's latest
+//! revision current as its draft, and a seal keeps it for good. The service never reads a
+//! checkout, so everything here is what a client read in one.
 
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
@@ -135,13 +136,17 @@ pub struct AddCapture {
     /// its base branch doesn't hold
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolves: Vec<Resolves>,
+    /// Whether it only keeps the node's draft current, rather than sealing what it took, as a
+    /// capture that doesn't say does
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
 }
 
 /// What came of a capture
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Captured {
-    /// The capture was kept as a new revision, and its SHAs added
+    /// The capture was kept as a new revision, a draft or sealed as it asked, and its SHAs added
     Added {
         /// The node's record as it now stands
         record: WorkRecord,
@@ -151,8 +156,19 @@ pub enum Captured {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         trailers: Vec<TrailerRead>,
     },
-    /// The capture's base and tree are its node's latest revision's, so no revision was added,
-    /// and its SHAs were added naming that one
+    /// The capture was kept over the node's draft, under the draft's number: its files written
+    /// over the draft's if they changed, and sealed if it seals, and its SHAs added
+    Replaced {
+        /// The node's record as it now stands
+        record: WorkRecord,
+        /// The revision as it now stands, still a draft unless the capture sealed it
+        revision: Revision,
+        /// What each thread its trailers named came to, the revision linked to those resolved
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trailers: Vec<TrailerRead>,
+    },
+    /// The capture's base and tree are its node's latest revision's, and it sealed nothing that
+    /// wasn't sealed, so no revision was written, and its SHAs were added naming that one
     Unchanged {
         /// The node's record as it now stands
         record: WorkRecord,
@@ -310,12 +326,20 @@ mod tests {
             conflicts: Vec::new(),
             files: Vec::new(),
             resolves: Vec::new(),
+            draft: false,
         };
         let json = serde_json::to_string(&add).unwrap();
         assert_eq!(serde_json::from_str::<AddCapture>(&json).unwrap(), add);
-        // one sent with no files or conflicts, as C30's were, reads as a capture of nothing
+        // one sent with no files or conflicts, as C30's were, reads as a sealing capture of
+        // nothing, which is what every capture was before drafts
         let bare = serde_json::json!({ "pinned": add.pinned, "shas": add.shas });
         assert_eq!(serde_json::from_value::<AddCapture>(bare).unwrap(), add);
+        assert!(!json.contains("draft"), "{json}");
+        // and a draft says so
+        let draft = AddCapture { draft: true, ..add };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["draft"], true);
+        assert_eq!(serde_json::from_value::<AddCapture>(json).unwrap(), draft);
     }
 
     /// A worktree is on the node started there last, and on none where nothing started

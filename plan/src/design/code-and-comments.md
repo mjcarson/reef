@@ -45,11 +45,26 @@ on and when it is completed, and keeps what it read. That needs four things reef
     edit of one shows as an edit.
 - **One draft, sealed at Stop** ([C56](../milestones/m7.md)).
   - git's post-commit and post-rewrite hooks, and PostToolUse on reef's status tool, keep a
-    node's latest revision current as its draft.
-  - The Stop hook seals the draft once the node is done, before it hands Claude the next node
-    ([C41](../milestones/m8.md)).
-  - Marking the node done again, after a round of comment fixes, seals a revision of its own.
+    node's latest revision current as its draft. A capture over a draft rewrites it under its
+    number, and one after a sealed revision opens the next as a draft.
+  - post-commit drafts the node the worktree is on after every commit, an amend's included. A
+    rebase runs it for each pick with HEAD half built, so it skips while a rebase is under way,
+    which it reads from the worktree's own git dir, and post-rewrite drafts once the rebase
+    ends. It leaves an amend to post-commit.
+  - PostToolUse drafts the node reef's status tool marked done, uncommitted work and all, when
+    the worktree is on it, since Claude marks a node done before it commits.
+  - The Stop hook seals once the node the worktree is on is done: its draft, or its first
+    revision if it has none, before C41 hands Claude the next node ([C41](../milestones/m8.md)).
+  - Sealing goes by status, so no done mark is kept. A round of fixes after a seal leaves a
+    draft of its own, which the next Stop seals as a revision of its own, whether or not the
+    node was marked done again.
+  - `reef start` of another node in the worktree seals the last node first if it is done, from
+    the worktree the new node starts from, so two nodes in one turn still seal the first. A seal
+    that fails is said, and the start goes on.
   - `reef node capture` seals by hand, for work done outside a session.
+  - Nothing to do is no failure: a hook outside git, outside every project or in a worktree no
+    node was started in says nothing. A capture that fails is an error, which git ignores and
+    Claude Code shows without stopping.
 - **reef makes a node's worktree.** Its WorktreeCreate hook replaces Claude Code's own, so
   `claude -w <node>` gets `.claude/worktrees/<node>` on branch `reef/<node>`, with the node
   started in it ([C60](../milestones/m8.md)). `reef start` starts a node in the worktree it runs in.
@@ -178,8 +193,15 @@ The rules:
 - **Stored as revisions.** Each capture is a revision of the node's changes: files, hunks and
   lines. Each line has an anchor a comment can name: its revision, its file, and its number on
   the side it is on, the base for a removed line and the worktree for any other. The latest
-  revision is a draft until it is sealed. Until git's hooks keep a draft ([C56](../milestones/m7.md)),
-  every capture `reef node capture` takes is sealed.
+  revision is a draft until it is sealed ([C56](../milestones/m7.md)).
+- **A draft is rewritten in place.** A capture over a draft writes its files' rows, then its
+  revision's row over the version read, under the draft's number. A seal of a draft it matches
+  rewrites the row alone, naming the head that holds it now, as a local squash leaves it.
+  - A file the new draft no longer lists keeps its row, which is never served, as with a capture
+    killed between its files and its revision.
+  - A reader may find a draft's new hunks under its old listing for a moment, which a draft, still
+    being worked on, can afford.
+  - Rows kept before drafts read as sealed, so drafts needed no fresh data directory.
 - **Rows, not bucket objects** ([C32](../milestones/m7.md)). A revision is a row in its node's partition,
   listing its files without their hunks, and each file is a row in the revision's partition,
   sorted by path, holding its hunks and lines as JSON. Listing a node's revisions reads one
@@ -208,8 +230,9 @@ The rules:
   node's revisions, named by its anchor, or on the node itself, as a general comment on its
   work, as a merge request's overview discussion is. Each is threaded, open or resolved, in a
   table of their own ([C34](../milestones/m7.md)).
-- **A line comment names a line its revision holds.** One whose revision, file, side or number
-  the node's stored revisions don't have is refused, and nothing is written.
+- **A line comment names a line its sealed revision holds.** One whose revision, file, side or
+  number the node's sealed revisions don't have is refused, and nothing is written. A draft's
+  lines change under it, so none takes a comment until it is sealed, and the app says so.
 - **Numbered in the plan.** Every comment, a reply included, takes the plan's next number, and
   a thread is named by its first comment's, so `Reef-Resolves: <n>` names one thread whichever
   node's worktree its commit is captured in.
@@ -221,8 +244,9 @@ The rules:
 - **Comments follow the code between revisions** ([C36](../milestones/m7.md)). When a later revision of a
   node's changes moves a commented line, the comment moves with it. reef maps the line by
   comparing the two stored revisions' hunks, not git's history, a revision at a time from the
-  one the line was last in. A thread keeps where it was started, where its line went in each
-  later revision, and the revision that lost it.
+  one the line was last in to the latest sealed one, passing over a draft until it is sealed. A
+  thread keeps where it was started, where its line went in each later revision, and the
+  revision that lost it.
   - **Blobs tie two revisions together.** A worktree file the next revision holds unchanged has
     the line where it was. One that is the next revision's base has it as that base's line of
     the same number, which is what a round of fixes after the node's work landed on its base

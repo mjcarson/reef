@@ -18,6 +18,10 @@
 //!   `--restart` starts it again from here, replacing its record.
 //! - **A node to do goes in progress,** as `reef status` would put it; any other status stays.
 //! - **A worktree is on the node started there last**, which `reef work` shows without an id.
+//! - **A start seals the node it moves on from.** The node the worktree was on, if it is done,
+//!   has its draft sealed first, or its first revision taken, from the worktree as this start
+//!   finds it, since its hooks draft only this node from then on. A seal that fails is said,
+//!   and the start goes on.
 
 use reef_api::work::on_worktree;
 use reef_api::{Project, StartWork, Started, WorkRecord, WorkStart};
@@ -25,6 +29,7 @@ use reef_model::{NodeName, Status};
 use std::io::Write;
 use std::path::Path;
 
+use crate::capture::{Report, seal_if_done};
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
 use crate::git::{Checkout, pin_ref};
@@ -80,6 +85,14 @@ pub async fn start<W: Write>(
             where_started(&record)
         ),
     };
+    // the node this worktree was on is sealed first, if it is done, since it moves on now
+    let records = client.work(&plan.project).await?;
+    if let Some(last) = on_worktree(&records, checkout.root())
+        && last.node != node
+        && let Err(error) = seal_if_done(client, &checkout, last, Report::Line, out).await
+    {
+        writeln!(out, "warning: `{}` wasn't sealed: {error:#}", last.node)?;
+    }
     // what the start read, pinned so no gc prunes it after a rebase
     let mut read = read_start(&checkout, &node, base)?;
     let message = format!("reef: {node} started");

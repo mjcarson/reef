@@ -133,7 +133,7 @@ pub fn added_file(path: &str, text: &str) -> FileDiff {
     }
 }
 
-/// A capture of a start, its SHAs made from a letter, holding the files given
+/// A capture of a start, its SHAs made from a letter, holding the files given, which seals
 ///
 /// # Arguments
 ///
@@ -147,6 +147,21 @@ pub fn capture(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
         conflicts: Vec::new(),
         files,
         resolves: Vec::new(),
+        draft: false,
+    }
+}
+
+/// A capture that keeps the node's draft current, as git's hooks take one
+///
+/// # Arguments
+///
+/// * `pinned` - The pinned commit of the start it was taken from
+/// * `sha` - The letter its SHAs are made of
+/// * `files` - Its files
+pub fn drafted(pinned: &str, sha: char, files: Vec<FileDiff>) -> AddCapture {
+    AddCapture {
+        draft: true,
+        ..capture(pinned, sha, files)
     }
 }
 
@@ -532,5 +547,93 @@ pub async fn captures_keep_what_fits_and_refuse_what_cant_be_read<B: Reopen>(
         assert!(error.downcast_ref::<Unkeepable>().is_some(), "{error:#}");
     }
     assert_eq!(fx.store.revisions(&node).await?.len(), 1);
+    Ok(())
+}
+
+/// A node's draft is kept current under one number until a seal keeps it, and a draft after a
+/// seal opens the next revision
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn drafts_are_rewritten_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    let node = named(&fx, "A");
+    let first = recorded(&fx, "A", start_in(&fx.repo, "A", 'a'), None).await?;
+    let pinned = first.start.pinned.clone();
+    // a node's first draft is revision 1, and says it is a draft
+    let one = vec![added_file("a.rs", "a\n"), added_file("b.rs", "b\n")];
+    let r1 = kept(&fx, &node, drafted(&pinned, 'c', one)).await?;
+    assert_eq!((r1.revision, r1.draft), (1, true));
+    // a draft that changes anything is written over it, under its number, its dropped file
+    // no longer listed or served
+    let two = vec![added_file("a.rs", "a\nmore\n")];
+    let replaced = fx
+        .store
+        .add_capture(&node, drafted(&pinned, 'd', two.clone()))
+        .await?;
+    let Captured::Replaced { revision, .. } = replaced else {
+        panic!("a draft over a draft was {replaced:?}");
+    };
+    assert_eq!((revision.revision, revision.draft), (1, true));
+    assert_eq!(revision.shas, shas('d'));
+    assert_eq!(fx.store.revisions(&node).await?, std::slice::from_ref(&revision));
+    let read = fx.store.revision_file(&node, 1, "a.rs").await?;
+    assert_eq!(read.as_ref(), Some(&two[0]));
+    assert!(fx.store.revision_file(&node, 1, "b.rs").await?.is_none());
+    // a draft of the same base and tree writes nothing, and names the draft
+    let same = fx
+        .store
+        .add_capture(&node, drafted(&pinned, 'd', two.clone()))
+        .await?;
+    let Captured::Unchanged {
+        revision: matched, ..
+    } = same
+    else {
+        panic!("a draft of the draft's tree was {same:?}");
+    };
+    assert_eq!(matched, revision);
+    // a seal of the same tree seals the draft as it is, naming the head that holds it now, as
+    // a local squash leaves the tree and moves the head
+    let mut squashed = capture(&pinned, 'd', Vec::new());
+    squashed.shas.head = "9".repeat(40);
+    let sealed = fx.store.add_capture(&node, squashed.clone()).await?;
+    let Captured::Replaced {
+        revision: sealed, ..
+    } = sealed
+    else {
+        panic!("a seal of the draft's tree was {sealed:?}");
+    };
+    assert_eq!((sealed.revision, sealed.draft), (1, false));
+    assert_eq!(sealed.shas, squashed.shas);
+    assert_eq!(sealed.files, revision.files);
+    let read = fx.store.revision_file(&node, 1, "a.rs").await?;
+    assert_eq!(read.as_ref(), Some(&two[0]));
+    // a seal or a draft of the sealed tree keeps nothing more
+    for add in [squashed.clone(), drafted(&pinned, 'd', Vec::new())] {
+        let again = fx.store.add_capture(&node, add).await?;
+        assert!(matches!(again, Captured::Unchanged { .. }), "{again:?}");
+    }
+    // a draft after the seal opens revision 2, which a seal that changes it seals in its place
+    let three = vec![added_file("c.rs", "c\n")];
+    let r2 = kept(&fx, &node, drafted(&pinned, 'e', three)).await?;
+    assert_eq!((r2.revision, r2.draft), (2, true));
+    let four = vec![added_file("c.rs", "c\nd\n")];
+    let last = fx
+        .store
+        .add_capture(&node, capture(&pinned, 'f', four.clone()))
+        .await?;
+    let Captured::Replaced { revision: r2, .. } = last else {
+        panic!("a changed seal over a draft was {last:?}");
+    };
+    assert_eq!((r2.revision, r2.draft), (2, false));
+    // every capture's SHAs name the revision it wrote or matched
+    let record = fx.store.work_of(&node).await?.expect("A was started");
+    let named: Vec<Option<u32>> = record.captures.iter().map(|c| c.revision).collect();
+    assert_eq!(named, [1, 1, 1, 1, 1, 1, 2, 2].map(Some));
+    // and all of it reads back once the store is reopened over the same rows
+    let fx = fx.reopen().await?;
+    assert_eq!(fx.store.revisions(&node).await?, [sealed, r2]);
+    let read = fx.store.revision_file(&node, 2, "c.rs").await?;
+    assert_eq!(read.as_ref(), Some(&four[0]));
     Ok(())
 }

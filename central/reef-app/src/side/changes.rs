@@ -4,7 +4,9 @@
 //! The revisions are read again after each capture the plan's stream announces, so a node
 //! worked on shows its newest revision without a reload. A revision lists its files without
 //! their hunks, and a file's hunks are fetched only when it is opened, so a node with a large
-//! diff opens at once.
+//! diff opens at once. A node's latest revision may be its draft, which git's hooks rewrite
+//! under its number while it is worked on: it says so, an open file's hunks are fetched again
+//! each time it is rewritten, and its lines take no comment until it is sealed.
 
 use super::Review;
 use super::diff::FileView;
@@ -109,10 +111,17 @@ fn RevisionView(
     let (added, removed) = revision.counts();
     let files = revision.files.len();
     let number = revision.revision;
+    let stamp = revision.at;
+    let draft = revision.draft;
     let at = when(revision.at);
     rsx! {
         p { class: "reef-app-muted reef-app-revision-sum",
-            "Captured {at} · {files} "
+            if draft {
+                span { class: "reef-app-tag draft", "draft" }
+                " Captured {at}, sealed once the node is done · {files} "
+            } else {
+                "Captured {at} · {files} "
+            }
             if files == 1 {
                 "file"
             } else {
@@ -149,6 +158,8 @@ fn RevisionView(
                             plan,
                             id,
                             revision: number,
+                            stamp,
+                            draft,
                             file: file.clone(),
                             open,
                             conflicted,
@@ -168,15 +179,20 @@ fn RevisionView(
 /// * `plan` - The plan's name within it
 /// * `id` - The node's id
 /// * `revision` - The revision's number
+/// * `stamp` - When the revision was stored, which a draft's rewrite moves on
+/// * `draft` - Whether the revision is the node's draft
 /// * `file` - The file, without its hunks
 /// * `open` - Whether its diff is open
 /// * `conflicted` - Whether it conflicted carrying the start forward
+#[allow(clippy::too_many_arguments)]
 #[component]
 fn FileRow(
     project: ReadSignal<String>,
     plan: ReadSignal<String>,
     id: ReadSignal<String>,
     revision: u32,
+    stamp: u64,
+    draft: bool,
     file: FileSummary,
     open: bool,
     conflicted: bool,
@@ -223,14 +239,22 @@ fn FileRow(
                 }
             }
             if open {
-                FileView { project, plan, id, revision, path: path.clone() }
+                FileView {
+                    project,
+                    plan,
+                    id,
+                    revision,
+                    stamp,
+                    draft,
+                    path: path.clone(),
+                }
             }
         }
     }
 }
 
 /// A revision as the picker names it: its number, its counts, when it was captured, and
-/// whether it is the latest
+/// whether it is a draft and the latest
 ///
 /// # Arguments
 ///
@@ -243,6 +267,9 @@ fn option_label(revision: &Revision, latest: u32) -> String {
         revision.revision,
         when(revision.at)
     );
+    if revision.draft {
+        label.push_str(" · draft");
+    }
     if revision.revision == latest {
         label.push_str(" · latest");
     }

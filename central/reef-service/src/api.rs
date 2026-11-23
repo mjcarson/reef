@@ -1051,7 +1051,9 @@ async fn add_capture<S: Serves>(
     // one row written, under the project's work lock
     let captured = serves.service().add_capture(&node, add).await?;
     let status = match captured {
-        Captured::Added { .. } | Captured::Unchanged { .. } => StatusCode::OK,
+        Captured::Added { .. } | Captured::Replaced { .. } | Captured::Unchanged { .. } => {
+            StatusCode::OK
+        }
         Captured::Restarted { .. } => StatusCode::CONFLICT,
         Captured::NotStarted { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };

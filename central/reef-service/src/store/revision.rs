@@ -10,12 +10,17 @@
 //!   row `if_absent`, so a revision that reads has every file it lists. A capture killed between
 //!   the two leaves file rows no revision lists, which are never served, and the next capture
 //!   writes over them under the same number.
+//! - **A draft is rewritten in place.** The node's latest revision may be a draft, which a
+//!   capture writes over under its number: its files' rows first, then its row over the version
+//!   read. A file the new draft no longer lists keeps its row, which is never served. A reader
+//!   may meanwhile find a draft's new hunks under its old listing, which a draft, still being
+//!   worked on, can afford. A seal of a draft unchanged rewrites its row alone.
 //! - **A file too large to keep whole** is kept without its hunks, and says so, since a row must
 //!   fit in one of shoal's frames.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another node's changes.
 
-use reef_api::{CaptureShas, FileDiff, FileSummary, Revision};
+use reef_api::{AddCapture, CaptureShas, FileDiff, FileSummary, Revision};
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -43,6 +48,28 @@ struct Kept {
     conflicts: Vec<String>,
     /// Every changed file, without its hunks
     files: Vec<FileSummary>,
+    /// Whether it is the node's draft, which a capture may still rewrite
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    draft: bool,
+}
+
+/// A node's latest revision, and the version its row was read at, which a draft's rewrite is
+/// written over
+#[derive(Debug, Clone)]
+pub(super) struct Latest {
+    /// The revision
+    pub revision: Revision,
+    /// The version of its row
+    pub version: u64,
+}
+
+/// What a capture's revision is written as
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Slot {
+    /// A new revision, under a number no row has
+    New,
+    /// Over the node's draft, its row at the version read
+    Over(u64),
 }
 
 impl<B: Backend> Store<B> {
@@ -54,12 +81,52 @@ impl<B: Backend> Store<B> {
     #[instrument(name = "Store::revisions", skip_all, err(Debug))]
     pub async fn revisions(&self, node: &NodeName) -> anyhow::Result<Vec<Revision>> {
         // every row of the node's partition, each checked against its full key
+        let read = self.revision_rows(node).await?;
+        Ok(read.into_iter().map(|latest| latest.revision).collect())
+    }
+
+    /// Lists a node's sealed revisions, oldest first, which comments name and follow: every
+    /// revision but a draft
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub(super) async fn sealed_revisions(&self, node: &NodeName) -> anyhow::Result<Vec<Revision>> {
+        // a draft's lines change under it, so no comment goes on them
+        let mut revisions = self.revisions(node).await?;
+        revisions.retain(|revision| !revision.draft);
+        Ok(revisions)
+    }
+
+    /// Gets a node's latest revision, and the version its row was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub(super) async fn latest_revision(&self, node: &NodeName) -> anyhow::Result<Option<Latest>> {
+        // the partition sorts by number, so the last row is the latest
+        Ok(self.revision_rows(node).await?.pop())
+    }
+
+    /// Reads every revision row of a node's partition, oldest first, with its version
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    async fn revision_rows(&self, node: &NodeName) -> anyhow::Result<Vec<Latest>> {
+        // every row, each checked against its full key
         let key = node_key(node);
         let rows = self
             .backend
             .revisions(&node.plan.project, &key, None)
             .await?;
-        rows.into_iter().map(|row| revision(node, row)).collect()
+        rows.into_iter()
+            .map(|row| {
+                let version = row.version;
+                let revision = revision(node, row)?;
+                Ok(Latest { revision, version })
+            })
+            .collect()
     }
 
     /// Gets one of a node's revisions, if it has one of that number
@@ -146,30 +213,29 @@ impl<B: Backend> Store<B> {
 
     /// Keeps one capture as a node's revision of a number: its files' rows, then its own
     ///
-    /// The caller holds the node's project's work lock, and has found the number free.
+    /// The caller holds the node's project's work lock, and has found the number free, or the
+    /// node's draft under it.
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
     /// * `number` - The revision's number
+    /// * `slot` - Whether it is new, or written over the node's draft
     /// * `at` - When it was stored, in milliseconds since the epoch
-    /// * `shas` - What the capture read
-    /// * `conflicts` - The files that conflicted carrying the start forward
-    /// * `files` - Every changed file, its hunks and all
+    /// * `add` - The capture: what it read, its conflicts, its files and whether it is a draft
     pub(super) async fn keep_revision(
         &self,
         node: &NodeName,
         number: u32,
+        slot: Slot,
         at: u64,
-        shas: CaptureShas,
-        conflicts: Vec<String>,
-        files: Vec<FileDiff>,
+        add: AddCapture,
     ) -> anyhow::Result<Revision> {
         // each file as its row, and as the revision lists it
         let key = node_key(node);
-        let mut rows = Vec::with_capacity(files.len());
-        let mut listed = Vec::with_capacity(files.len());
-        for file in files {
+        let mut rows = Vec::with_capacity(add.files.len());
+        let mut listed = Vec::with_capacity(add.files.len());
+        for file in add.files {
             let (row, summary) = file_row(node, &key, number, file)?;
             rows.push(row);
             listed.push(summary);
@@ -181,20 +247,75 @@ impl<B: Backend> Store<B> {
         // then the revision itself, once
         let kept = Kept {
             at,
-            shas,
-            conflicts,
+            shas: add.shas,
+            conflicts: add.conflicts,
             files: listed,
+            draft: add.draft,
+        };
+        self.write_kept(node, number, slot, kept).await
+    }
+
+    /// Seals a node's draft as it is, with the SHAs of the capture that sealed it: its row
+    /// alone, since its files are the ones it lists already
+    ///
+    /// The caller holds the node's project's work lock, and has read the draft as the latest.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `latest` - The node's draft, and the version its row was read at
+    /// * `at` - When it was sealed, in milliseconds since the epoch
+    /// * `shas` - What the sealing capture read
+    pub(super) async fn seal_revision(
+        &self,
+        node: &NodeName,
+        latest: Latest,
+        at: u64,
+        shas: CaptureShas,
+    ) -> anyhow::Result<Revision> {
+        // the draft's files and conflicts, which the same base and tree give again
+        let Latest { revision, version } = latest;
+        let kept = Kept {
+            at,
+            shas,
+            conflicts: revision.conflicts,
+            files: revision.files,
+            draft: false,
+        };
+        self.write_kept(node, revision.revision, Slot::Over(version), kept)
+            .await
+    }
+
+    /// Writes a revision's row: under a number no row has, or over a draft's at the version read
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    /// * `number` - The revision's number
+    /// * `slot` - Whether it is new, or written over the node's draft
+    /// * `kept` - The revision but its node and number
+    async fn write_kept(
+        &self,
+        node: &NodeName,
+        number: u32,
+        slot: Slot,
+        kept: Kept,
+    ) -> anyhow::Result<Revision> {
+        // a new row is the first of its number, and a draft's rewrite the next of its versions
+        let (version, expect) = match slot {
+            Slot::New => (1, Expect::Absent),
+            Slot::Over(read) => (read + 1, Expect::Version(read)),
         };
         let row = RevisionRow {
             project: node.plan.project.clone(),
-            node: key,
+            node: node_key(node),
             revision: sort_key(number),
-            version: 1,
+            version,
             record: serde_json::to_string(&kept)?,
         };
-        match self.backend.write_revision(row, Expect::Absent).await? {
+        match self.backend.write_revision(row, expect).await? {
             Written::Applied => Ok(revised(node, number, kept)),
-            // under the lock, only a writer in another process could have taken the number
+            // under the lock, only a writer in another process could have written the number
             Written::Refused(refusal) => anyhow::bail!(
                 "revision {number} of `{node}` wasn't kept, since another writer stored one under \
                  its number meanwhile: {}",
@@ -297,6 +418,7 @@ fn revised(node: &NodeName, number: u32, kept: Kept) -> Revision {
         shas: kept.shas,
         conflicts: kept.conflicts,
         files: kept.files,
+        draft: kept.draft,
     }
 }
 

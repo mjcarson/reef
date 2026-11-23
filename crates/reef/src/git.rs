@@ -157,6 +157,24 @@ impl Checkout {
         Ok(self.root.clone())
     }
 
+    /// Whether a rebase is under way in this worktree, which runs post-commit for each pick
+    /// with HEAD half built
+    ///
+    /// It is read from the worktree's own git dir, where git keeps `rebase-merge` or
+    /// `rebase-apply` while it rebases, so a linked worktree's rebase is its own. A mailbox
+    /// `git am` applies is no rebase.
+    pub fn rebasing(&self) -> bool {
+        // gix reads the markers git's own prompt reads
+        matches!(
+            self.repo.state(),
+            Some(
+                gix::state::InProgress::Rebase
+                    | gix::state::InProgress::RebaseInteractive
+                    | gix::state::InProgress::ApplyMailboxRebase
+            )
+        )
+    }
+
     /// The commit HEAD is at, or `None` in a repo with no commit yet
     pub fn head(&self) -> anyhow::Result<Option<String>> {
         // an unborn HEAD names a branch with no commit
