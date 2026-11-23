@@ -1267,6 +1267,46 @@ def c45_a_loop_started_from_the_app_streams_its_transcript(page):
         stop_runner(process)
 
 
+def c46_a_question_is_answered_in_the_app(page):
+    """C46: a session's question shows with its choices, a pick is sent once each question has one,
+    and the session carries on with it; an answer in the user's own words goes the same way."""
+    reef("plan", "new", "asks")
+    put("asks", node_yaml("Q1", "Q1 The first question"))
+    put("asks", node_yaml("Q2", "Q2 The second question"))
+    process = runner("asks", "question")
+    try:
+        open_sessions(page, "asks")
+        page.click(".reef-app-runner.picked button[data-act=start]")
+        card = ".reef-app-question[data-prompt=ask-Q1]"
+        page.wait_for_selector(card, timeout=20000)
+        choices = page.locator(f"{card} [data-choice]").evaluate_all("els => els.map(e => e.dataset.choice)")
+        legend = page.inner_text(f"{card} legend")
+        waits = page.is_disabled(f"{card} button[data-act=answer]")
+        page.screenshot(path=str(SHOTS / "reef-app-question.png"))
+        # a pick, then the answer
+        page.click(f"{card} [data-choice=Hi]")
+        ready = page.is_enabled(f"{card} button[data-act=answer]")
+        page.click(f"{card} button[data-act=answer]")
+        page.wait_for_function("() => document.querySelector('.reef-app-transcript').innerText"
+                               ".includes('You picked Hi.')", timeout=20000)
+        # Q2's question, answered in the user's own words
+        card = ".reef-app-question[data-prompt=ask-Q2]"
+        page.wait_for_selector(card, timeout=20000)
+        page.fill(f"{card} .reef-app-own", "Howdy")
+        page.click(f"{card} button[data-act=answer]")
+        page.wait_for_function("() => document.querySelector('.reef-app-transcript').innerText"
+                               ".includes('You picked Howdy.')", timeout=20000)
+        said = page.inner_text(".reef-app-transcript")
+        check("C46 a question is answered in the app, and the session carries on",
+              choices == ["Hello", "Hi"] and "Greeting" in legend and "Which greeting for Q1?" in legend
+              and waits and ready and "status: done" in reef("node", "get", "Q1", "--plan", "asks")
+              and "Answered: Which greeting for Q1? → Hi" in said,
+              {"choices": choices, "legend": legend, "answer waits for a pick": waits, "then ready": ready,
+               "said": said[-500:]})
+    finally:
+        stop_runner(process)
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -1320,6 +1360,7 @@ def main():
                 c73_a_review_holds_comments_until_submitted,
                 c56_drafts_in_the_sidebar,
                 c45_a_loop_started_from_the_app_streams_its_transcript,
+                c46_a_question_is_answered_in_the_app,
             ]
             for step in checks:
                 # every check, or those `--only` names

@@ -314,3 +314,9 @@ the session waits on ([C45](../milestones/m9.md)).
   its loop allows. A terminal's loops are listed to read, since only their own pane drives them.
 - **Each prompt a card.** A tool's permission shows its input, to allow or to deny with what
   Claude is told. A reply box shows while Claude's turn has ended mid-node.
+- **A question as Claude asked it** ([C46](../milestones/m9.md)). Each of Claude's questions shows with
+  its header and choices, radio buttons or checkboxes as it allows, and a box for an answer in
+  the user's own words, which wins over a pick. *Answer* waits until every question has one,
+  and sends each keyed by its question's text, several picks joined by `, ` in the order
+  offered, as Claude Code's own dialog sends them. *Don't answer* tells Claude the user chose
+  not to. The transcript keeps each question with its choices, and the answer given.

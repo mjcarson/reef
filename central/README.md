@@ -364,7 +364,8 @@ the pages and the JSON API alike.
   prompts waiting. It lists each runner, its state and its loop's node, with buttons that start,
   pause and stop the loop, and a terminal's loops to read. The picked runner's transcript follows
   the project's stream, and each prompt it waits on is a card to answer, beside a box for a
-  reply when Claude's turn ends mid-node.
+  reply when Claude's turn ends mid-node. A question's card offers its choices and a box for the
+  user's own words.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under

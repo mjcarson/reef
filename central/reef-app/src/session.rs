@@ -9,6 +9,8 @@
 //! - **A transcript is read after what it holds.** Each read asks for the entries after those
 //!   held, and follows the end as they come.
 //! - **Each prompt a card.** A tool's permission is allowed, or denied with what Claude is told.
+//!   A question shows each of Claude's questions with its choices, one or several picked, or an
+//!   answer in the user's own words, sent as Claude Code's own dialog sends them.
 //! - **A runner's loop is started, paused and stopped here,** as `reef loop start`, `pause` and
 //!   `stop` do a terminal's. A terminal's loops are listed beside, to read.
 
@@ -17,9 +19,10 @@ use crate::canvas::dom::{self, El};
 use crate::live::use_session_changes;
 use dioxus::prelude::*;
 use reef_api::{
-    Answer, Entry, EntryKind, Loop, LoopEdited, LoopState, Prompt, PromptKind, Session, SessionAct,
-    SessionActed, SessionState,
+    Answer, Entry, EntryKind, Loop, LoopEdited, LoopState, Prompt, PromptKind, Question, Session,
+    SessionAct, SessionActed, SessionState,
 };
+use std::collections::BTreeMap;
 
 /// A project's runners as the page reads them, shared through context with the bar and the panel
 #[derive(Clone, Copy)]
@@ -506,8 +509,18 @@ fn entry_body(kind: &EntryKind) -> Element {
                 pre { "{text}" }
             }
         },
-        EntryKind::Asked { prompt } => rsx! {
-            "Asked: {prompt_line(prompt)}"
+        EntryKind::Asked { prompt } => match &prompt.kind {
+            // a question shows its choices beside it
+            PromptKind::Question { questions } => rsx! {
+                "Asked:"
+                for question in questions.iter() {
+                    div { class: "reef-app-entry-question",
+                        "{question.question} "
+                        span { class: "reef-app-muted", "({choices_line(question)})" }
+                    }
+                }
+            },
+            _ => rsx! { "Asked: {prompt_line(prompt)}" },
         },
         EntryKind::Answered { answer, .. } => rsx! { "Answered: {answer.describe()}" },
         EntryKind::Session { id, mode } => rsx! {
@@ -523,6 +536,21 @@ fn entry_body(kind: &EntryKind) -> Element {
     }
 }
 
+/// A question's choices in a line, their labels between dots
+///
+/// # Arguments
+///
+/// * `question` - The question
+fn choices_line(question: &Question) -> String {
+    // each label in the order offered
+    let labels: Vec<&str> = question
+        .options
+        .iter()
+        .map(|choice| choice.label.as_str())
+        .collect();
+    labels.join(" · ")
+}
+
 /// A prompt's card: what it asks, and the buttons that answer it
 ///
 /// # Arguments
@@ -531,8 +559,196 @@ fn entry_body(kind: &EntryKind) -> Element {
 /// * `prompt` - The prompt
 #[component]
 fn PromptCard(session: String, prompt: Prompt) -> Element {
+    match prompt.kind.clone() {
+        // a question, answered by its choices or the user's own words
+        PromptKind::Question { questions } => rsx! {
+            QuestionCard { session, prompt, questions }
+        },
+        // anything else, allowed or denied
+        _ => rsx! {
+            AllowCard { session, prompt }
+        },
+    }
+}
+
+/// The answers a question card sends, each question's own words, else its labels picked in the
+/// order offered and joined by `, ` as Claude Code's own dialog joins them, or `None` while any
+/// question has neither
+///
+/// # Arguments
+///
+/// * `questions` - The questions
+/// * `picks` - Each question's labels picked, by its place
+/// * `own` - Each question's answer in the user's own words, by its place
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::{Choice, Question};
+/// use reef_app::session::answers_of;
+///
+/// let choice = |label: &str| Choice { label: label.to_string(), description: String::new() };
+/// let question = Question {
+///     question: "Which?".to_string(),
+///     header: String::new(),
+///     options: vec![choice("A"), choice("B")],
+///     multi_select: true,
+/// };
+/// let picked = vec![vec!["B".to_string(), "A".to_string()]];
+/// let answers = answers_of(&[question.clone()], &picked, &[String::new()]).unwrap();
+/// assert_eq!(answers["Which?"], "A, B");
+/// assert!(answers_of(&[question], &[Vec::new()], &[" ".to_string()]).is_none());
+/// ```
+pub fn answers_of(
+    questions: &[Question],
+    picks: &[Vec<String>],
+    own: &[String],
+) -> Option<BTreeMap<String, String>> {
+    // each question answered by the user's own words, else by what was picked
+    questions
+        .iter()
+        .enumerate()
+        .map(|(k, question)| {
+            let words = own.get(k).map(|words| words.trim()).unwrap_or_default();
+            let picked: Vec<&str> = question
+                .options
+                .iter()
+                .map(|choice| choice.label.as_str())
+                .filter(|label| {
+                    picks
+                        .get(k)
+                        .is_some_and(|picked| picked.iter().any(|p| p == label))
+                })
+                .collect();
+            let answer = match (words.is_empty(), picked.is_empty()) {
+                (false, _) => words.to_string(),
+                (true, false) => picked.join(", "),
+                (true, true) => return None,
+            };
+            Some((question.question.clone(), answer))
+        })
+        .collect()
+}
+
+/// A question's card: each of Claude's questions with its header and choices, one picked or
+/// several, and a box for an answer in the user's own words, sent once each has one
+///
+/// # Arguments
+///
+/// * `session` - The session's id
+/// * `prompt` - The prompt
+/// * `questions` - Its questions
+#[component]
+fn QuestionCard(session: String, prompt: Prompt, questions: Vec<Question>) -> Element {
+    let runners = use_context::<Runners>();
+    // each question's labels picked and own words, by its place, and whether it was sent
+    let count = questions.len();
+    let mut picks = use_signal(|| vec![Vec::<String>::new(); count]);
+    let mut own = use_signal(|| vec![String::new(); count]);
+    let mut sent = use_signal(|| false);
+    let answers = answers_of(&questions, &picks.read(), &own.read());
+    // answered once, each question by its text
+    let send = {
+        let (session, id) = (session.clone(), prompt.id.clone());
+        let answers = answers.clone();
+        move |_| {
+            let Some(answers) = answers.clone() else {
+                return;
+            };
+            sent.set(true);
+            let answer = Answer::Answers { answers };
+            runners.act(
+                session.clone(),
+                SessionAct::Answer {
+                    prompt: id.clone(),
+                    answer,
+                },
+            );
+        }
+    };
+    // or none given, which Claude is told
+    let skip = {
+        let (session, id) = (session.clone(), prompt.id.clone());
+        move |_| {
+            sent.set(true);
+            let answer = Answer::Deny {
+                message: "The user chose not to answer in reef's app.".to_string(),
+            };
+            runners.act(
+                session.clone(),
+                SessionAct::Answer {
+                    prompt: id.clone(),
+                    answer,
+                },
+            );
+        }
+    };
     rsx! {
-        AllowCard { session, prompt }
+        div { class: "reef-app-prompt reef-app-question", "data-prompt": "{prompt.id}",
+            p { class: "reef-app-prompt-head", "Claude asks" }
+            for (k , question) in questions.iter().cloned().enumerate() {
+                fieldset { class: "reef-app-ask", "data-question": "{k}",
+                    legend {
+                        if !question.header.is_empty() {
+                            span { class: "reef-app-tag", "{question.header}" }
+                            " "
+                        }
+                        "{question.question}"
+                    }
+                    for choice in question.options.iter().cloned() {
+                        label { class: "reef-app-choice", "data-choice": "{choice.label}",
+                            input {
+                                r#type: if question.multi_select { "checkbox" } else { "radio" },
+                                name: "{prompt.id}-{k}",
+                                checked: picks.read().get(k).is_some_and(|picked| picked.contains(&choice.label)),
+                                onchange: {
+                                    let (label, multi) = (choice.label.clone(), question.multi_select);
+                                    move |_| {
+                                        let mut picks = picks.write();
+                                        let picked = &mut picks[k];
+                                        // one of a radio's, or a checkbox's toggled
+                                        match (multi, picked.contains(&label)) {
+                                            (false, _) => *picked = vec![label.clone()],
+                                            (true, true) => picked.retain(|p| *p != label),
+                                            (true, false) => picked.push(label.clone()),
+                                        }
+                                    }
+                                },
+                            }
+                            span { class: "reef-app-choice-text",
+                                strong { "{choice.label}" }
+                                if !choice.description.is_empty() {
+                                    span { class: "reef-app-muted", " {choice.description}" }
+                                }
+                            }
+                        }
+                    }
+                    input {
+                        class: "reef-app-own",
+                        r#type: "text",
+                        placeholder: "Or answer in your own words",
+                        value: "{own.read()[k]}",
+                        oninput: move |event| own.write()[k] = event.value(),
+                    }
+                }
+            }
+            div { class: "reef-app-actions",
+                button {
+                    class: "reef-button",
+                    "data-act": "answer",
+                    disabled: answers.is_none() || *sent.read(),
+                    onclick: send,
+                    "Answer"
+                }
+                button {
+                    class: "reef-button",
+                    "data-act": "skip",
+                    disabled: *sent.read(),
+                    onclick: skip,
+                    "Don't answer"
+                }
+            }
+        }
     }
 }
 

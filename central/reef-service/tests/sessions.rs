@@ -658,3 +658,58 @@ async fn an_unknown_session_is_told_so() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// An answer picked in the app reaches the session, which carries on with it: the question
+/// shows with its choices as Claude offered them, the label picked comes back to Claude keyed by
+/// its question, and the node is done before the next is taken
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_picked_in_the_app_reaches_the_session() -> anyhow::Result<()> {
+    let sx = Sx::new("question", &["A", "B"], "question").await?;
+    let (stop, runner) = sx.runner();
+    let session = sx
+        .session_when("the runner to attach", |session| {
+            session.state == SessionState::Idle
+        })
+        .await?;
+    sx.act(&session, SessionAct::Start).await?;
+    // A's question, its header and choices as Claude offered them
+    let is_question = |prompt: &Prompt| matches!(prompt.kind, PromptKind::Question { .. });
+    let (session, prompt) = sx.prompt_when("A's question", is_question).await?;
+    let PromptKind::Question { questions } = &prompt.kind else {
+        unreachable!("found by its kind");
+    };
+    assert_eq!(questions.len(), 1);
+    assert_eq!(questions[0].question, "Which greeting for A?");
+    assert_eq!(questions[0].header, "Greeting");
+    let labels: Vec<&str> = questions[0]
+        .options
+        .iter()
+        .map(|choice| choice.label.as_str())
+        .collect();
+    assert_eq!(labels, ["Hello", "Hi"]);
+    assert!(!questions[0].multi_select);
+    // the app's pick, as its question card sends it
+    let answers =
+        std::collections::BTreeMap::from([("Which greeting for A?".to_string(), "Hi".to_string())]);
+    let picked = SessionAct::Answer {
+        prompt: prompt.id.clone(),
+        answer: Answer::Answers { answers },
+    };
+    let acted = sx.act(&session, picked).await?;
+    assert!(matches!(acted, SessionActed::Ordered { .. }), "{acted:?}");
+    // the session carried on with it: A done, and B's question next, in a fresh session
+    sx.prompt_when("B's question", |prompt| prompt.id == "ask-B")
+        .await?;
+    assert!(sx.done("A").await?);
+    let transcript = sx.transcript().await?;
+    let said = texts(&transcript);
+    assert!(said.contains(&"You picked Hi.".to_string()), "{said:#?}");
+    let answered = transcript.entries.iter().any(|entry| {
+        matches!(&entry.kind, EntryKind::Answered { prompt, answer: Answer::Answers { answers } }
+            if prompt == "ask-A" && answers["Which greeting for A?"] == "Hi")
+    });
+    assert!(answered, "the answer is in the transcript");
+    let _ = stop.send(());
+    runner.await??;
+    Ok(())
+}

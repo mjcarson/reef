@@ -180,6 +180,12 @@ code { font-size: 0.92em; }
 .reef-app-prompt-head { margin: 0; font-weight: 600; }
 .reef-app-prompt-input { margin: 0; max-height: 14rem; overflow: auto; font-size: 0.75rem; background: var(--panel); padding: 0.3rem; border-radius: 4px; }
 .reef-app-prompt .reef-app-actions { margin: 0; }
+.reef-app-ask { margin: 0; padding: 0.35rem 0.5rem; border: 1px solid var(--line); border-radius: 6px; display: grid; gap: 0.25rem; }
+.reef-app-ask legend { padding: 0 0.2rem; font-weight: 600; }
+.reef-app-choice { display: flex; gap: 0.4rem; align-items: baseline; cursor: pointer; }
+.reef-app-choice-text { overflow-wrap: anywhere; }
+.reef-app-own { font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 0.2rem 0.35rem; }
+.reef-app-entry-question { margin-left: 0.6rem; }
 "#;
 
 /// The app's pages, by path
