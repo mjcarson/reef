@@ -1,11 +1,13 @@
 //! reef's commands for the terminal loop: which pane feeds a project, and whether it is paused
 //!
 //! ```text
-//! reef loop start [--plan NAME] [--pane KEY] [--session ID]   # start, resume or move on the loop
-//! reef loop pause [--pane KEY]                                 # stop once its node is done
-//! reef loop stop [--pane KEY]                                  # end it, letting go of its node
-//! reef loop ls                                                 # the project's loops
-//! reef hook session-start [--pane KEY]                         # Claude Code's SessionStart hook
+//! reef loop start [--plan NAME] [--pane KEY] [--session ID] [--width N] [--no-open]
+//!                                                   # start, resume or move on the loop
+//! reef loop pause [--pane KEY]                      # stop once its node is done
+//! reef loop stop [--pane KEY]                       # end it, letting go of its node
+//! reef loop ls                                      # the project's loops
+//! reef loop attach [ID] [--pane KEY]                # work a group's member in this session
+//! reef hook session-start [--pane KEY]              # Claude Code's SessionStart hook
 //! ```
 //!
 //! - **A loop is its pane's.** Every `/clear` starts a new session with a new id, so a loop is
@@ -22,6 +24,13 @@
 //!   loop's node, or once the injector stepped aside, a start in the session's own pane hands off
 //!   as Stop did: in zellij or tmux it starts the injector, and elsewhere it says `/clear`, then
 //!   `next`. A start naming a pane types nothing into it, since its session isn't known.
+//! - **As wide as it is started.** `--width N` has a loop take up to N ready nodes at once, its
+//!   own session working the first, and each other one, a member, worked by a session of its
+//!   own in its own worktree. reef opens their panes in zellij or tmux unless `--no-open` says
+//!   not to ([`crate::open`]).
+//! - **An open session can work a member.** `! reef loop attach [ID]` in a session with no loop
+//!   of its own makes the member's worktree, starts the node there, joins the pane to it, and
+//!   tells Claude to enter that worktree with EnterWorktree before it takes the node.
 
 use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
 use reef_model::NodeName;
@@ -33,6 +42,7 @@ use crate::clear::{self, Clear};
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
 use crate::task::{self, Ending};
+use crate::worktree;
 
 /// The pane a loop command works on, and the session running there if it is this one
 pub struct Here {
@@ -123,6 +133,17 @@ pub fn server_pane<F: Fn(&str) -> Option<String>>(var: F, parent: u32) -> Option
     (parent > 1).then_some(Pane::Claude { pid: parent })
 }
 
+/// What a start asks of a pane's loop beyond the project it feeds
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Starts {
+    /// The session feeding it, named on the command line
+    pub session: Option<String>,
+    /// How many nodes it works at once, or `None` to keep its width, one for a new loop
+    pub width: Option<u8>,
+    /// Whether reef opens its members' panes, or `None` to keep what it does
+    pub opens: Option<bool>,
+}
+
 /// What Claude Code's SessionStart hook is handed on standard input, the parts reef reads
 #[derive(Debug, Deserialize)]
 struct SessionStarted {
@@ -141,7 +162,7 @@ struct SessionStarted {
 /// * `client` - The service's client
 /// * `cwd` - The working directory, which picks the project
 /// * `here` - The pane, and the session and Claude Code process running in it if known
-/// * `session` - The session feeding it, named on the command line
+/// * `starts` - The session named, the width and whether it opens its members' panes
 /// * `pick` - The project and plan named, if they were
 /// * `spawn` - Starts the injector in the background, as [`crate::clear::spawn`] does
 /// * `out` - Where to print what came of it
@@ -149,7 +170,7 @@ pub async fn start<W, S>(
     client: &Client,
     cwd: &Path,
     here: &Here,
-    session: Option<&str>,
+    starts: &Starts,
     pick: &PlanPick,
     spawn: S,
     out: &mut W,
@@ -160,32 +181,47 @@ where
 {
     // the project the working directory belongs to, and a plan only if one was named
     let project = cli::picked(client, cwd, &pick.project).await?;
+    if starts.width == Some(0) {
+        anyhow::bail!("a loop works at least one node at a time: `--width` takes 1 or more");
+    }
     let edit = LoopEdit::Start {
         project: project.name.clone(),
         plan: pick.plan.clone(),
-        session: session.map(str::to_string).or(here.session.clone()),
+        session: starts.session.clone().or(here.session.clone()),
+        width: starts.width,
+        opens: starts.opens,
+        pid: here.pid,
     };
     match edited(client, &here.pane, edit).await? {
         LoopEdited::Started { r#loop } => {
             writeln!(
                 out,
-                "started a loop in {}, feeding it {}",
+                "started a loop in {}, feeding it {}{}",
                 r#loop.pane.describe(),
-                feeds(&r#loop)
+                feeds(&r#loop),
+                wide(&r#loop)
             )?;
             Ok(())
         }
         LoopEdited::Resumed { r#loop } => {
             writeln!(
                 out,
-                "the loop in {} is running, feeding it {}{}",
+                "the loop in {} is running, feeding it {}{}{}",
                 r#loop.pane.describe(),
                 feeds(&r#loop),
+                wide(&r#loop),
                 holding(&r#loop)
             )?;
             // between nodes, it moves on as the Stop that ended its node would have
             move_on(client, &r#loop, here, spawn, out).await
         }
+        // a pane working another loop's member runs that session, not a loop
+        LoopEdited::Busy { r#loop } if r#loop.pane != here.pane => anyhow::bail!(
+            "{} works a member of the group of the loop in {}: a loop starts in a pane of its \
+             own",
+            here.pane.describe(),
+            r#loop.pane.describe()
+        ),
         LoopEdited::Busy { r#loop } => anyhow::bail!(
             "{} has a loop already, feeding it {}: `reef loop stop` ends it first",
             r#loop.pane.describe(),
@@ -252,6 +288,66 @@ where
         here.pid,
         spawn,
     )
+}
+
+/// Works a member of a loop's group in the session this runs in: makes the member's worktree,
+/// starts the node there, joins the pane to it, and tells Claude to enter it
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, in a checkout of the project's repo
+/// * `here` - The pane, which must run no loop of its own
+/// * `id` - The member's id, else the first member no session has joined
+/// * `pick` - The project named, if one was
+/// * `out` - Where to print what came of it
+pub async fn attach<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    here: &Here,
+    id: Option<&str>,
+    pick: &Pick,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the project, and the member named or the first waiting for a session
+    let project = cli::picked(client, cwd, pick).await?;
+    let loops = client.project_loops(&project.name).await?;
+    let mut members = loops
+        .iter()
+        .flat_map(|feeding| feeding.members.iter().map(move |member| (feeding, member)));
+    let found = match id {
+        Some(id) => members.find(|(_, member)| member.node.id == id),
+        None => members.find(|(_, member)| member.pane.is_none()),
+    };
+    let Some((by, member)) = found else {
+        match id {
+            Some(id) => anyhow::bail!(
+                "no loop of `{}` holds `{id}` as a member of its group: `reef loop ls` lists \
+                 each loop's members",
+                project.name
+            ),
+            None => anyhow::bail!(
+                "no member of a loop of `{}` waits for a session: `reef loop ls` lists each \
+                 loop's members",
+                project.name
+            ),
+        }
+    };
+    // its worktree, made from this checkout, with the node started and this pane joined
+    let node = member.node.clone();
+    let by = by.pane.clone();
+    let made = worktree::for_node(client, cwd, &node, Some(&here.pane), out).await?;
+    writeln!(
+        out,
+        "\n`{node}` is this session's, a member of the group of the loop in {}, in {} on \
+         `{}`. Enter that worktree with EnterWorktree (path: {}), then take the node with \
+         next_task and plan it as the reef skill's loop says. Work it there and nothing else.",
+        by.describe(),
+        made.path.display(),
+        made.branch,
+        made.path.display()
+    )?;
+    Ok(())
 }
 
 /// Pauses a pane's loop, so it stops once the node it is on is done
@@ -359,11 +455,13 @@ pub async fn ls<W: Write>(
 /// * `client` - The service's client
 /// * `input` - What the hook was handed on standard input
 /// * `pane` - The pane the session runs in
+/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
 /// * `out` - Where the hook's output goes
 pub async fn session_start<W: Write>(
     client: &Client,
     input: &str,
     pane: &Pane,
+    pid: Option<u32>,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the session that started
@@ -372,14 +470,13 @@ pub async fn session_start<W: Write>(
     })?;
     let edit = LoopEdit::Session {
         session: started.session_id,
+        pid,
     };
     let feeding = match edited(client, pane, edit).await? {
         // handed over, or no loop to hand: either way the session goes on
         LoopEdited::Edited { r#loop } => r#loop,
-        LoopEdited::NoLoop { .. } => {
-            out.flush()?;
-            return Ok(());
-        }
+        // a pane with no loop of its own may work a group's member, which it is told of
+        LoopEdited::NoLoop { .. } => return member_started(client, pane, out).await,
         other => return unexpected(pane, other),
     };
     // only a clear between nodes is told what is next, never a plan approval's mid-node
@@ -403,6 +500,40 @@ pub async fn session_start<W: Write>(
          the user says next, or asks for the next node, take it with reef's next_task tool \
          (`mcp__reef__next_task`, or `reef loop take` where reef's tools aren't served), then \
          plan it in plan mode as the reef skill's loop says."
+    );
+    let said = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context,
+        }
+    });
+    writeln!(out, "{said}")?;
+    Ok(())
+}
+
+/// Tells a session that started in a pane working a group's member which node it works, so the
+/// user's `next` takes it; a pane working none is told nothing
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `pane` - The pane the session runs in
+/// * `out` - Where the hook's output goes
+async fn member_started<W: Write>(client: &Client, pane: &Pane, out: &mut W) -> anyhow::Result<()> {
+    // the member this pane joined, if it joined one
+    let loops = client.loops().await?;
+    let Some((by, member)) = reef_api::loops::member_of(&loops, pane) else {
+        out.flush()?;
+        return Ok(());
+    };
+    // added to the session's context, as Claude Code reads a SessionStart's JSON
+    let context = format!(
+        "This session works `{}`, a member of the group of reef's loop in {}, in a worktree of \
+         its own. When the user says next, or asks for its node, take it with reef's next_task \
+         tool (`mcp__reef__next_task`, or `reef loop take` where reef's tools aren't served), \
+         then plan it in plan mode as the reef skill's loop says.",
+        member.node,
+        by.pane.describe()
     );
     let said = serde_json::json!({
         "hookSpecificOutput": {
@@ -440,6 +571,10 @@ pub async fn session_start<W: Write>(
 ///     state: LoopState::Running,
 ///     version: 5,
 ///     started_at: 1,
+///     width: 1,
+///     opens: true,
+///     pid: None,
+///     members: Vec::new(),
 /// };
 /// assert_eq!(between(&feeding), node);
 /// // mid-node, its node's end not acted on yet, it isn't
@@ -499,6 +634,18 @@ fn feeds(feeding: &Loop) -> String {
     }
 }
 
+/// How many nodes a loop works at once, as a clause after what it feeds, or nothing for one
+///
+/// # Arguments
+///
+/// * `feeding` - The loop
+fn wide(feeding: &Loop) -> String {
+    match feeding.width {
+        0 | 1 => String::new(),
+        width => format!(", {width} nodes at once"),
+    }
+}
+
 /// The node a loop holds, as a clause after it, or nothing
 ///
 /// # Arguments
@@ -527,6 +674,20 @@ fn listed(feeding: &Loop) -> String {
         Some(node) => format!("on `{node}`"),
         None => "on no node".to_string(),
     });
+    if feeding.width > 1 {
+        let opens = match feeding.opens {
+            true => "",
+            false => ", opening no panes",
+        };
+        parts.push(format!("{} at once{opens}", feeding.width));
+    }
+    // each member of its group, and the session working it if one is
+    for member in &feeding.members {
+        parts.push(match &member.pane {
+            Some(pane) => format!("with `{}` in {pane}", member.node),
+            None => format!("with `{}` waiting for a session", member.node),
+        });
+    }
     if let Some(acted) = &feeding.acted {
         parts.push(format!("acted on `{acted}`'s end"));
     }
@@ -659,6 +820,10 @@ mod tests {
             state: LoopState::Paused,
             version: 3,
             started_at: 1,
+            width: 1,
+            opens: true,
+            pid: None,
+            members: Vec::new(),
         };
         assert_eq!(
             listed(&paused),
@@ -677,6 +842,29 @@ mod tests {
         assert_eq!(
             listed(&running),
             "running, feeding every plan of `reef`, on no node"
+        );
+        // a group, one member joined and one waiting, from a loop that opens no panes
+        let grouped = Loop {
+            width: 3,
+            opens: false,
+            node: Some("reef/central/C40".parse().unwrap()),
+            members: vec![
+                reef_api::Member {
+                    node: "reef/central/C41".parse().unwrap(),
+                    pane: Some(Pane::Claude { pid: 9 }),
+                },
+                reef_api::Member {
+                    node: "reef/central/C42".parse().unwrap(),
+                    pane: None,
+                },
+            ],
+            ..running
+        };
+        assert_eq!(
+            listed(&grouped),
+            "running, feeding every plan of `reef`, on `reef/central/C40`, 3 at once, opening \
+             no panes, with `reef/central/C41` in claude:9, with `reef/central/C42` waiting for \
+             a session"
         );
     }
 }

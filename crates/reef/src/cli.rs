@@ -25,17 +25,20 @@
 //! reef [--conf PATH] queue move <ID> (--top | --bottom | --before ID | --after ID) [--project NAME] [--plan NAME]
 //! reef [--conf PATH] queue rm <ID>... [--project NAME] [--plan NAME]
 //! reef [--conf PATH] queue ls [--project NAME]
-//! reef [--conf PATH] loop start [--plan NAME] [--pane KEY] [--session ID] [--project NAME]
+//! reef [--conf PATH] loop start [--plan NAME] [--pane KEY] [--session ID] [--width N] [--no-open] [--project NAME]
 //! reef [--conf PATH] loop pause [--pane KEY]
 //! reef [--conf PATH] loop stop [--pane KEY]
 //! reef [--conf PATH] loop ls [--project NAME]
 //! reef [--conf PATH] loop take [--pane KEY] [--project NAME]
+//! reef [--conf PATH] loop attach [ID] [--pane KEY] [--project NAME]
 //! reef [--conf PATH] hook session-start [--pane KEY]
 //! reef [--conf PATH] hook post-commit
 //! reef [--conf PATH] hook post-rewrite <KIND>
 //! reef [--conf PATH] hook post-tool-use
 //! reef [--conf PATH] hook stop [--pane KEY]
 //! reef [--conf PATH] hook clear --pane KEY --session ID --pid PID --after NODE
+//! reef [--conf PATH] hook worktree-create
+//! reef [--conf PATH] hook worktree-remove
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
@@ -52,7 +55,9 @@
 //! it runs in, zellij's or tmux's or else the Claude Code process that ran it, unless `--pane`
 //! names one, and a loop spans the project's plans unless `--plan` names one. `loop take`, as
 //! the MCP tool next_task, takes the loop's next node and starts it in the working directory's
-//! checkout. The capture hooks work on the node the working directory's worktree is on, and do
+//! checkout, or the next group for a loop `--width` made wider than one. `loop attach` has the
+//! session it runs in work a group's member, in a worktree of its own, and `hook
+//! worktree-create` makes that worktree for `claude -w <id>`. The capture hooks work on the node the working directory's worktree is on, and do
 //! nothing where there is none. `import` picks the project the book is in, and lists the plan
 //! `--plan` names if it isn't listed. `export` picks the project the new book's directory is in.
 //! `skill` writes into the repo that holds its directory, and needs neither reef's config nor
@@ -76,6 +81,7 @@ use crate::import;
 use crate::loops;
 use crate::mcp::{self, Tools};
 use crate::node;
+use crate::open;
 use crate::page;
 use crate::queue;
 use crate::skill;
@@ -403,6 +409,14 @@ pub enum LoopCommand {
         /// The session feeding it, else the one this runs in, if Claude Code ran it
         #[arg(long, value_name = "ID")]
         session: Option<String>,
+        /// How many ready nodes it works at once: its session the first, and each other in a
+        /// session and worktree of its own; else it keeps its width, one for a new loop
+        #[arg(long, value_name = "N")]
+        width: Option<u8>,
+        /// Open no pane for a group's members, leaving each for `claude -w <id>` or `reef loop
+        /// attach`
+        #[arg(long)]
+        no_open: bool,
         /// The one plan to take nodes from, else every plan of the project
         #[command(flatten)]
         pick: PlanPick,
@@ -433,6 +447,19 @@ pub enum LoopCommand {
         #[arg(long, value_name = "KEY")]
         pane: Option<String>,
         /// The project whose node to take, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+    /// Work a member of a loop's group in the session this runs in, typed as `! reef loop
+    /// attach`: its worktree made from this checkout, the node started there and this pane
+    /// joined to it
+    Attach {
+        /// The member's id, else the first member no session has joined
+        id: Option<String>,
+        /// The pane, as `reef loop ls` prints it, else this one
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+        /// The project whose member to work, if not the working directory's
         #[command(flatten)]
         pick: Pick,
     },
@@ -484,6 +511,13 @@ pub enum HookCommand {
         #[arg(long, value_name = "NODE")]
         after: String,
     },
+    /// WorktreeCreate, for `claude -w <name>`: a node's worktree, `.claude/worktrees/<id>` on
+    /// `reef/<id>`, with the node started there, or a plain one for a name that is no node, its
+    /// path printed alone
+    WorktreeCreate,
+    /// WorktreeRemove: a last draft of the node the worktree is on, then the worktree removed,
+    /// never forced, its branch kept
+    WorktreeRemove,
 }
 
 /// What can be done with a plan's comment threads
@@ -790,12 +824,19 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                 LoopCommand::Start {
                     pane,
                     session,
+                    width,
+                    no_open,
                     pick,
                 } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
                     // between nodes, the injector reaches the same service, as Stop's does
                     let spawn = |order: &clear::Clear| clear::spawn(order, named.as_deref());
-                    loops::start(&client, cwd, &here, session.as_deref(), &pick, spawn, out).await
+                    let starts = loops::Starts {
+                        session,
+                        width,
+                        opens: no_open.then_some(false),
+                    };
+                    loops::start(&client, cwd, &here, &starts, &pick, spawn, out).await
                 }
                 LoopCommand::Pause { pane } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
@@ -811,7 +852,11 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                 }
                 LoopCommand::Take { pane, pick } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
-                    task::next_task(&client, cwd, Some(&here.pane), &pick, out).await
+                    task::next_task(&client, cwd, Some(&here.pane), &pick, open::open, out).await
+                }
+                LoopCommand::Attach { id, pane, pick } => {
+                    let here = loops::Here::find(pane.as_deref(), var)?;
+                    loops::attach(&client, cwd, &here, id.as_deref(), &pick, out).await
                 }
             }
         }
@@ -820,7 +865,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let var = |name: &str| std::env::var(name).ok();
             let here = loops::Here::find(pane.as_deref(), var)?;
             let input = stdin()?;
-            loops::session_start(&client, &input, &here.pane, out).await
+            loops::session_start(&client, &input, &here.pane, here.pid, out).await
         }
         Command::Hook(HookCommand::PostCommit) => hook::post_commit(&client, cwd, out).await,
         Command::Hook(HookCommand::PostRewrite { kind }) => {
@@ -862,6 +907,19 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                     .map_err(|error| anyhow::anyhow!("`{after}` names no node: {error}"))?,
             };
             clear::run(&client, &order, &mut std::io::stderr()).await
+        }
+        Command::Hook(HookCommand::WorktreeCreate) => {
+            // the session's pane, which joins the node's member if it is one
+            let var = |name: &str| std::env::var(name).ok();
+            let pane = reef_api::Pane::from_env(var);
+            let input = stdin()?;
+            // Claude Code reads the path from standard output, so the rest goes to standard error
+            let mut said = std::io::stderr();
+            hook::worktree_create(&client, cwd, &input, pane.as_ref(), &mut said, out).await
+        }
+        Command::Hook(HookCommand::WorktreeRemove) => {
+            let input = stdin()?;
+            hook::worktree_remove(&client, &input, out).await
         }
         Command::Mcp { pick } => {
             // the pane the session runs in, its multiplexer's else the Claude Code that started it
@@ -1364,6 +1422,8 @@ mod tests {
             Command::Loop(LoopCommand::Start {
                 pane,
                 session,
+                width,
+                no_open,
                 pick,
             }) => {
                 assert_eq!(
@@ -1371,9 +1431,31 @@ mod tests {
                     (Some("claude:7"), Some("s1"))
                 );
                 assert_eq!(pick.plan.as_deref(), Some("central"));
+                // one at a time, keeping its width, unless it is named
+                assert_eq!((width, no_open), (None, false));
             }
             other => panic!("parsed as {other:?}"),
         }
+        // a start as wide as named, opening no panes when told not to
+        let wide = ["reef", "loop", "start", "--width", "3", "--no-open"];
+        assert!(matches!(
+            Cli::try_parse_from(wide).unwrap().command,
+            Command::Loop(LoopCommand::Start {
+                width: Some(3),
+                no_open: true,
+                ..
+            })
+        ));
+        assert!(Cli::try_parse_from(["reef", "loop", "start", "--width", "x"]).is_err());
+        // attach takes a member's id or none, and a pane or none
+        let attach = Cli::try_parse_from(["reef", "loop", "attach", "C60"]).unwrap();
+        match attach.command {
+            Command::Loop(LoopCommand::Attach { id, pane, .. }) => {
+                assert_eq!((id.as_deref(), pane), (Some("C60"), None));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["reef", "loop", "attach", "--plan", "central"]).is_err());
         // pause and stop take a pane or none, and nothing else
         let pause = Cli::try_parse_from(["reef", "loop", "pause"]).unwrap();
         assert!(matches!(
@@ -1399,6 +1481,15 @@ mod tests {
             hook.command,
             Command::Hook(HookCommand::SessionStart { pane: None })
         ));
+        // the worktree hooks take their input on standard input alone
+        for (event, parsed) in [
+            ("worktree-create", HookCommand::WorktreeCreate),
+            ("worktree-remove", HookCommand::WorktreeRemove),
+        ] {
+            let hook = Cli::try_parse_from(["reef", "hook", event]).unwrap();
+            assert_eq!(format!("{:?}", hook.command), format!("Hook({parsed:?})"));
+            assert!(Cli::try_parse_from(["reef", "hook", event, "x"]).is_err());
+        }
     }
 
     /// git's hooks take what git passes them, and Claude Code's take their input on standard

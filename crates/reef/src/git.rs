@@ -175,6 +175,16 @@ impl Checkout {
         )
     }
 
+    /// Whether HEAD is a merge commit, with more than one parent
+    pub fn head_merges(&self) -> anyhow::Result<bool> {
+        // an unborn HEAD is no commit at all
+        let Some(head) = self.head()? else {
+            return Ok(false);
+        };
+        let commit = self.repo.find_commit(id(&head)?)?;
+        Ok(commit.parent_ids().count() > 1)
+    }
+
     /// The commit HEAD is at, or `None` in a repo with no commit yet
     pub fn head(&self) -> anyhow::Result<Option<String>> {
         // an unborn HEAD names a branch with no commit
@@ -294,6 +304,109 @@ impl Checkout {
             .repo
             .merge_base(id(a)?, id(b)?)?
             .map(|base| base.detach().to_string()))
+    }
+
+    /// Whether one commit is the other, or one of its ancestors
+    ///
+    /// # Arguments
+    ///
+    /// * `ancestor` - The commit that may be an ancestor, its full id
+    /// * `of` - The commit whose history it may be in, its full id
+    pub fn is_ancestor(&self, ancestor: &str, of: &str) -> anyhow::Result<bool> {
+        // a commit is in its own history, and an ancestor is its descendant's merge-base
+        if ancestor == of {
+            return Ok(true);
+        }
+        Ok(self.merge_base(ancestor, of)?.as_deref() == Some(ancestor))
+    }
+
+    /// Adds a linked worktree on a branch, made at a commit if the branch isn't there yet
+    ///
+    /// Through git's CLI, since gix can't add a worktree. Nothing is fetched.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Where the worktree goes, which must not be there yet
+    /// * `branch` - The branch it checks out, by its short name
+    /// * `from` - The commit a new branch is made at
+    pub fn add_worktree(&self, path: &Path, branch: &str, from: &str) -> anyhow::Result<()> {
+        // a branch kept from an earlier worktree is checked out again as it is
+        let add = [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("--quiet"),
+        ];
+        let args: Vec<&OsStr> = match self.has_ref(&format!("refs/heads/{branch}"))? {
+            true => add
+                .into_iter()
+                .chain([path.as_os_str(), OsStr::new(branch)])
+                .collect(),
+            false => add
+                .into_iter()
+                .chain([OsStr::new("-b"), OsStr::new(branch), path.as_os_str()])
+                .chain([OsStr::new(from)])
+                .collect(),
+        };
+        self.git_bytes(args, None)?;
+        Ok(())
+    }
+
+    /// Removes a linked worktree of the repo, keeping its branch
+    ///
+    /// git refuses a worktree with changes it would lose, which is left as it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The worktree's root
+    pub fn remove_worktree(&self, path: &Path) -> anyhow::Result<()> {
+        // never forced, so nothing uncommitted is lost
+        let args = [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            path.as_os_str(),
+        ];
+        self.git_bytes(args, None)?;
+        Ok(())
+    }
+
+    /// Deletes a local branch, as a worktree's start that was refused leaves the one it made
+    ///
+    /// # Arguments
+    ///
+    /// * `branch` - The branch's short name
+    pub fn delete_branch(&self, branch: &str) -> anyhow::Result<()> {
+        self.git(&["branch", "--quiet", "-D", branch], None)?;
+        Ok(())
+    }
+
+    /// Adds a pattern to the repo's own `info/exclude`, which every worktree of it reads, unless
+    /// a line there names it already, and says whether it added it
+    ///
+    /// # Arguments
+    ///
+    /// * `pattern` - The pattern, as an ignore file writes one
+    pub fn exclude(&self, pattern: &str) -> anyhow::Result<bool> {
+        // the common dir's, so one line covers every worktree
+        let info = self.repo.common_dir().join("info");
+        let file = info.join("exclude");
+        let kept = match std::fs::read_to_string(&file) {
+            Ok(kept) => kept,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", file.display())),
+        };
+        if kept.lines().any(|line| line.trim() == pattern) {
+            return Ok(false);
+        }
+        // appended on a line of its own, after whatever the file ends with
+        std::fs::create_dir_all(&info)?;
+        let mut text = kept;
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(pattern);
+        text.push('\n');
+        std::fs::write(&file, text).with_context(|| format!("writing {}", file.display()))?;
+        Ok(true)
     }
 
     /// Reads one trailer off each commit a head reaches and none of the hidden commits do,

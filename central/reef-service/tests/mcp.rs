@@ -270,6 +270,9 @@ async fn next_task_skips_a_waiting_queued_node_and_says_why() -> anyhow::Result<
                 project: "reef".to_string(),
                 plan: None,
                 session: None,
+                width: None,
+                opens: None,
+                pid: None,
             },
         };
         client.edit_loop(&start).await?;

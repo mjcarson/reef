@@ -22,14 +22,17 @@ status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, 
 `reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
 a node's changes in its worktree as a revision and resolves the comments its commits'
 `Reef-Resolves` trailers name, `reef comment resolve`, which resolves one by hand, `reef loop
-start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in, `reef loop
-take`, which takes that loop's next node and starts it, as the MCP tool next_task does, `reef
-hook session-start`, which hands the loop to each session that starts there and names the next
-node to a clear between nodes, `reef hook stop`, which seals a node done and says once what comes
-after the loop's node, `reef hook clear`, which Stop, or a `reef loop start` between nodes,
-starts in the background to type `/clear` and the next node's kickoff into a zellij or tmux pane
-once Claude is idle, and `reef import` and `reef export`, which carry a book's nodes and pages
-in and out. `reef export --replace` writes a plan back over the book it lives in, keeping the
+start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in, `--width`
+setting how many nodes it works at once, `reef loop take`, which takes that loop's next node and
+starts it, as the MCP tool next_task does, or the next group for a loop wider than one, `reef
+loop attach`, which has an open session work a group's member, `reef hook session-start`, which
+hands the loop to each session that starts there and names the next node to a clear between
+nodes, `reef hook stop`, which seals a node done and says once what comes after the loop's node
+or its group, `reef hook clear`, which Stop, or a `reef loop start` between nodes, starts in the
+background to type `/clear` and the next node's kickoff into a zellij or tmux pane once Claude is
+idle, `reef hook worktree-create` and `worktree-remove`, which make a node's worktree for
+`claude -w <id>` with the node started there, and take it away again, and `reef import` and
+`reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes a plan back over the book it lives in, keeping the
 book's files, summary and `book.toml`. They call the address `[api] address` names and say so
 when nothing answers there.
 

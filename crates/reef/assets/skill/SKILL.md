@@ -29,6 +29,7 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   |----|------|---------|
   | Find work | `mcp__reef__next` | `reef next` |
   | Take the loop's next node | `mcp__reef__next_task` | `reef loop take` |
+  | Work a group's member here | | `reef loop attach <ID>` |
   | Read a node's YAML | `mcp__reef__get` | `reef node get <ID>` |
   | Read its body too | | `reef node get <ID> --md` |
   | Check the plan | `mcp__reef__check` | `reef check` |
@@ -63,6 +64,20 @@ The full key reference is in [reference.md](reference.md). Read it before writin
      `! reef loop start` moves on the same way. Either way, the next node starts in a fresh
      context, with next_task again. When a `! reef loop start` says reef clears the context,
      answer it in a line and leave the next node to the fresh context.
+- **A loop started wider than one node works a group** (`! reef loop start --width 2`):
+  - **In the loop's own session,** next_task takes the group. Work only its first node, in this
+    checkout. Each other node of the group, a *member*, gets a session of its own in its own
+    worktree. In zellij or tmux reef opens a pane for each, running `claude -w <ID>`. Elsewhere
+    the user runs that, or `! reef loop attach <ID>` in a Claude session already open.
+  - **In a member's session,** call next_task as above: it returns that member's node, started
+    in its worktree already. After a `! reef loop attach`, first enter the worktree it names with
+    EnterWorktree (its `path`), then call next_task. Work and commit in that worktree only.
+  - **Once a node is done and the rest of its group isn't,** Stop says what the group waits on:
+    end the turn. A member's session can be closed then. The Stop that finds the whole group
+    done clears the loop's own pane, whichever session it ran in.
+  - **After the group's clear, next_task may ask for each member's branch to be merged**
+    (`git merge reef/<ID>`). Merge each into the loop's checkout, resolving any conflict as the
+    repo's own instructions say, then call next_task again for the next group.
 - **Before starting work, read its node** by id with `get`. Read its `needs`, its group, and
   its `docs` page (`reef page get <PATH>`, or the repo's file at that path): they say what the
   work is gated on and how it was meant to be done.

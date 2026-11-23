@@ -8,7 +8,10 @@
 //!
 //! - **One loop a pane.** A pane holds one loop at most, feeding one project, or one plan of it.
 //! - **One loop a node.** A node another loop holds can't be taken, so two sessions never work
-//!   on the same node ([`holder`]).
+//!   on the same node ([`holder`]), a node it holds as a group's member included.
+//! - **A group at once.** A loop wider than one node takes a group of ready nodes: its own
+//!   session works the first, and each other one, a [`Member`], is worked by a session of its
+//!   own in a worktree, which joins it from its own pane ([`LoopEdit::Join`]).
 //! - **Paused after the node it is on.** A paused loop keeps its node, and stops once that node
 //!   is done.
 //! - **The node whose end it acted on** is kept, so the Stop hook acts on each node's end once.
@@ -198,6 +201,44 @@ impl LoopState {
     }
 }
 
+/// A node of a loop's group past the loop's own, worked by a session of its own in a worktree
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    /// The node
+    pub node: NodeName,
+    /// The pane of the session that joined it, if one has
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<Pane>,
+}
+
+/// A loop's width before groups: one node at a time
+fn one() -> u8 {
+    1
+}
+
+/// Whether a loop works one node at a time, so its width needn't be written
+///
+/// # Arguments
+///
+/// * `width` - The loop's width
+fn is_one(width: &u8) -> bool {
+    *width == 1
+}
+
+/// Whether reef opens a pane for each member of a loop's group, unless told not to
+fn yes() -> bool {
+    true
+}
+
+/// Whether a flag is set, so a set one needn't be written
+///
+/// # Arguments
+///
+/// * `flag` - The flag
+fn is_set(flag: &bool) -> bool {
+    *flag
+}
+
 /// One loop: the pane it feeds, the project it feeds it from, and where it is
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Loop {
@@ -223,9 +264,59 @@ pub struct Loop {
     pub version: u64,
     /// When it was started, in milliseconds since the epoch
     pub started_at: u64,
+    /// How many nodes it works at once: its own, and as many members as fit beside it
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub width: u8,
+    /// Whether reef opens a pane for each member in the loop's own zellij or tmux session
+    #[serde(default = "yes", skip_serializing_if = "is_set")]
+    pub opens: bool,
+    /// The Claude Code process its session runs in, `CLAUDE_PID`, so a member's Stop can clear
+    /// its pane
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// The group's nodes past its own, each worked by a session of its own in a worktree
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<Member>,
 }
 
 impl Loop {
+    /// The nodes of its group: its own first, then each member's
+    pub fn group(&self) -> impl Iterator<Item = &NodeName> {
+        // its own, then the members' in the order they were taken
+        self.node
+            .iter()
+            .chain(self.members.iter().map(|member| &member.node))
+    }
+
+    /// Whether it holds a node, as its own or as a member's
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub fn holds(&self, node: &NodeName) -> bool {
+        self.group().any(|held| held == node)
+    }
+
+    /// The member a node is, if it is one of this loop's
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub fn member(&self, node: &NodeName) -> Option<&Member> {
+        self.members.iter().find(|member| member.node == *node)
+    }
+
+    /// The member whose session runs in a pane, if one of this loop's does
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The pane
+    pub fn member_in(&self, pane: &Pane) -> Option<&Member> {
+        self.members
+            .iter()
+            .find(|member| member.pane.as_ref() == Some(pane))
+    }
+
     /// Whether a node is one this loop takes nodes from: its project's, and its plan's if it
     /// names one
     ///
@@ -263,6 +354,10 @@ impl Loop {
     ///     state: LoopState::Running,
     ///     version: 3,
     ///     started_at: 1,
+    ///     width: 1,
+    ///     opens: true,
+    ///     pid: None,
+    ///     members: Vec::new(),
     /// };
     /// let handed = cleared.clone().handed_to("after");
     /// assert_eq!(handed.session.as_deref(), Some("after"));
@@ -290,7 +385,29 @@ impl Loop {
 /// assert!(holder(&[], &node).is_none());
 /// ```
 pub fn holder<'a>(loops: &'a [Loop], node: &NodeName) -> Option<&'a Loop> {
-    loops.iter().find(|held| held.node.as_ref() == Some(node))
+    // its own node, or one of its group's members
+    loops.iter().find(|held| held.holds(node))
+}
+
+/// The loop a pane works a member of, and that member, if it works one
+///
+/// # Arguments
+///
+/// * `loops` - Every loop
+/// * `pane` - The pane
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::loops::{Pane, member_of};
+///
+/// assert!(member_of(&[], &Pane::Claude { pid: 7 }).is_none());
+/// ```
+pub fn member_of<'a>(loops: &'a [Loop], pane: &Pane) -> Option<(&'a Loop, &'a Member)> {
+    // a pane joins one member at a time
+    loops
+        .iter()
+        .find_map(|feeding| feeding.member_in(pane).map(|member| (feeding, member)))
 }
 
 /// One change to a pane's loop
@@ -307,6 +424,16 @@ pub enum LoopEdit {
         /// The session feeding it, if the starter knows
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// How many nodes it works at once, or `None` to keep its width, one for a new loop
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        width: Option<u8>,
+        /// Whether reef opens the members' panes, or `None` to keep what it does, which a new
+        /// loop does
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opens: Option<bool>,
+        /// The Claude Code process its session runs in, if the starter knows
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
     },
     /// Pause it, so it stops once the node it is on is done
     Pause,
@@ -316,12 +443,25 @@ pub enum LoopEdit {
     Session {
         /// The session's id
         session: String,
+        /// The Claude Code process the session runs in, if the hook was told
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
     },
-    /// Take a node, which no other loop may hold, or let go of the one it holds
+    /// Take a node, and a group's members beside it, none of which another loop may hold, or
+    /// let go of everything it holds
     Hold {
         /// The node to take, or `None` to hold none
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<NodeName>,
+        /// The group's other nodes, each to be worked by a session of its own
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        members: Vec<NodeName>,
+    },
+    /// Join the pane, which runs no loop of its own, to the member of whichever loop holds the
+    /// node, moving it off any member it worked before
+    Join {
+        /// The member's node
+        node: NodeName,
     },
     /// Record the node whose end it acted on, unless it acted on that node's end already
     Acted {
@@ -399,11 +539,28 @@ pub enum LoopEdited {
         /// The pane's loop as it stands
         r#loop: Loop,
     },
+    /// The pane joined a member of this loop, or had joined it already
+    Joined {
+        /// The loop whose member it joined, as it now stands
+        r#loop: Loop,
+    },
+    /// No loop holds the node as a member, so the pane joined nothing
+    NotMember {
+        /// The node
+        node: NodeName,
+    },
+    /// The group held is wider than the loop, so nothing was taken
+    TooWide {
+        /// How many nodes the hold named
+        named: usize,
+        /// The pane's loop as it stands
+        r#loop: Loop,
+    },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane, holder};
+    use super::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane, holder, member_of};
     use reef_model::NodeName;
 
     /// Reads an environment out of pairs
@@ -441,6 +598,10 @@ mod tests {
             state: LoopState::Running,
             version: 1,
             started_at: 1,
+            width: 1,
+            opens: true,
+            pid: None,
+            members: Vec::new(),
         }
     }
 
@@ -568,13 +729,79 @@ mod tests {
         );
     }
 
+    /// A loop holds its group's members as its own node, so no other loop takes one, and a pane
+    /// is found working the member it joined
+    #[test]
+    fn a_groups_members_are_held_by_its_loop() {
+        // a loop on C39, with C40 joined from a tmux pane and C41 waiting for a session
+        let node = |id: &str| -> NodeName { format!("reef/central/{id}").parse().unwrap() };
+        let joined = Pane::Tmux {
+            server: "/tmp/t".to_string(),
+            pane: "%5".to_string(),
+        };
+        let wide = Loop {
+            width: 3,
+            members: vec![
+                Member {
+                    node: node("C40"),
+                    pane: Some(joined.clone()),
+                },
+                Member {
+                    node: node("C41"),
+                    pane: None,
+                },
+            ],
+            ..looped(1, Some("C39"))
+        };
+        let loops = [wide.clone(), looped(2, Some("C42"))];
+        // its own node first, then its members, all held by it
+        let group: Vec<String> = wide.group().map(|held| held.id.clone()).collect();
+        assert_eq!(group, ["C39", "C40", "C41"]);
+        for id in ["C39", "C40", "C41"] {
+            assert_eq!(holder(&loops, &node(id)).map(|l| &l.pane), Some(&wide.pane));
+        }
+        // the joined pane works C40, and a pane that joined nothing works none
+        let (by, member) = member_of(&loops, &joined).unwrap();
+        assert_eq!((&by.pane, &member.node), (&wide.pane, &node("C40")));
+        assert!(member_of(&loops, &Pane::Claude { pid: 9 }).is_none());
+        assert!(wide.member(&node("C41")).unwrap().pane.is_none());
+        assert!(wide.member(&node("C39")).is_none());
+    }
+
+    /// A loop written before groups reads as one node wide, opening panes, with no members, and
+    /// one that is one wide writes none of what groups added
+    #[test]
+    fn loops_from_before_groups_read_one_wide() {
+        // a loop as it was written before C60
+        let before = r#"{"pane":{"kind":"claude","pid":7},"project":"reef","state":"running","version":2,"started_at":1}"#;
+        let read: Loop = serde_json::from_str(before).unwrap();
+        assert_eq!(read.width, 1);
+        assert!(read.opens);
+        assert_eq!(read.pid, None);
+        assert!(read.members.is_empty());
+        let value = serde_json::to_value(&read).unwrap();
+        for key in ["width", "opens", "pid", "members"] {
+            assert!(value.get(key).is_none(), "{key} was written");
+        }
+        // and a hold or a session from before reads as one with no members or process
+        let hold: LoopEdit =
+            serde_json::from_str(r#"{"edit":"hold","node":"reef/central/C39"}"#).unwrap();
+        assert!(matches!(hold, LoopEdit::Hold { members, .. } if members.is_empty()));
+        let session: LoopEdit =
+            serde_json::from_str(r#"{"edit":"session","session":"s"}"#).unwrap();
+        assert!(matches!(session, LoopEdit::Session { pid: None, .. }));
+    }
+
     /// Edits and their outcomes are tagged in kebab-case, a loop under its keyword's name
     #[test]
     fn edits_and_outcomes_are_tagged() {
         // an edit names its kind beside what it carries, and the pane its kind
         let edit = EditLoop {
             pane: Pane::Claude { pid: 7 },
-            edit: LoopEdit::Hold { node: None },
+            edit: LoopEdit::Hold {
+                node: None,
+                members: Vec::new(),
+            },
         };
         assert_eq!(
             serde_json::to_string(&edit).unwrap(),
@@ -586,7 +813,10 @@ mod tests {
             LoopEdit::Start {
                 project: "reef".to_string(),
                 plan: None,
-                session: None
+                session: None,
+                width: None,
+                opens: None,
+                pid: None,
             }
         );
         // an outcome carries its loop as `loop`, which reads back

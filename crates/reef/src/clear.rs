@@ -867,6 +867,10 @@ mod tests {
             state: LoopState::Running,
             version: 4,
             started_at: 1,
+            width: 1,
+            opens: true,
+            pid: None,
+            members: Vec::new(),
         }
     }
 

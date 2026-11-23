@@ -42,7 +42,7 @@
 //! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there |
 //! | `POST …/plans/{plan}/comments/{thread}/resolution` | `resolve_thread` | [`Resolved`]: 200, 409 if stale, 422 if no thread starts there or the revision isn't stored |
 //! | `GET /api/v1/loops` | `loops` | every [`Loop`], by pane |
-//! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written, 409 if the pane's loop is busy or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or its plan's |
+//! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written or joined, 409 if the pane's loop is busy or another loop or pane holds the node, 422 if the pane has no loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than the loop |
 //! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //!
@@ -1314,9 +1314,10 @@ async fn project_loops<S: Serves>(
     Ok(Json(loops))
 }
 
-/// Changes a pane's loop: 200 if written, 409 if the pane's loop is busy, another loop holds the
-/// node or the loop acted on the node's end already, 422 if the pane has no loop or the node
-/// isn't the loop's or its plan's
+/// Changes a pane's loop: 200 if written or joined, 409 if the pane's loop is busy, another loop
+/// or pane holds the node or the loop acted on the node's end already, 422 if the pane has no
+/// loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than
+/// the loop
 ///
 /// # Arguments
 ///
@@ -1333,13 +1334,16 @@ async fn edit_loop<S: Serves>(
         LoopEdited::Started { .. }
         | LoopEdited::Resumed { .. }
         | LoopEdited::Edited { .. }
-        | LoopEdited::Stopped { .. } => StatusCode::OK,
+        | LoopEdited::Stopped { .. }
+        | LoopEdited::Joined { .. } => StatusCode::OK,
         LoopEdited::Busy { .. } | LoopEdited::Held { .. } | LoopEdited::ActedAlready { .. } => {
             StatusCode::CONFLICT
         }
-        LoopEdited::NoLoop { .. } | LoopEdited::NotInLoop { .. } | LoopEdited::NotInPlan { .. } => {
-            StatusCode::UNPROCESSABLE_ENTITY
-        }
+        LoopEdited::NoLoop { .. }
+        | LoopEdited::NotInLoop { .. }
+        | LoopEdited::NotInPlan { .. }
+        | LoopEdited::NotMember { .. }
+        | LoopEdited::TooWide { .. } => StatusCode::UNPROCESSABLE_ENTITY,
     };
     Ok((status, Json(edited)))
 }

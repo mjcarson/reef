@@ -11,14 +11,21 @@
 //!   so two Stops never both act on one node.
 //! - **A session takes its pane's loop over.** A clear starts a new session in the same pane,
 //!   and handing it the loop keeps everything else the loop holds ([`Loop::handed_to`]).
+//! - **A group is held as one.** A hold names the loop's own node and the group's members, no
+//!   more than its width, and takes them all or none: one another loop holds is
+//!   [`LoopEdited::Held`]. A new hold replaces the members the last one took.
+//! - **A pane joins a member.** A pane with no loop of its own joins the member of whichever loop
+//!   holds its node ([`LoopEdit::Join`]), moving off any member it joined before, since a pane
+//!   runs one session at a time. A member another pane joined is [`LoopEdited::Held`]. A pane
+//!   working a member starts no loop of its own, and is [`LoopEdited::Busy`].
 //! - **Written by version.** A start writes its row `if_absent`, every other change over the
 //!   version read, and a stop deletes it at that version, so a write from another process
 //!   between the read and the write is caught.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as a loop.
 
-use reef_api::loops::holder;
-use reef_api::{Loop, LoopEdit, LoopEdited, LoopState, Pane};
+use reef_api::loops::{holder, member_of};
+use reef_api::{Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -48,6 +55,46 @@ struct Kept {
     state: LoopState,
     /// When it was started, in milliseconds since the epoch
     started_at: u64,
+    /// How many nodes it works at once
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    width: u8,
+    /// Whether reef opens a pane for each member
+    #[serde(default = "yes", skip_serializing_if = "is_set")]
+    opens: bool,
+    /// The Claude Code process its session runs in, if one was named
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pid: Option<u32>,
+    /// The group's nodes past its own, and the panes that joined them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    members: Vec<Member>,
+}
+
+/// A loop's width in a row written before groups: one node at a time
+fn one() -> u8 {
+    1
+}
+
+/// Whether a loop works one node at a time, so its row needn't say
+///
+/// # Arguments
+///
+/// * `width` - The loop's width
+fn is_one(width: &u8) -> bool {
+    *width == 1
+}
+
+/// Whether reef opens the members' panes, in a row written before groups
+fn yes() -> bool {
+    true
+}
+
+/// Whether a flag is set, so a row needn't say
+///
+/// # Arguments
+///
+/// * `flag` - The flag
+fn is_set(flag: &bool) -> bool {
+    *flag
 }
 
 impl<B: Backend> Store<B> {
@@ -94,11 +141,18 @@ impl<B: Backend> Store<B> {
         let _held = self.loop_lock.lock().await;
         let loops = self.loops().await?;
         let current = loops.iter().find(|read| read.pane == *pane).cloned();
+        // a join is taken by a pane with no loop of its own, to another loop's member
+        if let LoopEdit::Join { node } = edit {
+            return self.join(pane, current, &loops, node).await;
+        }
         // a start is the one change a pane without a loop can take
         let LoopEdit::Start {
             project,
             plan,
             session,
+            width,
+            opens,
+            pid,
         } = edit
         else {
             let Some(current) = current else {
@@ -106,6 +160,12 @@ impl<B: Backend> Store<B> {
             };
             return self.change(current, &loops, edit).await;
         };
+        // a pane working another loop's member starts no loop of its own
+        if current.is_none()
+            && let Some((by, _)) = member_of(&loops, pane)
+        {
+            return Ok(LoopEdited::Busy { r#loop: by.clone() });
+        }
         match current {
             // a pane with no loop starts one, running and holding nothing
             None => {
@@ -119,6 +179,10 @@ impl<B: Backend> Store<B> {
                     state: LoopState::Running,
                     version: 1,
                     started_at: now_ms(),
+                    width: width.unwrap_or(1).max(1),
+                    opens: opens.unwrap_or(true),
+                    pid,
+                    members: Vec::new(),
                 };
                 self.keep_loop(&started, Expect::Absent).await?;
                 Ok(LoopEdited::Started { r#loop: started })
@@ -130,6 +194,10 @@ impl<B: Backend> Store<B> {
                     session: session.or(current.session),
                     state: LoopState::Running,
                     version: read + 1,
+                    // a width or a choice of panes named changes it from its next group on
+                    width: width.map_or(current.width, |width| width.max(1)),
+                    opens: opens.unwrap_or(current.opens),
+                    pid: pid.or(current.pid),
                     ..current
                 };
                 self.keep_loop(&resumed, Expect::Version(read)).await?;
@@ -138,6 +206,71 @@ impl<B: Backend> Store<B> {
             // and one feeding another project or plan is left as it is
             Some(current) => Ok(LoopEdited::Busy { r#loop: current }),
         }
+    }
+
+    /// Joins a pane to the member of whichever loop holds a node, under the loops' lock
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The pane joining, which must run no loop of its own
+    /// * `current` - The pane's own loop, if it has one
+    /// * `loops` - Every loop as read
+    /// * `node` - The member's node
+    async fn join(
+        &self,
+        pane: &Pane,
+        current: Option<Loop>,
+        loops: &[Loop],
+        node: reef_model::NodeName,
+    ) -> anyhow::Result<LoopEdited> {
+        // a pane running a loop of its own works that loop's node, not another's member
+        if let Some(current) = current {
+            return Ok(LoopEdited::Busy { r#loop: current });
+        }
+        // the loop holding the node as a member, if one does
+        let Some(by) = loops.iter().find(|feeding| feeding.member(&node).is_some()) else {
+            return Ok(LoopEdited::NotMember { node });
+        };
+        match by.member(&node).and_then(|member| member.pane.as_ref()) {
+            // joined already from this pane, which changes nothing
+            Some(joined) if joined == pane => {
+                return Ok(LoopEdited::Joined { r#loop: by.clone() });
+            }
+            // a session in another pane works it
+            Some(_) => {
+                return Ok(LoopEdited::Held {
+                    node,
+                    by: by.clone(),
+                });
+            }
+            None => {}
+        }
+        // a pane runs one session at a time, so it leaves any member it joined before
+        if let Some((before, _)) = member_of(loops, pane)
+            && before.pane != by.pane
+        {
+            let left = Loop {
+                members: unjoined(&before.members, pane),
+                version: before.version + 1,
+                ..before.clone()
+            };
+            self.keep_loop(&left, Expect::Version(before.version))
+                .await?;
+        }
+        // the member joined, any other it joined in this loop left
+        let mut members = unjoined(&by.members, pane);
+        for member in &mut members {
+            if member.node == node {
+                member.pane = Some(pane.clone());
+            }
+        }
+        let joined = Loop {
+            members,
+            version: by.version + 1,
+            ..by.clone()
+        };
+        self.keep_loop(&joined, Expect::Version(by.version)).await?;
+        Ok(LoopEdited::Joined { r#loop: joined })
     }
 
     /// Changes a pane's loop that is there by any edit but a start
@@ -176,35 +309,65 @@ impl<B: Backend> Store<B> {
                     ),
                 };
             }
+            // a join is taken by the caller
+            LoopEdit::Join { .. } => anyhow::bail!("a join was handed to a loop's change"),
             // handed to the session now in its pane, keeping everything else
-            LoopEdit::Session { session } => current.handed_to(&session),
-            // a node it takes must be its own project's or plan's, and held by no other loop
-            LoopEdit::Hold { node: Some(node) } => {
-                if !current.covers(&node) {
-                    return Ok(LoopEdited::NotInLoop {
-                        node,
-                        r#loop: current,
-                    });
+            LoopEdit::Session { session, pid } => {
+                let pid = pid.or(current.pid);
+                Loop {
+                    pid,
+                    ..current.handed_to(&session)
                 }
+            }
+            // a group it takes is no wider than it is
+            LoopEdit::Hold {
+                node: Some(_),
+                ref members,
+            } if members.len() + 1 > usize::from(current.width) => {
+                return Ok(LoopEdited::TooWide {
+                    named: members.len() + 1,
+                    r#loop: current,
+                });
+            }
+            // each node it takes must be its own project's or plan's, and held by no other loop
+            LoopEdit::Hold {
+                node: Some(node),
+                members,
+            } => {
                 let others: Vec<Loop> = loops
                     .iter()
                     .filter(|other| other.pane != current.pane)
                     .cloned()
                     .collect();
-                if let Some(by) = holder(&others, &node) {
-                    return Ok(LoopEdited::Held {
-                        node,
-                        by: by.clone(),
-                    });
+                for taken in std::iter::once(&node).chain(&members) {
+                    if !current.covers(taken) {
+                        return Ok(LoopEdited::NotInLoop {
+                            node: taken.clone(),
+                            r#loop: current,
+                        });
+                    }
+                    if let Some(by) = holder(&others, taken) {
+                        return Ok(LoopEdited::Held {
+                            node: taken.clone(),
+                            by: by.clone(),
+                        });
+                    }
                 }
+                // the new group's members, none joined yet, in place of the last group's
+                let members = members
+                    .into_iter()
+                    .map(|node| Member { node, pane: None })
+                    .collect();
                 Loop {
                     node: Some(node),
+                    members,
                     ..current
                 }
             }
-            // or it lets go of the one it holds
-            LoopEdit::Hold { node: None } => Loop {
+            // or it lets go of everything it holds
+            LoopEdit::Hold { node: None, .. } => Loop {
                 node: None,
+                members: Vec::new(),
                 ..current
             },
             // a node's end it acted on already is never acted on again, judged under the lock
@@ -264,6 +427,10 @@ fn loop_row(kept: &Loop) -> anyhow::Result<LoopRow> {
         acted: kept.acted.clone(),
         state: kept.state,
         started_at: kept.started_at,
+        width: kept.width,
+        opens: kept.opens,
+        pid: kept.pid,
+        members: kept.members.clone(),
     };
     Ok(LoopRow {
         list: LOOPS.to_string(),
@@ -303,14 +470,37 @@ fn read_loop(row: LoopRow) -> anyhow::Result<Loop> {
         state: kept.state,
         version: row.version,
         started_at: kept.started_at,
+        width: kept.width,
+        opens: kept.opens,
+        pid: kept.pid,
+        members: kept.members,
     })
+}
+
+/// A group's members with a pane's join taken off whichever it was on
+///
+/// # Arguments
+///
+/// * `members` - The members
+/// * `pane` - The pane leaving
+fn unjoined(members: &[Member], pane: &Pane) -> Vec<Member> {
+    members
+        .iter()
+        .map(|member| match member.pane.as_ref() == Some(pane) {
+            true => Member {
+                node: member.node.clone(),
+                pane: None,
+            },
+            false => member.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Kept, loop_row, read_loop};
     use crate::schema::LoopRow;
-    use reef_api::{Loop, LoopState, Pane};
+    use reef_api::{Loop, LoopState, Member, Pane};
 
     /// A loop reads back from its row as it was written
     #[test]
@@ -329,10 +519,39 @@ mod tests {
             state: LoopState::Paused,
             version: 4,
             started_at: 9,
+            width: 2,
+            opens: false,
+            pid: Some(4242),
+            members: vec![Member {
+                node: "reef/central/C40".parse()?,
+                pane: Some(Pane::Claude { pid: 7 }),
+            }],
         };
         let row = loop_row(&kept)?;
         assert_eq!(row.pane, "tmux:/tmp/tmux-1000/default:%3");
         assert_eq!(read_loop(row)?, kept);
+        Ok(())
+    }
+
+    /// A row written before groups reads as a loop one node wide, opening panes, with no members
+    #[test]
+    fn rows_from_before_groups_read_one_wide() -> anyhow::Result<()> {
+        // the record as C61 wrote it
+        let row = LoopRow {
+            list: super::LOOPS.to_string(),
+            pane: "claude:7".to_string(),
+            version: 3,
+            record:
+                r#"{"project":"reef","node":"reef/central/C39","state":"running","started_at":1}"#
+                    .to_string(),
+        };
+        let read = read_loop(row)?;
+        assert_eq!((read.width, read.opens, read.pid), (1, true, None));
+        assert!(read.members.is_empty());
+        // and written back one wide, it says nothing groups added
+        let written = loop_row(&read)?;
+        assert!(!written.record.contains("width"), "{}", written.record);
+        assert!(!written.record.contains("members"), "{}", written.record);
         Ok(())
     }
 
@@ -348,6 +567,10 @@ mod tests {
             acted: None,
             state: LoopState::Running,
             started_at: 1,
+            width: 1,
+            opens: true,
+            pid: None,
+            members: Vec::new(),
         })?;
         let stray = LoopRow {
             list: "other".to_string(),

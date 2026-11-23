@@ -51,6 +51,9 @@ on and when it is completed, and keeps what it read. That needs four things reef
     rebase runs it for each pick with HEAD half built, so it skips while a rebase is under way,
     which it reads from the worktree's own git dir, and post-rewrite drafts once the rebase
     ends. It leaves an amend to post-commit.
+  - post-commit skips a merge commit, which brings in work that isn't the node's: what the base
+    branch brought in is carried at the next capture, and a group's member merged back is that
+    member's ([C60](../milestones/m8.md)).
   - PostToolUse drafts the node reef's status tool marked done, uncommitted work and all, when
     the worktree is on it, since Claude marks a node done before it commits.
   - The Stop hook seals once the node the worktree is on is done: its draft, or its first
@@ -68,6 +71,13 @@ on and when it is completed, and keeps what it read. That needs four things reef
 - **reef makes a node's worktree.** Its WorktreeCreate hook replaces Claude Code's own, so
   `claude -w <node>` gets `.claude/worktrees/<node>` on branch `reef/<node>`, with the node
   started in it ([C60](../milestones/m8.md)). `reef start` starts a node in the worktree it runs in.
+  - It is made from the asking checkout's HEAD and based on that checkout's branch, which its
+    changes go back to. Nothing is fetched.
+  - `/.claude/worktrees/` goes in the repo's `info/exclude`, so a start's snapshot in the main
+    worktree never takes a linked one in.
+  - `reef loop attach` makes the same worktree for a session already open.
+  - WorktreeRemove takes a last draft, then removes the worktree, never forced, keeping its
+    branch.
 - **A work record** ([C30](../milestones/m7.md)).
   - `reef start` records the node's worktree, branch, base branch, start and fork, and pins the
     start under `refs/reef/start/<plan>/<id>`, as a commit of the start's tree whose parent is

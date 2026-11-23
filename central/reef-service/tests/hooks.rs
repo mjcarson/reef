@@ -323,7 +323,7 @@ impl Hx {
             &self.client()?,
             cwd,
             &here,
-            None,
+            &reef::loops::Starts::default(),
             &reef::cli::PlanPick::default(),
             spawn,
             &mut out,
@@ -353,6 +353,7 @@ impl Hx {
             &self.client()?,
             &input.to_string(),
             &pane.parse()?,
+            None,
             &mut out,
         )
         .await?;
@@ -401,6 +402,178 @@ impl Hx {
             .filter_map(|line| line.split_once('\t'))
             .map(|(args, said)| (args.to_string(), said.replace("\\n", "\n")))
             .collect())
+    }
+
+    /// Starts a loop as `! reef loop start --width N` starts it in a session's own pane,
+    /// returning what it printed
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The session's working directory
+    /// * `pane` - The pane's key
+    /// * `width` - How many nodes it works at once
+    /// * `opens` - Whether reef opens its members' panes
+    async fn started_wide(
+        &self,
+        cwd: &Path,
+        pane: &str,
+        width: u8,
+        opens: bool,
+    ) -> anyhow::Result<String> {
+        // the pane, session and process Claude Code names to its `!` commands
+        let here = reef::loops::Here {
+            pane: pane.parse()?,
+            session: Some("s1".to_string()),
+            pid: Some(4242),
+        };
+        let starts = reef::loops::Starts {
+            session: None,
+            width: Some(width),
+            opens: (!opens).then_some(false),
+        };
+        let mut out = Vec::new();
+        let spawn = |_: &reef::clear::Clear| anyhow::bail!("a fresh start clears nothing");
+        reef::loops::start(
+            &self.client()?,
+            cwd,
+            &here,
+            &starts,
+            &reef::cli::PlanPick::default(),
+            spawn,
+            &mut out,
+        )
+        .await?;
+        Ok(String::from_utf8(out)?)
+    }
+
+    /// Calls next_task as the MCP tool calls it in a pane, returning what it printed and each
+    /// member's pane it would have opened, which is recorded rather than opened
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The session's working directory
+    /// * `pane` - The pane's key
+    async fn taken_in(
+        &self,
+        cwd: &Path,
+        pane: &str,
+    ) -> anyhow::Result<(String, Vec<reef::open::Open>)> {
+        let pane: reef_api::Pane = pane.parse()?;
+        // each pane it opens recorded, never opened
+        let mut opened = Vec::new();
+        let open = |order: &reef::open::Open| {
+            opened.push(order.clone());
+            Ok(())
+        };
+        let mut out = Vec::new();
+        reef::task::next_task(
+            &self.client()?,
+            cwd,
+            Some(&pane),
+            &reef::cli::Pick::default(),
+            open,
+            &mut out,
+        )
+        .await?;
+        Ok((String::from_utf8(out)?, opened))
+    }
+
+    /// Calls Claude Code's WorktreeCreate hook as `claude -w <name>` calls it from a directory
+    /// in a pane, returning the path it printed and what else it said
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The session's working directory
+    /// * `name` - The worktree's name
+    /// * `pane` - The new session's pane, if it has one
+    async fn worktree_made(
+        &self,
+        cwd: &Path,
+        name: &str,
+        pane: Option<&str>,
+    ) -> anyhow::Result<(String, String)> {
+        // the input Claude Code hands it
+        let input = serde_json::json!({
+            "session_id": "w1",
+            "transcript_path": "/dev/null",
+            "cwd": cwd,
+            "hook_event_name": "WorktreeCreate",
+            "name": name,
+        });
+        let pane: Option<reef_api::Pane> = pane.map(str::parse).transpose()?;
+        let (mut said, mut out) = (Vec::new(), Vec::new());
+        reef::hook::worktree_create(
+            &self.client()?,
+            &self.repo,
+            &input.to_string(),
+            pane.as_ref(),
+            &mut said,
+            &mut out,
+        )
+        .await?;
+        Ok((String::from_utf8(out)?, String::from_utf8(said)?))
+    }
+
+    /// Calls Claude Code's WorktreeRemove hook as it is called for a worktree it is done with,
+    /// returning what it printed
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The worktree's root
+    async fn worktree_removed(&self, path: &Path) -> anyhow::Result<String> {
+        let input = serde_json::json!({
+            "session_id": "w1",
+            "transcript_path": "/dev/null",
+            "cwd": self.repo,
+            "hook_event_name": "WorktreeRemove",
+            "worktree_path": path,
+        });
+        let mut out = Vec::new();
+        reef::hook::worktree_remove(&self.client()?, &input.to_string(), &mut out).await?;
+        Ok(String::from_utf8(out)?)
+    }
+
+    /// Calls Claude Code's Stop hook as it is called when a turn ends in a session in a pane,
+    /// naming the session, returning what it printed and each injector it would have started
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The session's working directory
+    /// * `pane` - The pane's key
+    /// * `session` - The session that stopped
+    /// * `pid` - Its Claude Code process, `CLAUDE_PID`
+    async fn stopped_as(
+        &self,
+        cwd: &Path,
+        pane: &str,
+        session: &str,
+        pid: u32,
+    ) -> anyhow::Result<(String, Vec<reef::clear::Clear>)> {
+        let input = serde_json::json!({
+            "session_id": session,
+            "transcript_path": "/dev/null",
+            "cwd": cwd,
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+        });
+        let pane: reef_api::Pane = pane.parse()?;
+        let mut spawned = Vec::new();
+        let spawn = |order: &reef::clear::Clear| {
+            spawned.push(order.clone());
+            Ok(())
+        };
+        let mut out = Vec::new();
+        reef::hook::stop(
+            &self.client()?,
+            &self.repo,
+            &input.to_string(),
+            Some(&pane),
+            Some(pid),
+            spawn,
+            &mut out,
+        )
+        .await?;
+        Ok((String::from_utf8(out)?, spawned))
     }
 }
 
@@ -921,5 +1094,306 @@ async fn a_start_between_nodes_moves_on() -> anyhow::Result<()> {
     let (said, spawned) = hx.started_by(&a, pane, "s3", 4242).await?;
     assert!(said.contains("nothing else is ready to take"), "{said}");
     assert_eq!(spawned.len(), 0);
+    Ok(())
+}
+
+/// Two ready nodes are worked at once, each in its own worktree, and the next group starts only
+/// once both are done: a loop two wide in zellij takes A with B beside it and opens B's pane;
+/// B's session gets its worktree from WorktreeCreate and takes B; A's end waits on B and clears
+/// nothing; B's end, the last, seals only B's changes and clears the loop's own pane; and
+/// next_task takes no new group until `reef/B` is merged, a merge that drafts nothing into A
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_group_is_worked_at_once_and_ends_once() -> anyhow::Result<()> {
+    let hx = Hx::new("group", &["A", "B", "C"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    // a loop two wide in a zellij pane, its session s1 in Claude Code process 4242
+    let lead = "zellij:work:3";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    let said = hx.started_wide(&a, lead, 2, true).await?;
+    assert!(said.ends_with(", 2 nodes at once\n"), "{said}");
+    // it takes A for itself and B beside it, opening B's pane from its own checkout
+    let (took, opened) = hx.taken_in(&a, lead).await?;
+    assert!(
+        took.starts_with(
+            "Took `cli/docs/A` for the loop in zellij session `work`, pane 3, with 1 more of its \
+             group beside it for sessions of their own. Work only `cli/docs/A` here."
+        ),
+        "{took}"
+    );
+    assert!(
+        took.contains("cli/docs/B  a pane of its own was opened, running `claude -w B`"),
+        "{took}"
+    );
+    assert_eq!(
+        opened,
+        vec![reef::open::Open {
+            beside: lead.parse()?,
+            root: a.clone(),
+            id: "B".to_string(),
+        }]
+    );
+    // B's session, `claude -w B` in zellij pane 7, gets its worktree from reef
+    let member = "zellij:work:7";
+    let (path, said) = hx.worktree_made(&a, "B", Some(member)).await?;
+    let b = hx.repo.join(".claude/worktrees/B").canonicalize()?;
+    assert_eq!(path, format!("{}\n", b.display()));
+    assert!(said.contains("reef: started `B` in"), "{said}");
+    assert!(
+        said.ends_with(
+            "reef: this session works `cli/docs/B` for the loop in zellij session `work`, pane 3\n"
+        ),
+        "{said}"
+    );
+    assert_eq!(git::run(&b, &["branch", "--show-current"])?, "reef/B");
+    let listed = hx.reef(&a, &["loop", "ls"]).await?;
+    assert!(
+        listed.contains("2 at once, with `cli/docs/B` in zellij:work:7"),
+        "{listed}"
+    );
+    // and next_task there hands it B, started in its worktree, which a second call does again
+    for _ in 0..2 {
+        let (took, opened) = hx.taken_in(&b, member).await?;
+        assert!(
+            took.starts_with("`cli/docs/B` is this session's, a member of the loop in zellij session `work`, pane 3's group"),
+            "{took}"
+        );
+        assert!(
+            took.contains(&format!("started in {} on `reef/B`", b.display())),
+            "{took}"
+        );
+        assert!(opened.is_empty());
+    }
+    // both worked at once, each committing in its own worktree
+    committed(&a, "a.txt", "A's\n", "A").await?;
+    committed(&b, "b.txt", "B's\n", "B").await?;
+    // A done first: its end waits on B, and nothing is cleared
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    let (said, spawned) = hx.stopped_as(&a, lead, "s1", 4242).await?;
+    let said = told(&said);
+    assert!(
+        said.ends_with(
+            "reef: `cli/docs/A` is done. Its group waits on `cli/docs/B`: this pane moves on \
+             once they are all done"
+        ),
+        "{said}"
+    );
+    assert!(spawned.is_empty(), "{spawned:?}");
+    let (took, _) = hx.taken_in(&a, lead).await?;
+    assert!(
+        took.starts_with("`cli/docs/A` is done, and its group waits on `cli/docs/B`"),
+        "{took}"
+    );
+    // B done last: its end seals B and clears the loop's own pane, with the loop's session
+    hx.reef(&b, &["status", "B", "done"]).await?;
+    let (said, spawned) = hx.stopped_as(&b, member, "w1", 7777).await?;
+    let said = told(&said);
+    assert!(said.starts_with("reef: sealed `B` as revision 1"), "{said}");
+    assert!(
+        said.ends_with(
+            "reef: `cli/docs/B` was the last of its group to be done, so the loop's pane moves \
+             on. `cli/docs/A` is done. `cli/docs/C` is next: reef clears the context and asks \
+             for it once Claude is idle and the input box is empty"
+        ),
+        "{said}"
+    );
+    assert_eq!(
+        spawned,
+        vec![reef::clear::Clear {
+            pane: lead.parse()?,
+            session: "s1".to_string(),
+            pid: 4242,
+            after: "cli/docs/A".parse()?,
+        }]
+    );
+    // each captured only its own changes
+    for (id, file) in [("A", "a.txt"), ("B", "b.txt")] {
+        let changes = hx.changes(id).await?;
+        let paths: Vec<String> = changes
+            .last()
+            .map(|(_, files)| files.iter().map(|f| f.path().to_string()).collect())
+            .unwrap_or_default();
+        assert_eq!(paths, [file], "{id}");
+    }
+    // the group's end is acted on once, from either pane
+    for (cwd, pane) in [(&a, lead), (&b, member)] {
+        let (said, spawned) = hx.stopped_as(cwd, pane, "s1", 4242).await?;
+        assert_eq!((said.as_str(), spawned.len()), ("", 0), "{pane}");
+    }
+    // after the clear, no new group is taken until B's branch is merged
+    let (took, opened) = hx.taken_in(&a, lead).await?;
+    assert!(took.contains("so no new group is taken"), "{took}");
+    assert!(
+        took.contains("  git merge reef/B    # cli/docs/B"),
+        "{took}"
+    );
+    assert!(opened.is_empty());
+    let listed = hx.reef(&a, &["loop", "ls"]).await?;
+    assert!(listed.contains("on `cli/docs/A`"), "{listed}");
+    // merged, concluded by `git commit` as a conflict's resolution is, which runs post-commit
+    // on the merge and drafts nothing of B's into A, the next group is C alone
+    hooked(&a, &["merge", "-q", "--no-ff", "--no-commit", "reef/B"]).await?;
+    hooked(&a, &["commit", "-q", "--no-edit"]).await?;
+    let revisions: Vec<bool> = hx
+        .changes("A")
+        .await?
+        .iter()
+        .map(|(revision, _)| revision.draft)
+        .collect();
+    assert_eq!(revisions, [false], "A's changes after the merge");
+    let (took, opened) = hx.taken_in(&a, lead).await?;
+    assert!(
+        took.starts_with(
+            "Took `cli/docs/C` for the loop in zellij session `work`, pane 3. Plan it now"
+        ),
+        "{took}"
+    );
+    assert!(opened.is_empty());
+    Ok(())
+}
+
+/// WorktreeCreate makes `.claude/worktrees/<id>` on `reef/<id>` with the node started there,
+/// kept out of the main worktree's snapshots, and made again is the same; a member another
+/// session works is refused, and a name that is no node gets a plain worktree. `reef loop
+/// attach` gives an open session a member and says to enter its worktree, a session in a
+/// member's worktree that no pane joined is joined by its next_task, a loop that opens no panes
+/// names the ways a member gets a session, and WorktreeRemove drafts the node, then removes its
+/// worktree but never one with changes, keeping the branch
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktrees_are_made_for_nodes_and_attached() -> anyhow::Result<()> {
+    let hx = Hx::new("worktrees", &["A", "B", "C", "D"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    let main = git::run(&hx.repo, &["branch", "--show-current"])?;
+    // a loop four wide in tmux, opening no panes, in a checkout of its own
+    let lead = "tmux:/tmp/t:%1";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    hx.started_wide(&a, lead, 4, false).await?;
+    let (took, opened) = hx.taken_in(&a, lead).await?;
+    assert!(opened.is_empty());
+    for id in ["B", "C"] {
+        assert!(
+            took.contains(&format!(
+                "cli/docs/{id}  waits for a session of its own: `claude -w {id}` run from {}, or \
+                 `! reef loop attach {id}` in a Claude session already open",
+                a.display()
+            )),
+            "{took}"
+        );
+    }
+    // B's worktree made from the main checkout, on its own branch, based on main's
+    let (path, said) = hx
+        .worktree_made(&hx.repo, "B", Some("tmux:/tmp/t:%2"))
+        .await?;
+    let b = hx.repo.join(".claude/worktrees/B").canonicalize()?;
+    assert_eq!(path.trim_end(), b.display().to_string());
+    assert!(said.contains(&format!("reef: base      {main}")), "{said}");
+    let record = hx.reef(&b, &["work"]).await?;
+    assert!(record.contains("branch    reef/B"), "{record}");
+    // out of the main worktree's snapshots, excluded once however often it is made
+    let excluded = |repo: &Path| -> anyhow::Result<usize> {
+        let common = git::run(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        let text = std::fs::read_to_string(Path::new(&common).join("info/exclude"))?;
+        Ok(text
+            .lines()
+            .filter(|line| *line == "/.claude/worktrees/")
+            .count())
+    };
+    assert_eq!(git::run(&hx.repo, &["status", "--porcelain"])?, "");
+    // made again from the same pane, it is the same worktree
+    let (again, said) = hx
+        .worktree_made(&hx.repo, "B", Some("tmux:/tmp/t:%2"))
+        .await?;
+    assert_eq!(again, path);
+    assert!(said.contains("is in"), "{said}");
+    assert_eq!(excluded(&hx.repo)?, 1);
+    // and asked for from another pane, it is refused, since B has a session
+    let error = hx
+        .worktree_made(&hx.repo, "B", Some("tmux:/tmp/t:%9"))
+        .await
+        .expect_err("a second session was given B");
+    assert!(
+        format!("{error:#}").contains("has a session already, in tmux pane %2"),
+        "{error:#}"
+    );
+    // a name that is no node gets a plain worktree, starting nothing
+    let (plain, _) = hx.worktree_made(&hx.repo, "scratch", None).await?;
+    let scratch = hx.repo.join(".claude/worktrees/scratch").canonicalize()?;
+    assert_eq!(plain.trim_end(), scratch.display().to_string());
+    assert_eq!(
+        git::run(&scratch, &["branch", "--show-current"])?,
+        "worktree-scratch"
+    );
+    // an open session in tmux pane %3 attaches to the member still waiting, C
+    let attached = hx
+        .reef(&hx.repo, &["loop", "attach", "--pane", "tmux:/tmp/t:%3"])
+        .await?;
+    let c = hx.repo.join(".claude/worktrees/C").canonicalize()?;
+    assert!(
+        attached.contains(&format!(
+            "`cli/docs/C` is this session's, a member of the group of the loop in tmux pane %1 \
+             on /tmp/t, in {} on `reef/C`. Enter that worktree with EnterWorktree (path: {}), \
+             then take the node with next_task",
+            c.display(),
+            c.display()
+        )),
+        "{attached}"
+    );
+    // and its next_task, served from the main checkout, hands it C
+    let (took, _) = hx.taken_in(&hx.repo, "tmux:/tmp/t:%3").await?;
+    assert!(took.starts_with("`cli/docs/C` is this session's"), "{took}");
+    // D's worktree made where WorktreeCreate finds no pane, its session's next_task joins it there
+    let (path, said) = hx.worktree_made(&hx.repo, "D", None).await?;
+    let d = hx.repo.join(".claude/worktrees/D").canonicalize()?;
+    assert_eq!(path.trim_end(), d.display().to_string());
+    assert!(!said.contains("this session works"), "{said}");
+    let (took, _) = hx.taken_in(&d, "claude:5555").await?;
+    assert!(took.starts_with("`cli/docs/D` is this session's"), "{took}");
+    let listed = hx.reef(&a, &["loop", "ls"]).await?;
+    assert!(
+        listed.contains("with `cli/docs/D` in claude:5555"),
+        "{listed}"
+    );
+    // with every member joined, an attach finds none waiting, and the loop's pane joins none
+    let error = hx
+        .reef(&hx.repo, &["loop", "attach", "--pane", "tmux:/tmp/t:%4"])
+        .await
+        .expect_err("an attach found a member no session had");
+    assert!(
+        format!("{error:#}").contains("waits for a session"),
+        "{error:#}"
+    );
+    let error = hx
+        .reef(&hx.repo, &["loop", "attach", "B", "--pane", lead])
+        .await
+        .expect_err("the loop's own pane attached to a member");
+    assert!(
+        format!("{error:#}").contains("runs a loop of its own"),
+        "{error:#}"
+    );
+    // B's worktree, its work committed, is drafted and removed, its branch kept
+    committed(&b, "b.txt", "B's\n", "B").await?;
+    let said = hx.worktree_removed(&b).await?;
+    assert!(
+        said.ends_with(&format!("reef: removed {}\n", b.display())),
+        "{said}"
+    );
+    assert!(!b.exists());
+    assert!(git::succeeds(
+        &hx.repo,
+        &["rev-parse", "--verify", "-q", "refs/heads/reef/B"]
+    )?);
+    // and C's, holding a change nothing committed, is left as it is
+    std::fs::write(c.join("base.txt"), "changed\n")?;
+    let error = hx
+        .worktree_removed(&c)
+        .await
+        .expect_err("a worktree with changes was removed");
+    assert!(
+        format!("{error:#}").contains("was left as it is"),
+        "{error:#}"
+    );
+    assert!(c.exists());
     Ok(())
 }

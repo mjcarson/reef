@@ -7,12 +7,18 @@
 //! reef hook post-tool-use        # Claude Code, after reef's status tool: draft a node marked done
 //! reef hook stop [--pane KEY]    # Claude Code: seal the node done here, and end the loop's node
 //! reef hook clear ...            # Stop's, in the background: clear the session, ask for the next
+//! reef hook worktree-create      # Claude Code, for `claude -w <id>`: the node's worktree, started
+//! reef hook worktree-remove      # Claude Code: a last draft, then the worktree, its branch kept
 //! ```
 //!
 //! - **git's hooks keep the draft current.** post-commit drafts the node the worktree is on
 //!   after each commit, an amend's included, in whichever worktree it runs, since git runs the
 //!   repo's common hooks in every one. A rebase runs post-commit for each pick with HEAD half
 //!   built, so it skips mid-rebase, and post-rewrite drafts once the rebase ends.
+//! - **A merge commit is no node's work.** It brings in someone else's: what the base branch
+//!   brought in is carried at the next capture, and a group's member merged back after its group
+//!   is that member's. So post-commit drafts nothing for one, which would otherwise show a done
+//!   node's next revision holding its group's other work.
 //! - **So does marking a node done.** Claude marks a node done before it commits, so PostToolUse
 //!   on reef's status tool drafts the node it marked done, uncommitted work and all, when the
 //!   worktree is on it.
@@ -29,6 +35,17 @@
 //!   starts the injector in the background ([`crate::clear`]), which types `/clear` and the
 //!   next node's kickoff into the pane once Claude is idle and its input box empty. Anywhere
 //!   else, or if the injector can't start, the user types `/clear` and `next`.
+//! - **A group's last Stop clears the loop's pane.** For a loop wider than one node, each
+//!   node's Stop, the loop's own or a member's, says what the group still waits on, and the one
+//!   that finds it all done ends the group. It clears the loop's own pane, with the session and
+//!   Claude Code process the loop keeps, wherever that Stop ran.
+//! - **reef makes a node's worktree.** WorktreeCreate replaces Claude Code's own `git worktree
+//!   add`, so `claude -w <id>` gets `.claude/worktrees/<id>` on `reef/<id>`, with the node
+//!   started there and the session's pane joined to it where it is a loop's member
+//!   ([`crate::worktree`]). Its standard output is the worktree's path alone, as Claude Code
+//!   reads it, so everything else it says goes to standard error. A name that is no node gets
+//!   a worktree as Claude Code would make it, on `worktree-<name>`. WorktreeRemove takes a last
+//!   draft of the node, then removes the worktree, never forced, keeping its branch.
 //! - **Nothing to do is no failure.** A directory outside git or outside every project, a
 //!   worktree no node was started in, or a node marked something other than done: the hook says
 //!   nothing and succeeds. A capture that fails, or a service that doesn't answer, is an error,
@@ -46,8 +63,8 @@ use crate::capture::{Keep, Report, capture_record, seal_if_done};
 use crate::clear::{self, Clear};
 use crate::client::Client;
 use crate::git::Checkout;
-use crate::task;
 use crate::work::parse_status;
+use crate::{task, worktree};
 
 /// What Claude Code hands PostToolUse: the tool that ran, what it was called with, and where
 #[derive(Debug, Deserialize)]
@@ -74,6 +91,23 @@ struct StatusSet {
     plan: Option<String>,
 }
 
+/// What Claude Code hands WorktreeCreate: the worktree's name, and where the session is
+#[derive(Debug, Deserialize)]
+struct WorktreeAsked {
+    /// The name `claude -w` or EnterWorktree was given
+    name: String,
+    /// The session's working directory, which the worktree is made from
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+}
+
+/// What Claude Code hands WorktreeRemove: the worktree it is done with
+#[derive(Debug, Deserialize)]
+struct WorktreeDone {
+    /// The worktree's root
+    worktree_path: PathBuf,
+}
+
 /// What Claude Code hands Stop: the session, and where it is
 #[derive(Debug, Deserialize)]
 struct Stopped {
@@ -85,7 +119,8 @@ struct Stopped {
     cwd: Option<PathBuf>,
 }
 
-/// Drafts the node the worktree is on after a commit, unless a rebase is under way
+/// Drafts the node the worktree is on after a commit, unless a rebase is under way or the commit
+/// is a merge
 ///
 /// # Arguments
 ///
@@ -99,6 +134,10 @@ pub async fn post_commit<W: Write>(client: &Client, cwd: &Path, out: &mut W) -> 
     };
     // a rebase's picks are half built, so only its end is drafted, by post-rewrite
     if checkout.rebasing() {
+        return Ok(());
+    }
+    // and a merge brings in work that isn't the node's
+    if checkout.head_merges()? {
         return Ok(());
     }
     draft(client, &checkout, out).await
@@ -219,21 +258,140 @@ where
         seal_if_done(client, &checkout, &record, Report::Line, &mut sealed).await?;
         prefixed(&sealed, &mut said)?;
     }
-    // then the end of the loop's node, acted on once, wherever the session runs
-    let ending = match pane {
+    // then the end of the loop's node, or of its group, acted on once, wherever the session runs
+    let ended = match pane {
         Some(pane) => task::ended(client, pane).await?,
-        None => task::Ending::Nothing,
+        None => task::Ended {
+            ending: task::Ending::Nothing,
+            feeding: None,
+            member: None,
+        },
+    };
+    // the loop's own pane is the one cleared, with its session and process
+    let (target, session, pid) = match &ended.feeding {
+        Some(feeding) if ended.member.is_some() => {
+            (Some(&feeding.pane), feeding.session.clone(), feeding.pid)
+        }
+        Some(feeding) => (pane, stopped.session_id, pid.or(feeding.pid)),
+        None => (pane, stopped.session_id, pid),
     };
     // another node next clears the session, wherever reef can type into its pane
-    let Some(message) = clear::hand_off(&ending, pane, stopped.session_id, pid, spawn) else {
+    let Some(message) = clear::hand_off(&ended.ending, target, session, pid, spawn) else {
         // nothing for the user: the seal's lines as they are
         out.write_all(&said)?;
         return Ok(());
+    };
+    // a member's Stop that ended its group says it was the last
+    let message = match (&ended.member, &ended.ending) {
+        (
+            Some(member),
+            task::Ending::Next { .. } | task::Ending::Paused(_) | task::Ending::Finished(_),
+        ) => format!(
+            "`{member}` was the last of its group to be done, so the loop's pane moves on. \
+             {message}"
+        ),
+        _ => message,
     };
     // Claude Code shows a Stop's output to the user only when all of it is JSON
     let mut told = String::from_utf8_lossy(&said).into_owned();
     told.push_str(&format!("reef: {message}"));
     writeln!(out, "{}", serde_json::json!({ "systemMessage": told }))?;
+    Ok(())
+}
+
+/// Makes the worktree `claude -w <name>` asks for, and prints its path alone: a node's own,
+/// started there with the pane joined to it where it is a loop's member, or a plain one for a
+/// name that is no node
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, unless the input names the session's
+/// * `input` - The event Claude Code handed the hook, as JSON
+/// * `pane` - The pane the session runs in, if it could be found
+/// * `said` - Where to say what came of it, standard error, since Claude Code reads the path
+///   from standard output
+/// * `out` - Where to print the worktree's path
+pub async fn worktree_create<S: Write, W: Write>(
+    client: &Client,
+    cwd: &Path,
+    input: &str,
+    pane: Option<&Pane>,
+    said: &mut S,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the name asked for, from the session's directory
+    let asked: WorktreeAsked = serde_json::from_str(input)
+        .map_err(|error| anyhow::anyhow!("WorktreeCreate's input doesn't read as one: {error}"))?;
+    let dir = asked.cwd.as_deref().unwrap_or(cwd);
+    let checkout = Checkout::open(dir)?;
+    // a node of the project the repo is registered as, else a worktree like Claude Code's own
+    let node = match client.find_project(checkout.root()).await? {
+        Some(project) => worktree::resolve(client, &project.name, &asked.name).await?,
+        None => None,
+    };
+    let path = match node {
+        Some(node) => {
+            let mut lines = Vec::new();
+            let made = worktree::for_node(client, dir, &node, pane, &mut lines).await;
+            prefixed(&lines, said)?;
+            let made = made?;
+            // whose member the pane now works, if it joined one
+            if let Some(joined) = &made.joined {
+                writeln!(
+                    said,
+                    "reef: this session works `{node}` for the loop in {}",
+                    joined.pane.describe()
+                )?;
+            }
+            made.path
+        }
+        None => worktree::plain(dir, &asked.name)?,
+    };
+    // the path alone, as Claude Code reads it
+    writeln!(out, "{}", path.display())?;
+    Ok(())
+}
+
+/// Takes a last draft of the node a worktree is on, then removes the worktree, keeping its
+/// branch
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `input` - The event Claude Code handed the hook, as JSON
+/// * `out` - Where to print what came of it
+pub async fn worktree_remove<W: Write>(
+    client: &Client,
+    input: &str,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let done: WorktreeDone = serde_json::from_str(input)
+        .map_err(|error| anyhow::anyhow!("WorktreeRemove's input doesn't read as one: {error}"))?;
+    let checkout = Checkout::open(&done.worktree_path)?;
+    // whatever it holds is drafted before it goes
+    if let Some(record) = on_node(client, &checkout).await? {
+        let mut said = Vec::new();
+        capture_record(
+            client,
+            &checkout,
+            &record,
+            Keep::Draft,
+            Report::Line,
+            &mut said,
+        )
+        .await?;
+        prefixed(&said, out)?;
+    }
+    // removed from the main worktree, so git never removes the one it runs in
+    let main = Checkout::open(&checkout.main_root()?)?;
+    main.remove_worktree(checkout.root()).map_err(|error| {
+        error.context(format!(
+            "{} was left as it is: commit or discard its changes, then `git worktree remove` it",
+            checkout.root().display()
+        ))
+    })?;
+    writeln!(out, "reef: removed {}", checkout.root().display())?;
     Ok(())
 }
 

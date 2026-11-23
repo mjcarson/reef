@@ -3,8 +3,8 @@
 //!
 //! - **A loop feeds a registered project**, or one listed plan of it. A start naming a project
 //!   that isn't registered, or a plan it doesn't list, is refused before anything is read.
-//! - **A node held is in its plan.** A hold naming a node its plan doesn't have is
-//!   [`LoopEdited::NotInPlan`], and writes nothing. Whether the node is the loop's own project's
+//! - **A node held is in its plan.** A hold naming a node its plan doesn't have, its own or a
+//!   group's member, is [`LoopEdited::NotInPlan`], and writes nothing. Whether the node is the loop's own project's
 //!   or plan's, and whether another loop holds it, the store judges under the loops' lock.
 //! - **Each loop written is a change**, [`Change::LoopChanged`], to the project it feeds. An edit
 //!   that wrote nothing sends none.
@@ -41,7 +41,8 @@ impl<B: Backend> Service<B> {
     }
 
     /// Changes a pane's loop: starts, pauses or stops it, hands it to a session, has it take or
-    /// let go of a node, or records the node whose end it acted on
+    /// let go of a node or a group, joins the pane to another loop's member, or records the node
+    /// whose end it acted on
     ///
     /// # Arguments
     ///
@@ -62,11 +63,16 @@ impl<B: Backend> Service<B> {
             } if self.store.project(project).await?.is_none() => {
                 return Err(NotRegistered(project.clone()).into());
             }
-            // a node held is one its plan has
-            LoopEdit::Hold { node: Some(node) }
-                if self.store.get(&node.plan, &node.id).await?.is_none() =>
-            {
-                return Ok(LoopEdited::NotInPlan { node: node.clone() });
+            // each node held, a group's members included, is one its plan has
+            LoopEdit::Hold {
+                node: Some(node),
+                members,
+            } => {
+                for held in std::iter::once(node).chain(members) {
+                    if self.store.get(&held.plan, &held.id).await?.is_none() {
+                        return Ok(LoopEdited::NotInPlan { node: held.clone() });
+                    }
+                }
             }
             _ => {}
         }
@@ -76,7 +82,8 @@ impl<B: Backend> Service<B> {
             LoopEdited::Started { r#loop }
             | LoopEdited::Resumed { r#loop }
             | LoopEdited::Edited { r#loop }
-            | LoopEdited::Stopped { r#loop } => self.publish(Change::LoopChanged {
+            | LoopEdited::Stopped { r#loop }
+            | LoopEdited::Joined { r#loop } => self.publish(Change::LoopChanged {
                 project: r#loop.project.clone(),
                 pane: r#loop.pane.clone(),
             }),
@@ -86,7 +93,9 @@ impl<B: Backend> Service<B> {
             | LoopEdited::Held { .. }
             | LoopEdited::NotInLoop { .. }
             | LoopEdited::NotInPlan { .. }
-            | LoopEdited::ActedAlready { .. } => {}
+            | LoopEdited::ActedAlready { .. }
+            | LoopEdited::NotMember { .. }
+            | LoopEdited::TooWide { .. } => {}
         }
         Ok(edited)
     }

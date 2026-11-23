@@ -51,7 +51,7 @@ pub use comment::{
     Thread, ThreadState, TrailerOutcome, TrailerRead,
 };
 pub use error::{ApiError, ErrorCode};
-pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
+pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
     StalePut, StoredNode, lift, puts_for, records,

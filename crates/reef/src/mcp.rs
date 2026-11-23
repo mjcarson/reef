@@ -36,7 +36,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::cli::{Pick, PlanPick, picked, picked_plan};
 use crate::client::Client;
-use crate::{node, task, work};
+use crate::{node, open, task, work};
 
 /// The tools one session's server offers, over the service reef's config names
 #[derive(Clone)]
@@ -309,7 +309,12 @@ impl Tools {
                        queue's entries it passed over and why. Called again before the node is \
                        done, it returns the same node. With nothing to take, it says what \
                        everything waits on. A pane with no loop is refused: the user starts one \
-                       with `! reef loop start`."
+                       with `! reef loop start`. A loop started wider than one node takes a \
+                       group: this session works the first node only, and each other one gets a \
+                       session of its own in a worktree, which reef opens in zellij or tmux. In \
+                       such a member's session it returns that member's node. Before the next \
+                       group it asks for each member's branch to be merged, naming the `git \
+                       merge` to run."
     )]
     async fn next_task(&self) -> Result<String, String> {
         // the node `reef loop take` takes, for the pane the server was started in
@@ -327,6 +332,7 @@ impl Tools {
                 &cwd,
                 pane.as_ref(),
                 &pick,
+                open::open,
                 &mut out,
             ));
             (out, done)

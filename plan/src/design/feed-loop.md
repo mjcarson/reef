@@ -34,9 +34,11 @@ where they are today:
 - **Each node starts with a cleared context.** The context is cleared after each node, or after
   a group of parallel nodes in worktrees ([C60](../milestones/m8.md)), so a node never carries
   the last one's.
-- **reef never owns the session.** It doesn't start Claude, wrap its terminal or hold its input.
-  It types only into the pane the session already runs in, and only from that session's own
-  hook, or from a `! reef loop start` typed in it.
+- **reef never owns a session.** It doesn't wrap Claude's terminal or hold its input. It types
+  only into the pane a session already runs in, and only from a hook of that session or its
+  group, or from a `! reef loop start` typed in it. The one session it starts is a group's
+  member, in a pane of its own beside the loop's, for a loop the user started wider than one
+  node ([C60](../milestones/m8.md)).
 - **Cleared by typing into the pane.** No hook output, tool or command clears an interactive
   session. Once a node is done and another is next, the Stop hook lets Claude stop and starts an
   injector in the background, `reef hook clear` ([C61](../milestones/m8.md)). The injector waits
@@ -100,7 +102,8 @@ where they are today:
   - **Kept by central reef**, all loops in one partition, so whether another loop holds a node
     is one read under one lock.
 - **Sessions at once work in their own worktrees**, which reef makes, so two nodes' changes never
-  mix on one branch ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)).
+  mix on one branch ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)). A loop works a
+  group of nodes at once that way ([Groups of nodes at once](#groups-of-nodes-at-once)).
 - **Pausing stops the loop after the current node**, never in the middle of one.
 
 ### What X4 found
@@ -201,6 +204,93 @@ scrubbed environment.
 - **Approval's clear as well?** It drops a node's planning before its implementation, 8k to 9k
   for the stub's nodes. Whether `reef claude install` turns it on is
   [C42](../milestones/m8.md)'s call.
+
+## Groups of nodes at once
+
+Ready nodes never need each other, so a loop can work several side by side. Each still needs an
+interactive session of its own, since a subagent can't plan or ask.
+
+### Design choices
+
+- **As wide as the user starts it.** `! reef loop start --width N` has a loop take up to N
+  ready nodes at once, the queue's first, held as one under the loops' lock so no other loop
+  takes any of them. A width of one is the loop as it was.
+- **The loop's session works the first.** It works it in its own checkout, as a loop one wide
+  does. Each other node of the group is a *member*, worked by a session of its own.
+- **Each member in its own worktree:** `.claude/worktrees/<id>` on `reef/<id>`.
+  - It is made from the loop's checkout's HEAD, based on the loop's branch, with the node started
+    there.
+  - reef's WorktreeCreate hook makes it in place of Claude Code's own, so `claude -w <id>` gets it
+    in one step. A name that is no node gets a plain worktree on `worktree-<name>`, as Claude Code
+    would make it.
+  - `/.claude/worktrees/` goes in the repo's `info/exclude`, so the loop's own checkout never
+    takes a member's worktree in as an embedded repo.
+  - WorktreeRemove takes a last draft, then removes the worktree, never forced, keeping its
+    branch.
+- **A member's session comes three ways.**
+  - In zellij or tmux, next_task opens a pane for each member as it takes the group, with
+    zellij's `new-pane` or tmux's `split-window`. The pane runs `claude -w <id>`, with the
+    member's kickoff as its first prompt and every `CLAUDE*` variable unset. `--no-open` leaves
+    the members to the other two ways.
+  - The user runs `claude -w <id>` from the loop's checkout.
+  - `! reef loop attach [ID]` in a Claude session already open makes the member's worktree,
+    starts its node there, and tells Claude to enter the worktree with EnterWorktree.
+- **A pane joins its member.**
+  - WorktreeCreate and `attach` join the session's pane to its member, and the loop's row keeps
+    which pane works which member.
+  - So next_task there hands out that node, and SessionStart names it.
+  - A pane works one member at a time, and a pane running a loop of its own works none.
+- **The group ends once, when all of it is done.**
+  - Each node's Stop seals its own worktree's node as before, and says what the group still
+    waits on. A member's session can be closed then.
+  - The Stop that finds the whole group done acts on its end, recorded as the loop's own
+    node's.
+  - That Stop clears the loop's pane with the session and Claude Code process the loop keeps,
+    whichever pane it ran in.
+- **Merged before the next group.**
+  - next_task takes no new group while a member's branch isn't in the loop's checkout's HEAD.
+    It names the `git merge` to run for each, and Claude runs them.
+  - A branch gone, as a squash and a delete leave it, counts as merged.
+  - git's post-commit drafts nothing for a merge commit, so a merge concluded by `git commit`
+    never shows up as the loop's done node's next revision.
+
+### What C60 found
+
+Tried with Claude Code 2.1.330, running Sonnet 5.5 at low effort, on a scratch reef-serve. A loop
+two wide ran in plain tmux on three tiny nodes, and another in zellij on four. Each ran on a
+private tmux server with a scrubbed environment, and a stand-in script approved each plan.
+
+- **Two nodes were worked at once, in their own worktrees, in both multiplexers.**
+  - next_task took A for the loop and opened B's pane straight away, with tmux's `split-window`
+    or zellij's `new-pane`.
+  - B's `claude -w B` ran reef's WorktreeCreate, which made `.claude/worktrees/B` on `reef/B` and
+    joined the pane. Its kickoff took B without a word from the user.
+  - In tmux, both plans were approved 2 s apart, and both nodes were done 12 s after the take.
+- **The group ended once, and only then was the loop's pane cleared.**
+  - In zellij, A was done first. Its Stop cleared nothing, and B's Stop, the last, ended the
+    group and cleared the loop's pane.
+  - In the second group, C's Stop said the group waited on D. D's Stop said it was the last and
+    that nothing else was ready.
+- **The next group waited on the merge.**
+  - The cleared session's next_task named `git merge reef/B`. Claude ran it, and the next call
+    took C, 4 s after the clear.
+  - In zellij the merge was a merge commit.
+- **Each node's changes were its own.** Every node's sealed revision held only its own file,
+  B's and D's taken in their worktrees.
+- **`! reef loop attach` worked in an open session.**
+  - Claude entered D's worktree with EnterWorktree, unprompted, then took D with next_task.
+  - Its commit, its post-commit draft and its Stop's seal all ran in the worktree.
+  - Claude Code then kept the session's transcript under the worktree's path.
+- **A member's session asked nothing.** A `claude -w` session showed no trust dialog for a repo
+  trusted already. The committed `.claude/settings.json`'s allow rules and
+  `enabledMcpjsonServers` ran its tools with no prompt.
+- **A session may leave a node uncommitted.**
+  - In tmux, the loop's session, told only by the skill to commit, marked A and C done and left
+    their files untracked. C's seal held no files, as a seal leaves untracked files out.
+  - B's session committed.
+  - In zellij, whose repo's CLAUDE.md said to commit, every node was committed.
+- **A `claude -w` with no multiplexer wasn't tried.** If WorktreeCreate finds no pane there,
+  next_task joins the session by its worktree.
 
 ## The MCP tools
 

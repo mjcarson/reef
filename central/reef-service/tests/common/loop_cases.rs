@@ -37,6 +37,9 @@ fn start<B>(fx: &Fx<B>, session: &str) -> LoopEdit {
         project: fx.plan.project.clone(),
         plan: Some(fx.plan.plan.clone()),
         session: Some(session.to_string()),
+        width: None,
+        opens: None,
+        pid: None,
     }
 }
 
@@ -86,6 +89,9 @@ pub async fn a_pane_keeps_one_loop<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
         project: fx.plan.project.clone(),
         plan: None,
         session: None,
+        width: None,
+        opens: None,
+        pid: None,
     };
     let busy = fx.store.edit_loop(&here, other).await?;
     assert_eq!(
@@ -101,6 +107,9 @@ pub async fn a_pane_keeps_one_loop<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
         project: fx.plan.project.clone(),
         plan: Some(fx.plan.plan.clone()),
         session: None,
+        width: None,
+        opens: None,
+        pid: None,
     };
     let LoopEdited::Resumed { r#loop: resumed } = fx.store.edit_loop(&here, again).await? else {
         panic!("the paused loop wasn't resumed");
@@ -149,6 +158,7 @@ pub async fn two_loops_never_hold_one_node<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
     edited(&fx, &two, start(&fx, "s2")).await?;
     let hold = |id: &str| LoopEdit::Hold {
         node: Some(node_of(&fx, id)),
+        members: Vec::new(),
     };
     // the first takes C39, and the second is refused it, naming the first
     let held = edited(&fx, &one, hold("C39")).await?;
@@ -191,6 +201,7 @@ pub async fn two_loops_never_hold_one_node<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
     let elsewhere: NodeName = format!("{}/other/C40", fx.plan.project).parse()?;
     let outside = LoopEdit::Hold {
         node: Some(elsewhere.clone()),
+        members: Vec::new(),
     };
     assert!(matches!(
         fx.store.edit_loop(&one, outside).await?,
@@ -201,7 +212,15 @@ pub async fn two_loops_never_hold_one_node<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
         true => (one.clone(), two.clone()),
         false => (two.clone(), one.clone()),
     };
-    edited(&fx, &holder, LoopEdit::Hold { node: None }).await?;
+    edited(
+        &fx,
+        &holder,
+        LoopEdit::Hold {
+            node: None,
+            members: Vec::new(),
+        },
+    )
+    .await?;
     assert_eq!(
         edited(&fx, &other, hold("C40")).await?.node,
         Some(node_of(&fx, "C40"))
@@ -232,6 +251,7 @@ pub async fn a_clears_session_takes_its_panes_loop<B: Reopen>(fx: Fx<B>) -> anyh
     edited(&fx, &here, start(&fx, "before")).await?;
     let hold = LoopEdit::Hold {
         node: Some(node_of(&fx, "C39")),
+        members: Vec::new(),
     };
     edited(&fx, &here, hold).await?;
     let acted = LoopEdit::Acted {
@@ -242,6 +262,7 @@ pub async fn a_clears_session_takes_its_panes_loop<B: Reopen>(fx: Fx<B>) -> anyh
     // the clear's new session takes it, keeping everything it held
     let session = LoopEdit::Session {
         session: "after".to_string(),
+        pid: None,
     };
     let handed = edited(&fx, &here, session.clone()).await?;
     assert_eq!(handed.session.as_deref(), Some("after"));
@@ -316,5 +337,174 @@ pub async fn a_loop_acts_on_a_nodes_end_once<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     let moved = edited(&fx, &here, next).await?;
     assert_eq!(moved.acted, Some(node_of(&fx, "C40")));
     assert_eq!(moved.version, once.version + 1);
+    Ok(())
+}
+
+/// A start of a loop feeding the case's plan, as wide as named
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `width` - How many nodes it works at once
+fn wide<B>(fx: &Fx<B>, width: u8) -> LoopEdit {
+    LoopEdit::Start {
+        project: fx.plan.project.clone(),
+        plan: Some(fx.plan.plan.clone()),
+        session: Some("s1".to_string()),
+        width: Some(width),
+        opens: Some(false),
+        pid: Some(4242),
+    }
+}
+
+/// A hold of a node and its group's members, by id in the case's plan
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `ids` - The loop's own node's id, then each member's
+fn group<B>(fx: &Fx<B>, ids: &[&str]) -> LoopEdit {
+    LoopEdit::Hold {
+        node: Some(node_of(fx, ids[0])),
+        members: ids[1..].iter().map(|id| node_of(fx, id)).collect(),
+    }
+}
+
+/// A loop holds its group as one: as wide as it is and no wider, none of it taken by another
+/// loop, a member another loop holds refused whole, its next group in place of the last, and
+/// everything let go of by a stop
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_loop_holds_its_group_as_one<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a loop two wide, opening no panes, its process known, and one a node wide
+    let (two, one) = (pane(1), pane(2));
+    let started = edited(&fx, &two, wide(&fx, 2)).await?;
+    assert_eq!(
+        (started.width, started.opens, started.pid),
+        (2, false, Some(4242))
+    );
+    edited(&fx, &one, start(&fx, "s2")).await?;
+    // it holds C39 with C40 beside it, neither joined yet
+    let held = edited(&fx, &two, group(&fx, &["C39", "C40"])).await?;
+    assert_eq!(held.node, Some(node_of(&fx, "C39")));
+    let members: Vec<(NodeName, Option<Pane>)> = held
+        .members
+        .iter()
+        .map(|member| (member.node.clone(), member.pane.clone()))
+        .collect();
+    assert_eq!(members, vec![(node_of(&fx, "C40"), None)]);
+    // a group wider than the loop is refused, and writes nothing
+    assert!(matches!(
+        fx.store
+            .edit_loop(&two, group(&fx, &["C41", "C42", "C43"]))
+            .await?,
+        LoopEdited::TooWide { named: 3, .. }
+    ));
+    assert_eq!(fx.store.loop_in(&two).await?, Some(held.clone()));
+    // its member is refused to another loop, naming the loop that holds it
+    assert_eq!(
+        fx.store.edit_loop(&one, group(&fx, &["C40"])).await?,
+        LoopEdited::Held {
+            node: node_of(&fx, "C40"),
+            by: held.clone()
+        }
+    );
+    // and a group with a member another loop holds is refused whole
+    edited(&fx, &one, group(&fx, &["C41"])).await?;
+    assert!(matches!(
+        fx.store.edit_loop(&two, group(&fx, &["C42", "C41"])).await?,
+        LoopEdited::Held { node, .. } if node == node_of(&fx, "C41")
+    ));
+    assert_eq!(fx.store.loop_in(&two).await?, Some(held));
+    // its next group replaces the last, members and all
+    let next = edited(&fx, &two, group(&fx, &["C42", "C43"])).await?;
+    let ids: Vec<&str> = next.group().map(|node| node.id.as_str()).collect();
+    assert_eq!(ids, ["C42", "C43"]);
+    // and the width, the process and the members read back once the store is reopened
+    let fx = fx.reopen().await?;
+    assert_eq!(fx.store.loop_in(&two).await?, Some(next));
+    // a stop lets go of all of it, for the other loop to take
+    edited(&fx, &two, LoopEdit::Stop).await?;
+    edited(&fx, &one, group(&fx, &["C43"])).await?;
+    Ok(())
+}
+
+/// A pane joins a group's member: once, from one pane, never from a loop's own pane or to a
+/// node that is no member, moving off any member it joined before, and a pane working a member
+/// starts no loop of its own
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_pane_joins_a_member<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a loop three wide holding C39, with C40 and C41 beside it
+    let (lead, member, other) = (pane(1), pane(5), pane(6));
+    edited(&fx, &lead, wide(&fx, 3)).await?;
+    edited(&fx, &lead, group(&fx, &["C39", "C40", "C41"])).await?;
+    let plan = fx.plan.clone();
+    let join = |id: &str| LoopEdit::Join {
+        node: plan.node(id).expect("a node's id"),
+    };
+    let joined_by = |feeding: &Loop, id: &str| {
+        feeding
+            .member(&plan.node(id).expect("a node's id"))
+            .and_then(|member| member.pane.clone())
+    };
+    // a pane with no loop joins C40, and joining it again changes nothing
+    let LoopEdited::Joined { r#loop: joined } = fx.store.edit_loop(&member, join("C40")).await?
+    else {
+        panic!("the pane didn't join C40");
+    };
+    assert_eq!(joined.pane, lead);
+    assert_eq!(joined_by(&joined, "C40"), Some(member.clone()));
+    assert_eq!(
+        fx.store.edit_loop(&member, join("C40")).await?,
+        LoopEdited::Joined {
+            r#loop: joined.clone()
+        }
+    );
+    // another pane is refused it, naming the loop that holds it
+    assert!(matches!(
+        fx.store.edit_loop(&other, join("C40")).await?,
+        LoopEdited::Held { node, .. } if node == node_of(&fx, "C40")
+    ));
+    // the loop's own node, or one no loop holds, is no member to join
+    for id in ["C39", "C42"] {
+        assert_eq!(
+            fx.store.edit_loop(&other, join(id)).await?,
+            LoopEdited::NotMember {
+                node: node_of(&fx, id)
+            }
+        );
+    }
+    // the loop's own pane works its own node, not a member
+    assert!(matches!(
+        fx.store.edit_loop(&lead, join("C41")).await?,
+        LoopEdited::Busy { r#loop } if r#loop.pane == lead
+    ));
+    // a pane working a member starts no loop of its own
+    assert!(matches!(
+        fx.store.edit_loop(&member, start(&fx, "s9")).await?,
+        LoopEdited::Busy { r#loop } if r#loop.pane == lead
+    ));
+    assert_eq!(fx.store.loop_in(&member).await?, None);
+    // joining C41, it leaves C40 for another session
+    let LoopEdited::Joined { r#loop: moved } = fx.store.edit_loop(&member, join("C41")).await?
+    else {
+        panic!("the pane didn't join C41");
+    };
+    assert_eq!(joined_by(&moved, "C41"), Some(member.clone()));
+    assert_eq!(joined_by(&moved, "C40"), None);
+    assert!(matches!(
+        fx.store.edit_loop(&other, join("C40")).await?,
+        LoopEdited::Joined { .. }
+    ));
+    // and who joined what reads back once the store is reopened
+    let fx = fx.reopen().await?;
+    let read = fx.store.loop_in(&lead).await?.expect("the loop reads back");
+    assert_eq!(joined_by(&read, "C40"), Some(other));
+    assert_eq!(joined_by(&read, "C41"), Some(member));
     Ok(())
 }

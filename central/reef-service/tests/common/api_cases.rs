@@ -1519,6 +1519,9 @@ pub async fn loop_routes_answer_with_their_status<B: Backend + 'static>(
         project: project.to_string(),
         plan: plan.map(str::to_string),
         session: Some("s1".to_string()),
+        width: None,
+        opens: None,
+        pid: None,
     };
     // started in a pane, 200, then busy for another plan, 409
     let (status, started): (_, LoopEdited) = ax
@@ -1548,6 +1551,7 @@ pub async fn loop_routes_answer_with_their_status<B: Backend + 'static>(
     let node = ax.plan.node("C39")?;
     let hold = |node: &reef_model::NodeName| LoopEdit::Hold {
         node: Some(node.clone()),
+        members: Vec::new(),
     };
     let (status, held): (_, LoopEdited) =
         ax.client.post(paths::LOOPS, &edit(1, hold(&node))).await?;
@@ -1591,6 +1595,7 @@ pub async fn loop_routes_answer_with_their_status<B: Backend + 'static>(
     // the first handed to a clear's new session keeps its node, 200
     let session = LoopEdit::Session {
         session: "s2".to_string(),
+        pid: None,
     };
     let (status, handed): (_, LoopEdited) = ax.client.post(paths::LOOPS, &edit(1, session)).await?;
     assert_eq!(status, StatusCode::OK);
