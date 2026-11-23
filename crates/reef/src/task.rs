@@ -157,8 +157,8 @@ impl Ending {
         match self {
             Ending::Nothing => None,
             Ending::Paused(done) => Some(format!(
-                "`{done}` is done, and the loop is paused: `! reef loop start` sets it running \
-                 again"
+                "`{done}` is done, and the loop is paused: `! reef loop start` moves on to the \
+                 next node"
             )),
             Ending::Finished(done) => Some(format!(
                 "`{done}` is done, and nothing else is ready to take: `reef next` says what \

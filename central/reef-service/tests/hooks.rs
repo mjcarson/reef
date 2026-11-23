@@ -289,6 +289,49 @@ impl Hx {
         Ok((String::from_utf8(out)?, spawned))
     }
 
+    /// Runs `reef loop start` as Claude Code runs it in a session's own pane, `! reef loop
+    /// start`, returning what it printed and each injector it would have started, which is
+    /// recorded rather than started
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The session's working directory
+    /// * `pane` - The pane's key
+    /// * `session` - The session running there, `CLAUDE_CODE_SESSION_ID`
+    /// * `pid` - Its Claude Code process, `CLAUDE_PID`
+    async fn started_by(
+        &self,
+        cwd: &Path,
+        pane: &str,
+        session: &str,
+        pid: u32,
+    ) -> anyhow::Result<(String, Vec<reef::clear::Clear>)> {
+        // the pane, session and process Claude Code names to its `!` commands
+        let here = reef::loops::Here {
+            pane: pane.parse()?,
+            session: Some(session.to_string()),
+            pid: Some(pid),
+        };
+        // each injector it starts recorded, never run, so no pane is typed into
+        let mut spawned = Vec::new();
+        let spawn = |order: &reef::clear::Clear| {
+            spawned.push(order.clone());
+            Ok(())
+        };
+        let mut out = Vec::new();
+        reef::loops::start(
+            &self.client()?,
+            cwd,
+            &here,
+            None,
+            &reef::cli::PlanPick::default(),
+            spawn,
+            &mut out,
+        )
+        .await?;
+        Ok((String::from_utf8(out)?, spawned))
+    }
+
     /// Calls Claude Code's SessionStart hook as it is called when a clear starts a new session
     /// in a pane, returning what it printed
     ///
@@ -704,7 +747,7 @@ async fn a_loop_acts_once_on_each_nodes_end() -> anyhow::Result<()> {
     hx.reef(&a, &["status", "B", "done"]).await?;
     let said = told(&hx.stopped_in(&a, Some(pane), true).await?);
     assert!(
-        said.ends_with("reef: `cli/docs/B` is done, and the loop is paused: `! reef loop start` sets it running again"),
+        said.ends_with("reef: `cli/docs/B` is done, and the loop is paused: `! reef loop start` moves on to the next node"),
         "{said}"
     );
     assert!(!said.contains("is next"), "{said}");
@@ -813,5 +856,70 @@ async fn a_loop_in_zellij_clears_between_nodes() -> anyhow::Result<()> {
     hx.reef(&a, &["status", "C", "done"]).await?;
     let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
     assert!(said.contains("nothing else is ready"), "{said}");
+    Ok(())
+}
+
+/// A start in a session's own zellij pane moves a loop between nodes on as Stop does: once a
+/// paused loop's node is done, it starts the injector once, handed the session, its Claude Code
+/// process and the node, and says reef clears. A fresh start, one mid-node, one naming the pane,
+/// and one with nothing else ready start none, the named one saying `/clear`, then `next`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_between_nodes_moves_on() -> anyhow::Result<()> {
+    let hx = Hx::new("loop-starts", &["A", "B", "C"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    let pane = "zellij:work:3";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    // a fresh start holds nothing, so it starts nothing
+    let (said, spawned) = hx.started_by(&a, pane, "s1", 4242).await?;
+    assert!(said.starts_with("started a loop in zellij"), "{said}");
+    assert_eq!(spawned.len(), 0);
+    // nor does a start mid-node, which leaves the session on its node
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/A`"), "{took}");
+    let (said, spawned) = hx.started_by(&a, pane, "s1", 4242).await?;
+    assert!(said.ends_with("holding `cli/docs/A`\n"), "{said}");
+    assert_eq!(spawned.len(), 0);
+    // paused, A's end says the loop stops there, and nothing is cleared
+    hx.reef(&a, &["loop", "pause", "--pane", pane]).await?;
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(
+        said.ends_with("`! reef loop start` moves on to the next node"),
+        "{said}"
+    );
+    // a start then moves on: the injector started once, and reef says it clears
+    let (said, spawned) = hx.started_by(&a, pane, "s2", 4242).await?;
+    assert!(
+        said.ends_with(
+            "\n`cli/docs/A` is done. `cli/docs/B` is next: reef clears the context and asks for it \
+             once Claude is idle and the input box is empty\n"
+        ),
+        "{said}"
+    );
+    assert_eq!(
+        spawned,
+        vec![reef::clear::Clear {
+            pane: pane.parse()?,
+            session: "s2".to_string(),
+            pid: 4242,
+            after: "cli/docs/A".parse()?,
+        }]
+    );
+    // a start naming the pane, from wherever, types nothing and leaves the clear to the user
+    let said = hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    assert!(
+        said.ends_with("`cli/docs/A` is done. `cli/docs/B` is next: `/clear`, then say `next`\n"),
+        "{said}"
+    );
+    // and once the last ready node is done, a start finds nothing next to clear for
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/B`"), "{took}");
+    hx.reef(&a, &["status", "C", "done"]).await?;
+    hx.reef(&a, &["status", "B", "done"]).await?;
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(said.contains("nothing else is ready"), "{said}");
+    let (said, spawned) = hx.started_by(&a, pane, "s3", 4242).await?;
+    assert!(said.contains("nothing else is ready to take"), "{said}");
+    assert_eq!(spawned.len(), 0);
     Ok(())
 }

@@ -43,7 +43,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::capture::{Keep, Report, capture_record, seal_if_done};
-use crate::clear::Clear;
+use crate::clear::{self, Clear};
 use crate::client::Client;
 use crate::git::Checkout;
 use crate::task;
@@ -225,13 +225,7 @@ where
         None => task::Ending::Nothing,
     };
     // another node next clears the session, wherever reef can type into its pane
-    let order = clearing(&ending, pane, stopped.session_id, pid);
-    let (typed, failed) = match order.map(|order| spawn(&order)) {
-        Some(Ok(())) => (true, None),
-        Some(Err(error)) => (false, Some(error)),
-        None => (false, None),
-    };
-    let Some(message) = ending.message(typed) else {
+    let Some(message) = clear::hand_off(&ending, pane, stopped.session_id, pid, spawn) else {
         // nothing for the user: the seal's lines as they are
         out.write_all(&said)?;
         return Ok(());
@@ -239,41 +233,8 @@ where
     // Claude Code shows a Stop's output to the user only when all of it is JSON
     let mut told = String::from_utf8_lossy(&said).into_owned();
     told.push_str(&format!("reef: {message}"));
-    if let Some(error) = failed {
-        told.push_str(&format!(" (reef couldn't clear it itself: {error:#})"));
-    }
     writeln!(out, "{}", serde_json::json!({ "systemMessage": told }))?;
     Ok(())
-}
-
-/// What the injector is handed, when a node's end has another next and the session can be typed
-/// into: its pane is a multiplexer's, and its session and Claude Code process are known
-///
-/// # Arguments
-///
-/// * `ending` - What the Stop made of the turn's end
-/// * `pane` - The pane the session runs in, if it could be found
-/// * `session` - The session that stopped, as Stop's input names it
-/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`
-fn clearing(
-    ending: &task::Ending,
-    pane: Option<&Pane>,
-    session: Option<String>,
-    pid: Option<u32>,
-) -> Option<Clear> {
-    // only the end of a node with another next is cleared after
-    let task::Ending::Next { done, .. } = ending else {
-        return None;
-    };
-    // and only in a pane reef can type into, watching a session it can name
-    let pane = pane.filter(|pane| pane.typed())?;
-    let session = session.filter(|session| !session.trim().is_empty())?;
-    Some(Clear {
-        pane: pane.clone(),
-        session,
-        pid: pid?,
-        after: done.clone(),
-    })
 }
 
 /// The status reef's status tool set a node to, if the tool was it and the status was done
@@ -359,10 +320,7 @@ fn prefixed<W: Write>(said: &[u8], out: &mut W) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolUsed, clearing, marked_done};
-    use crate::clear::Clear;
-    use crate::task::Ending;
-    use reef_api::Pane;
+    use super::{ToolUsed, marked_done};
 
     /// Reads a PostToolUse input
     ///
@@ -423,52 +381,5 @@ mod tests {
             "tool_input": { "id": "C56", "status": "finished-ish" },
         }));
         assert!(marked_done(&odd).is_none());
-    }
-
-    /// The injector is handed a node's end only when another is next, in a zellij or tmux pane,
-    /// with the session and its Claude Code process named
-    #[test]
-    fn only_a_next_node_in_a_typed_pane_is_cleared_after() {
-        let done: reef_model::NodeName = "reef/central/C41".parse().unwrap();
-        let next = Ending::Next {
-            done: done.clone(),
-            next: "reef/central/C61".parse().unwrap(),
-        };
-        let zellij: Pane = "zellij:work:3".parse().unwrap();
-        let session = || Some("s1".to_string());
-        // a zellij or tmux pane, its session and its process named, is cleared after
-        assert_eq!(
-            clearing(&next, Some(&zellij), session(), Some(4242)),
-            Some(Clear {
-                pane: zellij.clone(),
-                session: "s1".to_string(),
-                pid: 4242,
-                after: done.clone(),
-            })
-        );
-        let tmux: Pane = "tmux:/tmp/tmux-1000/default:%3".parse().unwrap();
-        assert!(clearing(&next, Some(&tmux), session(), Some(4242)).is_some());
-        // a Claude Code process with no multiplexer, or no pane, is the user's to clear
-        let bare = Pane::Claude { pid: 4242 };
-        assert_eq!(clearing(&next, Some(&bare), session(), Some(4242)), None);
-        assert_eq!(clearing(&next, None, session(), Some(4242)), None);
-        // as is a session or a process Claude Code didn't name
-        assert_eq!(clearing(&next, Some(&zellij), None, Some(4242)), None);
-        assert_eq!(
-            clearing(&next, Some(&zellij), Some(" ".to_string()), Some(4242)),
-            None
-        );
-        assert_eq!(clearing(&next, Some(&zellij), session(), None), None);
-        // and a pause, a finished plan or nothing to act on clears nothing
-        for ending in [
-            Ending::Paused(done.clone()),
-            Ending::Finished(done.clone()),
-            Ending::Nothing,
-        ] {
-            assert_eq!(
-                clearing(&ending, Some(&zellij), session(), Some(4242)),
-                None
-            );
-        }
     }
 }

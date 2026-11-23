@@ -1,7 +1,7 @@
 //! reef's commands for the terminal loop: which pane feeds a project, and whether it is paused
 //!
 //! ```text
-//! reef loop start [--plan NAME] [--pane KEY] [--session ID]   # start or resume this pane's loop
+//! reef loop start [--plan NAME] [--pane KEY] [--session ID]   # start, resume or move on the loop
 //! reef loop pause [--pane KEY]                                 # stop once its node is done
 //! reef loop stop [--pane KEY]                                  # end it, letting go of its node
 //! reef loop ls                                                 # the project's loops
@@ -18,6 +18,10 @@
 //!   between nodes is told which node is next ([`between`]).
 //! - **Every plan, or one.** A loop takes the project's ready work across its plans, unless
 //!   `--plan` names one.
+//! - **A start between nodes moves on.** Stop acts on a node's end once, so after a paused
+//!   loop's node, or once the injector stepped aside, a start in the session's own pane hands off
+//!   as Stop did: in zellij or tmux it starts the injector, and elsewhere it says `/clear`, then
+//!   `next`. A start naming a pane types nothing into it, since its session isn't known.
 
 use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
 use reef_model::NodeName;
@@ -25,6 +29,7 @@ use serde::Deserialize;
 use std::io::Write;
 use std::path::Path;
 
+use crate::clear::{self, Clear};
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
 use crate::task::{self, Ending};
@@ -35,12 +40,16 @@ pub struct Here {
     pub pane: Pane,
     /// The session running in it, when the pane is this process's own and Claude Code named it
     pub session: Option<String>,
+    /// The Claude Code process the session runs in, `CLAUDE_PID`, when the pane is this
+    /// process's own and Claude Code named it
+    pub pid: Option<u32>,
 }
 
 impl Here {
     /// The pane named, else the one this process runs in, found from its environment
     ///
-    /// A session is only known for this process's own pane, never for one named.
+    /// A session and its Claude Code process are only known for this process's own pane, never
+    /// for one named.
     ///
     /// # Arguments
     ///
@@ -55,6 +64,7 @@ impl Here {
     /// let env = |name: &str| (name == "CLAUDE_CODE_SESSION_ID").then(|| "s1".to_string());
     /// let here = Here::find(Some("claude:4242"), env).unwrap();
     /// assert_eq!((here.pane.to_string(), here.session), ("claude:4242".to_string(), None));
+    /// assert_eq!(here.pid, None);
     /// ```
     pub fn find<F: Fn(&str) -> Option<String>>(
         named: Option<&str>,
@@ -65,6 +75,7 @@ impl Here {
             return Ok(Here {
                 pane: named.parse()?,
                 session: None,
+                pid: None,
             });
         }
         // else this process's own, and the session Claude Code ran it from
@@ -76,7 +87,9 @@ impl Here {
             )
         })?;
         let session = var("CLAUDE_CODE_SESSION_ID").filter(|id| !id.trim().is_empty());
-        Ok(Here { pane, session })
+        // and the Claude Code process it runs in, which the injector asks whether it is idle
+        let pid = var("CLAUDE_PID").and_then(|pid| pid.trim().parse().ok());
+        Ok(Here { pane, session, pid })
     }
 }
 
@@ -121,24 +134,30 @@ struct SessionStarted {
 }
 
 /// Starts a loop in a pane feeding the picked project, or one plan of it, or sets the pane's
-/// paused loop running again
+/// paused loop running again, moving on to the next node when it is between nodes
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `cwd` - The working directory, which picks the project
-/// * `here` - The pane, and the session running in it if known
+/// * `here` - The pane, and the session and Claude Code process running in it if known
 /// * `session` - The session feeding it, named on the command line
 /// * `pick` - The project and plan named, if they were
+/// * `spawn` - Starts the injector in the background, as [`crate::clear::spawn`] does
 /// * `out` - Where to print what came of it
-pub async fn start<W: Write>(
+pub async fn start<W, S>(
     client: &Client,
     cwd: &Path,
     here: &Here,
     session: Option<&str>,
     pick: &PlanPick,
+    spawn: S,
     out: &mut W,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    W: Write,
+    S: FnOnce(&Clear) -> anyhow::Result<()>,
+{
     // the project the working directory belongs to, and a plan only if one was named
     let project = cli::picked(client, cwd, &pick.project).await?;
     let edit = LoopEdit::Start {
@@ -164,7 +183,8 @@ pub async fn start<W: Write>(
                 feeds(&r#loop),
                 holding(&r#loop)
             )?;
-            Ok(())
+            // between nodes, it moves on as the Stop that ended its node would have
+            move_on(client, &r#loop, here, spawn, out).await
         }
         LoopEdited::Busy { r#loop } => anyhow::bail!(
             "{} has a loop already, feeding it {}: `reef loop stop` ends it first",
@@ -173,6 +193,65 @@ pub async fn start<W: Write>(
         ),
         other => unexpected(&here.pane, other),
     }
+}
+
+/// Moves a loop that a start set running on to its next node, if it is between nodes, as the
+/// Stop that ended its node does: the injector started where reef can type into the session,
+/// else the user told to `/clear`, then say `next`
+///
+/// A loop mid-node, or one holding nothing, is left to its session.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `feeding` - The pane's loop, set running
+/// * `here` - The pane, and the session and Claude Code process running in it if known
+/// * `spawn` - Starts the injector in the background
+/// * `out` - Where to print what came of it
+async fn move_on<W, S>(
+    client: &Client,
+    feeding: &Loop,
+    here: &Here,
+    spawn: S,
+    out: &mut W,
+) -> anyhow::Result<()>
+where
+    W: Write,
+    S: FnOnce(&Clear) -> anyhow::Result<()>,
+{
+    // only a loop whose node's end was acted on is between nodes
+    let Some(done) = between(feeding) else {
+        return Ok(());
+    };
+    // what comes after its node, over the loops of its project
+    let loops = client.loops().await?;
+    let ending = task::upcoming(client, feeding, done, &loops).await?;
+    if let Some(message) = handed_off(&ending, here, spawn) {
+        writeln!(out, "{message}")?;
+    }
+    Ok(())
+}
+
+/// Hands a start's ending off as Stop does, from the pane, session and process it ran in, and
+/// says what the user is told of it
+///
+/// # Arguments
+///
+/// * `ending` - What comes after the loop's node, which is done
+/// * `here` - The pane, and the session and Claude Code process running in it if known
+/// * `spawn` - Starts the injector in the background
+fn handed_off<S>(ending: &Ending, here: &Here, spawn: S) -> Option<String>
+where
+    S: FnOnce(&Clear) -> anyhow::Result<()>,
+{
+    // a pane named has no session or process known, so it is never typed into
+    clear::hand_off(
+        ending,
+        Some(&here.pane),
+        here.session.clone(),
+        here.pid,
+        spawn,
+    )
 }
 
 /// Pauses a pane's loop, so it stops once the node it is on is done
@@ -303,8 +382,12 @@ pub async fn session_start<W: Write>(
         }
         other => return unexpected(pane, other),
     };
-    // only a clear between nodes is told what is next
-    let Some(done) = between(&feeding, &started.source) else {
+    // only a clear between nodes is told what is next, never a plan approval's mid-node
+    if started.source != "clear" {
+        out.flush()?;
+        return Ok(());
+    }
+    let Some(done) = between(&feeding) else {
         out.flush()?;
         return Ok(());
     };
@@ -331,13 +414,14 @@ pub async fn session_start<W: Write>(
     Ok(())
 }
 
-/// The node a loop holds when a clear finds it between nodes: running, its node done and that
-/// node's end acted on by the Stop hook, which acts only on a node that is done
+/// The node a loop holds when it is between nodes: running, its node done and that node's end
+/// acted on by the Stop hook, which acts only on a node that is done
+///
+/// A clear's new session, and a start, read it to move on to the next node.
 ///
 /// # Arguments
 ///
-/// * `feeding` - The pane's loop, handed to the session that started
-/// * `source` - Why the session started, as Claude Code's SessionStart names it
+/// * `feeding` - The pane's loop
 ///
 /// # Examples
 ///
@@ -357,12 +441,14 @@ pub async fn session_start<W: Write>(
 ///     version: 5,
 ///     started_at: 1,
 /// };
-/// assert_eq!(between(&feeding, "clear"), node);
-/// assert_eq!(between(&feeding, "startup"), None);
+/// assert_eq!(between(&feeding), node);
+/// // mid-node, its node's end not acted on yet, it isn't
+/// let mid = Loop { acted: None, ..feeding };
+/// assert_eq!(between(&mid), None);
 /// ```
-pub fn between(feeding: &Loop, source: &str) -> Option<NodeName> {
-    // only a clear, and only of a running loop
-    if source != "clear" || feeding.state != LoopState::Running {
+pub fn between(feeding: &Loop) -> Option<NodeName> {
+    // only a running loop moves on
+    if feeding.state != LoopState::Running {
         return None;
     }
     // whose node's end was acted on, so a plan approval's clear mid-node is passed by
@@ -456,7 +542,8 @@ fn listed(feeding: &Loop) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Here, listed, server_pane};
+    use super::{Here, handed_off, listed, server_pane};
+    use crate::task::Ending;
     use reef_api::{Loop, LoopState, Pane};
 
     /// An MCP server's pane is its multiplexer's, then `CLAUDE_PID`'s, then its parent's
@@ -499,13 +586,63 @@ mod tests {
         let own = Here::find(None, env).unwrap();
         assert_eq!(own.pane, Pane::Claude { pid: 4242 });
         assert_eq!(own.session.as_deref(), Some("s1"));
-        // a pane named never takes this process's session
+        assert_eq!(own.pid, Some(4242));
+        // a pane named never takes this process's session or process
         let named = Here::find(Some("tmux:/tmp/t:%1"), env).unwrap();
-        assert_eq!(named.session, None);
+        assert_eq!((named.session, named.pid), (None, None));
         // a key that names no pane, and no pane at all, are refused saying what to do
         assert!(Here::find(Some("nowhere"), env).is_err());
         let error = Here::find(None, |_| None).err().unwrap();
         assert!(error.to_string().contains("`! reef loop ...`"), "{error}");
+    }
+
+    /// A start between nodes in its session's own zellij pane starts the injector once, handed
+    /// the session and its process, while one with no multiplexer, or naming a pane, starts none
+    /// and says `/clear`, then `next`
+    #[test]
+    fn a_start_between_nodes_says_who_clears() {
+        let next = Ending::Next {
+            done: "reef/central/C61".parse().unwrap(),
+            next: "reef/central/C71".parse().unwrap(),
+        };
+        // a session in zellij, as Claude Code runs `! reef loop start` there
+        let zellij = |name: &str| match name {
+            "ZELLIJ_SESSION_NAME" => Some("work".to_string()),
+            "ZELLIJ_PANE_ID" => Some("3".to_string()),
+            "CLAUDE_PID" => Some("4242".to_string()),
+            "CLAUDE_CODE_SESSION_ID" => Some("s1".to_string()),
+            _ => None,
+        };
+        let here = Here::find(None, zellij).unwrap();
+        let mut started = Vec::new();
+        let said = handed_off(&next, &here, |order| {
+            started.push(order.args().join(" "));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            started,
+            vec![
+                "hook clear --pane zellij:work:3 --session s1 --pid 4242 --after reef/central/C61"
+            ]
+        );
+        assert!(said.contains("reef clears the context"), "{said}");
+        // a session with no multiplexer is the user's to clear
+        let bare = |name: &str| match name {
+            "CLAUDE_PID" => Some("4242".to_string()),
+            "CLAUDE_CODE_SESSION_ID" => Some("s1".to_string()),
+            _ => None,
+        };
+        let here = Here::find(None, bare).unwrap();
+        let said = handed_off(&next, &here, |_| unreachable!()).unwrap();
+        assert_eq!(
+            said,
+            "`reef/central/C61` is done. `reef/central/C71` is next: `/clear`, then say `next`"
+        );
+        // as is a zellij pane named from elsewhere, whose session isn't known
+        let here = Here::find(Some("zellij:work:3"), zellij).unwrap();
+        let said = handed_off(&next, &here, |_| unreachable!()).unwrap();
+        assert!(said.ends_with("`/clear`, then say `next`"), "{said}");
     }
 
     /// A loop is listed by its state, what it feeds, its node, what it acted on and its session

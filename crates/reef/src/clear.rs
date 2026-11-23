@@ -8,6 +8,11 @@
 //! - **Started by Stop, in the background.** No hook output, tool or command clears an
 //!   interactive session. So once the node the pane's loop holds is done and another is next,
 //!   Stop starts this as a process of its own ([`spawn`]) and lets Claude stop.
+//! - **Or by a start between nodes.** Stop acts on a node's end once, so after a paused loop's
+//!   node, or once the injector stepped aside, `! reef loop start` hands off as Stop did
+//!   ([`hand_off`]). Claude Code answers a `!` command with a turn of its own, busy from the
+//!   command's Enter to the reply's end, so the injector, started inside it, waits it out as it
+//!   waits out the turn that ended a node.
 //! - **Only into the session's own pane**, zellij's or tmux's, as X4 typed into it: zellij's
 //!   `write-chars` and `write 13`, tmux's `send-keys`. A session with no multiplexer has no pane
 //!   reef can reach, so its user types `/clear` and `next`.
@@ -37,6 +42,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::client::Client;
+use crate::task::Ending;
 
 /// What the injector types once the clear's new session is idle
 pub const KICKOFF: &str = "Take the next node from reef's loop with next_task";
@@ -60,16 +66,17 @@ const SETTLE: Duration = Duration::from_millis(400);
 /// How long it waits for a clear's new session before it steps aside
 const CLEARING: Duration = Duration::from_secs(10);
 
-/// What the Stop hook hands the injector it starts: where to type, and after which node
+/// What the injector is handed, by Stop or by a start between nodes: where to type, and after
+/// which node
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clear {
     /// The pane the session runs in, zellij's or tmux's
     pub pane: Pane,
-    /// The session that stopped, which is cleared
+    /// The session running in the pane, which is cleared
     pub session: String,
     /// The Claude Code process the session runs in, `CLAUDE_PID`, which a clear keeps
     pub pid: u32,
-    /// The node whose end the Stop acted on
+    /// The node whose end the loop acted on
     pub after: NodeName,
 }
 
@@ -109,7 +116,90 @@ impl Clear {
     }
 }
 
-/// Starts the injector as a process of its own, so the Stop hook returns at once
+/// What the injector is handed, when a node's end has another next and the session can be typed
+/// into: its pane is a multiplexer's, and its session and Claude Code process are known
+///
+/// # Arguments
+///
+/// * `ending` - What came after the loop's node
+/// * `pane` - The pane the session runs in, if it could be found
+/// * `session` - The session running there, if Claude Code named it
+/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
+pub fn order(
+    ending: &Ending,
+    pane: Option<&Pane>,
+    session: Option<String>,
+    pid: Option<u32>,
+) -> Option<Clear> {
+    // only the end of a node with another next is cleared after
+    let Ending::Next { done, .. } = ending else {
+        return None;
+    };
+    // and only in a pane reef can type into, watching a session it can name
+    let pane = pane.filter(|pane| pane.typed())?;
+    let session = session.filter(|session| !session.trim().is_empty())?;
+    Some(Clear {
+        pane: pane.clone(),
+        session,
+        pid: pid?,
+        after: done.clone(),
+    })
+}
+
+/// Starts the injector once a node's end has another next and the session can be typed into,
+/// then says what the user is told of the end, if anything
+///
+/// Stop hands off at a node's end, and `reef loop start` when it sets a loop running between
+/// nodes. Where the injector can't start, the user is told to clear the session, and why.
+///
+/// # Arguments
+///
+/// * `ending` - What came after the loop's node
+/// * `pane` - The pane the session runs in, if it could be found
+/// * `session` - The session running there, if Claude Code named it
+/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
+/// * `spawn` - Starts the injector in the background, as [`spawn`] does
+///
+/// # Examples
+///
+/// ```
+/// use reef::clear::hand_off;
+/// use reef::task::Ending;
+/// use reef_api::Pane;
+///
+/// let next = Ending::Next {
+///     done: "reef/central/C61".parse().unwrap(),
+///     next: "reef/central/C71".parse().unwrap(),
+/// };
+/// // a Claude Code process with no multiplexer is the user's to clear
+/// let bare = Pane::Claude { pid: 4242 };
+/// let said = hand_off(&next, Some(&bare), Some("s1".to_string()), Some(4242), |_| unreachable!());
+/// assert!(said.unwrap().ends_with("`/clear`, then say `next`"));
+/// ```
+pub fn hand_off<S>(
+    ending: &Ending,
+    pane: Option<&Pane>,
+    session: Option<String>,
+    pid: Option<u32>,
+    spawn: S,
+) -> Option<String>
+where
+    S: FnOnce(&Clear) -> anyhow::Result<()>,
+{
+    // another node next clears the session, wherever reef can type into its pane
+    let started = order(ending, pane, session, pid).map(|order| spawn(&order));
+    let message = ending.message(matches!(started, Some(Ok(()))))?;
+    // an injector that couldn't start leaves the clear to the user, saying why
+    match started {
+        Some(Err(error)) => Some(format!(
+            "{message} (reef couldn't clear it itself: {error:#})"
+        )),
+        _ => Some(message),
+    }
+}
+
+/// Starts the injector as a process of its own, so the hook or command that starts it returns at
+/// once
 ///
 /// It runs this same binary, in a process group of its own so nothing Claude Code sends the
 /// hook's group reaches it, with nothing piped back to Claude Code, and its output appended to
@@ -594,7 +684,7 @@ pub fn judge(
     }
 }
 
-/// Clears the session the Stop hook ran in and asks for the next node, once it is idle and its
+/// Clears the session running in the pane and asks for the next node, once it is idle and its
 /// box empty, or steps aside, saying why
 ///
 /// # Arguments
@@ -745,7 +835,10 @@ async fn cleared(order: &Clear) -> anyhow::Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Agent, Step, Watch, agent, input_box, judge, same_words, sgr};
+    use super::{
+        Agent, Clear, Step, Watch, agent, hand_off, input_box, judge, order, same_words, sgr,
+    };
+    use crate::task::Ending;
     use reef_api::{Loop, LoopState, Pane};
     use reef_model::NodeName;
 
@@ -968,5 +1061,105 @@ mod tests {
         assert!(same_words("/clear", "/clear"));
         assert!(!same_words("half a thought/clear", "/clear"));
         assert!(!same_words("", "/clear"));
+    }
+
+    /// The injector is handed a node's end only when another is next, in a zellij or tmux pane,
+    /// with the session and its Claude Code process named
+    #[test]
+    fn only_a_next_node_in_a_typed_pane_is_cleared_after() {
+        let done = named("C41");
+        let next = Ending::Next {
+            done: done.clone(),
+            next: named("C61"),
+        };
+        let zellij: Pane = "zellij:work:3".parse().unwrap();
+        let session = || Some("s1".to_string());
+        // a zellij or tmux pane, its session and its process named, is cleared after
+        assert_eq!(
+            order(&next, Some(&zellij), session(), Some(4242)),
+            Some(Clear {
+                pane: zellij.clone(),
+                session: "s1".to_string(),
+                pid: 4242,
+                after: done.clone(),
+            })
+        );
+        let tmux: Pane = "tmux:/tmp/tmux-1000/default:%3".parse().unwrap();
+        assert!(order(&next, Some(&tmux), session(), Some(4242)).is_some());
+        // a Claude Code process with no multiplexer, or no pane, is the user's to clear
+        let bare = Pane::Claude { pid: 4242 };
+        assert_eq!(order(&next, Some(&bare), session(), Some(4242)), None);
+        assert_eq!(order(&next, None, session(), Some(4242)), None);
+        // as is a session or a process Claude Code didn't name
+        assert_eq!(order(&next, Some(&zellij), None, Some(4242)), None);
+        assert_eq!(
+            order(&next, Some(&zellij), Some(" ".to_string()), Some(4242)),
+            None
+        );
+        assert_eq!(order(&next, Some(&zellij), session(), None), None);
+        // and a pause, a finished plan or nothing to act on clears nothing
+        for ending in [
+            Ending::Paused(done.clone()),
+            Ending::Finished(done.clone()),
+            Ending::Nothing,
+        ] {
+            assert_eq!(order(&ending, Some(&zellij), session(), Some(4242)), None);
+        }
+    }
+
+    /// Handing off starts the injector once where it can type, and says reef clears; where it
+    /// can't, or the injector fails to start, it says `/clear`, then `next`, and why
+    #[test]
+    fn a_hand_off_says_who_clears() {
+        let next = Ending::Next {
+            done: named("C61"),
+            next: named("C71"),
+        };
+        let zellij: Pane = "zellij:work:3".parse().unwrap();
+        // a pane reef can type into starts the injector once, and says reef clears
+        let mut started = Vec::new();
+        let said = hand_off(
+            &next,
+            Some(&zellij),
+            Some("s1".to_string()),
+            Some(4242),
+            |order| {
+                started.push(order.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(started.len(), 1);
+        assert!(
+            said.ends_with(
+                "reef clears the context and asks for it once Claude is idle and the input box is \
+                 empty"
+            ),
+            "{said}"
+        );
+        // an injector that fails to start leaves the clear to the user, saying why
+        let said = hand_off(
+            &next,
+            Some(&zellij),
+            Some("s1".to_string()),
+            Some(4242),
+            |_| anyhow::bail!("no such program"),
+        )
+        .unwrap();
+        assert!(
+            said.ends_with(
+                "`/clear`, then say `next` (reef couldn't clear it itself: no such program)"
+            ),
+            "{said}"
+        );
+        // and nothing to act on starts nothing and says nothing
+        let said = hand_off(
+            &Ending::Nothing,
+            Some(&zellij),
+            Some("s1".to_string()),
+            Some(4242),
+            |_| unreachable!(),
+        );
+        assert_eq!(said, None);
     }
 }

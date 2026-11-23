@@ -24,7 +24,8 @@ where they are today:
    ([C56](../milestones/m7.md)).
 5. **The Stop hook** (`reef hook stop`) clears the context and starts the next node once the
    node is done ([C61](../milestones/m8.md)). While Claude waits on the user, the hook lets it
-   stop.
+   stop. After a paused node's end, `! reef loop start` moves on the same way
+   ([C71](../milestones/m8.md)).
 
 ### Design choices
 
@@ -35,7 +36,7 @@ where they are today:
   the last one's.
 - **reef never owns the session.** It doesn't start Claude, wrap its terminal or hold its input.
   It types only into the pane the session already runs in, and only from that session's own
-  hook.
+  hook, or from a `! reef loop start` typed in it.
 - **Cleared by typing into the pane.** No hook output, tool or command clears an interactive
   session. Once a node is done and another is next, the Stop hook lets Claude stop and starts an
   injector in the background, `reef hook clear` ([C61](../milestones/m8.md)). The injector waits
@@ -49,6 +50,14 @@ where they are today:
     acted on, its Claude Code process running the session it waits on. Otherwise it quits.
   - **In its own process group,** with nothing piped back to Claude Code, and what it did
     appended to `$XDG_STATE_HOME/reef/clear.log`.
+  - **A start between nodes hands off as Stop does** ([C71](../milestones/m8.md)). Stop acts on a node's
+    end once, so after a paused loop's node, or once the injector stepped aside, `! reef loop
+    start` starts the same injector in zellij or tmux, handed the session and process from
+    `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID`. Elsewhere it says `/clear`, then `next`. A start
+    naming a pane with `--pane` types nothing, since that pane's session isn't known.
+  - **It waits out the start's own turn.** Claude Code answers a `!` command with a turn of its
+    own, busy from the command's Enter to the reply's end. The injector starts inside that turn,
+    so it waits it out as it waits out the turn that ended a node.
 - **A draft is never typed over.** The injector reads the pane's input box with its colours,
   through zellij's `dump-screen --ansi` or tmux's `capture-pane -e`: the last `❯` line right
   under a rule, up to the rule that closes it. It waits while the box holds anything that isn't
@@ -57,7 +66,8 @@ where they are today:
   - **Enter only on its own line.** After typing, it reads the box back, and presses Enter only
     if the box holds what it typed, so a key the user pressed meanwhile never sends their line.
   - **It steps aside** once a turn starts that it didn't type, such as the user sending their
-    draft, or after ten minutes. The user's own `/clear` and `next` then start the next node.
+    draft, or after ten minutes. The user's own `/clear` and `next`, or `! reef loop start`,
+    then start the next node.
 - **Without a multiplexer, the user types `/clear` and `next`.** The Stop hook's message says
   which node is next, and SessionStart(clear) names it to Claude, so one word after the clear
   starts it. A clear mid-node, a plan approval's, is told nothing.
@@ -85,8 +95,8 @@ where they are today:
     its pane and its session from Claude Code's variables, or `--pane` names one.
   - **A loop keeps** its project, the one plan it narrows to if any, its session, the node it
     holds and the node whose end it acted on. `reef loop pause` lets it finish its node, `reef
-    loop start` sets it running again, `reef loop stop` ends it and lets go of its node, and
-    `reef loop ls` lists the project's.
+    loop start` sets it running again, moving on when it is between nodes, `reef loop stop` ends
+    it and lets go of its node, and `reef loop ls` lists the project's.
   - **Kept by central reef**, all loops in one partition, so whether another loop holds a node
     is one read under one lock.
 - **Sessions at once work in their own worktrees**, which reef makes, so two nodes' changes never
@@ -166,6 +176,25 @@ environment. A stand-in user approved through tmux.
   3 s. Sent instead, the injector stepped aside.
 - **Without a multiplexer, `/clear` and `next` started the next node** through SessionStart's
   context.
+
+### What C71 found
+
+Tried with Claude Code 2.1.330, running Sonnet 5.5 at low effort, on a scratch reef-serve. One
+loop ran in zellij, one in plain tmux and one with neither, each on a private tmux server with a
+scrubbed environment.
+
+- **A `!` command is one busy turn.** `claude agents --json`, polled every 0.12 s, showed the
+  session busy from the command's Enter until Claude had answered its output, with no idle look
+  between. `! sleep 2` was busy for 2.9 s and `! true` for 0.8 s.
+- **A start between nodes cleared and moved on, in both.** In zellij and in tmux, `! reef loop
+  start` after a paused node's end had Claude answer the start in a line, then cleared the
+  session and took the next node with nothing more typed. Each new session's first turn ran at
+  44.4k, a fresh session's, against 51.6k to 52.5k at the old session's end.
+- **So did one after the injector stepped aside.** A draft left in the box held Stop's
+  injector, and sending it made the injector step aside. `! reef loop start` then cleared and
+  moved on the same way.
+- **Without a multiplexer, the start said `/clear`, then `next`,** and those two started the
+  next node at 44.4k.
 
 ### Open questions
 

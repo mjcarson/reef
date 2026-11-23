@@ -395,7 +395,7 @@ pub enum NodeCommand {
 #[derive(Debug, Subcommand)]
 pub enum LoopCommand {
     /// Start a loop in this pane, feeding its session the project's nodes, or set its paused
-    /// loop running again
+    /// loop running again, moving on to the next node when it is between nodes
     Start {
         /// The pane, as `reef loop ls` prints it, else this one
         #[arg(long, value_name = "KEY")]
@@ -467,19 +467,20 @@ pub enum HookCommand {
         #[arg(long, value_name = "KEY")]
         pane: Option<String>,
     },
-    /// Stop's injector, which Stop starts in the background: once the session is idle and its
-    /// input box empty, type `/clear` and the next node's kickoff into its zellij or tmux pane
+    /// The injector, which Stop, or a start between nodes, starts in the background: once the
+    /// session is idle and its input box empty, type `/clear` and the next node's kickoff into
+    /// its zellij or tmux pane
     Clear {
         /// The pane to type into, as `reef loop ls` prints it
         #[arg(long, value_name = "KEY")]
         pane: String,
-        /// The session that stopped, which is cleared
+        /// The session running in the pane, which is cleared
         #[arg(long, value_name = "ID")]
         session: String,
         /// The Claude Code process the session runs in, `CLAUDE_PID`
         #[arg(long, value_name = "PID")]
         pid: u32,
-        /// The node whose end the Stop acted on, which the loop must still hold
+        /// The node whose end the loop acted on, which it must still hold
         #[arg(long, value_name = "NODE")]
         after: String,
     },
@@ -792,7 +793,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                     pick,
                 } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
-                    loops::start(&client, cwd, &here, session.as_deref(), &pick, out).await
+                    // between nodes, the injector reaches the same service, as Stop's does
+                    let spawn = |order: &clear::Clear| clear::spawn(order, named.as_deref());
+                    loops::start(&client, cwd, &here, session.as_deref(), &pick, spawn, out).await
                 }
                 LoopCommand::Pause { pane } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
@@ -849,7 +852,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             pid,
             after,
         }) => {
-            // what Stop handed it, each part as Stop wrote it
+            // what Stop, or a start, handed it, each part as it was written
             let order = clear::Clear {
                 pane: pane.parse()?,
                 session,

@@ -26,11 +26,12 @@ start|pause|stop|ls`, which keep the terminal loop of the pane a session runs in
 take`, which takes that loop's next node and starts it, as the MCP tool next_task does, `reef
 hook session-start`, which hands the loop to each session that starts there and names the next
 node to a clear between nodes, `reef hook stop`, which seals a node done and says once what comes
-after the loop's node, `reef hook clear`, which Stop starts in the background to type `/clear`
-and the next node's kickoff into a zellij or tmux pane once Claude is idle, and `reef import`
-and `reef export`, which carry a book's nodes and pages in and out. `reef export --replace` writes
-a plan back over the book it lives in, keeping the book's files, summary and `book.toml`. They call
-the address `[api] address` names and say so when nothing answers there.
+after the loop's node, `reef hook clear`, which Stop, or a `reef loop start` between nodes,
+starts in the background to type `/clear` and the next node's kickoff into a zellij or tmux pane
+once Claude is idle, and `reef import` and `reef export`, which carry a book's nodes and pages
+in and out. `reef export --replace` writes a plan back over the book it lives in, keeping the
+book's files, summary and `book.toml`. They call the address `[api] address` names and say so
+when nothing answers there.
 
 ## Building
 
