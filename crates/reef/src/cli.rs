@@ -43,6 +43,7 @@
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
 //! reef skill [DIR] [--print]
+//! reef claude install [DIR]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -60,8 +61,8 @@
 //! worktree-create` makes that worktree for `claude -w <id>`. The capture hooks work on the node the working directory's worktree is on, and do
 //! nothing where there is none. `import` picks the project the book is in, and lists the plan
 //! `--plan` names if it isn't listed. `export` picks the project the new book's directory is in.
-//! `skill` writes into the repo that holds its directory, and needs neither reef's config nor
-//! its service.
+//! `skill` writes into the repo that holds its directory, and `claude install` into the checkout
+//! that holds its directory, and neither needs reef's config or its service.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project};
@@ -71,6 +72,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::capture;
+use crate::claude;
 use crate::clear;
 use crate::client::Client;
 use crate::comment;
@@ -299,6 +301,26 @@ pub enum Command {
         /// Print its SKILL.md instead of writing it
         #[arg(long)]
         print: bool,
+    },
+    /// Set a repo up for Claude Code and the loop
+    #[command(subcommand)]
+    Claude(ClaudeCommand),
+}
+
+/// What can be set up for Claude Code
+#[derive(Debug, Subcommand)]
+pub enum ClaudeCommand {
+    /// Set the checkout that holds a directory up for the loop: reef's MCP server in `.mcp.json`,
+    /// its hooks in `.claude/settings.json`, its server enabled and its tools allowed in
+    /// `.claude/settings.local.json`, git's post-commit and post-rewrite, and the skill
+    ///
+    /// Running it again changes nothing. Commit `.mcp.json`, `.claude/settings.json` and the
+    /// skill, so every worktree checks them out. The local settings stay out of git, and reef's
+    /// WorktreeCreate copies them into each worktree it makes.
+    Install {
+        /// A directory in the checkout
+        #[arg(value_name = "DIR", default_value = ".")]
+        dir: PathBuf,
     },
 }
 
@@ -693,6 +715,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             false => skill::write(&cwd.join(dir), out).map(|_| ()),
         };
     }
+    // nor can they stop setting a repo up, which only writes files too
+    if let Command::Claude(ClaudeCommand::Install { dir }) = &cli.command {
+        return claude::install(&cwd.join(dir), out).map(|_| ());
+    }
     // the config named, read from the working directory, else the one the service reads
     let named = cli.conf.map(|path| cwd.join(path));
     let conf = Conf::load(named.as_deref())?;
@@ -931,6 +957,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         }
         // written above, before the config was read
         Command::Skill { .. } => unreachable!("the skill is written before the config is read"),
+        Command::Claude(_) => unreachable!("a repo is set up before the config is read"),
     }
 }
 
@@ -1173,8 +1200,8 @@ pub(crate) fn columns<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Command, CommentCommand, HookCommand, LoopCommand, NodeCommand, PageCommand,
-        PlanCommand, ProjectCommand, QueueCommand, columns,
+        ClaudeCommand, Cli, Command, CommentCommand, HookCommand, LoopCommand, NodeCommand,
+        PageCommand, PlanCommand, ProjectCommand, QueueCommand, columns,
     };
     use clap::{CommandFactory, Parser};
     use reef_model::{Met, Status};
@@ -1595,6 +1622,26 @@ mod tests {
         // it writes into a repo, not a project's plan
         assert!(Cli::try_parse_from(["reef", "skill", "--project", "reef"]).is_err());
         assert!(Cli::try_parse_from(["reef", "skill", "a", "b"]).is_err());
+    }
+
+    /// Setting a repo up takes a directory or none, and no project or plan
+    #[test]
+    fn claude_install_takes_a_directory() {
+        // a directory named
+        let named = Cli::try_parse_from(["reef", "claude", "install", "../other"]).unwrap();
+        assert!(matches!(
+            named.command,
+            Command::Claude(ClaudeCommand::Install { dir }) if dir == Path::new("../other")
+        ));
+        // none is the working directory
+        let here = Cli::try_parse_from(["reef", "claude", "install"]).unwrap();
+        assert!(matches!(
+            here.command,
+            Command::Claude(ClaudeCommand::Install { dir }) if dir == Path::new(".")
+        ));
+        // it writes into a checkout, not a project's plan
+        assert!(Cli::try_parse_from(["reef", "claude", "install", "--project", "r"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "claude"]).is_err());
     }
 
     /// The first column is padded to its widest cell

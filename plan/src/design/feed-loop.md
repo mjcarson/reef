@@ -105,6 +105,11 @@ where they are today:
   mix on one branch ([X3](code-and-comments.md#nodes-worked-on-at-once-x3)). A loop works a
   group of nodes at once that way ([Groups of nodes at once](#groups-of-nodes-at-once)).
 - **Pausing stops the loop after the current node**, never in the middle of one.
+- **A plan's approval offers a clear.** `reef claude install` turns on
+  `showClearContextOnPlanAccept`, so the approval dialog's first option drops the node's
+  planning, 8k to 9k in X4's runs, and the node is implemented from the plan alone
+  ([C42](../milestones/m8.md)). The user still picks it at each approval, and a setting they turned off
+  stays off.
 
 ### What X4 found
 
@@ -198,12 +203,6 @@ scrubbed environment.
   moved on the same way.
 - **Without a multiplexer, the start said `/clear`, then `next`,** and those two started the
   next node at 44.4k.
-
-### Open questions
-
-- **Approval's clear as well?** It drops a node's planning before its implementation, 8k to 9k
-  for the stub's nodes. Whether `reef claude install` turns it on is
-  [C42](../milestones/m8.md)'s call.
 
 ## Groups of nodes at once
 
@@ -356,8 +355,54 @@ Plan mode blocks Bash, so while Claude plans it can't run the CLI.
   names the tools and commands of the reef that wrote it. A test fails when the MCP server has
   a tool the skill doesn't name, or when the skill names a tool, a command or a flag reef doesn't
   have. A new tool such as next_task is written into the skill in the change that adds it.
-- **One command sets up a repo:** `reef claude install` writes the MCP entry, the Stop hook and
-  the skill, and running it twice changes nothing.
+- **One command sets up a repo** ([C42](../milestones/m8.md)). `reef claude install [DIR]` writes all of
+  it, and needs no config or service, as `reef skill` doesn't.
+  - **Committed, so every worktree checks them out:** `.mcp.json` runs `reef mcp` as the server
+    `reef`. `.claude/settings.json` runs `reef hook …` on SessionStart, Stop, PostToolUse after
+    `mcp__reef__status`, WorktreeCreate and WorktreeRemove. A group's member is checked out from
+    HEAD, so these, and the skill, reach its session once committed.
+  - **Local, since trust is the user's:** `.claude/settings.local.json` holds
+    `enabledMcpjsonServers`, the `mcp__reef` allow rule and `showClearContextOnPlanAccept`, and
+    `/.claude/settings.local.json` goes in `info/exclude`. WorktreeCreate copies the file into
+    each worktree it makes, where git ignores it there, since a copy git didn't ignore would be
+    captured as the node's change.
+  - **git's hooks where git runs them:** post-commit and post-rewrite, in the directory
+    `git rev-parse --git-path hooks` names, `core.hooksPath`'s if set, else the common dir's. Each
+    is a marked block running `reef hook …` with its standard input closed and `|| true`. A shell
+    script there already keeps its lines, the block going just after its shebang so an `exec`
+    can't skip it. Anything else is left as it is, and the line to add is printed.
+  - **Running it again changes nothing.** reef's entries are found however their command names
+    reef or its config, so one edited by hand stays. Every file is read and merged before any is
+    written, and only a file that changes is written. serde_json keeps no key order, so a merged
+    file's keys come out sorted.
+
+### What C42 found
+
+Tried with Claude Code 2.1.330, running Sonnet 5.5 at low effort, on a scratch reef-serve. A
+scratch repo, its committed `.claude/settings.json` already setting the model, was set up by
+`reef claude install` alone. Then a loop two wide ran on two tiny nodes in plain tmux, on a
+private tmux server with a scrubbed environment.
+
+- **Trusting the folder was the only prompt before each node.**
+  - The trust dialog listed the `mcp__reef` rule from the local settings, the hooks in
+    `.claude/settings.json`, and `.mcp.json`.
+  - No MCP server's approval followed. The loop's session ran in manual mode, so the allow rule
+    alone let next_task through, which writes.
+  - The member's `claude -w B` session, in the account's default auto mode, asked nothing either.
+    A's plan was up for approval 7 s after `next`, and B's 8 s after its pane opened.
+- **The member's worktree had the local settings.** WorktreeCreate copied
+  `.claude/settings.local.json` into `.claude/worktrees/B`, which stayed clean, and B's sealed
+  revision held only its own file.
+- **Approval's clear worked in the loop.** The dialog's first option was *Yes, clear context and
+  use auto mode*. Both sessions implemented their node from the plan alone under a new session
+  id, committed, and marked it done, and the loop followed its session.
+- **The repo's own settings stayed.** The model and effort keys sat beside reef's hooks, and a
+  second run changed nothing.
+- **Claude Code puts `**/.claude/settings.local.json` in the user's own git ignore file**, so on
+  most machines the local settings are ignored before install excludes them.
+- **A member's Stop after its group ended shows nothing.** A's Stop, the loop's own, found B done
+  already and ended the group. B's Stop then sealed B, but, with no loop end to act on, it
+  printed its seal line as plain text, which Claude Code keeps out of the terminal.
 
 ## Later, the loop in the app
 

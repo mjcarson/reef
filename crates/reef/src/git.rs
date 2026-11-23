@@ -409,6 +409,48 @@ impl Checkout {
         Ok(true)
     }
 
+    /// The directory git runs this worktree's hooks from: `core.hooksPath`'s if it is set, else
+    /// the common dir's `hooks`, which every worktree of the repo runs
+    pub fn hooks_dir(&self) -> anyhow::Result<PathBuf> {
+        // git resolves it as it does to run a hook, a relative `core.hooksPath` included
+        let dir = self.git(
+            &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+            None,
+        )?;
+        Ok(PathBuf::from(dir))
+    }
+
+    /// Whether git ignores a path in this worktree, by any of its ignore files or the repo's
+    /// `info/exclude`, whether or not the path is there
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path, from the worktree's root
+    pub fn ignores(&self, path: &str) -> anyhow::Result<bool> {
+        // check-ignore answers in its status: 0 is ignored, 1 is not, and anything else failed
+        let mut git = Command::new("git");
+        git.arg("-C")
+            .arg(&self.root)
+            .args(["check-ignore", "--quiet", "--", path])
+            .env("LC_ALL", "C");
+        for var in GIT_ENV {
+            git.env_remove(var);
+        }
+        let output = git
+            .stdin(Stdio::null())
+            .output()
+            .context("running git check-ignore")?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => anyhow::bail!(
+                "git check-ignore failed in {}: {}",
+                self.root.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        }
+    }
+
     /// Reads one trailer off each commit a head reaches and none of the hidden commits do,
     /// oldest first, leaving out commits that don't carry it
     ///

@@ -11,7 +11,9 @@ user unit `reef` (`central/README.md`, "Running it for real"). The reef skill
   commit `plan/` in the same change as the work. `cargo run -q --release -p mdbook-reef -- check
   plan` still checks it.
 - **The skill is written, not edited.** `reef skill` writes `crates/reef/assets/skill` to
-  `.claude/skills/reef`, so change the assets and run it again. The mdbook skill's source is
+  `.claude/skills/reef`, so change the assets and run it again. `reef claude install` writes
+  it too, with `.mcp.json`, `.claude/settings.json` and git's hooks, which set this repo up for
+  the loop; don't edit those by hand either. The mdbook skill's source is
   `crates/mdbook-reef/assets/skill`. `mdbook-reef install` and `mdbook-reef skill` would write
   it over the central one, so pass `install` `--no-skill`, and don't run `skill` here.
 - **Run `reef` from the repo's root.** If it says nothing answers, start the server with

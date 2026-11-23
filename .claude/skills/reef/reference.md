@@ -165,4 +165,5 @@ reef loop start                      # start a loop in this pane, typed as `! re
 reef loop take                       # the loop's next node, started here, as next_task takes it
 reef export plan --replace           # write the plan back over the book it was exported to
 reef skill                           # rewrite this skill from the installed reef
+reef claude install                  # set the repo up for the loop: MCP entry, hooks and skill
 ```

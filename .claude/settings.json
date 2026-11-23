@@ -1,0 +1,55 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "reef hook post-tool-use",
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__reef__status"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "reef hook session-start",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "reef hook stop",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "command": "reef hook worktree-create",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "command": "reef hook worktree-remove",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -44,6 +44,10 @@ reef, `mdbook-reef skill [book]` refreshes it.
 A repo whose plan lives in central reef takes [the central skill](crates/reef/assets/skill/SKILL.md)
 instead: `reef skill [dir]` writes it to the same place, with the same rules, worked through
 reef's MCP tools and the `reef` CLI rather than a book's files. A repo holds one or the other.
+`reef claude install [dir]` sets such a repo up for reef's terminal loop in one step: the MCP
+entry in `.mcp.json`, Claude Code's hooks in `.claude/settings.json`, the server enabled and
+its tools allowed in `.claude/settings.local.json`, git's post-commit and post-rewrite, and the
+skill. Running it again changes nothing.
 
 ## Writing nodes
 

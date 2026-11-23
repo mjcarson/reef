@@ -50,6 +50,9 @@
 //! - **The skill** ([`skill`]): the Claude skill for central reef, written to the
 //!   `.claude/skills/reef` of a repo, which keeps the plan in step with the work through the
 //!   MCP tools and the CLI.
+//! - **Setting a repo up** ([`claude`]): reef's MCP entry, Claude Code's and git's hooks, the
+//!   local settings that enable the server and allow its tools, and the skill, written by
+//!   `reef claude install`, which changes nothing run again.
 //! - **git** ([`git`]): the checkout a node's work happens in, read through gix, its worktree
 //!   written as a tree through git's CLI, its start pinned under `refs/reef/start/`, and its
 //!   diff, the carry of its start and its commits' trailers taken through gix.
@@ -61,6 +64,7 @@
 //! against a service they serve.
 
 pub mod capture;
+pub mod claude;
 pub mod clear;
 pub mod cli;
 pub mod client;

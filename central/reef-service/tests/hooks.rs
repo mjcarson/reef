@@ -1397,3 +1397,53 @@ async fn worktrees_are_made_for_nodes_and_attached() -> anyhow::Result<()> {
     assert!(c.exists());
     Ok(())
 }
+
+/// A member's worktree has the repo's local settings: WorktreeCreate copies the asking
+/// checkout's `.claude/settings.local.json` into each worktree it makes, a plain one's included,
+/// once git ignores it, and never while git would take it in as the node's change
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_members_worktree_gets_the_local_settings() -> anyhow::Result<()> {
+    let hx = Hx::new("local", &["B", "C"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    // local settings that git doesn't ignore yet, whatever the machine's own ignore file says,
+    // where Claude Code puts `**/.claude/settings.local.json`
+    let local =
+        r#"{ "enabledMcpjsonServers": ["reef"], "permissions": { "allow": ["mcp__reef"] } }"#;
+    std::fs::create_dir_all(hx.repo.join(".claude"))?;
+    std::fs::write(hx.repo.join(reef::claude::LOCAL), local)?;
+    let checkout = reef::git::Checkout::open(&hx.repo)?;
+    checkout.exclude(&format!("!{}", reef::claude::LOCAL_EXCLUDED))?;
+    // B's worktree is made without them, since they would be its change
+    let (_, said) = hx.worktree_made(&hx.repo, "B", None).await?;
+    let b = hx.repo.join(".claude/worktrees/B");
+    assert!(!b.join(reef::claude::LOCAL).exists());
+    assert!(!said.contains("copied"), "{said}");
+    // ignored as `reef claude install` leaves them, its line after the one above, C's worktree
+    // gets the same bytes
+    checkout.exclude(reef::claude::LOCAL_EXCLUDED)?;
+    let (_, said) = hx.worktree_made(&hx.repo, "C", None).await?;
+    let c = hx.repo.join(".claude/worktrees/C").canonicalize()?;
+    assert_eq!(std::fs::read_to_string(c.join(reef::claude::LOCAL))?, local);
+    assert!(
+        said.contains(&format!(
+            "reef: copied .claude/settings.local.json into {}",
+            c.display()
+        )),
+        "{said}"
+    );
+    // which leaves C's worktree clean, so no capture of C holds them
+    assert_eq!(git::run(&c, &["status", "--porcelain"])?, "");
+    // a plain worktree gets them too
+    let (plain, _) = hx.worktree_made(&hx.repo, "scratch", None).await?;
+    let scratch = Path::new(plain.trim_end());
+    assert_eq!(
+        std::fs::read_to_string(scratch.join(reef::claude::LOCAL))?,
+        local
+    );
+    // and made again, a worktree keeps its own
+    std::fs::write(c.join(reef::claude::LOCAL), "{}")?;
+    let (_, said) = hx.worktree_made(&hx.repo, "C", None).await?;
+    assert!(said.contains("is in"), "{said}");
+    assert_eq!(std::fs::read_to_string(c.join(reef::claude::LOCAL))?, "{}");
+    Ok(())
+}

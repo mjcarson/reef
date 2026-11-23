@@ -81,6 +81,18 @@ pub fn write<W: Write>(dir: &Path, out: &mut W) -> anyhow::Result<PathBuf> {
     Ok(skill)
 }
 
+/// Whether a skill's directory holds this reef's skill already, each of its files as written
+///
+/// # Arguments
+///
+/// * `skill` - The skill's directory, as [`place`] names it
+pub fn is_written(skill: &Path) -> bool {
+    // every file there, and each the same bytes
+    FILES.iter().all(|(name, text)| {
+        std::fs::read_to_string(skill.join(name)).is_ok_and(|kept| kept == *text)
+    })
+}
+
 /// Prints the skill's SKILL.md
 ///
 /// # Arguments

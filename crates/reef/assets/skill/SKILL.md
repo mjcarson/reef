@@ -24,6 +24,10 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   runs `mcp__reef__next`, `mcp__reef__get` and `mcp__reef__check` without a prompt, since they
   only read. The others write, so they wait until the plan is approved. Each tool's text is
   what its command prints.
+- **With no `mcp__reef__*` tools, the repo isn't set up for them.** `reef claude install`, run
+  from the repo's root, writes the MCP entry, Claude Code's and git's hooks and this skill. It
+  writes hooks that run on every commit and every turn, so it is the user's to run: suggest it,
+  and work through the CLI meanwhile.
 
   | To | Tool | Command |
   |----|------|---------|

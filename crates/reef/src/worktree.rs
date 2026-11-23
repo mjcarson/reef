@@ -15,6 +15,10 @@
 //!   refused takes the worktree, and the branch it made, away again.
 //! - **Made again, it is the same.** A worktree there already that the node was started in is
 //!   handed back as it is, and joined again.
+//! - **With the asking checkout's local settings.** `.claude/settings.local.json`, which `reef
+//!   claude install` writes and git ignores, isn't checked out, so a new worktree is given a copy,
+//!   and its session asks no more than the asking one's. A file git doesn't ignore there is never
+//!   copied, since it would be captured as the node's change.
 //! - **Then the pane joins the member,** where the node is a loop's member, so the session
 //!   there works it ([`reef_api::LoopEdit::Join`]). A pane running a loop of its own, or a member
 //!   another pane works, is refused before anything is made.
@@ -25,6 +29,7 @@ use reef_model::{NodeName, PlanName};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::claude;
 use crate::cli::{Pick, PlanPick};
 use crate::client::Client;
 use crate::git::Checkout;
@@ -179,6 +184,10 @@ pub async fn for_node<W: Write>(
                     )),
                 });
             }
+            // started, it gets the asking checkout's local settings
+            if carry_local(&checkout, &path)? {
+                writeln!(out, "copied {} into {}", claude::LOCAL, path.display())?;
+            }
         }
     }
     // the pane then works it, where it is a loop's member
@@ -214,8 +223,36 @@ pub fn plain(cwd: &Path, name: &str) -> anyhow::Result<PathBuf> {
             )
         })?;
         checkout.add_worktree(&path, &format!("worktree-{name}"), &from)?;
+        carry_local(&checkout, &path)?;
     }
     Ok(path.canonicalize()?)
+}
+
+/// Copies the asking checkout's local Claude Code settings into a worktree just made from it,
+/// where git ignores them, and says whether it did
+///
+/// A checkout with none, or a worktree that has its own, is left as it is.
+///
+/// # Arguments
+///
+/// * `from` - The asking checkout
+/// * `to` - The new worktree's root
+fn carry_local(from: &Checkout, to: &Path) -> anyhow::Result<bool> {
+    // the asking checkout's, if it has them and the worktree doesn't
+    let source = from.root().join(claude::LOCAL);
+    let target = to.join(claude::LOCAL);
+    if !source.is_file() || target.exists() {
+        return Ok(false);
+    }
+    // never a file git would take in as the node's change
+    if !Checkout::open(to)?.ignores(claude::LOCAL)? {
+        return Ok(false);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&source, &target)?;
+    Ok(true)
 }
 
 /// Where a worktree of a name goes: under the main worktree's `.claude/worktrees`

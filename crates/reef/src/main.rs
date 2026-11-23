@@ -15,6 +15,7 @@
 //! reef next                    # the work ready to start, and what the rest waits on
 //! reef mcp                     # serve these as MCP tools over stdio, for Claude Code
 //! reef skill                   # write the Claude skill that works the plan through them
+//! reef claude install          # set the repo up for the loop: MCP entry, hooks and skill
 //! ```
 
 use clap::Parser;
