@@ -71,7 +71,10 @@ use crate::store::{
 
 mod comments;
 mod loops;
+mod sessions;
 mod work;
+
+pub use sessions::{KEPT_ENTRIES, NoSession, ORDERS_WAIT_MAX};
 
 /// The process's one service over shoal, opened on first use
 static SHARED: OnceCell<Service> = OnceCell::const_new();
@@ -88,6 +91,8 @@ pub struct Service<B = ShoalBackend> {
     /// Where each applied write is sent, for every subscriber to the change stream, until the
     /// stream is ended
     changes: Mutex<Option<broadcast::Sender<Change>>>,
+    /// The sessions of runners the user started, kept in memory
+    sessions: sessions::Sessions,
 }
 
 impl Service<ShoalBackend> {
@@ -153,6 +158,7 @@ impl<B: Backend> Service<B> {
             store,
             sections: Sections::default(),
             changes: Mutex::new(Some(changes)),
+            sessions: sessions::Sessions::default(),
         }
     }
 

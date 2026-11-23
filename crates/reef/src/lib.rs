@@ -26,6 +26,8 @@
 //! - **Clearing between nodes** ([`clear`]): once a loop's node is done, Stop's injector types
 //!   `/clear` and the next node's kickoff into the session's zellij or tmux pane, once Claude is
 //!   idle and its input box empty.
+//! - **The runner** ([`run`]): `reef loop run` runs a loop's sessions headless here, a fresh one
+//!   a node, and relays each one's transcript and prompts through central reef to the app.
 //! - **Comments** ([`comment`]): a plan's threads listed whole, replied in, and resolved by
 //!   hand, the revision that answered one linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
@@ -81,6 +83,7 @@ pub mod node;
 pub mod open;
 pub mod page;
 pub mod queue;
+pub mod run;
 pub mod skill;
 pub mod start;
 pub mod task;

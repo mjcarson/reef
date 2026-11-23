@@ -541,3 +541,22 @@ the next, and allowed anything else.
   session. Closing stdin ended it, SessionEnd and all, within 0.4 s.
 - **Each node cost $0.15 to $0.17**, planned, rejected once, approved and done in 27 s when
   answered at once.
+
+### What C45 found
+
+Tried with Claude Code 2.1.330, running Sonnet 5.5 at low effort, against reef-app built by dx on
+scratch data, in a scratch repo `reef claude install` set up. `reef loop run` ran in the repo with
+a scrubbed environment, and a Playwright driver started its loop from the sessions panel and
+allowed each card as it showed.
+
+- **Started from the app, a session a node.** The runner attached idle, and *Start a loop* had L1
+  taken in a session within a second. Once L1 was done and committed, Stop's message said the
+  runner starts L2 in a fresh session, and a second Claude Code session took it.
+- **The transcript came live.** The panel went from 0 to 65 entries with no reload, each call,
+  output and prompt as it came, and the canvas drew each node done.
+- **Every prompt was a card.** Headless in `default` mode, Bash and Write asked, and so did L2's
+  plan. Each was allowed from its card, and the session carried on. L1 cost $0.12.
+- **Claude may skip plan mode on a trivial node.** L1's session found it too small to plan, and
+  asked for nothing but Bash.
+- **Several plans confuse the tools.** In a project with two plans, status and accept refused a
+  bare id, and Claude tried `live/allow` before `allow` ([C74](../milestones/m8.md)).

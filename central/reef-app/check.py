@@ -1102,6 +1102,171 @@ def c25_keys_and_the_sidebar_queue(page):
           seen)
 
 
+# Claude Code as `reef loop run` runs it, played over stream-json for the session checks: on the
+# loop's kickoff it takes the node with reef's own `loop take`, asks what the play asks and waits
+# for the answer, marks the node done and runs reef's own Stop hook, then ends its turn
+STUB = r'''#!/usr/bin/env python3
+import json, os, subprocess, sys
+REEF, PLAY = sys.argv[1], sys.argv[2]
+SESSION = f"stub-{os.getpid()}"
+
+def say(value):
+    print(json.dumps(value), flush=True)
+
+def text(words):
+    say({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": words}]}})
+
+def lines():
+    for line in sys.stdin:
+        try:
+            yield json.loads(line)
+        except ValueError:
+            pass
+
+INPUT = lines()
+
+def ask(rid, tool, given):
+    say({"type": "control_request", "request_id": rid,
+         "request": {"subtype": "can_use_tool", "tool_name": tool, "input": given}})
+    for line in INPUT:
+        if line.get("type") == "control_response" and line["response"]["request_id"] == rid:
+            return line["response"]["response"]
+    sys.exit(0)
+
+def reef(*args, stdin=None):
+    return subprocess.run([REEF, *args], input=stdin, capture_output=True, text=True).stdout
+
+def play(node):
+    if PLAY == "permission":
+        answer = ask(f"perm-{node}", "Bash", {"command": f"echo {node}"})
+        text("Claude heard: " + ("allowed" if answer["behavior"] == "allow" else "denied: " + answer.get("message", "")))
+    elif PLAY == "question":
+        question = f"Which greeting for {node}?"
+        answer = ask(f"ask-{node}", "AskUserQuestion", {"questions": [{
+            "question": question, "header": "Greeting", "multiSelect": False,
+            "options": [{"label": "Hello", "description": "The usual"}, {"label": "Hi", "description": "Shorter"}]}]})
+        text("You picked " + answer.get("updatedInput", {}).get("answers", {}).get(question, "nothing") + ".")
+    elif PLAY == "plan":
+        plan, n = f"# Plan for {node}\n\nWrite the greeting.", 1
+        while True:
+            answer = ask(f"plan-{node}-{n}", "ExitPlanMode", {"plan": plan})
+            if answer["behavior"] == "allow":
+                text(f"Plan {n} was approved.")
+                break
+            n += 1
+            plan = f"# Plan for {node}, revised\n\nWrite the greeting.\n\n{answer.get('message', '')}"
+
+for message in INPUT:
+    if message.get("type") != "user":
+        continue
+    said = message["message"]["content"][0]["text"]
+    say({"type": "system", "subtype": "init", "session_id": SESSION, "permissionMode": "default"})
+    if said.startswith("Take the next node"):
+        taken = reef("loop", "take")
+        say({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "mcp__reef__next_task", "input": {}}]}})
+        say({"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": taken}]}})
+        name = next((line.split("`")[1] for line in taken.splitlines() if line.startswith("Took `")), None)
+        if name:
+            _, plan, node = name.split("/")
+            play(node)
+            reef("status", node, "done", "--plan", plan)
+            stopped = reef("hook", "stop", stdin=json.dumps({"session_id": SESSION, "cwd": os.getcwd()}))
+            try:
+                message = json.loads(stopped)["systemMessage"]
+                say({"type": "system", "subtype": "informational", "content": "Stop says: " + message})
+            except ValueError:
+                pass
+        else:
+            text("Nothing is ready to take.")
+    else:
+        text("You said: " + said)
+    say({"type": "result", "subtype": "success", "num_turns": 3, "total_cost_usd": 0.01, "duration_ms": 5})
+'''
+
+
+def runner(plan, play):
+    """Starts `reef loop run` in the check's repo, narrowed to a plan, with Claude played by the
+    stub, in a process group of its own."""
+    stub = WORK / "claude-stub.py"
+    stub.write_text(STUB)
+    stub.chmod(0o755)
+    claude = WORK / f"claude-{play}.sh"
+    claude.write_text(f"#!/bin/sh\nexec python3 -I '{stub}' '{REEF / 'target/debug/reef'}' '{play}'\n")
+    claude.chmod(0o755)
+    env = dict(os.environ)
+    for name in list(env):
+        if name.startswith(("CLAUDE", "ZELLIJ", "TMUX")) or name == "REEF_PANE":
+            env.pop(name)
+    log = open(WORK / f"runner-{plan}.log", "w")
+    return subprocess.Popen([REEF / "target/debug/reef", "--conf", WORK / "reef.toml", "loop", "run",
+                             "--plan", plan, "--claude", claude], cwd=WORK / "repo", env=env, stdout=log,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+
+
+def stop_runner(process):
+    """Stops a runner as Ctrl-C would, which lets go of its loop and detaches it."""
+    try:
+        os.killpg(process.pid, signal.SIGINT)
+        process.wait(timeout=20)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        os.killpg(process.pid, signal.SIGKILL)
+
+
+def open_sessions(page, plan):
+    """Opens a plan's page with its sessions panel, once a runner has attached."""
+    page.goto(URL + f"/plans/check/{plan}")
+    wait_drawn(page)
+    page.click(".reef-app-sessions-toggle")
+    page.wait_for_selector(".reef-app-runner[data-session] button[data-act=start]", timeout=20000)
+
+
+def entries(page, kind=""):
+    """How many entries of a kind the open transcript shows."""
+    return page.locator(f".reef-app-transcript .reef-app-entry{'.' + kind if kind else ''}").count()
+
+
+def c45_a_loop_started_from_the_app_streams_its_transcript(page):
+    """C45: a runner attaches, the app starts its loop, and each session's transcript and prompt
+    show live: a prompt allowed, the node done, and the next node taken in a fresh session."""
+    reef("plan", "new", "runs")
+    put("runs", node_yaml("R1", "R1 The first run"))
+    put("runs", node_yaml("R2", "R2 The second run"))
+    process = runner("runs", "permission")
+    try:
+        open_sessions(page, "runs")
+        page.evaluate("() => { window.__kept = 'same page'; }")
+        idle = page.inner_text(".reef-app-runner .reef-app-session-state")
+        page.click(".reef-app-runner button[data-act=start]")
+        # R1 taken, its tool waiting in a card, and counted in the bar
+        page.wait_for_selector(".reef-app-prompt[data-prompt=perm-R1]", timeout=20000)
+        waiting = page.inner_text(".reef-app-sessions-toggle")
+        before = entries(page)
+        page.screenshot(path=str(SHOTS / "reef-app-session-prompt.png"))
+        page.click(".reef-app-prompt[data-prompt=perm-R1] button[data-act=allow]")
+        # R2 taken in a fresh session, its own prompt waiting, with no reload
+        page.wait_for_selector(".reef-app-prompt[data-prompt=perm-R2]", timeout=20000)
+        page.wait_for_function("() => document.querySelectorAll('.reef-app-entry.session').length === 2",
+                               timeout=10000)
+        after = entries(page)
+        said = page.inner_text(".reef-app-transcript")
+        page.screenshot(path=str(SHOTS / "reef-app-session.png"))
+        # stopped from the app, letting go of R2
+        page.click(".reef-app-runner button[data-act=stop]")
+        page.wait_for_function("() => !document.querySelector('.reef-app-prompt')", timeout=10000)
+        stopped = page.inner_text(".reef-app-runner-loop")
+        check("C45 a loop started from the app shows its transcript live",
+              idle == "idle" and "1 waiting" in waiting and after > before
+              and "Answered: allowed" in said and "Claude heard: allowed" in said and "`check/runs/R1` is done" in said
+              and "status: done" in reef("node", "get", "R1", "--plan", "runs")
+              and stopped == "No loop started" and page.evaluate("() => window.__kept") == "same page",
+              {"idle": idle, "bar": waiting, "entries": [before, after], "stopped": stopped,
+               "said": said[-600:]})
+    finally:
+        stop_runner(process)
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -1154,6 +1319,7 @@ def main():
                 c36_comments_follow_the_code,
                 c73_a_review_holds_comments_until_submitted,
                 c56_drafts_in_the_sidebar,
+                c45_a_loop_started_from_the_app_streams_its_transcript,
             ]
             for step in checks:
                 # every check, or those `--only` names

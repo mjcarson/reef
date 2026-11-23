@@ -23,6 +23,7 @@ pub mod panel;
 pub mod queue;
 #[cfg(feature = "server")]
 pub mod server;
+pub mod session;
 pub mod side;
 
 pub use app::App;

@@ -311,6 +311,31 @@ reef claude install                        # the MCP entry, the hooks and the sk
   only once it has one, so a row kept before reads back with none. C39's `LoopRow` moved the
   schema's pin but needed none: its binary read back the nodes and comments C37's wrote.
 
+### A loop the app runs
+
+`reef loop run`, run from a repo's root, attaches this checkout to central reef as a runner.
+Each node then gets a fresh `claude -p` session over stream-json, spawned here, on the user's own
+machine. The service runs nothing: it keeps each runner's transcript and the prompts waiting on
+it in memory, and the app's sessions panel shows them, starts, pauses and stops the runner's
+loop, and answers its prompts.
+
+```sh
+reef loop run                                   # wait for the app to start the loop
+reef loop run --start --plan central            # or start it now, narrowed to a plan
+reef loop run --permission-mode auto -- --model sonnet --effort low
+```
+
+- **The repo is set up as for the terminal loop,** by `reef claude install`, since each session
+  runs its `.mcp.json` and hooks. They find the runner's loop through `REEF_PANE`, which names
+  its pane, `reef:<id>`. Nothing of the runner's own `CLAUDE*`, `ZELLIJ*` or `TMUX*` reaches them.
+- **One node at a time.** A loop on a runner's pane is one node wide.
+- **Every prompt waits for the app,** a tool's permission among them, since headless Claude Code
+  starts in `default` mode unless `--permission-mode` says otherwise. Allow rules in the repo's
+  settings still allow what they name.
+- **Ctrl-C ends it:** its session ends, its loop lets go of its node, and the app shows it
+  detached. A runner unheard from for a minute shows as gone. One whose service restarted
+  attaches again with the transcript it holds.
+
 ## The app
 
 `reef-app` is a Dioxus 0.7.10 fullstack app. Its front page lists every project with its plans,
@@ -334,6 +359,12 @@ the pages and the JSON API alike.
   and marked if it is outdated. A thread a change resolved names that revision and its commit,
   or what it was reopened after. The canvas reads the plan's threads once a change, for all
   three.
+
+- **The sessions panel** opens from the bar, whose button counts the live sessions and the
+  prompts waiting. It lists each runner, its state and its loop's node, with buttons that start,
+  pause and stop the loop, and a terminal's loops to read. The picked runner's transcript follows
+  the project's stream, and each prompt it waits on is a card to answer, beside a box for a
+  reply when Claude's turn ends mid-node.
 
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under

@@ -22,7 +22,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Where a loop's session runs: a terminal multiplexer's pane, or else the Claude Code process,
-/// either of which a `/clear` keeps
+/// either of which a `/clear` keeps, or a runner that starts each node's session itself
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Pane {
@@ -45,14 +45,21 @@ pub enum Pane {
         /// The process's id
         pid: u32,
     },
+    /// A runner the user started, `reef loop run`, which starts each node's session headless and
+    /// names itself to them in `REEF_PANE`
+    Reef {
+        /// The runner's id, which holds no `:`
+        id: String,
+    },
 }
 
 impl Pane {
-    /// Finds the pane a process runs in from its environment: zellij's, then tmux's, then the
-    /// Claude Code process it was started by
+    /// Finds the pane a process runs in from its environment: the one `REEF_PANE` names, then
+    /// zellij's, then tmux's, then the Claude Code process it was started by
     ///
     /// Claude Code passes its pane's variables, and its own `CLAUDE_PID`, to every command and
-    /// hook it runs.
+    /// hook it runs. A runner names its own pane in `REEF_PANE`, which outranks the rest, since a
+    /// runner started in a multiplexer's pane hands its sessions that pane's variables too.
     ///
     /// # Arguments
     ///
@@ -74,6 +81,10 @@ impl Pane {
     pub fn from_env<F: Fn(&str) -> Option<String>>(var: F) -> Option<Pane> {
         // a variable set to nothing is as good as unset
         let set = |name: &str| var(name).filter(|value| !value.trim().is_empty());
+        // a pane named outright, as a runner names its own to the sessions it starts
+        if let Some(pane) = set("REEF_PANE").and_then(|key| key.trim().parse().ok()) {
+            return Some(pane);
+        }
         // zellij's actions need the session as well as the pane
         if let (Some(session), Some(pane)) = (set("ZELLIJ_SESSION_NAME"), set("ZELLIJ_PANE_ID")) {
             return Some(Pane::Zellij { session, pane });
@@ -91,7 +102,8 @@ impl Pane {
     }
 
     /// Whether reef can type into the pane: a multiplexer's can be written to, but a Claude Code
-    /// process with none has no pane but the user's own terminal
+    /// process with none has no pane but the user's own terminal, and a runner's sessions take
+    /// their messages on standard input
     ///
     /// # Examples
     ///
@@ -112,17 +124,34 @@ impl Pane {
             Pane::Zellij { session, pane } => format!("zellij session `{session}`, pane {pane}"),
             Pane::Tmux { server, pane } => format!("tmux pane {pane} on {server}"),
             Pane::Claude { pid } => format!("Claude Code process {pid}"),
+            Pane::Reef { id } => format!("reef's runner `{id}`"),
         }
+    }
+
+    /// Whether a runner starts this pane's sessions itself, rather than a person in a terminal
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::loops::Pane;
+    ///
+    /// assert!("reef:k3x9-4242".parse::<Pane>().unwrap().runs());
+    /// assert!(!Pane::Claude { pid: 4242 }.runs());
+    /// ```
+    pub fn runs(&self) -> bool {
+        matches!(self, Pane::Reef { .. })
     }
 }
 
 impl fmt::Display for Pane {
-    /// The pane as its key: `zellij:<session>:<pane>`, `tmux:<server>:<pane>` or `claude:<pid>`
+    /// The pane as its key: `zellij:<session>:<pane>`, `tmux:<server>:<pane>`, `claude:<pid>` or
+    /// `reef:<id>`
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Pane::Zellij { session, pane } => write!(f, "zellij:{session}:{pane}"),
             Pane::Tmux { server, pane } => write!(f, "tmux:{server}:{pane}"),
             Pane::Claude { pid } => write!(f, "claude:{pid}"),
+            Pane::Reef { id } => write!(f, "reef:{id}"),
         }
     }
 }
@@ -136,8 +165,8 @@ impl fmt::Display for BadPane {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "`{}` is no pane: one is `zellij:<session>:<pane>`, `tmux:<server>:<pane>` or \
-             `claude:<pid>`, as `reef loop ls` prints it",
+            "`{}` is no pane: one is `zellij:<session>:<pane>`, `tmux:<server>:<pane>`, \
+             `claude:<pid>` or `reef:<id>`, as `reef loop ls` prints it",
             self.0
         )
     }
@@ -175,6 +204,10 @@ impl FromStr for Pane {
             }
             "claude" => Ok(Pane::Claude {
                 pid: rest.parse().map_err(|_| bad())?,
+            }),
+            // a runner's id is one segment
+            "reef" if !rest.is_empty() && !rest.contains(':') => Ok(Pane::Reef {
+                id: rest.to_string(),
             }),
             _ => Err(bad()),
         }
@@ -648,6 +681,33 @@ mod tests {
         assert_eq!(Pane::from_env(vars(&[])), None);
     }
 
+    /// A runner's pane, named in `REEF_PANE`, wins over every other, and a key that names no
+    /// pane is passed over
+    #[test]
+    fn a_runners_pane_is_named_outright() {
+        // a runner started inside tmux hands its sessions tmux's variables too
+        let runner = [
+            ("REEF_PANE", "reef:k3x9-4242"),
+            ("TMUX_PANE", "%3"),
+            ("CLAUDE_PID", "492329"),
+        ];
+        assert_eq!(
+            Pane::from_env(vars(&runner)),
+            Some(Pane::Reef {
+                id: "k3x9-4242".to_string()
+            })
+        );
+        // one that doesn't read as a pane leaves the others to say
+        let bad = [("REEF_PANE", "reef:"), ("CLAUDE_PID", "7")];
+        assert_eq!(Pane::from_env(vars(&bad)), Some(Pane::Claude { pid: 7 }));
+        // a runner's pane is never typed into, and its sessions are run
+        let pane = Pane::Reef {
+            id: "k3x9-4242".to_string(),
+        };
+        assert!(!pane.typed() && pane.runs());
+        assert_eq!(pane.describe(), "reef's runner `k3x9-4242`");
+    }
+
     /// A pane's key reads back as the pane, and anything else is refused saying what one is
     #[test]
     fn pane_keys_read_back() {
@@ -662,6 +722,9 @@ mod tests {
                 pane: "%3".to_string(),
             },
             Pane::Claude { pid: 492329 },
+            Pane::Reef {
+                id: "k3x9-4242".to_string(),
+            },
         ];
         for pane in panes {
             let key = pane.to_string();
@@ -673,6 +736,8 @@ mod tests {
             "zellij:only",
             "tmux::%3",
             "claude:me",
+            "reef:",
+            "reef:a:b",
             "screen:1:2",
             "zellij:a:",
         ] {

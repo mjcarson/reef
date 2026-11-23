@@ -89,6 +89,7 @@ use crate::node;
 use crate::open;
 use crate::page;
 use crate::queue;
+use crate::run as runner;
 use crate::skill;
 use crate::start;
 use crate::task;
@@ -476,6 +477,28 @@ pub enum LoopCommand {
         /// The project whose node to take, if not the working directory's
         #[command(flatten)]
         pick: Pick,
+    },
+    /// Run a loop's sessions headless in this checkout, a fresh one a node, attached to central
+    /// reef so its app starts the loop, shows each session's transcript and answers its prompts
+    ///
+    /// It runs until Ctrl-C, which ends any session, lets go of the loop's node and detaches.
+    Run {
+        /// Start the loop at once, rather than wait for the app to
+        #[arg(long)]
+        start: bool,
+        /// The Claude Code to run
+        #[arg(long, value_name = "PATH", default_value = "claude")]
+        claude: String,
+        /// The permission mode each session starts in, else Claude Code's default for a headless
+        /// session
+        #[arg(long, value_name = "MODE")]
+        permission_mode: Option<String>,
+        /// The one plan to take nodes from, else every plan of the project
+        #[command(flatten)]
+        pick: PlanPick,
+        /// More arguments for each session, after `--`, such as `-- --model sonnet`
+        #[arg(last = true, value_name = "ARGS")]
+        args: Vec<String>,
     },
     /// Work a member of a loop's group in the session this runs in, typed as `! reef loop
     /// attach`: its worktree made from this checkout, the node started there and this pane
@@ -940,6 +963,24 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                 LoopCommand::Attach { id, pane, pick } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
                     loops::attach(&client, cwd, &here, id.as_deref(), &pick, out).await
+                }
+                LoopCommand::Run {
+                    start,
+                    claude,
+                    permission_mode,
+                    pick,
+                    args,
+                } => {
+                    // each session's MCP server and hooks reach the same service, through the
+                    // config this reef read
+                    let runs = runner::Runs {
+                        claude,
+                        start,
+                        mode: permission_mode,
+                        args,
+                        conf: conf.source.clone(),
+                    };
+                    runner::run(&client, cwd, &runs, &pick, out).await
                 }
             }
         }

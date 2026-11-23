@@ -187,6 +187,10 @@ pub fn hand_off<S>(
 where
     S: FnOnce(&Clear) -> anyhow::Result<()>,
 {
+    // a runner's session is never cleared: the runner starts what comes next in a fresh one
+    if pane.is_some_and(Pane::runs) {
+        return ending.run_message();
+    }
     // another node next clears the session, wherever reef can type into its pane
     let started = order(ending, pane, session, pid).map(|order| spawn(&order));
     let message = ending.message(matches!(started, Some(Ok(()))))?;
@@ -289,7 +293,7 @@ impl Typist {
                 server: server.clone(),
                 pane: pane.clone(),
             }),
-            Pane::Claude { .. } => None,
+            Pane::Claude { .. } | Pane::Reef { .. } => None,
         }
     }
 

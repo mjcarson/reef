@@ -143,6 +143,20 @@ pub const LOOPS: &str = "/api/v1/loops";
 /// One project's loops
 pub const PROJECT_LOOPS: &str = "/api/v1/projects/{project}/loops";
 
+/// Runners' sessions: a runner attaches by `POST`
+pub const SESSIONS: &str = "/api/v1/sessions";
+
+/// One runner's session: its transcript after the `after` query's entry, read by `GET`, the
+/// runner's report sent by `POST`, and its letting go by `DELETE`
+pub const SESSION: &str = "/api/v1/sessions/{session}";
+
+/// One session's orders: those after the `after` query's number, waited for up to the `wait`
+/// query's milliseconds by `GET`, and the app's act on the session sent by `POST`
+pub const SESSION_ORDERS: &str = "/api/v1/sessions/{session}/orders";
+
+/// One project's runners' sessions
+pub const PROJECT_SESSIONS: &str = "/api/v1/projects/{project}/sessions";
+
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
 
@@ -512,6 +526,33 @@ pub fn project_loops(project: &str) -> String {
     format!("{PROJECTS}/{}/loops", encode(project))
 }
 
+/// The path of one runner's session
+///
+/// # Arguments
+///
+/// * `session` - The session's id
+pub fn session(session: &str) -> String {
+    format!("{SESSIONS}/{}", encode(session))
+}
+
+/// The path of one session's orders
+///
+/// # Arguments
+///
+/// * `session` - The session's id
+pub fn session_orders(session: &str) -> String {
+    format!("{}/orders", self::session(session))
+}
+
+/// The path of one project's runners' sessions
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn project_sessions(project: &str) -> String {
+    format!("{PROJECTS}/{}/sessions", encode(project))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -608,6 +649,7 @@ mod tests {
                 .replace("{plan}", "central")
                 .replace("{id}", "C30")
                 .replace("{thread}", "7")
+                .replace("{session}", "k3x9-4242")
         };
         assert_eq!(super::plan_comments(&plan), fill(super::PLAN_COMMENTS));
         assert_eq!(super::node_comments(&node), fill(super::NODE_COMMENTS));
@@ -621,6 +663,16 @@ mod tests {
         );
         // and a project's loops
         assert_eq!(super::project_loops("reef"), fill(super::PROJECT_LOOPS));
+        // and a runner's session, its orders and a project's sessions
+        assert_eq!(super::session("k3x9-4242"), fill(super::SESSION));
+        assert_eq!(
+            super::session_orders("k3x9-4242"),
+            fill(super::SESSION_ORDERS)
+        );
+        assert_eq!(
+            super::project_sessions("reef"),
+            fill(super::PROJECT_SESSIONS)
+        );
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC
             .replace("{project}", "reef")

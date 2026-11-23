@@ -4,6 +4,7 @@ use crate::calls::{self, ProjectPlans};
 use crate::canvas::{Canvas, Keyed};
 use crate::live::use_changes;
 use crate::queue::{QueuePanel, use_queue};
+use crate::session::{SessionPanel, SessionsButton, use_runners};
 use dioxus::prelude::*;
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
@@ -144,6 +145,41 @@ code { font-size: 0.92em; }
 .reef-app-open-where { font-size: 0.8rem; color: var(--muted); }
 .reef-app-open-text { overflow-wrap: anywhere; }
 .reef-app-open-none { padding: 4px 10px; }
+.reef-app-sessions, .reef-app-sessions-toggle { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
+.reef-app-sessions-toggle { margin-left: auto; }
+.reef-app-waiting { margin-left: 0.35rem; font-size: 0.75rem; color: var(--links); }
+.reef-app-sessions-toggle.some .reef-app-waiting { font-weight: 600; }
+.reef-app-sessions { flex: none; width: 30rem; max-width: 45vw; overflow-y: auto; box-sizing: border-box; padding: 0.6rem 0.8rem; border-left: 1px solid var(--line); background: var(--panel); font-size: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem; }
+.reef-app-sessions-head { display: flex; align-items: baseline; justify-content: space-between; }
+.reef-app-sessions-head h2, .reef-app-sessions-sub { margin: 0; font-size: 0.95rem; }
+.reef-app-sessions-sub { font-size: 0.85rem; color: var(--muted); }
+.reef-app-runners { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.3rem; }
+.reef-app-runner { border: 1px solid var(--line); border-radius: 6px; background: var(--bg); padding: 0.35rem 0.5rem; cursor: pointer; }
+.reef-app-runner.terminal { cursor: default; }
+.reef-app-runner.picked { border-color: var(--links); box-shadow: 0 0 0 1px var(--links); }
+.reef-app-runner-top { display: flex; gap: 0.45rem; align-items: baseline; flex-wrap: wrap; }
+.reef-app-runner-where { color: var(--muted); font-family: monospace; font-size: 0.78rem; overflow-wrap: anywhere; }
+.reef-app-runner-loop { margin-top: 0.15rem; }
+.reef-app-runner .reef-app-actions { margin: 0.3rem 0 0; }
+.reef-app-session-state { font-size: 0.75rem; color: var(--muted); }
+.reef-app-session-state.s-working { color: var(--reef-progress); }
+.reef-app-session-state.s-waiting { color: var(--links); }
+.reef-app-session-state.s-gone, .reef-app-session-state.s-detached { color: var(--reef-blocked); }
+.reef-app-session { display: grid; gap: 0.45rem; }
+.reef-app-session-sum { margin: 0; color: var(--muted); }
+.reef-app-transcript { list-style: none; margin: 0; padding: 0.4rem; max-height: 55vh; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); display: grid; gap: 0.3rem; font-size: 0.8rem; }
+.reef-app-entry { overflow-wrap: anywhere; white-space: pre-wrap; }
+.reef-app-entry.user { color: var(--links); }
+.reef-app-entry.tool, .reef-app-entry.turn, .reef-app-entry.session { color: var(--muted); font-size: 0.75rem; white-space: normal; }
+.reef-app-entry.output summary { color: var(--muted); cursor: pointer; font-size: 0.75rem; }
+.reef-app-entry.output pre { margin: 0.2rem 0; max-height: 12rem; overflow: auto; background: var(--panel); padding: 0.3rem; border-radius: 4px; white-space: pre-wrap; }
+.reef-app-entry.error summary { color: var(--reef-blocked); }
+.reef-app-entry.note { color: var(--muted); font-style: italic; }
+.reef-app-entry.asked, .reef-app-entry.answered { border-left: 3px solid var(--links); padding-left: 0.4rem; }
+.reef-app-prompt { border: 1px solid var(--links); border-radius: 6px; padding: 0.5rem 0.6rem; background: var(--bg); display: grid; gap: 0.35rem; }
+.reef-app-prompt-head { margin: 0; font-weight: 600; }
+.reef-app-prompt-input { margin: 0; max-height: 14rem; overflow: auto; font-size: 0.75rem; background: var(--panel); padding: 0.3rem; border-radius: 4px; }
+.reef-app-prompt .reef-app-actions { margin: 0; }
 "#;
 
 /// The app's pages, by path
@@ -285,6 +321,8 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
     });
     // the project's queue, which the panel shows and the sidebar edits
     use_queue(project);
+    // and its runners, which the bar counts and the sessions panel shows
+    use_runners(project);
     let (project_now, plan_now) = (project(), plan());
     rsx! {
         div { class: "reef-app-plan",
@@ -294,6 +332,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                 if let Some(Err(error)) = &*info.read() {
                     span { class: "reef-app-error", "{error}" }
                 }
+                SessionsButton {}
             }
             div { class: "reef-app-stage",
                 QueuePanel { project }
@@ -309,6 +348,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                         }
                     }
                 }
+                SessionPanel {}
             }
         }
     }

@@ -276,6 +276,38 @@ impl Ending {
         }
     }
 
+    /// What a runner's session is told once its node's end is acted on: what comes next, which
+    /// the runner starts in a fresh session itself, or how its paused loop moves on
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef::task::Ending;
+    ///
+    /// let next = Ending::Next {
+    ///     done: "reef/central/C45".parse().unwrap(),
+    ///     next: "reef/central/C46".parse().unwrap(),
+    ///     round: false,
+    /// };
+    /// assert!(next.run_message().unwrap().ends_with("reef's runner starts it in a fresh session"));
+    /// ```
+    pub fn run_message(&self) -> Option<String> {
+        match self {
+            // the runner reads the loop at the turn's end, and moves on itself
+            Ending::Next { done, next, round } => Some(format!(
+                "{}: reef's runner starts {} in a fresh session",
+                coming(done, next, *round),
+                if *round { "them" } else { "it" }
+            )),
+            Ending::Paused(done) => Some(format!(
+                "`{done}` is done, and the loop is paused: starting it again in reef's app moves \
+                 on to the next node"
+            )),
+            // the rest say the same wherever the session runs
+            other => other.message(false),
+        }
+    }
+
     /// The node that comes next, if one does, and whether it comes for a round of its comments
     pub fn next(&self) -> Option<(&NodeName, bool)> {
         match self {

@@ -154,6 +154,13 @@ pub enum Change {
         /// The pane whose loop it is
         pane: Pane,
     },
+    /// A runner's session attached, reported, was acted on, or let go
+    SessionChanged {
+        /// The project its runner takes nodes from
+        project: String,
+        /// The session's id
+        session: String,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -178,6 +185,7 @@ impl Change {
             Change::ThreadsFollowed { .. } => "threads-followed",
             Change::ReviewMarked { .. } => "review-marked",
             Change::LoopChanged { .. } => "loop-changed",
+            Change::SessionChanged { .. } => "session-changed",
             Change::Missed { .. } => "missed",
         }
     }
@@ -190,9 +198,9 @@ impl Change {
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
-            Change::QueueChanged { project } | Change::LoopChanged { project, .. } => {
-                Some(project.as_str())
-            }
+            Change::QueueChanged { project }
+            | Change::LoopChanged { project, .. }
+            | Change::SessionChanged { project, .. } => Some(project.as_str()),
             Change::WorkRecorded { node, .. }
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
@@ -221,6 +229,7 @@ impl Change {
             Change::ProjectAdded { .. }
             | Change::QueueChanged { .. }
             | Change::LoopChanged { .. }
+            | Change::SessionChanged { .. }
             | Change::Missed { .. } => None,
         }
     }

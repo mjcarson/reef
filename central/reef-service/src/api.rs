@@ -75,12 +75,12 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Change, Checked, Commented, EditLoop,
-    ErrorCode, FileDiff, Listing, Loop, LoopEdited, MarkReview, MarkThread, Marked, NewPlan,
-    NewProject, NewReply, NewThread, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite,
-    Project, Puts, QueueEdit, QueueListing, Queued, ResolveThread, Resolved, Review, Reviewed,
-    Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread, WRITE_BODY_MAX,
-    WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Change, Checked, Commented,
+    EditLoop, ErrorCode, FileDiff, Listing, Loop, LoopEdited, MarkReview, MarkThread, Marked,
+    NewPlan, NewProject, NewReply, NewThread, Ordered, PageEdit, PageEdited, PageListing, PlanInfo,
+    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, Report, ResolveThread, Resolved,
+    Review, Reviewed, Revision, Rewrite, Session, SessionAct, SessionActed, StartWork, Started,
+    StoredNode, StoredPage, Thread, Transcript, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -97,7 +97,7 @@ use tracing::instrument;
 
 use crate::backend::Backend;
 use crate::conf::Conf;
-use crate::service::Service;
+use crate::service::{NoSession, Service};
 use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
 
 /// A handle on a service that a router holds and clones into every request
@@ -198,6 +198,22 @@ pub fn router<S: Serves>(serves: S) -> Router {
         )
         .route(paths::LOOPS, get(loops::<S>).post(edit_loop::<S>))
         .route(paths::PROJECT_LOOPS, get(project_loops::<S>))
+        .route(
+            paths::SESSIONS,
+            axum::routing::post(attach_session::<S>).layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
+        .route(
+            paths::SESSION,
+            get(session_transcript::<S>)
+                .post(report_session::<S>)
+                .delete(detach_session::<S>)
+                .layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
+        .route(
+            paths::SESSION_ORDERS,
+            get(session_orders::<S>).post(act_on_session::<S>),
+        )
+        .route(paths::PROJECT_SESSIONS, get(project_sessions::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .with_state(serves)
 }
@@ -284,6 +300,8 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::NotRegistered
         } else if error.downcast_ref::<NotListed>().is_some() {
             ErrorCode::NotListed
+        } else if error.downcast_ref::<NoSession>().is_some() {
+            ErrorCode::NotFound
         } else if error.downcast_ref::<NameError>().is_some() {
             ErrorCode::BadName
         } else if error.downcast_ref::<Unkeepable>().is_some() {
@@ -504,6 +522,32 @@ struct PageSegments {
 struct FindQuery {
     /// The directory, absolute, as the service's host sees it
     dir: PathBuf,
+}
+
+/// The segments of a route under one runner's session
+#[derive(Deserialize)]
+struct SessionSegments {
+    /// The session's id
+    session: String,
+}
+
+/// The query a session's transcript takes
+#[derive(Deserialize)]
+struct AfterQuery {
+    /// How many of its entries were read already
+    #[serde(default)]
+    after: u64,
+}
+
+/// The query a runner's ask for its orders takes
+#[derive(Deserialize)]
+struct OrdersQuery {
+    /// The number of the last order it read
+    #[serde(default)]
+    after: u64,
+    /// How long to wait for an order if none is there, in milliseconds
+    #[serde(default)]
+    wait: u64,
 }
 
 /// The query a thread's routes take, to serve threads and comments pending in a review too
@@ -1438,6 +1482,146 @@ fn commented_status(commented: &Commented) -> StatusCode {
             StatusCode::UNPROCESSABLE_ENTITY
         }
     }
+}
+
+/// Attaches a runner's session, or attaches it again with what it holds
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `attach` - The runner's pane, project, host and checkout, and what it holds already
+#[instrument(name = "api::attach_session", skip_all, err(Debug))]
+async fn attach_session<S: Serves>(
+    State(serves): State<S>,
+    Body(attach): Body<Attach>,
+) -> Result<Json<Session>, Failure> {
+    // refused for a pane that isn't a runner's, or a project or plan that isn't there
+    let session = serves.service().attach_session(attach).await?;
+    Ok(Json(session))
+}
+
+/// A session's transcript after the entries read already, 404 if no runner attached it
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The session's id
+/// * `query` - How many of its entries were read already
+#[instrument(name = "api::session_transcript", skip_all, err(Debug))]
+async fn session_transcript<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<SessionSegments>,
+    Params(query): Params<AfterQuery>,
+) -> Result<Json<Transcript>, Failure> {
+    // as far back as it keeps
+    let transcript = serves
+        .service()
+        .session_transcript(&segments.session, query.after)
+        .await?;
+    Ok(Json(transcript))
+}
+
+/// Takes a runner's report, 404 if this service doesn't know its session, so it attaches again
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The session's id
+/// * `report` - Its entries since its last report, and where it stands now
+#[instrument(name = "api::report_session", skip_all, err(Debug))]
+async fn report_session<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<SessionSegments>,
+    Body(report): Body<Report>,
+) -> Result<Json<Session>, Failure> {
+    // kept in memory, and told to the change stream
+    let session = serves
+        .service()
+        .report_session(&segments.session, report)
+        .await?;
+    Ok(Json(session))
+}
+
+/// Lets go of a runner's session, as its runner does when it stops
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The session's id
+#[instrument(name = "api::detach_session", skip_all, err(Debug))]
+async fn detach_session<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<SessionSegments>,
+) -> Result<Json<Session>, Failure> {
+    // kept to read, given no more orders
+    let session = serves.service().detach_session(&segments.session).await?;
+    Ok(Json(session))
+}
+
+/// The orders for a runner after the last it read, waiting a while for one if none is there
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The session's id
+/// * `query` - The last order read, and how long to wait
+#[instrument(name = "api::session_orders", skip_all, err(Debug))]
+async fn session_orders<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<SessionSegments>,
+    Params(query): Params<OrdersQuery>,
+) -> Result<Json<Vec<Ordered>>, Failure> {
+    // held open until an order comes, or the wait ends with none
+    let wait = std::time::Duration::from_millis(query.wait);
+    let orders = serves
+        .service()
+        .session_orders(&segments.session, query.after, wait)
+        .await?;
+    Ok(Json(orders))
+}
+
+/// Does what the app asks of a runner's session: 200 if the runner was told or its loop
+/// changed, 409 if no such prompt waits, Claude isn't waiting for a reply, or the runner is gone
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The session's id
+/// * `act` - What is asked of it
+#[instrument(name = "api::act_on_session", skip_all, err(Debug))]
+async fn act_on_session<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<SessionSegments>,
+    Body(act): Body<SessionAct>,
+) -> Result<(StatusCode, Json<SessionActed>), Failure> {
+    // a loop changed as its pane's would be, or an order queued for the runner
+    let acted = serves
+        .service()
+        .act_on_session(&segments.session, act)
+        .await?;
+    let status = match acted {
+        SessionActed::Ordered { .. } | SessionActed::Looped { .. } => StatusCode::OK,
+        SessionActed::NoPrompt { .. }
+        | SessionActed::NotWaiting { .. }
+        | SessionActed::Gone { .. } => StatusCode::CONFLICT,
+    };
+    Ok((status, Json(acted)))
+}
+
+/// Lists the sessions of runners taking nodes from a project
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::project_sessions", skip_all, err(Debug))]
+async fn project_sessions<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<Session>>, Failure> {
+    // refused if the project isn't registered
+    let sessions = serves.service().project_sessions(&segments.project).await?;
+    Ok(Json(sessions))
 }
 
 /// Follows the change stream: one server-sent event a change, from now on

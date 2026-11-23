@@ -23,6 +23,9 @@
 //!   changes that resolved it, and what came of a comment, a mark or a resolve.
 //! - **Loops** ([`loops`]): the terminal loop's state: the pane a session feeds a project in,
 //!   the node it holds, the node whose end it acted on, and whether it is paused.
+//! - **Sessions** ([`session`]): the sessions a runner the user started runs headless, as
+//!   central reef relays them: each one's transcript and prompts, what the app asks of it, and the
+//!   orders the runner takes.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -42,6 +45,7 @@ pub mod paths;
 pub mod project;
 pub mod queue;
 pub mod revision;
+pub mod session;
 pub mod work;
 
 pub use change::{Change, FollowedThread, PutNode, PutPage};
@@ -64,6 +68,10 @@ pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Projec
 pub use queue::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};
 pub use revision::{
     Anchor, FileDiff, FileStatus, FileSummary, Hunk, Line, LineKind, Revision, Side,
+};
+pub use session::{
+    Answer, Attach, Choice, Entry, EntryKind, Order, Ordered, Prompt, PromptKind, Question, Report,
+    Session, SessionAct, SessionActed, SessionState, Transcript,
 };
 pub use work::{
     AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,

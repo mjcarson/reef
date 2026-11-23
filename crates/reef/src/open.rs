@@ -104,7 +104,7 @@ impl Open {
                 line
             }
             // a Claude Code process with no multiplexer has no pane to open beside
-            Pane::Claude { .. } => return None,
+            Pane::Claude { .. } | Pane::Reef { .. } => return None,
         };
         line.extend(session);
         Some(line)

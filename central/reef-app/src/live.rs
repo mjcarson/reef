@@ -9,6 +9,9 @@
 //! A node's work, its captured revisions and its comments, changes apart from its plan. The plan's stream bumps
 //! a counter of its own for those, [`WorkChanges`], so a capture reads the Changes tab again
 //! without reading the plan's payload again.
+//!
+//! A project's runners, their sessions and loops, follow its stream on a counter of their own,
+//! so a transcript is read again as each entry comes, without reading the queue or the plan.
 
 use dioxus::prelude::*;
 
@@ -105,6 +108,35 @@ const PROJECT_KINDS: &[&str] = &[
     "plan-written",
     "missed",
 ];
+
+/// The changes that mean reading a project's runners again: a session's report or an act on it,
+/// a loop changed, or a gap
+const SESSION_KINDS: &[&str] = &["session-changed", "loop-changed", "missed"];
+
+/// Counts the changes to a project's runners and loops announced since the page opened, following
+/// its stream again when the route names another project
+///
+/// A resource that reads the count reads the sessions, or a transcript, again after each change.
+///
+/// # Arguments
+///
+/// * `project` - The project
+pub fn use_session_changes(project: ReadSignal<String>) -> ReadSignal<u64> {
+    // how many changes have come, and the stream they come on
+    let count = use_signal(|| 0u64);
+    let mut stream = use_signal(|| None::<Follow>);
+    // follow the project the route names, its runners' sessions and loops
+    use_effect(move || {
+        let url = reef_api::paths::changes(Some(&project()), None);
+        let counters = [Counter {
+            kinds: SESSION_KINDS,
+            count,
+            docs: false,
+        }];
+        stream.set(follow(&url, &counters));
+    });
+    count.into()
+}
 
 /// Counts the changes to a plan announced since the page opened it, following its stream again
 /// when the route names another plan

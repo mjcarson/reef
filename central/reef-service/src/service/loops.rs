@@ -6,6 +6,8 @@
 //! - **A node held is in its plan.** A hold naming a node its plan doesn't have, its own or a
 //!   group's member, is [`LoopEdited::NotInPlan`], and writes nothing. Whether the node is the loop's own project's
 //!   or plan's, and whether another loop holds it, the store judges under the loops' lock.
+//! - **A runner's loop works one node at a time.** A start wider than one on a runner's pane is
+//!   refused, since each of a group's members would need a session of its own.
 //! - **Each loop written is a change**, [`Change::LoopChanged`], to the project it feeds. An edit
 //!   that wrote nothing sends none.
 
@@ -15,7 +17,7 @@ use tracing::instrument;
 
 use super::Service;
 use crate::backend::Backend;
-use crate::store::NotRegistered;
+use crate::store::{NotRegistered, Unkeepable};
 
 impl<B: Backend> Service<B> {
     /// Lists every loop, by pane
@@ -50,6 +52,16 @@ impl<B: Backend> Service<B> {
     #[instrument(name = "Service::edit_loop", skip_all, err(Debug))]
     pub async fn edit_loop(&self, edit: EditLoop) -> anyhow::Result<LoopEdited> {
         match &edit.edit {
+            // a runner starts one session at a time, so its loop works one node at a time
+            LoopEdit::Start {
+                width: Some(width), ..
+            } if edit.pane.runs() && *width > 1 => {
+                return Err(Unkeepable(format!(
+                    "{} works one node at a time, so its loop can't be {width} wide",
+                    edit.pane.describe()
+                ))
+                .into());
+            }
             // a start names a registered project, and a plan it lists if it names one
             LoopEdit::Start {
                 project,

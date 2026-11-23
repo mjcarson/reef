@@ -289,3 +289,28 @@ diff, and on the node as a whole ([C35](../milestones/m7.md)), over the threads 
   are pending in it, *Submit review*, which publishes them all at once, and *Discard*. Each is
   sent over the version read. The open counts, in the tab and the toolbar, leave pending threads
   out until they are published.
+
+## The sessions panel
+
+A runner the user started, `reef loop run`, runs a loop's sessions headless, and central reef
+relays them ([The loop in the app](feed-loop.md#later-the-loop-in-the-app)). The app shows each
+session's transcript as it comes, starts, pauses and stops the runner's loop, and answers what
+the session waits on ([C45](../milestones/m9.md)).
+
+### Design choices
+
+- **A column beside the canvas, opened from the bar.** The panel sits in the plan's page beside
+  the canvas, outside the plan's key, so moving between a project's plans keeps it. The bar's
+  *Sessions* button counts the live sessions and the prompts waiting on the app, so a question
+  is seen with the panel shut.
+- **Followed on the project's stream, on a counter of its own.** `session-changed` and
+  `loop-changed` read the runners again, and the open transcript after what it holds, without
+  reading the queue or the plan.
+- **A transcript is read after what it holds.** Each read asks for the entries after the last
+  one held, and the list follows its end as they come. A session keeps its last 2,000 entries,
+  so a read that finds its entries let go starts again from the oldest kept.
+- **Each runner a row, a terminal's loops beside.** A runner shows its host, its checkout, where
+  its session stands and its loop's node, with *Start a loop*, *Resume*, *Pause* and *Stop* as
+  its loop allows. A terminal's loops are listed to read, since only their own pane drives them.
+- **Each prompt a card.** A tool's permission shows its input, to allow or to deny with what
+  Claude is told. A reply box shows while Claude's turn has ended mid-node.

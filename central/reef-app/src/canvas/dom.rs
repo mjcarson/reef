@@ -172,6 +172,15 @@ mod web {
         el.set_scroll_top(0);
     }
 
+    /// Scrolls an element to its bottom, as a transcript follows what it last said
+    ///
+    /// # Arguments
+    ///
+    /// * `el` - The element
+    pub fn scroll_to_bottom(el: &El) {
+        el.set_scroll_top(el.scroll_height());
+    }
+
     /// Scrolls whatever holds an element so the element is in view, at the middle if it moves
     ///
     /// # Arguments
@@ -486,6 +495,9 @@ mod server {
 
     /// Nothing scrolls on the server
     pub fn scroll_to_top(_el: &El) {}
+
+    /// Nothing scrolls on the server
+    pub fn scroll_to_bottom(_el: &El) {}
 
     /// Nothing scrolls on the server
     pub fn scroll_into_view(_el: &El) {}

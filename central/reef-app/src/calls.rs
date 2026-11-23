@@ -7,8 +7,9 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, FileDiff, Marked, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review,
-    ReviewState, Reviewed, Revision, Target, Thread, ThreadState,
+    Commented, FileDiff, Loop, Marked, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review,
+    ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, Target, Thread,
+    ThreadState, Transcript,
 };
 #[cfg(feature = "server")]
 use reef_api::{MarkReview, MarkThread, NewReply, NewThread, Writer};
@@ -126,6 +127,75 @@ pub async fn edit_queue(project: String, edit: QueueEdit) -> Result<Queued, Serv
     // under the queue's lock, told to the change stream once it is made
     crate::server::service()
         .edit_queue(&project, edit)
+        .await
+        .map_err(failed)
+}
+
+/// A project's runners' sessions, and every loop feeding it, a terminal's or a runner's
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Runners {
+    /// The sessions of runners taking nodes from it, each gone if its runner went silent
+    pub sessions: Vec<Session>,
+    /// The loops feeding it, by pane
+    pub loops: Vec<Loop>,
+}
+
+/// A project's runners' sessions, and the loops feeding it
+///
+/// # Arguments
+///
+/// * `project` - The project
+#[get("/app/sessions?project")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::runners", skip_all, err(Debug))
+)]
+pub async fn runners(project: String) -> Result<Runners, ServerFnError> {
+    // refused for a project that isn't registered
+    let service = crate::server::service();
+    let sessions = service.project_sessions(&project).await.map_err(failed)?;
+    let loops = service.project_loops(&project).await.map_err(failed)?;
+    Ok(Runners { sessions, loops })
+}
+
+/// A runner's session's transcript after the entries read already
+///
+/// # Arguments
+///
+/// * `id` - The session's id
+/// * `after` - How many of its entries were read already
+#[get("/app/session?id&after")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::session_transcript", skip_all, err(Debug))
+)]
+pub async fn session_transcript(id: String, after: u64) -> Result<Transcript, ServerFnError> {
+    // as far back as the service keeps
+    crate::server::service()
+        .session_transcript(&id, after)
+        .await
+        .map_err(failed)
+}
+
+/// Asks something of a runner's session: starts, pauses or stops its loop, answers one of its
+/// prompts, or replies to Claude
+///
+/// A prompt that no longer waits, a Claude that isn't waiting, or a runner that is gone is an
+/// answer, not a failure, and sends nothing.
+///
+/// # Arguments
+///
+/// * `id` - The session's id
+/// * `act` - What is asked of it
+#[post("/app/session")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::act_on_session", skip_all, err(Debug))
+)]
+pub async fn act_on_session(id: String, act: SessionAct) -> Result<SessionActed, ServerFnError> {
+    // a loop changed as its pane's would be, or an order queued for the runner
+    crate::server::service()
+        .act_on_session(&id, act)
         .await
         .map_err(failed)
 }

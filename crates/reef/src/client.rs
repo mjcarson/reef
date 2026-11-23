@@ -7,11 +7,11 @@
 //! error says where the CLI looked, which key set it, and how to start the service.
 
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Captured, Checked, Commented, EditLoop,
-    ErrorCode, FileDiff, Listing, Loop, LoopEdited, NewPlan, NewProject, NewReply, PageEdit,
-    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
-    ResolveThread, Resolved, Revision, Rewrite, StartWork, Started, StoredNode, StoredPage, Thread,
-    WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, EditLoop,
+    ErrorCode, FileDiff, Listing, Loop, LoopEdited, NewPlan, NewProject, NewReply, Ordered,
+    PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing,
+    Queued, Report, ResolveThread, Resolved, Revision, Rewrite, Session, SessionAct, SessionActed,
+    StartWork, Started, StoredNode, StoredPage, Thread, Transcript, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -494,6 +494,113 @@ impl Client {
         let path = paths::LOOPS;
         let request = self.http.post(self.url(path)).json(edit);
         self.send(request, path).await
+    }
+
+    /// Attaches a runner's session, or attaches it again with what it holds
+    ///
+    /// # Arguments
+    ///
+    /// * `attach` - The runner's pane, project, host and checkout, and what it holds already
+    pub async fn attach_session(&self, attach: &Attach) -> anyhow::Result<Session> {
+        let path = paths::SESSIONS;
+        let request = self.http.post(self.url(path)).json(attach);
+        self.send(request, path).await
+    }
+
+    /// Reports a runner's entries and where it stands, or `None` if the service doesn't know
+    /// its session, as after the service restarted, so the runner attaches again
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session's id
+    /// * `report` - Its entries since its last report, and where it stands now
+    pub async fn report_session(
+        &self,
+        id: &str,
+        report: &Report,
+    ) -> anyhow::Result<Option<Session>> {
+        let path = paths::session(id);
+        let request = self.http.post(self.url(&path)).json(report);
+        // a session the service has never heard of is an answer here, not an error
+        match self.send(request, &path).await {
+            Ok(session) => Ok(Some(session)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Lets go of a runner's session
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session's id
+    pub async fn detach_session(&self, id: &str) -> anyhow::Result<Session> {
+        let path = paths::session(id);
+        self.send(self.http.delete(self.url(&path)), &path).await
+    }
+
+    /// The orders for a runner after the last it read, waiting up to a while for one, or
+    /// `None` if the service doesn't know its session
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session's id
+    /// * `after` - The number of the last order read, or 0
+    /// * `wait` - How long the service may wait for one
+    pub async fn session_orders(
+        &self,
+        id: &str,
+        after: u64,
+        wait: Duration,
+    ) -> anyhow::Result<Option<Vec<Ordered>>> {
+        let path = format!(
+            "{}?after={after}&wait={}",
+            paths::session_orders(id),
+            wait.as_millis()
+        );
+        // a session the service has never heard of is an answer here, not an error
+        match self.send(self.http.get(self.url(&path)), &path).await {
+            Ok(orders) => Ok(Some(orders)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A session's transcript after the entries read already
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session's id
+    /// * `after` - How many of its entries were read already
+    pub async fn session_transcript(&self, id: &str, after: u64) -> anyhow::Result<Transcript> {
+        let path = format!("{}?after={after}", paths::session(id));
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Asks something of a runner's session as the app does: changes its loop, or orders an
+    /// answer or a reply
+    ///
+    /// A prompt that doesn't wait, a Claude that isn't waiting, or a runner that is gone is an
+    /// answer, not an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session's id
+    /// * `act` - What is asked of it
+    pub async fn act_on_session(&self, id: &str, act: &SessionAct) -> anyhow::Result<SessionActed> {
+        let path = paths::session_orders(id);
+        let request = self.http.post(self.url(&path)).json(act);
+        self.send(request, &path).await
+    }
+
+    /// Lists the sessions of runners taking nodes from a project
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn project_sessions(&self, project: &str) -> anyhow::Result<Vec<Session>> {
+        let path = paths::project_sessions(project);
+        self.send(self.http.get(self.url(&path)), &path).await
     }
 
     /// The full URL of a route's path
