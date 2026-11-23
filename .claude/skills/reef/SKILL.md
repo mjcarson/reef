@@ -56,7 +56,9 @@ The full key reference is in [reference.md](reference.md). Read it before writin
      the user's approval.
   4. **Implement it, and finish it** as section 5 says: its status, its criteria, the commit.
   5. **End the turn once it is committed,** rather than taking the next node in the same
-     context. The next node starts after a `/clear`, with next_task again.
+     context. The Stop hook (`reef hook stop`) then names the next node, or says the loop is
+     paused or nothing else is ready. The next node starts after a `/clear`, with next_task
+     again.
 - **Before starting work, read its node** by id with `get`. Read its `needs`, its group, and
   its `docs` page (`reef page get <PATH>`, or the repo's file at that path): they say what the
   work is gated on and how it was meant to be done.

@@ -6,6 +6,9 @@
 //! - **One loop a node.** Every loop is read from the one partition under the loops' lock, so a
 //!   node another loop holds is found, and refused as [`LoopEdited::Held`], before any write.
 //!   Two loops taking one node at once are taken one at a time, and the second is refused.
+//! - **A node's end is acted on once.** Recording the node whose end a loop acted on, when it
+//!   acted on that node's end already, is [`LoopEdited::ActedAlready`], judged under the lock,
+//!   so two Stops never both act on one node.
 //! - **A session takes its pane's loop over.** A clear starts a new session in the same pane,
 //!   and handing it the loop keeps everything else the loop holds ([`Loop::handed_to`]).
 //! - **Written by version.** A start writes its row `if_absent`, every other change over the
@@ -204,7 +207,14 @@ impl<B: Backend> Store<B> {
                 node: None,
                 ..current
             },
-            // the node whose end it acted on, so it acts on it no more
+            // a node's end it acted on already is never acted on again, judged under the lock
+            LoopEdit::Acted { node } if current.acted.as_ref() == Some(&node) => {
+                return Ok(LoopEdited::ActedAlready {
+                    node,
+                    r#loop: current,
+                });
+            }
+            // else the node whose end it acted on, so it acts on it no more
             LoopEdit::Acted { node } => Loop {
                 acted: Some(node),
                 ..current

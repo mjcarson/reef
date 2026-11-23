@@ -5,7 +5,7 @@
 //! reef hook post-commit          # git: draft the node this worktree is on, unless mid-rebase
 //! reef hook post-rewrite <KIND>  # git: draft it once a rebase ends; an amend is post-commit's
 //! reef hook post-tool-use        # Claude Code, after reef's status tool: draft a node marked done
-//! reef hook stop                 # Claude Code: seal the draft of the node done here
+//! reef hook stop [--pane KEY]    # Claude Code: seal the node done here, and end the loop's node
 //! ```
 //!
 //! - **git's hooks keep the draft current.** post-commit drafts the node the worktree is on
@@ -18,15 +18,20 @@
 //! - **Stop seals.** Only Stop sees everything after the mark, such as the plan's export and its
 //!   commit, so once the node the worktree is on is done, Stop seals its draft, or takes its
 //!   first revision if it has none. A round of fixes after that leaves a draft of its own, which
-//!   the next Stop seals as a revision of its own. Stop never blocks.
+//!   the next Stop seals as a revision of its own.
+//! - **Stop ends the loop's node once.** Once the node the pane's loop holds is done, Stop acts
+//!   on its end once ([`task::ended`]), telling the user what is next, that the loop is paused,
+//!   or that nothing else is ready, as a `systemMessage`, since Claude Code shows the user a
+//!   Stop's output only as JSON. Mid-node Claude is waiting on the user, so Stop says nothing.
+//!   Stop never blocks, since Claude Code shows a block as a problem.
 //! - **Nothing to do is no failure.** A directory outside git or outside every project, a
 //!   worktree no node was started in, or a node marked something other than done: the hook says
 //!   nothing and succeeds. A capture that fails, or a service that doesn't answer, is an error,
 //!   which git ignores and Claude Code shows without stopping.
 //! - **Each line it prints starts `reef:`**, since git shows it among a commit's own output.
 
-use reef_api::WorkRecord;
 use reef_api::work::on_worktree;
+use reef_api::{Pane, WorkRecord};
 use reef_model::Status;
 use serde::Deserialize;
 use std::io::Write;
@@ -35,6 +40,7 @@ use std::path::{Path, PathBuf};
 use crate::capture::{Keep, Report, capture_record, seal_if_done};
 use crate::client::Client;
 use crate::git::Checkout;
+use crate::task;
 use crate::work::parse_status;
 
 /// What Claude Code hands PostToolUse: the tool that ran, what it was called with, and where
@@ -164,35 +170,52 @@ pub async fn post_tool_use<W: Write>(
     prefixed(&said, out)
 }
 
-/// Seals the node the worktree is on once it is done: its draft, or its first revision if it
-/// has none
+/// Seals the node the worktree is on once it is done, its draft or its first revision if it has
+/// none, then acts once on the end of the node the pane's loop holds
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `cwd` - The working directory, unless the input names the session's
 /// * `input` - The event Claude Code handed the hook, as JSON
+/// * `pane` - The pane the session runs in, if it could be found
 /// * `out` - Where to print what came of it
 pub async fn stop<W: Write>(
     client: &Client,
     cwd: &Path,
     input: &str,
+    pane: Option<&Pane>,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the session's directory, which its worktree is found from
     let stopped: Stopped = serde_json::from_str(input)
         .map_err(|error| anyhow::anyhow!("Stop's input doesn't read as one: {error}"))?;
     let dir = stopped.cwd.as_deref().unwrap_or(cwd);
-    let Some(checkout) = open(dir) else {
-        return Ok(());
-    };
-    let Some(record) = on_node(client, &checkout).await? else {
-        return Ok(());
-    };
-    // sealed only once it is done, and only what isn't sealed yet
+    // sealed first, so the loop moves on only from a node whose changes are kept
     let mut said = Vec::new();
-    seal_if_done(client, &checkout, &record, Report::Line, &mut said).await?;
-    prefixed(&said, out)
+    if let Some(checkout) = open(dir)
+        && let Some(record) = on_node(client, &checkout).await?
+    {
+        // sealed only once it is done, and only what isn't sealed yet
+        let mut sealed = Vec::new();
+        seal_if_done(client, &checkout, &record, Report::Line, &mut sealed).await?;
+        prefixed(&sealed, &mut said)?;
+    }
+    // then the end of the loop's node, acted on once, wherever the session runs
+    let ending = match pane {
+        Some(pane) => task::ended(client, pane).await?,
+        None => task::Ending::Nothing,
+    };
+    let Some(message) = ending.message() else {
+        // nothing for the user: the seal's lines as they are
+        out.write_all(&said)?;
+        return Ok(());
+    };
+    // Claude Code shows a Stop's output to the user only when all of it is JSON
+    let mut told = String::from_utf8_lossy(&said).into_owned();
+    told.push_str(&format!("reef: {message}"));
+    writeln!(out, "{}", serde_json::json!({ "systemMessage": told }))?;
+    Ok(())
 }
 
 /// The status reef's status tool set a node to, if the tool was it and the status was done

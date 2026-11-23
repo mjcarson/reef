@@ -283,3 +283,38 @@ pub async fn a_beaten_loop_write_is_an_error<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     assert_eq!(fx.store.loop_in(&here).await?, Some(started));
     Ok(())
 }
+
+/// A loop acts on each node's end once: the node whose end it acted on is recorded, a second
+/// record of the same node is refused under the lock without a write, and the next node's end
+/// is recorded over it
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_loop_acts_on_a_nodes_end_once<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a loop that acted on C39's end
+    let here = pane(1);
+    edited(&fx, &here, start(&fx, "s1")).await?;
+    let acted = LoopEdit::Acted {
+        node: node_of(&fx, "C39"),
+    };
+    let once = edited(&fx, &here, acted.clone()).await?;
+    assert_eq!(once.acted, Some(node_of(&fx, "C39")));
+    // acting on it again writes nothing, and says so with the loop as it stands
+    assert_eq!(
+        fx.store.edit_loop(&here, acted).await?,
+        LoopEdited::ActedAlready {
+            node: node_of(&fx, "C39"),
+            r#loop: once.clone()
+        }
+    );
+    assert_eq!(fx.store.loop_in(&here).await?, Some(once.clone()));
+    // and the next node's end is recorded over it
+    let next = LoopEdit::Acted {
+        node: node_of(&fx, "C40"),
+    };
+    let moved = edited(&fx, &here, next).await?;
+    assert_eq!(moved.acted, Some(node_of(&fx, "C40")));
+    assert_eq!(moved.version, once.version + 1);
+    Ok(())
+}

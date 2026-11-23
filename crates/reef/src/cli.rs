@@ -34,7 +34,7 @@
 //! reef [--conf PATH] hook post-commit
 //! reef [--conf PATH] hook post-rewrite <KIND>
 //! reef [--conf PATH] hook post-tool-use
-//! reef [--conf PATH] hook stop
+//! reef [--conf PATH] hook stop [--pane KEY]
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
@@ -457,8 +457,13 @@ pub enum HookCommand {
     /// PostToolUse, after reef's status tool: draft the node it marked done, if this worktree
     /// is on it
     PostToolUse,
-    /// Stop: seal the node this worktree is on once it is done, its draft or its first revision
-    Stop,
+    /// Stop: seal the node this worktree is on once it is done, its draft or its first revision,
+    /// then act once on the end of the node this pane's loop holds
+    Stop {
+        /// The pane, else the one the session runs in
+        #[arg(long, value_name = "KEY")]
+        pane: Option<String>,
+    },
 }
 
 /// What can be done with a plan's comment threads
@@ -804,9 +809,15 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let input = stdin()?;
             hook::post_tool_use(&client, cwd, &input, out).await
         }
-        Command::Hook(HookCommand::Stop) => {
+        Command::Hook(HookCommand::Stop { pane }) => {
+            // the pane named, else the session's, and none is no loop to end a node of
+            let var = |name: &str| std::env::var(name).ok();
+            let pane = match pane {
+                Some(key) => Some(key.parse::<reef_api::Pane>()?),
+                None => reef_api::Pane::from_env(var),
+            };
             let input = stdin()?;
-            hook::stop(&client, cwd, &input, out).await
+            hook::stop(&client, cwd, &input, pane.as_ref(), out).await
         }
         Command::Mcp { pick } => {
             // the pane the session runs in, its multiplexer's else the Claude Code that started it
@@ -1370,8 +1381,17 @@ mod tests {
             Command::Hook(HookCommand::PostToolUse)
         ));
         let stop = Cli::try_parse_from(["reef", "--conf", "a.toml", "hook", "stop"]).unwrap();
-        assert!(matches!(stop.command, Command::Hook(HookCommand::Stop)));
-        assert!(Cli::try_parse_from(["reef", "hook", "stop", "--pane", "x"]).is_err());
+        assert!(matches!(
+            stop.command,
+            Command::Hook(HookCommand::Stop { pane: None })
+        ));
+        // Stop takes the pane whose loop it ends a node of, as SessionStart does
+        let named = Cli::try_parse_from(["reef", "hook", "stop", "--pane", "claude:7"]).unwrap();
+        assert!(matches!(
+            named.command,
+            Command::Hook(HookCommand::Stop { pane: Some(key) }) if key == "claude:7"
+        ));
+        assert!(Cli::try_parse_from(["reef", "hook", "stop", "x"]).is_err());
     }
 
     /// A resolve takes its thread's number, and the node and revision that answered it or none

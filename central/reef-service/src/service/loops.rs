@@ -85,7 +85,8 @@ impl<B: Backend> Service<B> {
             | LoopEdited::Busy { .. }
             | LoopEdited::Held { .. }
             | LoopEdited::NotInLoop { .. }
-            | LoopEdited::NotInPlan { .. } => {}
+            | LoopEdited::NotInPlan { .. }
+            | LoopEdited::ActedAlready { .. } => {}
         }
         Ok(edited)
     }

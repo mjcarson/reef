@@ -109,4 +109,5 @@ suite!(
     two_loops_never_hold_one_node,
     a_clears_session_takes_its_panes_loop,
     a_beaten_loop_write_is_an_error,
+    a_loop_acts_on_a_nodes_end_once,
 );

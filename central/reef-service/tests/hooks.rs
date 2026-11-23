@@ -208,22 +208,48 @@ impl Hx {
         Ok(String::from_utf8(out)?)
     }
 
-    /// Calls Claude Code's Stop hook as it is called when a turn ends, returning what it printed
+    /// Calls Claude Code's Stop hook as it is called when a turn ends in a session with no pane,
+    /// returning what it printed
     ///
     /// # Arguments
     ///
     /// * `cwd` - The session's working directory
     async fn stopped(&self, cwd: &Path) -> anyhow::Result<String> {
+        self.stopped_in(cwd, None, false).await
+    }
+
+    /// Calls Claude Code's Stop hook as it is called when a turn ends in a pane, returning what
+    /// it printed
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The session's working directory
+    /// * `pane` - The pane's key, if the session runs in one
+    /// * `active` - Whether Claude Code says a Stop hook kept this turn going
+    async fn stopped_in(
+        &self,
+        cwd: &Path,
+        pane: Option<&str>,
+        active: bool,
+    ) -> anyhow::Result<String> {
         // the input Claude Code hands it
         let input = serde_json::json!({
             "session_id": "s1",
             "transcript_path": "/dev/null",
             "cwd": cwd,
             "hook_event_name": "Stop",
-            "stop_hook_active": false,
+            "stop_hook_active": active,
         });
+        let pane: Option<reef_api::Pane> = pane.map(str::parse).transpose()?;
         let mut out = Vec::new();
-        reef::hook::stop(&self.client()?, &self.repo, &input.to_string(), &mut out).await?;
+        reef::hook::stop(
+            &self.client()?,
+            &self.repo,
+            &input.to_string(),
+            pane.as_ref(),
+            &mut out,
+        )
+        .await?;
         Ok(String::from_utf8(out)?)
     }
 
@@ -555,5 +581,84 @@ async fn a_rebase_captures_once_at_its_end() -> anyhow::Result<()> {
     );
     assert_eq!(runs[1].1, "");
     assert_eq!(hx.captures("A").await?.len(), 4);
+    Ok(())
+}
+
+/// What a Stop hook told the user, read out of the JSON it printed
+///
+/// # Arguments
+///
+/// * `said` - What the hook printed
+fn told(said: &str) -> String {
+    // one JSON object, whose `systemMessage` Claude Code shows the user
+    let value: serde_json::Value = serde_json::from_str(said)
+        .unwrap_or_else(|error| panic!("the Stop hook printed no JSON ({error}): {said}"));
+    value["systemMessage"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the Stop hook told the user nothing: {said}"))
+        .to_string()
+}
+
+/// The Stop hook acts once on the end of each node a pane's loop holds, whatever
+/// `stop_hook_active` says: nothing mid-node, then the next node named once it is done, the
+/// loop's pause once a paused loop's node is done, and nothing else ready once the last is done,
+/// each said once
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_loop_acts_once_on_each_nodes_end() -> anyhow::Result<()> {
+    let hx = Hx::new("loop-ends", &["A", "B", "C"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    // a loop in a pane, which takes A into a worktree of its own
+    let pane = "claude:4242";
+    let a = git::worktree(&hx.repo, &hx.ax.dir.join("cli-a"))?;
+    hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/A`"), "{took}");
+    // a turn's end mid-node lets Claude stop and says nothing, chained or not
+    committed(&a, "a.txt", "A's\n", "A one").await?;
+    for active in [false, true] {
+        assert_eq!(hx.stopped_in(&a, Some(pane), active).await?, "");
+    }
+    // once A is done, the turn's end seals it and names the next node, once
+    hx.reef(&a, &["status", "A", "done"]).await?;
+    let said = told(&hx.stopped_in(&a, Some(pane), true).await?);
+    assert!(said.starts_with("reef: sealed `A` as revision 1"), "{said}");
+    assert!(
+        said.ends_with(
+            "\nreef: `cli/docs/A` is done. `cli/docs/B` is next: `/clear`, then ask for it"
+        ),
+        "{said}"
+    );
+    let listed = hx.reef(&a, &["loop", "ls"]).await?;
+    assert!(listed.contains("acted on `cli/docs/A`'s end"), "{listed}");
+    for active in [true, false] {
+        assert_eq!(hx.stopped_in(&a, Some(pane), active).await?, "");
+    }
+    // B taken, then the loop paused: B's end says the loop stops there, once
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/B`"), "{took}");
+    hx.reef(&a, &["loop", "pause", "--pane", pane]).await?;
+    assert_eq!(hx.stopped_in(&a, Some(pane), false).await?, "");
+    hx.reef(&a, &["status", "B", "done"]).await?;
+    let said = told(&hx.stopped_in(&a, Some(pane), true).await?);
+    assert!(
+        said.ends_with("reef: `cli/docs/B` is done, and the loop is paused: `! reef loop start` sets it running again"),
+        "{said}"
+    );
+    assert!(!said.contains("is next"), "{said}");
+    assert_eq!(hx.stopped_in(&a, Some(pane), true).await?, "");
+    // running again, it takes C, and C's end finds nothing else ready, once
+    hx.reef(&a, &["loop", "start", "--pane", pane]).await?;
+    let took = hx.reef(&a, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.starts_with("Took `cli/docs/C`"), "{took}");
+    hx.reef(&a, &["status", "C", "done"]).await?;
+    let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
+    assert!(
+        said.ends_with("reef: `cli/docs/C` is done, and nothing else is ready to take: `reef next` says what everything waits on"),
+        "{said}"
+    );
+    assert_eq!(hx.stopped_in(&a, Some(pane), false).await?, "");
+    // and a pane with no loop, or no pane, leaves the turn's end to the seal alone
+    assert_eq!(hx.stopped_in(&a, Some("claude:5151"), false).await?, "");
+    assert_eq!(hx.stopped(&a).await?, "");
     Ok(())
 }

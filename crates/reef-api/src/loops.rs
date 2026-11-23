@@ -307,7 +307,7 @@ pub enum LoopEdit {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<NodeName>,
     },
-    /// Record the node whose end it acted on
+    /// Record the node whose end it acted on, unless it acted on that node's end already
     Acted {
         /// The node
         node: NodeName,
@@ -375,6 +375,13 @@ pub enum LoopEdited {
     NotInPlan {
         /// The node
         node: NodeName,
+    },
+    /// The loop acted on the node's end already, so nothing was written
+    ActedAlready {
+        /// The node
+        node: NodeName,
+        /// The pane's loop as it stands
+        r#loop: Loop,
     },
 }
 

@@ -1314,8 +1314,9 @@ async fn project_loops<S: Serves>(
     Ok(Json(loops))
 }
 
-/// Changes a pane's loop: 200 if written, 409 if the pane's loop is busy or another loop holds
-/// the node, 422 if the pane has no loop or the node isn't the loop's or its plan's
+/// Changes a pane's loop: 200 if written, 409 if the pane's loop is busy, another loop holds the
+/// node or the loop acted on the node's end already, 422 if the pane has no loop or the node
+/// isn't the loop's or its plan's
 ///
 /// # Arguments
 ///
@@ -1333,7 +1334,9 @@ async fn edit_loop<S: Serves>(
         | LoopEdited::Resumed { .. }
         | LoopEdited::Edited { .. }
         | LoopEdited::Stopped { .. } => StatusCode::OK,
-        LoopEdited::Busy { .. } | LoopEdited::Held { .. } => StatusCode::CONFLICT,
+        LoopEdited::Busy { .. } | LoopEdited::Held { .. } | LoopEdited::ActedAlready { .. } => {
+            StatusCode::CONFLICT
+        }
         LoopEdited::NoLoop { .. } | LoopEdited::NotInLoop { .. } | LoopEdited::NotInPlan { .. } => {
             StatusCode::UNPROCESSABLE_ENTITY
         }

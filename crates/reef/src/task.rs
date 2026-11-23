@@ -17,6 +17,10 @@
 //!   that can't be started is let go of again.
 //! - **Handed back whole:** the node as `reef node get --md` prints it, then the queue's entries
 //!   passed over and why. With nothing to take, next's report says what everything waits on.
+//! - **The Stop hook ends a node once** ([`ended`]). While the node the loop holds isn't done,
+//!   Claude is waiting on the user, and the hook lets it stop. Once it is done, the hook acts on
+//!   its end once, recorded as [`LoopEdit::Acted`], whatever `stop_hook_active` says: it names
+//!   the next node, or says the loop is paused or nothing else is ready.
 
 use reef_api::loops::holder;
 use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
@@ -113,6 +117,176 @@ pub fn choose(feeding: &Loop, held: Option<Status>, next: &Next, loops: &[Loop])
     }
 }
 
+/// What the Stop hook makes of a turn's end for the loop of the pane it runs in
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// Nothing to act on: no loop, no node held, the node not done, or its end acted on already
+    Nothing,
+    /// The node is done and the loop is paused, so it stops there
+    Paused(NodeName),
+    /// The node is done and nothing else is ready to take
+    Finished(NodeName),
+    /// The node is done and this one is next
+    Next {
+        /// The node done
+        done: NodeName,
+        /// The node next_task takes next, as things stand
+        next: NodeName,
+    },
+}
+
+impl Ending {
+    /// What the hook tells the user of it, if it acted
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef::task::Ending;
+    ///
+    /// let paused = Ending::Paused("reef/central/C41".parse().unwrap());
+    /// assert!(paused.message().unwrap().contains("the loop is paused"));
+    /// assert_eq!(Ending::Nothing.message(), None);
+    /// ```
+    pub fn message(&self) -> Option<String> {
+        match self {
+            Ending::Nothing => None,
+            Ending::Paused(done) => Some(format!(
+                "`{done}` is done, and the loop is paused: `! reef loop start` sets it running \
+                 again"
+            )),
+            Ending::Finished(done) => Some(format!(
+                "`{done}` is done, and nothing else is ready to take: `reef next` says what \
+                 everything waits on"
+            )),
+            Ending::Next { done, next } => Some(format!(
+                "`{done}` is done. `{next}` is next: `/clear`, then ask for it"
+            )),
+        }
+    }
+}
+
+/// The node whose end a turn's end is: the one the loop holds, once it is done and its end
+/// wasn't acted on yet
+///
+/// `stop_hook_active` is never read: it stays true across a whole chain of turns, so the node
+/// whose end the loop acted on is the guard.
+///
+/// # Arguments
+///
+/// * `feeding` - The pane's loop
+/// * `held` - Where the node it holds stands, or `None` if it holds none or its plan lost it
+///
+/// # Examples
+///
+/// ```
+/// use reef::task::end_of;
+/// use reef_api::{Loop, LoopState, Pane};
+/// use reef_model::Status;
+///
+/// let feeding = Loop {
+///     pane: Pane::Claude { pid: 7 },
+///     project: "reef".to_string(),
+///     plan: None,
+///     session: None,
+///     node: Some("reef/central/C41".parse().unwrap()),
+///     acted: None,
+///     state: LoopState::Running,
+///     version: 2,
+///     started_at: 1,
+/// };
+/// assert_eq!(end_of(&feeding, Some(Status::Done)), feeding.node);
+/// assert_eq!(end_of(&feeding, Some(Status::InProgress)), None);
+/// ```
+pub fn end_of(feeding: &Loop, held: Option<Status>) -> Option<NodeName> {
+    // a node under way, blocked or gone leaves Claude waiting on the user
+    let node = feeding.node.as_ref()?;
+    if held != Some(Status::Done) {
+        return None;
+    }
+    // and a node's end is acted on once
+    (feeding.acted.as_ref() != Some(node)).then(|| node.clone())
+}
+
+/// What comes after a node the loop holds is done: it stops if paused, else the first ready node
+/// no other loop holds is next, or nothing is
+///
+/// # Arguments
+///
+/// * `feeding` - The pane's loop
+/// * `done` - The node it holds, which is done
+/// * `next` - The ready work over the loop's plans, the queue's first
+/// * `loops` - Every loop of the project, the pane's included
+pub fn after(feeding: &Loop, done: NodeName, next: &Next, loops: &[Loop]) -> Ending {
+    // next_task's own choice, as it will make it for a node done
+    match choose(feeding, Some(Status::Done), next, loops) {
+        Choice::Paused => Ending::Paused(done),
+        Choice::Take { candidates, .. } => match candidates.into_iter().next() {
+            Some(next) => Ending::Next { done, next },
+            None => Ending::Finished(done),
+        },
+        // a node done is never handed out again
+        Choice::Again(_) => Ending::Nothing,
+    }
+}
+
+/// Judges a turn's end for the loop of the pane the Stop hook runs in, and records that it acted
+/// on its node's end before saying what comes next
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `pane` - The pane the session runs in
+pub async fn ended(client: &Client, pane: &Pane) -> anyhow::Result<Ending> {
+    // the pane's loop, if it has one
+    let loops = client.loops().await?;
+    let Some(feeding) = loops.iter().find(|feeding| feeding.pane == *pane) else {
+        return Ok(Ending::Nothing);
+    };
+    // a loop holding nothing, or whose node's end was acted on, reads nothing more
+    let Some(node) = &feeding.node else {
+        return Ok(Ending::Nothing);
+    };
+    if feeding.acted.as_ref() == Some(node) {
+        return Ok(Ending::Nothing);
+    }
+    // the node's end only once it is done
+    let held = status_of(client, node).await?;
+    let Some(done) = end_of(feeding, held) else {
+        return Ok(Ending::Nothing);
+    };
+    // what comes after it, over the loops of its project
+    let next = next_for(client, feeding).await?;
+    let project: Vec<Loop> = loops
+        .iter()
+        .filter(|other| other.project == feeding.project)
+        .cloned()
+        .collect();
+    let ending = after(feeding, done.clone(), &next, &project);
+    // recorded before it is told, and told only by the Stop that recorded it
+    match edited(client, pane, LoopEdit::Acted { node: done }).await? {
+        LoopEdited::Edited { .. } => Ok(ending),
+        // another Stop acted on it first, or the loop was stopped meanwhile
+        LoopEdited::ActedAlready { .. } | LoopEdited::NoLoop { .. } => Ok(Ending::Nothing),
+        other => anyhow::bail!("the service answered {other:?} for the loop in {pane}"),
+    }
+}
+
+/// The ready work a loop takes from: its one plan's, or every plan's of its project
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `feeding` - The loop
+async fn next_for(client: &Client, feeding: &Loop) -> anyhow::Result<Next> {
+    match &feeding.plan {
+        Some(plan) => {
+            let plan = PlanName::new(feeding.project.as_str(), plan.as_str())?;
+            client.next(&plan).await
+        }
+        None => client.project_next(&feeding.project).await,
+    }
+}
+
 /// A ready node's full name: its plan's as next names it, else the loop's one plan's
 ///
 /// # Arguments
@@ -175,13 +349,7 @@ pub async fn next_task<W: Write>(
         Some(node) => status_of(client, node).await?,
         None => None,
     };
-    let next = match &feeding.plan {
-        Some(plan) => {
-            let plan = PlanName::new(feeding.project.as_str(), plan.as_str())?;
-            client.next(&plan).await?
-        }
-        None => client.project_next(&feeding.project).await?,
-    };
+    let next = next_for(client, &feeding).await?;
     match choose(&feeding, held, &next, &loops) {
         Choice::Again(node) => {
             // the node it is on, started here if it never was
@@ -421,7 +589,7 @@ async fn edited(client: &Client, pane: &Pane, edit: LoopEdit) -> anyhow::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{Choice, choose};
+    use super::{Choice, Ending, after, choose, end_of};
     use reef_api::{Loop, LoopState, Pane};
     use reef_model::{Next, NodeName, PlanName, Ready, Status};
 
@@ -511,6 +679,94 @@ mod tests {
         assert_eq!(
             choose(&paused, Some(Status::Done), &next, &loops),
             Choice::Paused
+        );
+    }
+
+    /// The Stop hook acts on a node's end once: a node done is its end until the loop records
+    /// acting on it, and an earlier node acted on leaves the new one's end to act on
+    #[test]
+    fn it_never_acts_twice_on_one_nodes_end() {
+        // C40 done, its end not acted on yet, is the end to act on
+        let on = looped(1, Some("C40"));
+        assert_eq!(end_of(&on, Some(Status::Done)), Some(named("C40")));
+        // once acted on, every later turn's end is no node's, however often it comes
+        let acted = Loop {
+            acted: Some(named("C40")),
+            ..on.clone()
+        };
+        for _ in 0..3 {
+            assert_eq!(end_of(&acted, Some(Status::Done)), None);
+        }
+        // the end acted on last being an earlier node's leaves C40's to act on
+        let earlier = Loop {
+            acted: Some(named("C39")),
+            ..on
+        };
+        assert_eq!(end_of(&earlier, Some(Status::Done)), Some(named("C40")));
+    }
+
+    /// The Stop hook names no next node mid-node, when the loop is paused, or once nothing else
+    /// is ready, and names the first ready node no other loop holds otherwise
+    #[test]
+    fn it_does_nothing_mid_node_when_paused_or_once_the_plan_is_finished() {
+        // mid-node, blocked, gone from its plan or holding nothing, a turn's end is no node's
+        let on = looped(1, Some("C40"));
+        for held in [
+            Some(Status::Todo),
+            Some(Status::InProgress),
+            Some(Status::Blocked),
+            None,
+        ] {
+            assert_eq!(end_of(&on, held), None, "{held:?}");
+        }
+        assert_eq!(end_of(&looped(1, None), Some(Status::Done)), None);
+        // a paused loop stops at C40's end, however much is ready
+        let next = ready(&["C41", "C42"]);
+        let paused = Loop {
+            state: LoopState::Paused,
+            ..on.clone()
+        };
+        assert_eq!(
+            after(&paused, named("C40"), &next, std::slice::from_ref(&paused)),
+            Ending::Paused(named("C40"))
+        );
+        // nothing ready, or all of it another loop's, is the plan finished for this loop
+        assert_eq!(
+            after(&on, named("C40"), &ready(&[]), std::slice::from_ref(&on)),
+            Ending::Finished(named("C40"))
+        );
+        let there = looped(2, Some("C41"));
+        let loops = [on.clone(), there];
+        assert_eq!(
+            after(&on, named("C40"), &ready(&["C41"]), &loops),
+            Ending::Finished(named("C40"))
+        );
+        // else the first ready node no other loop holds is next
+        assert_eq!(
+            after(&on, named("C40"), &next, &loops),
+            Ending::Next {
+                done: named("C40"),
+                next: named("C42")
+            }
+        );
+        assert_eq!(
+            after(&on, named("C40"), &next, std::slice::from_ref(&on)),
+            Ending::Next {
+                done: named("C40"),
+                next: named("C41")
+            }
+        );
+        // and only an ending that acted says anything
+        assert_eq!(Ending::Nothing.message(), None);
+        let told = Ending::Next {
+            done: named("C40"),
+            next: named("C41"),
+        };
+        assert_eq!(
+            told.message().as_deref(),
+            Some(
+                "`reef/central/C40` is done. `reef/central/C41` is next: `/clear`, then ask for it"
+            )
         );
     }
 
