@@ -15,8 +15,9 @@ The examples use `reef.example.com`, port `12443` for TLS, the account `reef`, i
   replace the other over the same data directory.
 - **Shoal in process, or as a node.** By default the server runs shoal, reef's store, in its own
   process. An external `reef-shoal` node is a second unit to run, and is worth it only if you
-  want to restart reef without restarting its store. See [An external shoal
-  node](external-shoal.md).
+  want to restart reef without restarting its store, or to choose the cores its shards take.
+  See [An external shoal node](external-shoal.md), and [Beside a benchmark](benchmarks.md) for
+  a machine that also runs one.
 - **One process a data directory.** Never run reef-app and reef-serve over the same data at
   once. The second one refuses to start.
 

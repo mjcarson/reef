@@ -36,3 +36,6 @@ log in again.
 
 Then [add a project and a plan](../projects/index.md). Nothing else changes: the CLI finds the
 server at its default address.
+
+On a machine that also runs shoal's benchmarks, reef's shards share their cores. See [Beside a
+benchmark](benchmarks.md).

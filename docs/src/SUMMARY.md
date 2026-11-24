@@ -25,6 +25,7 @@
   - [An external shoal node](central/deploy/external-shoal.md)
   - [What not to do](central/deploy/dont.md)
   - [One person on localhost](central/deploy/localhost.md)
+  - [Beside a benchmark](central/deploy/benchmarks.md)
 - [Projects and plans](central/projects/index.md)
   - [Registering a project](central/projects/register.md)
   - [Private repos](central/projects/private-repos.md)
