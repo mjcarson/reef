@@ -5,6 +5,10 @@ plan is `reef/central`, kept by central reef itself, and `../plan` is that plan'
 [Running it for real](#running-it-for-real)). This workspace is the only part of reef that depends
 on shoal, so it is a workspace of its own, which reef's stable root workspace excludes.
 
+This page is the service's reference: how it is built, what it checks, its JSON API and its
+store. To deploy a server, use one, add projects and plans to it or administer it, read
+[the guide in docs/central](../docs/central/README.md).
+
 ```
 reef-service   the service and its store: every write checked against the whole plan, reef's
                shoal schema, and the only code that touches shoal; the JSON API's router, and
@@ -300,6 +304,8 @@ over loopback.
 reef's own plan lives in a reef-serve that runs as a systemd user unit, its data in the default
 `~/.local/share/reef/shoal`, with no config file. `../plan` is the plan's export, which git keeps:
 it is the copy a fresh data directory is imported from, and the book `mdbook-reef` still builds.
+This section is reef's own setup. A server for a team, or one for yourself, is set up as
+[Deploying](../docs/central/deploy.md) says.
 
 ```sh
 cargo install --locked --path ../crates/reef --target-dir ../target          # the terminal's client
@@ -358,7 +364,9 @@ reef claude install                        # the MCP entry, the hooks and the sk
   `reef` newer than the service it calls says the service has no route for what it asked.
 - **A changed row needs a fresh data directory**, since shoal can't migrate a table: stop the
   unit, move `~/.local/share/reef/shoal` aside, start it, then `reef project add reef` and
-  `reef import plan --plan central` again. Export first if the book is behind. A table added
+  `reef import plan --plan central` again. Export first if the book is behind. What carries over
+  and what doesn't is in [When the store's schema
+  changed](../docs/central/administering.md#when-the-stores-schema-changed). A table added
   needed none when C30 added `WorkRow`: its binary opened a data directory the one before it
   wrote, read the imported plan back, and kept work records beside it. C32's two tables and
   C34's `CommentRow` needed none either, nor did C37's resolutions, which a thread's row keeps
@@ -370,24 +378,14 @@ reef claude install                        # the MCP entry, the hooks and the sk
 
 ### Signing in
 
-Sign-in is off unless reef's config asks for it, as reef's own unit runs with no config at all.
-To turn it on, add `[auth] required = true` to the config the service reads, restart it, then:
-
-```sh
-reef user add ada                  # from the service's host: the first user, an admin
-reef login --user ada              # its token, kept for every `reef` this user runs here
-reef whoami                        # whom the service takes this `reef` for
-reef user add bob                  # as an admin; `reef user ls` lists them
-reef user passwd                   # your own password, with your current one
-reef user passwd bob               # as an admin: bob's, which revokes his tokens
-reef user rm bob                   # as an admin: bob and his tokens, never the last admin
-reef token ls                      # your tokens, this reef's marked; `--user bob` as an admin
-reef token revoke 3f9c0a1b2d4e5f60 # one by its id; `--others` every one but this reef's
-reef logout                        # the token revoked at the service, and forgotten here
-```
+Sign-in is off unless reef's config asks for it with `[auth] required = true`, as reef's own unit
+runs with no config at all. The commands that add the first admin, sign in, and manage users and
+tokens are in [The first admin](../docs/central/deploy.md#the-first-admin), [Sign
+in](../docs/central/using.md#sign-in) and [Users](../docs/central/administering.md#users).
 
 - **A password is asked for on the terminal** with echo off, never taken as an argument, or read
-  from `--password-file PATH` (`-` for standard input). The service keeps only its argon2id hash.
+  from `--password-file PATH` (`-` for standard input), through `reef_api::prompt`, which the
+  CLI and reef-serve share. The service keeps only its argon2id hash.
 - **A login keeps a token, never the password,** in `$XDG_CONFIG_HOME/reef/credentials.toml`,
   readable by its owner alone, a token for each server by its root (`http://127.0.0.1:12180`,
   or the `https://` one `[api] url` names).
@@ -398,53 +396,25 @@ reef logout                        # the token revoked at the service, and forgo
   days, `Secure` when it signs in over TLS. The app's bar names whom it is signed in as, beside a
   Sign out, and the name opens `/account`: your password, your tokens, each revoked from there,
   and, for an admin, every user, whose password they set or whom they remove.
-- **Repeated wrong passwords are slowed.** A name may fail 5 times, and an address 20, an IPv6
-  one by its /64; then each try waits, from a second, doubling to 5 minutes, refused with 429
-  before its password is checked. A success clears the name, and failures are forgotten an hour
-  after the last. Your own password change is slowed the same way.
+- **Repeated wrong passwords are slowed** (`service/throttle.rs`), in memory, by name and by
+  address, each try counted as it is let through and a success taking it back. The limits are in
+  [Failed sign-ins](../docs/central/administering.md#failed-sign-ins).
 - **A lost admin is recovered on the service's host,** from the store itself, never over the
-  API: stop the service, which holds its data directory, then
-
-  ```sh
-  systemctl --user stop reef
-  reef-serve recover ada            # a new password, asked twice; ada made an admin
-  systemctl --user start reef
-  ```
-
-  It revokes ada's tokens, and adds ada as an admin if no user has the name. `--password-file`
-  reads the password from a file, and `--conf` names the service's config. With shoal on a node
-  of its own, it runs while the service does, which then trusts a revoked token for up to a
-  minute.
+  API: `reef-serve recover` opens the store and calls `Service::recover_admin`, so it runs only
+  while the service is stopped, unless shoal is a node of its own. The steps are in [A lost
+  admin](../docs/central/administering.md#a-lost-admin).
 - **A refused `reef` says how to sign in**, naming the service's address and the file its token
   came from.
 
 ### Serving other hosts
 
 The loopback port stays plain HTTP, for the service's own host. Other hosts reach the JSON API,
-and the app, over TLS on a second listener, which sign-in must be required for:
-
-```toml
-[api]
-address = "127.0.0.1:12180"         # this host's CLI, hooks and MCP server, as before
-
-[api.tls]
-address = "0.0.0.0:12443"
-cert = "/etc/reef/fullchain.pem"
-key = "/etc/reef/privkey.pem"
-
-[auth]
-required = true
-```
-
-The first admin is added on the service's host, over loopback, with `reef user add`. A `reef` on
-another host names the service by its root, and a root to trust its certificate by if the system
-doesn't already:
-
-```toml
-[api]
-url = "https://reef.example:12443"   # wins over `address`
-ca = "/home/me/.config/reef/ca.pem"  # beside the system's roots, and `$SSL_CERT_FILE`'s
-```
+and the app, over TLS on a second listener, `[api.tls]`, which sign-in must be required for. The
+first admin is added on the service's host, over loopback. A `reef` on another host names the
+service by `[api] url`, which wins over `address`, and trusts `[api] ca` beside the system's
+roots and `$SSL_CERT_FILE`'s. The configs for both sides are in
+[Configure](../docs/central/deploy.md#configure) and [Point it at the
+server](../docs/central/using.md#point-it-at-the-server).
 
 - **The certificate is read as the server starts,** so a renewed one is served from the next
   restart. A chain or key that can't be read, or a key that isn't the certificate's, stops it,
@@ -470,13 +440,8 @@ A project can be registered by its git URL rather than a directory on the servic
 service its users don't share a disk with. The service keeps a clone of one branch of it, and
 reads that project's docs from its clone at the commit it last fetched. A node's changes still
 come from the user's own checkout, as `reef start` and `reef node capture` read them there.
-
-```sh
-reef project add shoal --url git@github.com:org/shoal.git          # its default branch
-reef project add shoal --url https://github.com/org/shoal --branch dev
-reef project fetch                  # from a clone of it, or --project shoal from anywhere
-reef project ls                     # shoal  git@github.com:org/shoal.git (`main` at 6376987)
-```
+How to register one, reach a private repo and fetch it is in [By its git
+URL](../docs/central/projects-and-plans.md#by-its-git-url).
 
 - **The clone is bare, shallow and one branch**, made by `git init --bare` in `[remotes] clones`
   and filled by the fetch every later fetch runs: the branch's tip alone, over its own ref, so a

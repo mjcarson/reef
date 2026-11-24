@@ -41,13 +41,25 @@ it done and its acceptance criteria met in the change that finishes it, to recor
 figures in `performance`, and to run `mdbook-reef check` after every edit. After upgrading
 reef, `mdbook-reef skill [book]` refreshes it.
 
+## Central reef
+
+A plan can live on a server instead of in a book. Central reef keeps a team's projects and plans
+in one service, and checks every write against the whole plan as the build does. The `reef` CLI,
+Claude Code (through reef's MCP tools) and a web app all read and write the same nodes. The
+node keys, the checks and the viewer are the same as a book's.
+
+- [What it is and how it fits together](docs/central/README.md)
+- [Deploying a server](docs/central/deploy.md), for one person or for a team over TLS
+- [Adding projects and plans](docs/central/projects-and-plans.md), a book's plan imported among
+  them
+- [Using it](docs/central/using.md): the CLI from another host, the app, Claude Code
+- [Administering it](docs/central/administering.md): users, upgrades, backups
+
 A repo whose plan lives in central reef takes [the central skill](crates/reef/assets/skill/SKILL.md)
-instead: `reef skill [dir]` writes it to the same place, with the same rules, worked through
-reef's MCP tools and the `reef` CLI rather than a book's files. A repo holds one or the other.
-`reef claude install [dir]` sets such a repo up for reef's terminal loop in one step: the MCP
-entry in `.mcp.json`, Claude Code's hooks in `.claude/settings.json`, the server enabled and
-its tools allowed in `.claude/settings.local.json`, git's post-commit and post-rewrite, and the
-skill. Running it again changes nothing.
+instead of the mdbook one: the same rules, worked through reef's MCP tools and CLI rather than a
+book's files. A repo holds one or the other. `reef claude install` writes it, with reef's MCP
+server and hooks ([Set the repo up for Claude
+Code](docs/central/projects-and-plans.md#set-the-repo-up-for-claude-code)).
 
 ## Writing nodes
 
