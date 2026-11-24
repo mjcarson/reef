@@ -17,7 +17,10 @@ fn main() -> Result<()> {
 }
 
 fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
@@ -53,13 +56,29 @@ fn wasm() -> Result<()> {
         .current_dir(&root)
         .env_remove("RUSTFLAGS")
         .env("CARGO_ENCODED_RUSTFLAGS", "")
-        .args(["build", "--profile", "wasm", "-p", "reef-view", "--target", "wasm32-unknown-unknown"]))?;
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
+        .args([
+            "build",
+            "--profile",
+            "wasm",
+            "-p",
+            "reef-view",
+            "--target",
+            "wasm32-unknown-unknown",
+        ]))?;
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target"));
     let wasm = target_dir.join("wasm32-unknown-unknown/wasm/reef_view.wasm");
     let out = target_dir.join("reef-bindgen");
     std::fs::create_dir_all(&out)?;
     run(Command::new("wasm-bindgen")
-        .args(["--target", "no-modules", "--no-typescript", "--out-name", "reef"])
+        .args([
+            "--target",
+            "no-modules",
+            "--no-typescript",
+            "--out-name",
+            "reef",
+        ])
         .arg("--out-dir")
         .arg(&out)
         .arg(&wasm))
@@ -68,7 +87,12 @@ fn wasm() -> Result<()> {
     // Shrink it if wasm-opt is around; it is optional.
     let opt = out.join("reef_opt.wasm");
     if Command::new("wasm-opt").arg("--version").output().is_ok() {
-        run(Command::new("wasm-opt").arg("-Os").args(WASM_FEATURES).arg(&bg).arg("-o").arg(&opt))?;
+        run(Command::new("wasm-opt")
+            .arg("-Os")
+            .args(WASM_FEATURES)
+            .arg(&bg)
+            .arg("-o")
+            .arg(&opt))?;
         bg = opt;
     }
     let glue = std::fs::read_to_string(out.join("reef.js"))?;
@@ -80,7 +104,12 @@ fn wasm() -> Result<()> {
     );
     let dest = root.join("crates/mdbook-reef/assets/reef.js");
     std::fs::write(&dest, js)?;
-    eprintln!("wrote {} ({} KiB wasm, {} KiB bundle)", dest.display(), bytes.len() / 1024, std::fs::metadata(&dest)?.len() / 1024);
+    eprintln!(
+        "wrote {} ({} KiB wasm, {} KiB bundle)",
+        dest.display(),
+        bytes.len() / 1024,
+        std::fs::metadata(&dest)?.len() / 1024
+    );
     Ok(())
 }
 
@@ -88,11 +117,21 @@ fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         s.push(T[(n >> 18) as usize & 63] as char);
         s.push(T[(n >> 12) as usize & 63] as char);
-        s.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        s.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        s.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        s.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     s
 }
