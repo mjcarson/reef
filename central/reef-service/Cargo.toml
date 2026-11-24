@@ -26,7 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 anyhow.workspace = true
-tokio = { workspace = true, features = ["net", "signal", "fs"] }
+tokio = { workspace = true, features = ["net", "signal", "fs", "process"] }
 tracing.workspace = true
 # statfs and getrlimit, for the checks before an in-process pool starts
 libc = { workspace = true, optional = true }
@@ -34,6 +34,8 @@ libc = { workspace = true, optional = true }
 argon2.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
+# a remote project's docs, read from its bare clone at a commit, and git URLs read as git reads them
+gix = { version = "=0.90.0", default-features = false, features = ["sha1"] }
 
 [dev-dependencies]
 # a client of the JSON API that knows only reef-api's types

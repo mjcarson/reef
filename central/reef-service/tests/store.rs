@@ -60,6 +60,8 @@ suite!(
     put_during_bulk_write_waits_and_is_refused,
     deleting_a_missing_row_deletes_nothing,
     linked_worktree_finds_its_project,
+    a_clone_finds_its_remote_project,
+    a_registration_killed_after_its_remote_leaves_no_project,
     subdirectory_finds_its_project,
     unregistered_directory_finds_none,
     projects_list_by_name,

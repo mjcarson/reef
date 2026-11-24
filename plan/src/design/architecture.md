@@ -144,9 +144,11 @@ versions, validation, atomic writes and derived state would each be written seve
   neither why nor what, and a member alone names a group that isn't a node, so neither could
   go in first. Each put names the version its writer read. The check runs under the plan's
   write lock, so two writes fine alone can't break the plan together.
-- **Docs come from the project's working tree.** A stored node's links resolve from its repo's
-  root, where import puts them ([C26](../milestones/m6.md)), so a link to a missing doc or
-  heading is refused, and a why or a what can still come from a doc.
+- **Docs come from the project's working tree, or its fetched commit.** A stored node's links
+  resolve from its repo's root, where import puts them ([C26](../milestones/m6.md)), so a link to a missing
+  doc or heading is refused, and a why or a what can still come from a doc. A project registered
+  by its git URL ([C49](../milestones/m10.md)) reads them from the service's bare clone at the commit last
+  fetched, through gix, so every read of one moment sees one commit, and a fetch lands whole.
 - **Two front doors onto it.** A plain JSON API on axum (typed in `reef-api`) for the CLI, the
   MCP server and the hooks; Dioxus server functions for the app. Both run in one axum server,
   and the CLI never depends on the app's wire format.

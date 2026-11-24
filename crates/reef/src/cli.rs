@@ -75,7 +75,7 @@
 //! else the file `$REEF_CREDENTIALS` names, else `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
 use clap::{Args, Parser, Subcommand};
-use reef_api::{AddedProject, Project, Writer};
+use reef_api::{AddedProject, Fetched, Project, Writer};
 use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
 use std::io::Write;
@@ -386,13 +386,25 @@ pub enum ClaudeCommand {
 /// What can be done with projects
 #[derive(Debug, Subcommand)]
 pub enum ProjectCommand {
-    /// Register a project for the repo that holds a directory
+    /// Register a project for the repo that holds a directory, or by its git URL
     Add {
         /// The project's name
         name: String,
         /// A directory in its repo, else the working directory
-        #[arg(long, value_name = "DIR")]
+        #[arg(long, value_name = "DIR", conflicts_with = "url")]
         repo: Option<PathBuf>,
+        /// The git URL its repo is fetched from, which the service clones and reads docs from
+        #[arg(long)]
+        url: Option<String>,
+        /// The branch whose docs the service reads, else the remote's default
+        #[arg(long, requires = "url")]
+        branch: Option<String>,
+    },
+    /// Fetch a remote project's branch, so the service reads its docs at its tip
+    Fetch {
+        /// The project to fetch instead
+        #[command(flatten)]
+        pick: Pick,
     },
     /// List every registered project and its repo
     Ls,
@@ -843,8 +855,20 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
     let credentials = conf.credentials.clone();
     let client = Client::new(&conf)?;
     match cli.command {
-        Command::Project(ProjectCommand::Add { name, repo }) => {
-            project_add(&client, cwd, &name, repo.as_deref(), out).await
+        Command::Project(ProjectCommand::Add {
+            name,
+            repo,
+            url: None,
+            ..
+        }) => project_add(&client, cwd, &name, repo.as_deref(), out).await,
+        Command::Project(ProjectCommand::Add {
+            name,
+            url: Some(url),
+            branch,
+            ..
+        }) => project_add_remote(&client, &name, &url, branch.as_deref(), out).await,
+        Command::Project(ProjectCommand::Fetch { pick }) => {
+            project_fetch(&client, cwd, &pick, out).await
         }
         Command::Project(ProjectCommand::Ls) => project_ls(&client, out).await,
         Command::Project(ProjectCommand::Show { pick }) => {
@@ -883,7 +907,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             // the markdown first, so a file that can't be read asks nothing of the service
             let text = node::read_input(cwd, file.as_deref())?;
             let plan = picked_plan(&client, cwd, &pick).await?;
-            page::put(&client, &plan, &path, &text, out).await
+            page::put(&client, &plan, &path, &text, cwd, out).await
         }
         Command::Page(PageCommand::Rm { path, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
@@ -1211,6 +1235,110 @@ async fn project_add<W: Write>(
     }
 }
 
+/// Registers a project by its git URL, which the service clones before it answers
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `name` - The project's name
+/// * `url` - The URL its repo is fetched from
+/// * `branch` - The branch whose docs the service reads, else the remote's default
+/// * `out` - Where to print the project registered
+async fn project_add_remote<W: Write>(
+    client: &Client,
+    name: &str,
+    url: &str,
+    branch: Option<&str>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the service checks the URL, clones it and reads its branch's tip
+    match client.add_remote_project(name, url, branch).await? {
+        AddedProject::Added(project) => {
+            writeln!(
+                out,
+                "registered `{}` for {}",
+                project.name,
+                shown_repo(&project)
+            )?;
+            Ok(())
+        }
+        AddedProject::NameTaken => {
+            anyhow::bail!("a project named `{name}` is already registered")
+        }
+        AddedProject::RepoTaken { project } => {
+            anyhow::bail!("the repo {url} fetches from is already registered as `{project}`")
+        }
+    }
+}
+
+/// Fetches a remote project's branch, and says whether it moved
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `pick` - The project named, if one was
+/// * `out` - Where to print what came of it
+async fn project_fetch<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    pick: &Pick,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the project, then its branch's tip, fetched by the service
+    let project = picked(client, cwd, pick).await?;
+    let branch = project
+        .remote
+        .as_ref()
+        .map(|remote| remote.branch.clone())
+        .unwrap_or_default();
+    match client.fetch_project(&project.name).await? {
+        Fetched::Moved { from, to } => writeln!(
+            out,
+            "`{}`'s `{branch}` moved from {} to {}",
+            project.name,
+            short(&from),
+            short(&to)
+        )?,
+        Fetched::Unchanged { commit } => writeln!(
+            out,
+            "`{}`'s `{branch}` is still at {}",
+            project.name,
+            short(&commit)
+        )?,
+        Fetched::Local => anyhow::bail!(
+            "project `{}` reads its docs from {} on the service's host as they stand, so there is \
+             nothing to fetch",
+            project.name,
+            project.repo.display()
+        ),
+    }
+    Ok(())
+}
+
+/// A commit's first seven hex digits, as git abbreviates it
+///
+/// # Arguments
+///
+/// * `commit` - The commit's full hex id
+fn short(commit: &str) -> &str {
+    // a commit is hex, so any byte is a char boundary
+    &commit[..commit.len().min(7)]
+}
+
+/// A project's repo as `ls` and `show` print it: a remote's URL and the commit its docs are read
+/// at, else the repo's path on the service's host
+///
+/// # Arguments
+///
+/// * `project` - The project
+fn shown_repo(project: &Project) -> String {
+    match &project.remote {
+        Some(remote) => format!("{} (`{}` at {})", remote.url, remote.branch, remote.short()),
+        None => project.repo.display().to_string(),
+    }
+}
+
 /// Lists every registered project and its repo
 ///
 /// # Arguments
@@ -1222,7 +1350,7 @@ async fn project_ls<W: Write>(client: &Client, out: &mut W) -> anyhow::Result<()
     let projects = client.projects().await?;
     let rows = projects
         .iter()
-        .map(|project| (project.name.clone(), project.repo.display().to_string()));
+        .map(|project| (project.name.clone(), shown_repo(project)));
     columns(out, rows)
 }
 
@@ -1242,10 +1370,8 @@ async fn project_show<W: Write>(
 ) -> anyhow::Result<()> {
     // the project and its repo
     let project = picked(client, cwd, pick).await?;
-    columns(
-        out,
-        [(project.name, project.repo.display().to_string())].into_iter(),
-    )
+    let repo = shown_repo(&project);
+    columns(out, [(project.name, repo)].into_iter())
 }
 
 /// Lists a new, empty plan in the picked project
@@ -1321,8 +1447,8 @@ pub(crate) async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::
     // else the one whose repo holds the working directory, its main repo's in a worktree
     client.find_project(cwd).await?.ok_or_else(|| {
         anyhow::anyhow!(
-            "no project is registered for {}: register one with `reef project add <name>`, or \
-             name one with `--project`",
+            "no project is registered for {} or its remotes: register one with `reef project add \
+             <name>`, or `--url` for one the service clones, or name one with `--project`",
             cwd.display()
         )
     })

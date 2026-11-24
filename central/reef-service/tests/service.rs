@@ -43,6 +43,7 @@ macro_rules! suite {
 }
 
 suite!(
+    remotes_are_fetched_on_their_interval,
     refused_batch_writes_none_of_it,
     fix_gets_through_on_a_broken_plan,
     half_brief_fix_gets_through,

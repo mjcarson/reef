@@ -17,8 +17,12 @@ The full key reference is in [reference.md](reference.md). Read it before writin
 ## 1. Find the plan
 
 - **The working directory picks the project**: the registered project whose repo holds it, its
-  main repo's in a linked worktree. `reef project show` names it, and `reef plan ls` lists its
-  plans. Where it has several, name one: `plan` on a tool, `--plan` on a command.
+  main repo's in a linked worktree, or the one registered by the git URL its remotes name.
+  `reef project show` names it, and `reef plan ls` lists its plans. Where it has several, name
+  one: `plan` on a tool, `--plan` on a command.
+- **A project registered by its URL reads docs at the commit last fetched**, so a link to a doc
+  that isn't pushed and fetched yet is refused. Ask the user to push it, then run
+  `reef project fetch`; pushing is theirs to do.
 - **Tools first, the CLI where there are none.** Claude Code serves reef's tools as
   `mcp__reef__*` when the repo's `.mcp.json` runs `reef mcp`. Plan mode blocks Bash, but it
   runs `mcp__reef__next`, `mcp__reef__get`, `mcp__reef__check` and `mcp__reef__comments`
@@ -42,6 +46,7 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   | Set a criterion | `mcp__reef__accept` | `reef accept <ID> <N> met --test <TEST>` |
   | List a node's criteria | | `reef accept <ID>` |
   | Start its code here | | `reef start <ID>` |
+  | Fetch a remote project's docs | | `reef project fetch` |
   | Read or change a page | | `reef page ls`, `reef page get <PATH>`, `reef page put <PATH> <FILE>` |
   | See the user's order | | `reef queue ls` |
   | List open comments | `mcp__reef__comments` | `reef comment ls` |

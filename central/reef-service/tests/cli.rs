@@ -2301,6 +2301,104 @@ async fn cli_project(cx: &Cx, ids: &[&str]) -> anyhow::Result<PathBuf> {
     Ok(repo)
 }
 
+/// A user's clone of a remote project's repo finds the project by its remote, apart from the
+/// service's own clone: it puts, starts and captures the project's nodes there, and a doc
+/// section it pushes can be linked once the project is fetched
+#[tokio::test]
+async fn a_clone_of_a_remote_project_starts_and_captures_its_nodes() -> anyhow::Result<()> {
+    let cx = Cx::new("remote-clone").await?;
+    // a repo published to a bare remote, registered by its URL from outside any checkout of it
+    let design = "# Design\n\n## Old\n\nThe old words.\n";
+    let (bare, _) = git::published(&cx.ax.dir.join("up"), &[("docs/design.md", design)])?;
+    let url = format!("file://{}", bare.display());
+    let out = cx
+        .reef(&cx.ax.dir, &["project", "add", "up", "--url", &url])
+        .await?;
+    assert!(
+        out.starts_with(&format!("registered `up` for {url} (`main` at ")),
+        "{out}"
+    );
+    cx.reef(&cx.ax.dir, &["plan", "new", "docs", "--project", "up"])
+        .await?;
+    // a user's own clone of it, which the service never reads
+    let bare_path = bare.to_str().expect("the remote is a utf-8 path");
+    let mine = cx.ax.dir.join("mine");
+    let mine_path = mine.to_str().expect("the case's dir is utf-8");
+    git::run(&cx.ax.dir, &["clone", "-q", bare_path, mine_path])?;
+    let mine = mine.canonicalize()?;
+    // finds the project by its remote
+    let shown = cx.reef(&mine, &["project", "show"]).await?;
+    assert!(shown.starts_with("up ") && shown.contains(&url), "{shown}");
+    // a node put from it, linking a section of the doc the service fetched
+    let a = cx.yaml(
+        "A.yml",
+        &format!("{}docs: [docs/design.md#old]\n", work("A", &[])),
+    )?;
+    cx.reef(&mine, &["node", "put", &a]).await?;
+    // started on a branch there, and its committed work captured from there
+    git::run(&mine, &["checkout", "-q", "-b", "work"])?;
+    let started = cx.reef(&mine, &["start", "A"]).await?;
+    assert!(
+        started.starts_with(&format!("started `A` in {}\n", mine.display())),
+        "{started}"
+    );
+    git::write(&mine, "src/lib.rs", "fn a() {}\n")?;
+    commit_all(&mine, "A")?;
+    let captured = cx.reef(&mine, &["node", "capture"]).await?;
+    assert!(
+        captured.starts_with(&format!(
+            "captured `A` as revision 1 in {}\n",
+            mine.display()
+        )),
+        "{captured}"
+    );
+    // kept as the node's revision, its file the one the user's clone changed
+    let conf = reef::Conf::load(Some(&cx.conf))?;
+    let client = reef::Client::new(&conf)?;
+    let node = PlanName::new("up", "docs")?.node("A")?;
+    let revisions = client.revisions(&node).await?;
+    let paths: Vec<&str> = revisions[0].files.iter().map(|file| file.path()).collect();
+    assert_eq!((revisions.len(), paths), (1, vec!["src/lib.rs"]));
+    // a section pushed from the clone can't be linked until the project is fetched
+    let revised = format!("{design}\n## New\n\nA section of its own.\n");
+    git::write(&mine, "docs/design.md", &revised)?;
+    commit_all(&mine, "a new section")?;
+    git::push(&mine)?;
+    let b = cx.yaml(
+        "B.yml",
+        &format!("{}docs: [docs/design.md#new]\n", work("B", &[])),
+    )?;
+    let (_, refused) = cx.failing(&mine, &["node", "put", &b]).await?;
+    assert!(refused.contains("design.md"), "{refused}");
+    let fetched = cx.reef(&mine, &["project", "fetch"]).await?;
+    assert!(
+        fetched.starts_with("`up`'s `main` moved from "),
+        "{fetched}"
+    );
+    cx.reef(&mine, &["node", "put", &b]).await?;
+    // fetched again, it is where it was, and `ls` shows the remote at its tip
+    let again = cx.reef(&mine, &["project", "fetch"]).await?;
+    assert!(again.starts_with("`up`'s `main` is still at "), "{again}");
+    let tip = git::run(&mine, &["rev-parse", "--short=7", "HEAD"])?;
+    let listed = cx.reef(&mine, &["project", "ls"]).await?;
+    assert!(
+        listed.contains(&format!("{url} (`main` at {tip})")),
+        "{listed}"
+    );
+    // a local project has nothing to fetch
+    let (_, local) = cx.failing(&cx.ax.repo, &["project", "fetch"]).await?;
+    assert!(local.contains("nothing to fetch"), "{local}");
+    // and a checkout of another repo can't start the remote project's nodes by naming it
+    let (_, elsewhere) = cx
+        .failing(&cx.ax.repo, &["start", "B", "--project", "up"])
+        .await?;
+    assert!(
+        elsewhere.contains("is not in project `up`'s repo"),
+        "{elsewhere}"
+    );
+    Ok(())
+}
+
 /// Two nodes started at once in two worktrees are recorded apart: each its own worktree,
 /// branch and start, its own uncommitted work in it, and each worktree on its own node
 #[tokio::test]

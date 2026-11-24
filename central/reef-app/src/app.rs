@@ -266,8 +266,10 @@ pub fn Picker() -> Element {
                 Some(Ok(listed)) if listed.is_empty() => rsx! {
                     p { class: "reef-app-muted",
                         "No projects yet. Register one with "
-                        code { "reef project add <name> <repo>" }
-                        "."
+                        code { "reef project add <name>" }
+                        " from its repo, or "
+                        code { "reef project add <name> --url <git url>" }
+                        " for one the service clones."
                     }
                 },
                 Some(Ok(listed)) => rsx! {
@@ -295,8 +297,11 @@ pub fn Picker() -> Element {
 /// * `listing` - The project and its plans
 #[component]
 fn ProjectEntry(listing: ProjectPlans) -> Element {
-    // the repo as a path to show, and each plan's route
-    let repo = listing.project.repo.display().to_string();
+    // the repo to show: a remote's URL, branch and commit, else its path, and each plan's route
+    let repo = match &listing.project.remote {
+        Some(remote) => format!("{} · {} @ {}", remote.url, remote.branch, remote.short()),
+        None => listing.project.repo.display().to_string(),
+    };
     let plans: Vec<(String, Route)> = listing
         .plans
         .iter()

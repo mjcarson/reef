@@ -12,7 +12,9 @@
 //! in-memory twin. The rows reef keeps in shoal are its `schema`, the user's queue sorts by
 //! `rank` strings, and reef's `conf` says how to
 //! reach shoal and where to serve. Projects name the repos their plans describe, and `repo`
-//! locates the one a working directory, or a linked worktree, is in. Before a pool starts,
+//! locates the one a working directory, or a linked worktree, is in. A project registered by its
+//! git URL is a remote one: `remote` checks the URL and keeps a clone of it, and `tree` reads its
+//! docs at the commit last fetched. Before a pool starts,
 //! `checks` refuses a config shoal would fail on obscurely, naming the fix. Without `embedded`
 //! this is shoal's client half alone and builds on stable.
 
@@ -27,21 +29,23 @@ pub mod memory;
 #[cfg(feature = "embedded")]
 pub mod pool;
 pub mod rank;
+pub mod remote;
 pub mod repo;
 pub mod schema;
 pub mod service;
 pub mod store;
+pub mod tree;
 
 pub use backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 pub use client::{Mode, ShoalBackend};
-pub use conf::{ApiSettings, AuthSettings, Conf, ShoalSettings};
+pub use conf::{ApiSettings, AuthSettings, Conf, RemoteSettings, ShoalSettings};
 pub use memory::MemoryBackend;
 pub use service::{Asker, NotAllowed, NotSignedIn, Service};
 pub use store::{
     AddCapture, AddedProject, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX, FileDiff,
-    FileSummary, Followed, Listing, Pending, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
-    PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Proposal,
-    Put, Puts, QueueEdit, Queued, Ranked, Revision, Rewrite, Rewritten, StalePut, StartWork,
-    Started, Store, StoredNode, StoredPage, StoredToken, StoredUser, Unkeepable, UserKept,
-    WorkRecord, WorkStart,
+    FileSummary, Followed, KeptRemote, Listing, NodePut, NodeRemove, NodeWrite, NotListed,
+    NotRegistered, PageEdit, PageEdited, PageListing, PageWrite, Pending, Place, PlanInfo,
+    PlanWrite, Project, Proposal, Put, Puts, QueueEdit, Queued, Ranked, Revision, Rewrite,
+    Rewritten, StalePut, StartWork, Started, Store, StoredNode, StoredPage, StoredRemote,
+    StoredToken, StoredUser, Unkeepable, UserKept, WorkRecord, WorkStart,
 };

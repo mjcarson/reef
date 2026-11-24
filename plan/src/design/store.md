@@ -288,3 +288,24 @@ partition, as projects and loops are.
   version read.
 - **Every row is checked against its full key on read,** so a hash collision is caught rather
   than served as another user's.
+
+## Remotes
+
+The git remote a project was registered by ([C49](../milestones/m10.md)), a row each in a constant
+partition, as projects, loops and users are.
+
+### Design choices
+
+- **A remote project is two rows.** Its project's row keeps its clone's path where a local
+  project keeps its repo's, and a `RemoteRow` beside it keeps the URL, the branch, the clone's
+  path again and the commit last fetched, as one JSON field. Projects needed no new field, so no
+  fresh data directory.
+- **The project's row is written last.** A registration writes its remote's row, then its
+  project's `if_absent`, so one killed between the two lists no project. A remote joins its
+  project only if both name the same clone, so a row left that way never attaches to a later
+  project of that name, and a later registration of it writes over it.
+- **One repo, one project, by its URL's key:** its host and path, with its scheme, user, port,
+  trailing `/` and `.git` left out, so `git@host:o/r.git` and `https://host/o/r` are one repo.
+  Two registrations of it are judged under the lock every registration holds.
+- **A fetch writes over the version read**, whether its branch moved or not, so the row says
+  when it was last fetched, and two fetches can't both land.

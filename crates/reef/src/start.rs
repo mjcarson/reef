@@ -197,13 +197,23 @@ pub(crate) async fn checkout_in(
     let checkout = Checkout::open(cwd)?;
     // the project, whose repo the checkout must be part of
     let project = cli::picked(client, cwd, pick).await?;
-    let main = checkout.main_root()?;
-    if main != project.repo {
+    let holds = match (&project.remote, &pick.project) {
+        // a local project's repo is a directory on this host, the checkout's main worktree
+        (None, _) => checkout.main_root()? == project.repo,
+        // a remote project picked by this checkout's remotes is the one it is a clone of
+        (Some(_), None) => true,
+        // and one named is asked about, in case this is a clone of another's repo
+        (Some(_), Some(_)) => client
+            .find_project(checkout.root())
+            .await?
+            .is_some_and(|found| found.name == project.name),
+    };
+    if !holds {
         anyhow::bail!(
             "{} is not in project `{}`'s repo, {}: {verb} its nodes from a checkout of it",
             checkout.root().display(),
             project.name,
-            project.repo.display()
+            project.shown_repo()
         );
     }
     Ok((checkout, project))

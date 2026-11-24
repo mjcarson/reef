@@ -231,7 +231,7 @@ impl DocSource for RepoSource {
 /// # Arguments
 ///
 /// * `path` - The path to judge
-fn leaves(path: &str) -> bool {
+pub fn leaves(path: &str) -> bool {
     path.starts_with('/') || path.split('/').any(|part| part == "..")
 }
 
@@ -290,7 +290,9 @@ impl MemSource {
     /// assert_eq!(docs.iter().collect::<Vec<_>>(), [("a.md", "# A\n")]);
     /// ```
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.docs.iter().map(|(path, text)| (path.as_str(), text.as_str()))
+        self.docs
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
     }
 }
 
@@ -449,11 +451,16 @@ mod tests {
 
     #[test]
     fn frontmatter_left_out_of_headings() {
-        let docs: MemSource = [("n.md", "---\nid: n\n---\n# N\n\n## Why\n")].into_iter().collect();
+        let docs: MemSource = [("n.md", "---\nid: n\n---\n# N\n\n## Why\n")]
+            .into_iter()
+            .collect();
         // a node file's frontmatter is not part of its doc
         assert_eq!(doc_body(&docs.read("n.md").unwrap()), "# N\n\n## Why\n");
         let heads = docs.headings("n.md").unwrap();
-        assert_eq!(heads.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(), ["n", "why"]);
+        assert_eq!(
+            heads.iter().map(|h| h.0.as_str()).collect::<Vec<_>>(),
+            ["n", "why"]
+        );
         // a missing doc has no headings
         assert!(docs.headings("gone.md").is_none());
         // a boxed or borrowed source reads the same
@@ -461,7 +468,10 @@ mod tests {
         fn heads_of(source: impl DocSource) -> Option<Headings> {
             source.headings("n.md")
         }
-        assert_eq!(heads_of(Box::new(docs.clone()) as Box<dyn DocSource>), Some(heads.clone()));
+        assert_eq!(
+            heads_of(Box::new(docs.clone()) as Box<dyn DocSource>),
+            Some(heads.clone())
+        );
         assert_eq!(heads_of(&docs), Some(heads));
     }
 
@@ -493,18 +503,40 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("outside.md"), repo.join("docs/out.md")).unwrap();
         let docs = RepoSource::new(&repo);
         // a doc in the repo is read, and named by its path from the root
-        assert_eq!(docs.read("docs/in.md").as_deref(), Some("# In\n\n## Rows\n"));
+        assert_eq!(
+            docs.read("docs/in.md").as_deref(),
+            Some("# In\n\n## Rows\n")
+        );
         assert_eq!(docs.place("docs/in.md").as_deref(), Ok("docs/in.md"));
         // one beside it is not, however its path climbs out, nor is one a symlink leads out to
-        for path in ["../outside.md", "docs/../../outside.md", "/etc/hostname", "docs/out.md"] {
+        for path in [
+            "../outside.md",
+            "docs/../../outside.md",
+            "/etc/hostname",
+            "docs/out.md",
+        ] {
             assert!(docs.read(path).is_none(), "{path} was read");
         }
         // check refuses a link that leaves the repo as written, and finds no doc behind a symlink out
         let renderer = Renderer::new(&docs, Sections::default());
-        assert_eq!(renderer.doc_link("", "../outside.md#rows").unwrap_err(), "doc `../outside.md#rows` leaves the repo");
-        assert_eq!(renderer.doc_link("docs/in.md", "../../outside.png").unwrap_err(), "doc `../../outside.png` leaves the repo");
-        assert_eq!(renderer.doc_link("", "docs/out.md").unwrap_err(), "doc `docs/out.md` not found (looked for docs/out.md)");
-        assert_eq!(renderer.doc_link("", "docs/in.md#rows").unwrap().href, "reef-root:/docs/in.html#rows");
+        assert_eq!(
+            renderer.doc_link("", "../outside.md#rows").unwrap_err(),
+            "doc `../outside.md#rows` leaves the repo"
+        );
+        assert_eq!(
+            renderer
+                .doc_link("docs/in.md", "../../outside.png")
+                .unwrap_err(),
+            "doc `../../outside.png` leaves the repo"
+        );
+        assert_eq!(
+            renderer.doc_link("", "docs/out.md").unwrap_err(),
+            "doc `docs/out.md` not found (looked for docs/out.md)"
+        );
+        assert_eq!(
+            renderer.doc_link("", "docs/in.md#rows").unwrap().href,
+            "reef-root:/docs/in.html#rows"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -518,10 +550,15 @@ mod tests {
         std::fs::create_dir_all(dir.join("design")).unwrap();
         std::fs::write(dir.join("design/a.md"), "# Repo\n\n## Rows\n").unwrap();
         std::fs::write(dir.join("design/b.md"), "# B\n\n## Columns\n").unwrap();
-        let pages = MemSource::new().with("design/a.md", "# Page\n\n## Pages\n").with("c.md", "# C\n");
+        let pages = MemSource::new()
+            .with("design/a.md", "# Page\n\n## Pages\n")
+            .with("c.md", "# C\n");
         let docs = Layered::new(&pages, RepoSource::new(&dir));
         // a page hides the repo's doc at its path, headings and all
-        assert_eq!(docs.read("design/a.md").as_deref(), Some("# Page\n\n## Pages\n"));
+        assert_eq!(
+            docs.read("design/a.md").as_deref(),
+            Some("# Page\n\n## Pages\n")
+        );
         assert_eq!(docs.headings("design/a.md").unwrap()[1].0, "pages");
         // a path no page holds is read from the repo, and one neither holds is no doc
         assert_eq!(docs.headings("design/b.md").unwrap()[1].0, "columns");
@@ -531,9 +568,18 @@ mod tests {
         assert_eq!(docs.place("c.md").as_deref(), Ok("c.md"));
         assert_eq!(docs.place("../c.md").unwrap_err(), "leaves the repo");
         let renderer = Renderer::new(&docs, Sections::default());
-        assert_eq!(renderer.doc_link("", "gone.md").unwrap_err(), "doc `gone.md` not found (looked for gone.md)");
-        assert_eq!(renderer.doc_link("", "design/a.md#rows").unwrap_err(), "doc `design/a.md#rows`: design/a.md has no heading with the id `rows`");
-        assert_eq!(renderer.doc_link("", "design/a.md#pages").unwrap().href, "reef-root:/design/a.html#pages");
+        assert_eq!(
+            renderer.doc_link("", "gone.md").unwrap_err(),
+            "doc `gone.md` not found (looked for gone.md)"
+        );
+        assert_eq!(
+            renderer.doc_link("", "design/a.md#rows").unwrap_err(),
+            "doc `design/a.md#rows`: design/a.md has no heading with the id `rows`"
+        );
+        assert_eq!(
+            renderer.doc_link("", "design/a.md#pages").unwrap().href,
+            "reef-root:/design/a.html#pages"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -568,7 +614,10 @@ mod tests {
                 Ok(path.to_string())
             }
         }
-        let source = Counting { docs: MemSource::new().with("a.md", "# A\n\n## Why\n"), reads: Default::default() };
+        let source = Counting {
+            docs: MemSource::new().with("a.md", "# A\n\n## Why\n"),
+            reads: Default::default(),
+        };
         let docs = Cached::new(&source);
         // each path is read from the source once, found or not
         for _ in 0..3 {

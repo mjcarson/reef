@@ -20,7 +20,10 @@
 //!   what is tracked, and what its base already holds. Every step meets at tree ids in the one
 //!   object store, so gix reads the tree git wrote.
 //!
-//! Nothing here fetches, pushes or names a remote. gix is opened from the directory alone, and
+//! - **A checkout's remotes by their URLs alone**, users and passwords left out, which is how the
+//!   service finds the remote project a clone of its repo belongs to.
+//!
+//! Nothing here fetches or pushes. gix is opened from the directory alone, and
 //! git's CLI runs with the variables that would point it at another repo or index removed, as
 //! `reef-service`'s `repo` does, so a git hook's environment can't redirect either. Each gix
 //! step is tested against git's CLI, which stays its oracle.
@@ -168,6 +171,43 @@ impl Checkout {
     /// The worktree's root
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The URLs this checkout's remotes fetch from, each with no user or password in it
+    ///
+    /// The remote the current branch's upstream is on comes first, then `origin`, then the rest
+    /// by name, each URL once and with git's `insteadOf` rewrites applied. A token is often kept
+    /// in a URL's user, so neither a user nor a password leaves this host.
+    pub fn remote_urls(&self) -> Vec<String> {
+        // only configured remotes, since a name that isn't one would be read as a URL
+        let configured = self.repo.remote_names();
+        let mut names: Vec<BString> = Vec::new();
+        let direction = gix::remote::Direction::Fetch;
+        if let Ok(Some(head)) = self.repo.head_name()
+            && let Some(name) = self.repo.branch_remote_name(head.shorten(), direction)
+        {
+            names.push(name.as_bstr().to_owned());
+        }
+        names.push("origin".into());
+        names.extend(configured.iter().cloned());
+        // each one's fetch URL, with nobody in it, once
+        let mut urls: Vec<String> = Vec::new();
+        for name in names.iter().filter(|name| configured.contains(*name)) {
+            let Ok(remote) = self.repo.find_remote(name.as_bstr()) else {
+                continue;
+            };
+            let Some(url) = remote.url(direction) else {
+                continue;
+            };
+            let mut url = url.clone();
+            url.set_user(None);
+            url.set_password(None);
+            let url = url.to_bstring().to_string();
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+        urls
     }
 
     /// The root of the repo's main worktree, which a linked worktree is part of

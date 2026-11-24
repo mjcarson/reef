@@ -19,7 +19,8 @@
 //!   resolve from its repo's root, as `mdbook-reef check` resolves a book's from its `src`, and
 //!   a link that leaves the repo is refused. A page the plan keeps hides the repo's file at its
 //!   path. Docs are read off the async threads, and a plan's nodes and pages are read at one
-//!   moment.
+//!   moment. A remote project's docs are its clone's at the commit last fetched ([`remotes`]),
+//!   so every read of one moment sees one commit.
 //! - **A page edit is checked as a node write is.** Taking out a page a node links to, or a
 //!   heading a link names, adds a problem, and is refused.
 //! - **Docs are served as pages.** A payload's links lead under [`paths::docs`], where
@@ -41,6 +42,8 @@
 //!   holds, which no other loop may take, and whether it is paused.
 //! - **Users sign in for tokens** ([`users`]), when reef's config requires it: the first user is
 //!   added from the service's own host, and the rest by an admin.
+//! - **A project registers by its git URL too** ([`remotes`]): the service clones one branch of
+//!   it, and fetches it when asked and on the interval reef's config sets.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
@@ -52,12 +55,12 @@ use reef_model::{
 };
 use reef_render::docs::page_node_problems;
 use reef_render::{
-    Cached, DocSource, Layered, MemSource, ROOT, Renderer, RepoSource, Sections, doc_body,
-    render_page,
+    Cached, DocSource, Layered, MemSource, ROOT, Renderer, Sections, doc_body, render_page,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 use tokio::sync::{OnceCell, broadcast};
 use tracing::instrument;
 
@@ -70,10 +73,12 @@ use crate::store::{
     PageListing, PageWrite, PlanInfo, PlanWrite, Project, Proposal, Puts, QueueEdit, Queued,
     Rewrite, Store, StoredNode, StoredPage,
 };
+use crate::tree::Docs;
 
 mod comments;
 mod decisions;
 mod loops;
+mod remotes;
 mod sessions;
 mod users;
 mod work;
@@ -104,6 +109,12 @@ pub struct Service<B = ShoalBackend> {
     tokens: users::Tokens,
     /// Held to hash or check a password, so only a few run at once
     hashing: tokio::sync::Semaphore,
+    /// The directory remote projects are cloned into, or `None` if this service keeps no clones
+    clones: Option<PathBuf>,
+    /// How often every remote project is fetched, or `None` if only when asked
+    fetch_every: Option<Duration>,
+    /// Each remote project's fetch lock, held while its clone is fetched and its row written
+    fetches: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Service<ShoalBackend> {
@@ -120,7 +131,16 @@ impl Service<ShoalBackend> {
     pub async fn open(conf: &Conf) -> anyhow::Result<Service> {
         // reach shoal however the config says to, asking callers to sign in if it says to
         let store = Store::open(conf).await?;
-        Ok(Service::new(store).requiring_sign_in(conf.auth.required))
+        // clone remote projects where it says, unless it names nowhere and no home has a default
+        let clones = match conf.clones_dir() {
+            Ok(dir) => Some(dir),
+            Err(_) if conf.remotes.clones.is_none() => None,
+            Err(error) => return Err(error),
+        };
+        Ok(Service::new(store)
+            .requiring_sign_in(conf.auth.required)
+            .cloning_into(clones)
+            .fetching_every(conf.fetch_every()?))
     }
 
     /// Gets the process's service, opening it on first use
@@ -174,6 +194,9 @@ impl<B: Backend> Service<B> {
             requires_sign_in: false,
             tokens: users::Tokens::default(),
             hashing: tokio::sync::Semaphore::new(users::HASHING_AT_ONCE),
+            clones: None,
+            fetch_every: None,
+            fetches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -253,14 +276,20 @@ impl<B: Backend> Service<B> {
         self.store.projects().await
     }
 
-    /// Finds the project a directory belongs to, a linked worktree's main repo's for one in it
+    /// Finds the project a directory belongs to, a linked worktree's main repo's for one in it,
+    /// or the remote project one of its checkout's remotes was registered by
     ///
     /// # Arguments
     ///
     /// * `dir` - The directory, such as the working directory
+    /// * `remotes` - The URLs its checkout fetches from, in the order to try them
     #[instrument(name = "Service::find_project", skip_all, err(Debug))]
-    pub async fn find_project(&self, dir: &Path) -> anyhow::Result<Option<Project>> {
-        self.store.find_project(dir).await
+    pub async fn find_project(
+        &self,
+        dir: &Path,
+        remotes: &[String],
+    ) -> anyhow::Result<Option<Project>> {
+        self.store.find_project(dir, remotes).await
     }
 
     /// Lists a plan in its project, and returns whether it was added
@@ -342,8 +371,8 @@ impl<B: Backend> Service<B> {
     /// * `batch` - The nodes to write and to remove, each with the version its writer read
     #[instrument(name = "Service::batch", skip_all, err(Debug))]
     pub async fn batch(&self, plan: &PlanName, batch: Puts) -> anyhow::Result<Checked> {
-        // the plan's docs are its project's working tree
-        let repo = self.repo(plan).await?;
+        // the plan's docs are its project's working tree, or its clone at the commit fetched
+        let docs = self.docs(plan).await?;
         let sections = self.sections.clone();
         // the ids put and removed, for the change the batch makes if it is written
         let ids: Vec<String> = batch
@@ -359,7 +388,7 @@ impl<B: Backend> Service<B> {
         // judged under the plan's write lock, against the plan the batch lands on
         let checked = self
             .store
-            .batch_checked(plan, batch, move |proposal| added(repo, sections, proposal))
+            .batch_checked(plan, batch, move |proposal| added(docs, sections, proposal))
             .await?;
         // tell the change stream of each node written, at its new version, and each removed
         if let Checked::Applied { versions } = &checked {
@@ -388,13 +417,13 @@ impl<B: Backend> Service<B> {
     /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
     #[instrument(name = "Service::write_plan", skip_all, err(Debug))]
     pub async fn write_plan(&self, plan: &PlanName, write: PlanWrite) -> anyhow::Result<Rewrite> {
-        // the plan's docs are its pages over its project's working tree
-        let repo = self.repo(plan).await?;
+        // the plan's docs are its pages over its project's repo
+        let docs = self.docs(plan).await?;
         let sections = self.sections.clone();
         // judged under the plan's write lock, against the plan it replaces
         let rewrite = self
             .store
-            .write_plan_checked(plan, write, move |proposal| added(repo, sections, proposal))
+            .write_plan_checked(plan, write, move |proposal| added(docs, sections, proposal))
             .await?;
         // tell the change stream of the revision readers now load
         if let Rewrite::Applied(rewritten) = &rewrite {
@@ -414,7 +443,7 @@ impl<B: Backend> Service<B> {
     #[instrument(name = "Service::pages", skip_all, err(Debug))]
     pub async fn pages(&self, plan: &PlanName) -> anyhow::Result<PageListing> {
         // a plan of a project that isn't registered says so
-        self.repo(plan).await?;
+        self.docs(plan).await?;
         self.store.pages(plan).await
     }
 
@@ -427,7 +456,7 @@ impl<B: Backend> Service<B> {
     #[instrument(name = "Service::page", skip_all, err(Debug))]
     pub async fn page(&self, plan: &PlanName, path: &str) -> anyhow::Result<Option<StoredPage>> {
         // a plan of a project that isn't registered says so
-        self.repo(plan).await?;
+        self.docs(plan).await?;
         self.store.page(plan, path).await
     }
 
@@ -444,14 +473,14 @@ impl<B: Backend> Service<B> {
     /// * `edit` - The page to write or take out, with the version its writer read
     #[instrument(name = "Service::edit_page", skip_all, err(Debug))]
     pub async fn edit_page(&self, plan: &PlanName, edit: PageEdit) -> anyhow::Result<PageEdited> {
-        // the plan's docs are its pages over its project's working tree
-        let repo = self.repo(plan).await?;
+        // the plan's docs are its pages over its project's repo
+        let docs = self.docs(plan).await?;
         let sections = self.sections.clone();
         let path = edit.path().to_string();
         // judged under the plan's write lock, against the plan the edit lands on
         let edited = self
             .store
-            .edit_page_checked(plan, edit, move |proposal| added(repo, sections, proposal))
+            .edit_page_checked(plan, edit, move |proposal| added(docs, sections, proposal))
             .await?;
         // tell the change stream of the page written, at its new version, or taken out
         if let PageEdited::Applied { version } = &edited {
@@ -481,15 +510,15 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::check", skip_all, err(Debug))]
     pub async fn check(&self, plan: &PlanName) -> anyhow::Result<Vec<Diagnostic>> {
-        // the plan and its pages as they stand, and the working tree under them
-        let (records, pages, repo) = self.snapshot(plan).await?;
+        // the plan and its pages as they stand, and the repo under them
+        let (records, pages, docs) = self.snapshot(plan).await?;
         let sections = self.sections.clone();
-        // build it off the async threads, since its docs are files
+        // build it off the async threads, since its docs are files or git's objects
         let problems = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(Layered::new(&pages, RepoSource::new(repo)), sections);
-            checked(&renderer, records, &pages).1
+            let renderer = Renderer::new(Layered::new(&pages, docs.source()?), sections);
+            anyhow::Ok(checked(&renderer, records, &pages).1)
         })
-        .await?;
+        .await??;
         Ok(problems)
     }
 
@@ -610,13 +639,13 @@ impl<B: Backend> Service<B> {
     /// * `plans` - The plans to read, in the order their work is taken
     #[instrument(name = "Service::next_over", skip_all, err(Debug))]
     async fn next_over(&self, project: &str, plans: Vec<PlanName>) -> anyhow::Result<Next> {
-        // the working tree the plans' docs are read from, refused if it isn't registered
-        let repo = self
+        // the repo the plans' docs are read from, refused if it isn't registered
+        let project_read = self
             .store
             .project(project)
             .await?
-            .ok_or_else(|| NotRegistered(project.to_string()))?
-            .repo;
+            .ok_or_else(|| NotRegistered(project.to_string()))?;
+        let docs = Docs::of(&project_read);
         // each plan and its pages as they stand
         let mut read = Vec::with_capacity(plans.len());
         for plan in &plans {
@@ -633,10 +662,10 @@ impl<B: Backend> Service<B> {
             .filter(|node| plans.contains(&node.plan))
             .collect();
         let sections = self.sections.clone();
-        // build them off the async threads, since their docs are files, each over its own pages
-        // and every one over the same read of the working tree
+        // build them off the async threads, since their docs are files or git's objects, each
+        // over its own pages and every one over the same read of the repo
         let next = tokio::task::spawn_blocking(move || {
-            let repo = Cached::new(RepoSource::new(repo));
+            let repo = Cached::new(docs.source()?);
             let graphs: Vec<PlanGraph> = read
                 .into_iter()
                 .map(|(name, records, pages)| {
@@ -649,9 +678,9 @@ impl<B: Backend> Service<B> {
                     }
                 })
                 .collect();
-            Next::queued(&graphs, &queue)
+            anyhow::Ok(Next::queued(&graphs, &queue))
         })
-        .await?;
+        .await??;
         Ok(next)
     }
 
@@ -667,17 +696,17 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::payload", skip_all, err(Debug))]
     pub async fn payload(&self, plan: &PlanName) -> anyhow::Result<Payload> {
-        // the plan and its pages as they stand, and the working tree under them
-        let (records, pages, repo) = self.snapshot(plan).await?;
+        // the plan and its pages as they stand, and the repo under them
+        let (records, pages, docs) = self.snapshot(plan).await?;
         let sections = self.sections.clone();
-        // build and render it off the async threads, since its docs are files
+        // build and render it off the async threads, since its docs are files or git's objects
         let payload = tokio::task::spawn_blocking(move || {
-            let renderer = Renderer::new(Layered::new(pages, RepoSource::new(repo)), sections);
+            let renderer = Renderer::new(Layered::new(pages, docs.source()?), sections);
             let (graph, _) = build(&renderer, records);
             // a stored node has no page of its own
-            renderer.payload(&graph, |_| None)
+            anyhow::Ok(renderer.payload(&graph, |_| None))
         })
-        .await?;
+        .await??;
         // its links lead to the pages this service renders its docs as
         rooted(payload, &paths::docs(plan))
     }
@@ -697,8 +726,8 @@ impl<B: Backend> Service<B> {
     /// * `page` - The page's path from the root of the plan's docs
     #[instrument(name = "Service::doc_page", skip_all, err(Debug))]
     pub async fn doc_page(&self, plan: &PlanName, page: &str) -> anyhow::Result<Option<String>> {
-        // the docs of a plan its project lists, read from that project's working tree
-        let repo = self.repo(plan).await?;
+        // the docs of a plan its project lists, read from that project's repo
+        let repo = self.docs(plan).await?;
         let plans = self.store.plans(&plan.project).await?;
         if !plans.iter().any(|info| info.name == *plan) {
             return Err(NotListed(plan.clone()).into());
@@ -716,45 +745,46 @@ impl<B: Backend> Service<B> {
                 pages.insert(stored.path, stored.text);
             }
         }
-        // read and render it off the async threads, since its doc may be a file
+        // read and render it off the async threads, since its doc may be a file or a blob
         let html = tokio::task::spawn_blocking(move || {
-            let source = Layered::new(pages, RepoSource::new(repo));
-            page_of(&source, &page).map(|html| html.replace(ROOT, &docs))
+            let source = Layered::new(pages, repo.source()?);
+            anyhow::Ok(page_of(&source, &page).map(|html| html.replace(ROOT, &docs)))
         })
-        .await?;
+        .await??;
         Ok(html)
     }
 
-    /// Reads a plan's records and its pages as they stand at one moment, and the repo its
-    /// other docs are read from
+    /// Reads a plan's records and its pages as they stand at one moment, and where its other
+    /// docs are read from
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::snapshot", skip_all, err(Debug))]
-    async fn snapshot(&self, plan: &PlanName) -> anyhow::Result<(Vec<Record>, MemSource, PathBuf)> {
+    async fn snapshot(&self, plan: &PlanName) -> anyhow::Result<(Vec<Record>, MemSource, Docs)> {
         // the repo first, so a plan of an unknown project says so
-        let repo = self.repo(plan).await?;
+        let docs = self.docs(plan).await?;
         let (listing, pages) = self.store.snapshot(plan).await?;
         let records = listing.records(plan)?;
         let pages = page_source(pages.pages.into_iter().map(PageWrite::from).collect());
-        Ok((records, pages, repo))
+        Ok((records, pages, docs))
     }
 
-    /// The repo a plan's docs are read from: its project's
+    /// Where a plan's docs are read from: its project's working tree, or for a remote project
+    /// its clone at the commit last fetched
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
-    #[instrument(name = "Service::repo", skip_all, err(Debug))]
-    async fn repo(&self, plan: &PlanName) -> anyhow::Result<PathBuf> {
+    #[instrument(name = "Service::docs", skip_all, err(Debug))]
+    async fn docs(&self, plan: &PlanName) -> anyhow::Result<Docs> {
         // a plan belongs to a project that is registered
         let project = self
             .store
             .project(&plan.project)
             .await?
             .ok_or_else(|| NotRegistered(plan.project.clone()))?;
-        Ok(project.repo)
+        Ok(Docs::of(&project))
     }
 }
 
@@ -799,17 +829,17 @@ fn checked<S: DocSource>(
 
 /// The problems a write would add to a plan, judged off the async threads
 ///
-/// Both sides read the working tree through one cache, so they see its docs as they were at
-/// one moment, and each is read once. A write that leaves the pages as they stand builds both
-/// sides with one renderer; one that changes them builds each over its own pages.
+/// Both sides read the repo through one cache, so they see its docs as they were at one
+/// moment, and each is read once. A write that leaves the pages as they stand builds both sides
+/// with one renderer; one that changes them builds each over its own pages.
 ///
 /// # Arguments
 ///
-/// * `repo` - The working tree under the plan's pages
+/// * `docs` - The repo under the plan's pages: its working tree, or its clone at a commit
 /// * `sections` - The doc sections a node's brief form is taken from
 /// * `proposal` - The plan as it stands and as the write would leave it
 async fn added(
-    repo: PathBuf,
+    docs: Docs,
     sections: Sections,
     proposal: Proposal,
 ) -> anyhow::Result<Vec<Diagnostic>> {
@@ -819,9 +849,9 @@ async fn added(
         pages,
         pages_after,
     } = proposal;
-    // its docs are files, so build both sides off the async threads
+    // its docs are files or git's objects, so build both sides off the async threads
     let added = tokio::task::spawn_blocking(move || {
-        let repo = Cached::new(RepoSource::new(repo));
+        let repo = Cached::new(docs.source()?);
         let pages = page_source(pages);
         let (before, after) = match pages_after {
             // the same docs on both sides, each read once
@@ -832,7 +862,7 @@ async fn added(
                     checked(&renderer, after, &pages).1,
                 )
             }
-            // each side over its own pages, the working tree read once for both
+            // each side over its own pages, the repo read once for both
             Some(pages_after) => {
                 let pages_after = page_source(pages_after);
                 let stood = Renderer::new(Layered::new(&pages, &repo), sections.clone());
@@ -843,9 +873,9 @@ async fn added(
                 )
             }
         };
-        new_problems(&before, after)
+        anyhow::Ok(new_problems(&before, after))
     })
-    .await?;
+    .await??;
     Ok(added)
 }
 

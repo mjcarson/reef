@@ -1,7 +1,10 @@
 //! The store suite's cases, each generic over the backend so it runs against shoal and the twin
 
 use reef_model::{NodeSpec, PlanName};
-use reef_service::{AddedProject, Backend, NotListed, NotRegistered, Put, Refusal, RevisionKey};
+use reef_service::{
+    AddedProject, Backend, KeptRemote, NotListed, NotRegistered, Put, Refusal, RevisionKey,
+};
+use std::path::Path;
 use std::time::Duration;
 
 use super::{Fx, Reopen, git, ids, node};
@@ -570,8 +573,11 @@ pub async fn linked_worktree_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::
     let inside = linked.join("src").join("deep");
     std::fs::create_dir_all(&inside)?;
     // both find the main repo's project
-    assert_eq!(fx.store.find_project(&linked).await?, Some(app.clone()));
-    assert_eq!(fx.store.find_project(&inside).await?, Some(app));
+    assert_eq!(
+        fx.store.find_project(&linked, &[]).await?,
+        Some(app.clone())
+    );
+    assert_eq!(fx.store.find_project(&inside, &[]).await?, Some(app));
     // and registering the worktree is registering its main repo, which is taken
     let again = fx.store.add_project("app-linked", &linked).await?;
     assert_eq!(
@@ -595,7 +601,7 @@ pub async fn subdirectory_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::Res
     // finds the project registered for the repo
     let found = fx
         .store
-        .find_project(&inside)
+        .find_project(&inside, &[])
         .await?
         .expect("the repo's project is found");
     assert_eq!((found.name.as_str(), &found.repo), ("reef", &fx.repo));
@@ -610,9 +616,162 @@ pub async fn subdirectory_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::Res
 pub async fn unregistered_directory_finds_none<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a repo beside the registered one, never registered
     let other = git::repo(&fx.dir.join("other"))?;
-    assert_eq!(fx.store.find_project(&other).await?, None);
+    assert_eq!(fx.store.find_project(&other, &[]).await?, None);
     // and the case's directory itself, which is in this checkout's repo, not the fixture's
-    assert_eq!(fx.store.find_project(&fx.dir).await?, None);
+    assert_eq!(fx.store.find_project(&fx.dir, &[]).await?, None);
+    Ok(())
+}
+
+/// A remote kept as a registration that cloned it keeps one, its clone under the case's dir
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `url` - The URL it was registered by
+/// * `clone` - The clone's directory name
+fn kept<B>(fx: &Fx<B>, url: &str, clone: &str) -> KeptRemote {
+    KeptRemote {
+        url: url.to_string(),
+        branch: "main".to_string(),
+        clone: fx.dir.join("clones").join(clone),
+        commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        fetched_at: 1,
+    }
+}
+
+/// A clone of a remote project's repo finds it by any spelling of its remotes, wherever the
+/// clone is, while a directory in a local project's repo finds that project first
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_clone_finds_its_remote_project<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // a remote project, kept as a registration that cloned it keeps it
+    let up = kept(&fx, "git@example.com:org/up.git", "up.1.git");
+    let AddedProject::Added(project) = fx.store.add_remote_project("up", up.clone()).await? else {
+        panic!("a remote project for a fresh repo was refused");
+    };
+    assert_eq!(project.remote, Some(up.remote()));
+    assert_eq!(project.repo, up.clone);
+    // listed with its remote, beside the local project
+    let listed: Vec<(String, bool)> = fx
+        .store
+        .projects()
+        .await?
+        .into_iter()
+        .map(|project| (project.name, project.remote.is_some()))
+        .collect();
+    assert_eq!(
+        listed,
+        [("reef".to_string(), false), ("up".to_string(), true)]
+    );
+    // a directory on no host of this one's finds it by any spelling, the first match winning
+    let urls = |list: &[&str]| list.iter().map(|url| url.to_string()).collect::<Vec<_>>();
+    let nowhere = Path::new("/on/another/host");
+    let found = fx
+        .store
+        .find_project(nowhere, &urls(&["https://example.com/org/up"]))
+        .await?;
+    assert_eq!(found, Some(project.clone()));
+    let found = fx
+        .store
+        .find_project(
+            nowhere,
+            &urls(&[
+                "https://example.com/org/other",
+                "ssh://git@example.com/org/up.git",
+            ]),
+        )
+        .await?;
+    assert_eq!(found, Some(project.clone()));
+    let found = fx
+        .store
+        .find_project(nowhere, &urls(&["https://example.com/org/other"]))
+        .await?;
+    assert_eq!(found, None);
+    // a directory in the local project's repo finds it first, whatever its remotes say
+    let found = fx
+        .store
+        .find_project(&fx.repo, &urls(&["https://example.com/org/up"]))
+        .await?;
+    assert_eq!(found.map(|project| project.name), Some("reef".to_string()));
+    // and a repo on this host no local project holds falls back to its remotes
+    let other = git::repo(&fx.dir.join("other"))?;
+    let found = fx
+        .store
+        .find_project(&other, &urls(&["git@example.com:org/up"]))
+        .await?;
+    assert_eq!(found, Some(project));
+    // the same repo again by another spelling is taken, and so is a name
+    let again = kept(&fx, "https://EXAMPLE.com/org/up/", "again.2.git");
+    let expected = AddedProject::RepoTaken {
+        project: "up".to_string(),
+    };
+    assert_eq!(fx.store.add_remote_project("again", again).await?, expected);
+    let named = kept(&fx, "https://example.com/org/elsewhere", "reef.3.git");
+    let taken = fx.store.add_remote_project("reef", named).await?;
+    assert_eq!(taken, AddedProject::NameTaken);
+    Ok(())
+}
+
+/// A registration killed between its remote's row and its project's lists no project, a retry
+/// of it is registered over what it left, and what it left never attaches to a local project
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_registration_killed_after_its_remote_leaves_no_project<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // a registration killed once its remote's row is written
+    let first = kept(&fx, "https://example.com/org/up", "up.1.git");
+    fx.faults.fail_next_project_insert();
+    let killed = fx.store.add_remote_project("up", first.clone()).await;
+    assert!(
+        killed.is_err(),
+        "the killed registration was kept: {killed:?}"
+    );
+    // lists no project, and its URL finds none
+    let names: Vec<String> = fx
+        .store
+        .projects()
+        .await?
+        .into_iter()
+        .map(|project| project.name)
+        .collect();
+    assert_eq!(names, ["reef"]);
+    let nowhere = Path::new("/on/another/host");
+    let found = fx
+        .store
+        .find_project(nowhere, std::slice::from_ref(&first.url))
+        .await?;
+    assert_eq!(found, None);
+    // a retry, with a clone of its own, is registered over the row it left
+    let retry = kept(&fx, "https://example.com/org/up", "up.2.git");
+    let AddedProject::Added(up) = fx.store.add_remote_project("up", retry.clone()).await? else {
+        panic!("the retry was refused");
+    };
+    assert_eq!(
+        (up.repo, up.remote),
+        (retry.clone.clone(), Some(retry.remote()))
+    );
+    // and a remote left by a registration killed under another name never joins a local project
+    let left = kept(&fx, "https://example.com/org/down", "down.1.git");
+    fx.faults.fail_next_project_insert();
+    assert!(fx.store.add_remote_project("down", left).await.is_err());
+    let local = git::repo(&fx.dir.join("down"))?;
+    let AddedProject::Added(down) = fx.store.add_project("down", &local).await? else {
+        panic!("a local project under the killed one's name was refused");
+    };
+    assert_eq!(down.remote, None);
+    let listed = fx
+        .store
+        .projects()
+        .await?
+        .into_iter()
+        .find(|project| project.name == "down")
+        .expect("the local project is listed");
+    assert_eq!((listed.repo, listed.remote), (local, None));
     Ok(())
 }
 

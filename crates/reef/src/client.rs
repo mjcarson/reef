@@ -13,12 +13,12 @@
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
-    DecisionsRecorded, EditLoop, ErrorCode, FileDiff, IssuedToken, Listing, Loop, LoopEdited, Me,
-    NewPlan, NewProject, NewReply, NewUser, Ordered, PageEdit, PageEdited, PageListing, PlanInfo,
-    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, RecordDecisions, Report,
-    ResolveThread, Resolved, Revision, Rewrite, Session, SessionAct, SessionActed, SignIn,
-    SignedOut, StartWork, Started, StoredNode, StoredPage, Thread, Transcript, User, UserAdded,
-    WorkRecord, paths,
+    DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing, Loop,
+    LoopEdited, Me, NewPlan, NewProject, NewReply, NewUser, Ordered, PageEdit, PageEdited,
+    PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
+    RecordDecisions, Report, ResolveThread, Resolved, Revision, Rewrite, Session, SessionAct,
+    SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode, StoredPage, Thread,
+    Transcript, User, UserAdded, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -158,17 +158,44 @@ impl Client {
     /// * `repo` - A directory in its repo, absolute
     pub async fn add_project(&self, name: &str, repo: &Path) -> anyhow::Result<AddedProject> {
         // the service reads the repo as this host sees it
-        let new = NewProject {
-            name: name.to_string(),
-            repo: repo.to_path_buf(),
-        };
+        let new = NewProject::dir(name, repo);
         let request = self.http.post(self.url(paths::PROJECTS)).json(&new);
         self.send(request, paths::PROJECTS).await
     }
 
+    /// Registers a project by its git remote, which the service clones and fetches
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The project's name
+    /// * `url` - The URL the service fetches from, with no password in it
+    /// * `branch` - The branch whose docs it reads, or `None` for the remote's default
+    pub async fn add_remote_project(
+        &self,
+        name: &str,
+        url: &str,
+        branch: Option<&str>,
+    ) -> anyhow::Result<AddedProject> {
+        // the service clones it before it answers
+        let new = NewProject::remote(name, url, branch.map(str::to_string));
+        let request = self.http.post(self.url(paths::PROJECTS)).json(&new);
+        self.send(request, paths::PROJECTS).await
+    }
+
+    /// Fetches a remote project's branch, so the service reads its docs at its tip
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn fetch_project(&self, project: &str) -> anyhow::Result<Fetched> {
+        let path = paths::fetch(project);
+        self.send(self.http.post(self.url(&path)), &path).await
+    }
+
     /// Finds the project a directory belongs to, or `None` if no project is registered for it
     ///
-    /// A directory in a linked worktree belongs to its main repo's project.
+    /// A directory in a linked worktree belongs to its main repo's project, and one in a clone
+    /// of a remote project's repo belongs to that project, found by its checkout's remotes.
     ///
     /// # Arguments
     ///
@@ -178,7 +205,11 @@ impl Client {
         let text = dir
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("{} is not a utf-8 path", dir.display()))?;
-        let path = paths::find_project(text);
+        // with the URLs its checkout fetches from, if it is in one
+        let remotes = crate::git::Checkout::open(dir)
+            .map(|checkout| checkout.remote_urls())
+            .unwrap_or_default();
+        let path = paths::find_project(text, &remotes);
         // a directory no project holds is an answer here, not an error
         match self.send(self.http.get(self.url(&path)), &path).await {
             Ok(project) => Ok(Some(project)),

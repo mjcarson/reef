@@ -25,8 +25,10 @@
 use reef_api::{PageEdit, PageEdited, PageWrite, Refusal, StoredPage, check_page_path};
 use reef_model::PlanName;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use crate::client::Client;
+use crate::git::Checkout;
 
 /// What opens the comment `get` prints a page's version in
 const VERSION_OPEN: &str = "<!-- version:";
@@ -82,12 +84,14 @@ pub async fn get<W: Write>(
 /// * `plan` - The plan to put it in
 /// * `path` - The page's path
 /// * `text` - The markdown, after the version line `get` printed, if it was got
+/// * `cwd` - The working directory, which may be in a clone of a remote project's repo
 /// * `out` - Where to print the page written, at its new version
 pub async fn put<W: Write>(
     client: &Client,
     plan: &PlanName,
     path: &str,
     text: &str,
+    cwd: &Path,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // a path no page can have is refused before anything is sent
@@ -108,10 +112,16 @@ pub async fn put<W: Write>(
     )?;
     // a page hides the repo's file at its path, which is worth knowing when there is one
     let projects = client.projects().await?;
-    let repo = projects
+    let repo = match projects
         .into_iter()
         .find(|project| project.name == plan.project)
-        .map(|project| project.repo);
+    {
+        // a local project's repo is on this host
+        Some(project) if project.remote.is_none() => Some(project.repo),
+        // a remote project's is the clone of it here, if this is one
+        Some(project) => clone_here(client, cwd, &project.name).await?,
+        None => None,
+    };
     if repo.is_some_and(|repo| repo.join(path).is_file()) {
         writeln!(
             out,
@@ -120,6 +130,25 @@ pub async fn put<W: Write>(
         )?;
     }
     Ok(())
+}
+
+/// The root of the checkout a directory is in, if it is a clone of a remote project's repo
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The directory
+/// * `project` - The remote project's name
+async fn clone_here(client: &Client, cwd: &Path, project: &str) -> anyhow::Result<Option<PathBuf>> {
+    // a directory in no checkout is no clone
+    let Ok(checkout) = Checkout::open(cwd) else {
+        return Ok(None);
+    };
+    // one whose remotes find the project is a clone of its repo
+    let found = client.find_project(checkout.root()).await?;
+    Ok(found
+        .is_some_and(|found| found.name == project)
+        .then(|| checkout.root().to_path_buf()))
 }
 
 /// Takes a page out of a plan, unless it has moved on or that breaks the plan

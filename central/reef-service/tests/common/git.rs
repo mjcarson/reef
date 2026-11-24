@@ -123,3 +123,64 @@ pub fn worktree(repo: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
     git(repo, &["worktree", "add", "-q", "-b", branch, path])?;
     Ok(dir.canonicalize()?)
 }
+
+/// Makes a bare repo to push to, and a clone of it to work in, with files committed and pushed
+///
+/// Returns the bare repo and the clone, both canonical. The clone's `origin` is the bare repo,
+/// as a user's checkout of a remote project's repo would have it.
+///
+/// # Arguments
+///
+/// * `dir` - Where to make both, wiped first
+/// * `files` - Each file's path and text, committed together
+pub fn published(dir: &Path, files: &[(&str, &str)]) -> anyhow::Result<(PathBuf, PathBuf)> {
+    // wipe what an earlier run left
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)?;
+    // the remote, empty, its default branch `main`
+    let bare = dir.join("remote.git");
+    let bare_path = bare
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("{} is not a utf-8 path", bare.display()))?;
+    git(dir, &["init", "-q", "--bare", bare_path])?;
+    // a clone to work in, its files committed and pushed
+    let work = repo(&dir.join("work"))?;
+    git(&work, &["remote", "add", "origin", bare_path])?;
+    for (path, text) in files {
+        write(&work, path, text)?;
+        git(&work, &["add", path])?;
+    }
+    git(&work, &["commit", "-q", "-m", "published"])?;
+    push(&work)?;
+    Ok((bare.canonicalize()?, work))
+}
+
+/// Writes a file in a worktree, making its directories, without staging it
+///
+/// # Arguments
+///
+/// * `dir` - The worktree
+/// * `path` - The file's path in it
+/// * `text` - What it holds
+pub fn write(dir: &Path, path: &str, text: &str) -> anyhow::Result<()> {
+    // its directories first, then the file
+    let file = dir.join(path);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(file, text)?;
+    Ok(())
+}
+
+/// Pushes a worktree's `HEAD` to its `origin`'s `main`, returning the commit pushed
+///
+/// # Arguments
+///
+/// * `work` - The worktree
+pub fn push(work: &Path) -> anyhow::Result<String> {
+    // the branch the remote's HEAD names
+    git(work, &["push", "-q", "origin", "HEAD:main"])?;
+    run(work, &["rev-parse", "HEAD"])
+}

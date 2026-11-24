@@ -124,7 +124,8 @@ pub(crate) fn default_sections(config: &Config, book: &Path) -> anyhow::Result<(
 }
 
 /// The root a project's stored links lead from, for a directory in its repo: the repo's own
-/// root, or the root of the linked worktree the directory is in
+/// root, or the root of the linked worktree the directory is in, or for a remote project the
+/// root of the clone of it the directory is in
 ///
 /// # Arguments
 ///
@@ -147,7 +148,7 @@ pub(crate) async fn link_root(
         // in the repo's own working tree, or in a project outside git
         Some(tree) if tree == repo => Ok(repo),
         None if dir.starts_with(&repo) => Ok(repo),
-        // in a linked worktree, which must be the project's
+        // in a linked worktree, or a clone of a remote project's repo, which must be the project's
         Some(tree) => {
             let found = client.find_project(tree).await?;
             if found.is_some_and(|found| found.name == project.name) {
@@ -157,14 +158,14 @@ pub(crate) async fn link_root(
                 "{} is not in project `{}`'s repo, {}",
                 dir.display(),
                 project.name,
-                project.repo.display()
+                project.shown_repo()
             )
         }
         None => anyhow::bail!(
             "{} is not in project `{}`'s repo, {}",
             dir.display(),
             project.name,
-            project.repo.display()
+            project.shown_repo()
         ),
     }
 }

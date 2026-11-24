@@ -17,7 +17,7 @@ reef-app       the UI, a Dioxus 0.7 fullstack app on axum, which serves the JSON
 The service's data types, and the JSON API's requests, answers, routes and changes, are
 `reef-api`'s, in reef's stable workspace (`../crates/reef-api`), so the API's clients need neither
 shoal nor this workspace. One is `reef` (`../crates/reef`), the terminal's client: `reef project
-add|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
+add|fetch|ls|show`, `reef plan new|ls`, `reef node put|get|rm`, `reef page ls|get|put|rm`, `reef
 status`, `reef accept`, `reef check`, `reef next`, `reef queue add|move|rm|ls`, `reef start` and
 `reef work`, which record and show where a node's work happens, `reef node capture`, which keeps
 a node's changes in its worktree as a revision and resolves the comments its commits'
@@ -76,6 +76,10 @@ address = "127.0.0.1:12180"   # where the JSON API listens, and `reef` calls it:
 
 [auth]
 required = true               # every caller signs in; default false, which answers anyone
+
+[remotes]
+clones = "/home/me/.local/share/reef/clones"   # remote projects' clones; default $XDG_DATA_HOME/reef/clones
+fetch_every = "5m"            # how often every remote project is fetched, in s, m or h; "0s" never
 ```
 
 Only one process can open a data directory. `Service::shared` opens the process's service once,
@@ -118,7 +122,9 @@ It reads and writes through a `Store`, and checks every write against the whole 
   and a node can take its why and what from a doc. A plan keeps markdown pages of its own, which
   lie over the repo: a page hides the repo's file at its path. A link that leaves the repo
   (``doc `../x.md` leaves the repo``) refuses it too, and no doc is read through a symlink that
-  leads out of the repo.
+  leads out of the repo. A project registered by its git URL reads its docs from the service's
+  clone at the commit last fetched instead ([Projects from remote
+  repos](#projects-from-remote-repos)).
 - **A page edit is checked as a node write is** (`Service::edit_page`): taking out a page a node
   links to, or the heading it names, or the section its why came from, is refused.
 - **A link can name a node.** `node:C28`, or `node:M6#rows` at a heading of its body, in a page
@@ -187,8 +193,9 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | Route | Answer |
 |---|---|
 | `GET /api/v1/projects` | every `Project` |
-| `POST /api/v1/projects` `NewProject` | `AddedProject`: 201, or 409 if the name or repo is taken |
-| `GET /api/v1/find-project?dir=` | the `Project` a directory belongs to, or 404 |
+| `POST /api/v1/projects` `NewProject` | `AddedProject`: 201, 409 if the name or repo is taken, or 502 if its `remote` can't be fetched |
+| `GET /api/v1/find-project?dir=&remote=` | the `Project` a directory belongs to, or one of its checkout's remotes was registered by, or 404 |
+| `POST /api/v1/projects/{project}/fetch` | `Fetched`: 200 whether its branch moved or not, 422 for a local project, or 502 if its remote can't be fetched |
 | `GET /api/v1/projects/{project}/plans` | every `PlanInfo` |
 | `POST /api/v1/projects/{project}/plans` `NewPlan` | `AddedPlan`: 201, or 200 if it was listed |
 | `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load |
@@ -233,15 +240,18 @@ that `Service::shared` opens. Every route is one service call, and every body an
   ``{"refused":[{"source":"reef/central/C11","line":null,"message":"needs `X`, which is not a node"}]}``.
 - **An error is an `ApiError`**, `{"code":…,"message":…}`: `not-registered`, `not-listed` and
   `not-found` are 404, `bad-name` and `bad-request` 400, `unauthorized` 401, `forbidden` 403,
-  and `internal` 500. Paths a client sends
-  (`repo`, `dir`) must be absolute directories on the service's host.
+  `internal` 500, and `fetch-failed` 502, a remote git couldn't fetch. A `repo` a client sends
+  must be an absolute directory on the service's host. A `dir` must be absolute, and is matched
+  against local projects only if the service's host has it, so a checkout on another host finds
+  its project by its `remote`s alone.
 - **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,
-  `plan-added`, `nodes-put`, `pages-put`, `plan-written`, `queue-changed`, `work-recorded`), its
-  data the change as JSON. It is live only: a
+  `project-fetched`, `plan-added`, `nodes-put`, `pages-put`, `plan-written`, `queue-changed`,
+  `work-recorded`), its data the change as JSON. It is live only: a
   client reads what it needs, then follows. One that falls behind by more than 256 changes is
-  sent `missed`, with how many, and should read again. `plan` narrows it within a `project`.
+  sent `missed`, with how many, and should read again. `plan` narrows it within a `project`, and
+  a project's own changes reach it only if they concern every plan, as `project-fetched` does.
 - **One layer signs callers in.** `api::serve` wraps the router in `auth::guard`, as reef-app
   wraps its whole router. It reads a token from `Authorization: Bearer`, else the `reef_sign_in`
   cookie, and hands each route its `Caller`. With `[auth] required` off, the default, it lets
@@ -334,7 +344,9 @@ reef claude install                        # the MCP entry, the hooks and the sk
   C34's `CommentRow` needed none either, nor did C37's resolutions, which a thread's row keeps
   only once it has one, so a row kept before reads back with none. C39's `LoopRow` moved the
   schema's pin but needed none: its binary read back the nodes and comments C37's wrote. Nor did
-  C48's `UserRow` and `TokenRow`: its binary read back a plan the one before it wrote.
+  C48's `UserRow` and `TokenRow`: its binary read back a plan the one before it wrote. Nor did
+  C49's `RemoteRow`, which keeps a remote project's URL beside its `ProjectRow` rather than in
+  it.
 
 ### Signing in
 
@@ -361,6 +373,47 @@ reef logout                        # the token revoked at the service, and forgo
   beside a Sign out.
 - **A refused `reef` says how to sign in**, naming the service's address and the file its token
   came from.
+
+### Projects from remote repos
+
+A project can be registered by its git URL rather than a directory on the service's host, for a
+service its users don't share a disk with. The service keeps a clone of one branch of it, and
+reads that project's docs from its clone at the commit it last fetched. A node's changes still
+come from the user's own checkout, as `reef start` and `reef node capture` read them there.
+
+```sh
+reef project add shoal --url git@github.com:org/shoal.git          # its default branch
+reef project add shoal --url https://github.com/org/shoal --branch dev
+reef project fetch                  # from a clone of it, or --project shoal from anywhere
+reef project ls                     # shoal  git@github.com:org/shoal.git (`main` at 6376987)
+```
+
+- **The clone is bare, shallow and one branch**, made by `git init --bare` in `[remotes] clones`
+  and filled by the fetch every later fetch runs: the branch's tip alone, over its own ref, so a
+  force-push is followed. Its directory is named by its project and the moment it was made, so a
+  registration retried after a failure never meets the clone that one left. It needs git 2.29.
+- **Docs are read from git's objects at the commit the project's row keeps**, through gix, never
+  a working tree. Every read of one moment sees one commit, and a fetch lands for readers only
+  once its commit is written. A symlink is followed while it stays in the tree, and a submodule's
+  files aren't read.
+- **A fetch is asked for, or on an interval.** `reef project fetch` (`POST …/fetch`) fetches one
+  project; `[remotes] fetch_every`, five minutes unless set, fetches every remote project, and
+  the first round runs as the server starts. A branch that moved is `project-fetched`, which the
+  app's plan page reloads on.
+- **A link is checked against what was fetched.** A node linking a doc that isn't pushed and
+  fetched yet is refused, so push, then `reef project fetch`, before linking a new doc.
+- **A clone of the repo finds the project.** Every `reef` sends the URLs its checkout's remotes
+  fetch from, users and passwords left out, and the service matches them by host and path,
+  whatever their scheme, user, port, trailing `/` or `.git`. A directory in a local project's repo
+  on the service's host finds that project first.
+- **Git runs as the service's account.** A private remote is reached through that account's ssh
+  keys or credential helpers. A URL with a password, a user over http(s), or a relative path is
+  refused, as is any transport but file, git, ssh, http and https, since every caller sees a
+  project's URL and `ext::` would run a command. Git never prompts, and stops after 5 minutes.
+- **Known limits:** a clone is never removed, since a project can't be; moving `[remotes] clones`
+  leaves the paths projects keep behind; a doc kept in LFS reads as its pointer; and until C51
+  limits it, anyone who can reach the API can have the service clone any repo its account can
+  read, as `--repo` lets them read any directory today.
 
 ### Plans and choices kept
 

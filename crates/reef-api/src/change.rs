@@ -52,6 +52,15 @@ pub enum Change {
         /// The project, its repo located
         project: Project,
     },
+    /// A remote project was fetched and its branch moved, so its docs are read at a new commit
+    ///
+    /// Every plan of the project reads its docs there, so each plan's followers hear of it.
+    ProjectFetched {
+        /// The project's name
+        project: String,
+        /// The commit its docs are now read at
+        commit: String,
+    },
     /// A plan was listed in its project
     PlanAdded {
         /// The plan's full name
@@ -178,6 +187,7 @@ impl Change {
     pub fn kind(&self) -> &'static str {
         match self {
             Change::ProjectAdded { .. } => "project-added",
+            Change::ProjectFetched { .. } => "project-fetched",
             Change::PlanAdded { .. } => "plan-added",
             Change::NodesPut { .. } => "nodes-put",
             Change::PagesPut { .. } => "pages-put",
@@ -205,6 +215,7 @@ impl Change {
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
             Change::QueueChanged { project }
+            | Change::ProjectFetched { project, .. }
             | Change::LoopChanged { project, .. }
             | Change::SessionChanged { project, .. } => Some(project.as_str()),
             Change::WorkRecorded { node, .. }
@@ -235,11 +246,20 @@ impl Change {
             | Change::ReviewMarked { node, .. }
             | Change::DecisionsRecorded { node } => Some(&node.plan),
             Change::ProjectAdded { .. }
+            | Change::ProjectFetched { .. }
             | Change::QueueChanged { .. }
             | Change::LoopChanged { .. }
             | Change::SessionChanged { .. }
             | Change::Missed { .. } => None,
         }
+    }
+
+    /// Whether this change is its project's but concerns each of its plans, so a follower of
+    /// any one plan of the project hears of it
+    ///
+    /// A fetch moves the commit every plan of the project reads its docs at.
+    pub fn reaches_every_plan(&self) -> bool {
+        matches!(self, Change::ProjectFetched { .. })
     }
 }
 
@@ -302,7 +322,12 @@ mod tests {
                 project: crate::Project {
                     name: "reef".to_string(),
                     repo: "/src/reef".into(),
+                    remote: None,
                 },
+            },
+            Change::ProjectFetched {
+                project: "reef".to_string(),
+                commit: "0123456".to_string(),
             },
             Change::PlanAdded { plan: plan.clone() },
             Change::NodesPut {
@@ -364,5 +389,23 @@ mod tests {
                 change.kind()
             );
         }
+    }
+
+    /// A fetch is its project's change, and reaches every plan of it
+    #[test]
+    fn a_fetch_reaches_every_plan_of_its_project() {
+        // a fetch names its project and no plan
+        let fetched = Change::ProjectFetched {
+            project: "reef".to_string(),
+            commit: "0123456".to_string(),
+        };
+        assert_eq!(fetched.project(), Some("reef"));
+        assert_eq!(fetched.plan(), None);
+        assert!(fetched.reaches_every_plan());
+        // a queue's change is its project's too, but no plan's
+        let queue = Change::QueueChanged {
+            project: "reef".to_string(),
+        };
+        assert!(!queue.reaches_every_plan());
     }
 }

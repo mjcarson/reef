@@ -53,11 +53,13 @@ mod comment;
 mod decision;
 mod follow;
 mod loops;
+mod remotes;
 mod revision;
 mod users;
 mod work;
 
 pub use comment::{Followed, Pending};
+pub use remotes::{KeptRemote, StoredRemote};
 pub use users::{StoredToken, StoredUser, UserKept};
 
 pub use revision::FILE_ROW_MAX;
@@ -91,6 +93,7 @@ use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::rank;
+use crate::remote;
 use crate::repo::{self, Located};
 use crate::schema::{NodeRow, PROJECTS, PageRow, PlanRow, ProjectRow, QueueRow};
 
@@ -368,16 +371,21 @@ impl<B: Backend> Store<B> {
             Written::Applied => AddedProject::Added(Project {
                 name: name.to_string(),
                 repo,
+                remote: None,
             }),
             Written::Refused(_) => AddedProject::NameTaken,
         })
     }
 
-    /// Lists every project, by name
+    /// Lists every project, by name, each remote one with its remote
+    ///
+    /// A project's remote is joined to it only if both name the same clone, so a remote a
+    /// registration killed partway left never attaches to a later project of that name.
     #[instrument(name = "Store::projects", skip_all, err(Debug))]
     pub async fn projects(&self) -> anyhow::Result<Vec<Project>> {
-        // every project sits in the one listing partition
+        // every project sits in the one listing partition, and every remote in another
         let rows = self.backend.projects().await?;
+        let mut remotes = self.remotes().await?;
         rows.into_iter()
             .map(|row| {
                 // a row of another partition that hashed the same is a collision, not a project
@@ -388,9 +396,16 @@ impl<B: Backend> Store<B> {
                     row.name,
                     row.list
                 );
+                // its remote, if one names the clone its row does
+                let repo = PathBuf::from(row.repo);
+                let remote = remotes
+                    .remove(&row.name)
+                    .filter(|stored| stored.kept.clone == repo)
+                    .map(|stored| stored.kept.remote());
                 Ok(Project {
                     name: row.name,
-                    repo: PathBuf::from(row.repo),
+                    repo,
+                    remote,
                 })
             })
             .collect()
@@ -435,30 +450,63 @@ impl<B: Backend> Store<B> {
             .collect()
     }
 
-    /// Finds the project a directory belongs to
+    /// Finds the project a directory belongs to, or one of its checkout's remotes
     ///
-    /// A directory in a git repo belongs to the project registered for that repo's main
-    /// worktree, so a linked worktree finds its main repo's project. One outside git belongs to
-    /// the project registered for its nearest registered ancestor.
+    /// A directory on this host is matched first, against the local projects. One in a git repo
+    /// belongs to the project registered for that repo's main worktree, so a linked worktree
+    /// finds its main repo's project, and one outside git belongs to the project registered for
+    /// its nearest registered ancestor. Failing that, or for a directory on another host, the
+    /// first of its checkout's remotes that a remote project was registered by finds it, however
+    /// either URL is spelled.
     ///
     /// # Arguments
     ///
     /// * `dir` - The directory, such as the working directory
+    /// * `remotes` - The URLs its checkout fetches from, in the order to try them
     #[instrument(name = "Store::find_project", skip_all, err(Debug))]
-    pub async fn find_project(&self, dir: &Path) -> anyhow::Result<Option<Project>> {
-        // locate the directory, which asks git, off the async threads
-        let dir = dir.to_path_buf();
-        let located = tokio::task::spawn_blocking(move || repo::locate(&dir)).await??;
+    pub async fn find_project(
+        &self,
+        dir: &Path,
+        remotes: &[String],
+    ) -> anyhow::Result<Option<Project>> {
         let projects = self.projects().await?;
-        Ok(match located {
-            // git draws a repo's bounds, so only the project for its root
-            Located::Repo(root) => projects.into_iter().find(|project| project.repo == root),
-            // outside git, the deepest project that holds the directory
-            Located::Dir(dir) => projects
-                .into_iter()
-                .filter(|project| dir.starts_with(&project.repo))
-                .max_by_key(|project| project.repo.components().count()),
-        })
+        // a directory this host has, among the projects whose repos are on it
+        let on_host = tokio::fs::metadata(dir)
+            .await
+            .is_ok_and(|meta| meta.is_dir());
+        if on_host {
+            // locate the directory, which asks git, off the async threads
+            let dir = dir.to_path_buf();
+            let located = tokio::task::spawn_blocking(move || repo::locate(&dir)).await??;
+            let mut local = projects.iter().filter(|project| project.remote.is_none());
+            let found = match located {
+                // git draws a repo's bounds, so only the project for its root
+                Located::Repo(root) => local.find(|project| project.repo == root),
+                // outside git, the deepest project that holds the directory
+                Located::Dir(dir) => local
+                    .filter(|project| dir.starts_with(&project.repo))
+                    .max_by_key(|project| project.repo.components().count()),
+            };
+            if let Some(found) = found {
+                return Ok(Some(found.clone()));
+            }
+        }
+        // else the first remote of its checkout's that a remote project was registered by
+        for url in remotes {
+            let Some(wanted) = remote::key(url) else {
+                continue;
+            };
+            let found = projects.iter().find(|project| {
+                project
+                    .remote
+                    .as_ref()
+                    .is_some_and(|remote| remote::key(&remote.url).as_ref() == Some(&wanted))
+            });
+            if let Some(found) = found {
+                return Ok(Some(found.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// Lists a plan in its project, with an empty revision to put nodes into

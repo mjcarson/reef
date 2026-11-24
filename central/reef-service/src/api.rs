@@ -8,8 +8,9 @@
 //! | Route | Service | Answer |
 //! |---|---|---|
 //! | `GET /api/v1/projects` | `projects` | every [`Project`] |
-//! | `POST /api/v1/projects` | `add_project` | [`AddedProject`]: 201, or 409 if taken |
-//! | `GET /api/v1/find-project?dir=` | `find_project` | the [`Project`], or 404 |
+//! | `POST /api/v1/projects` | `add_project`, `add_remote_project` | [`AddedProject`]: 201, or 409 if taken, or 502 if its remote can't be fetched |
+//! | `GET /api/v1/find-project?dir=&remote=` | `find_project` | the [`Project`], or 404 |
+//! | `POST …/projects/{project}/fetch` | `fetch` | [`Fetched`]: 200, 422 if it is a local project, or 502 if its remote can't be fetched |
 //! | `GET …/projects/{project}/plans` | `plans` | every [`PlanInfo`] |
 //! | `POST …/projects/{project}/plans` | `add_plan` | [`AddedPlan`]: 201, or 200 if listed |
 //! | `GET …/projects/{project}/queue` | `queue` | its [`QueueListing`] |
@@ -84,8 +85,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Change, Checked, Commented,
-    Decision, DecisionsRecorded, EditLoop, ErrorCode, FileDiff, IssuedToken, Listing, Loop,
-    LoopEdited, MarkReview, MarkThread, Marked, Me, NewPlan, NewProject, NewReply, NewThread,
+    Decision, DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing,
+    Loop, LoopEdited, MarkReview, MarkThread, Marked, Me, NewPlan, NewProject, NewReply, NewThread,
     NewUser, Ordered, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
     QueueEdit, QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Review,
     Reviewed, Revision, Rewrite, Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork,
@@ -109,6 +110,7 @@ use tracing::instrument;
 use crate::auth::{self, Caller};
 use crate::backend::Backend;
 use crate::conf::Conf;
+use crate::remote::{BadRemote, FetchFailed};
 use crate::service::{Asker, NoSession, NotAllowed, NotSignedIn, Service};
 use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
 
@@ -162,6 +164,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
     Router::new()
         .route(paths::PROJECTS, get(projects::<S>).post(add_project::<S>))
         .route(paths::FIND_PROJECT, get(find_project::<S>))
+        .route(paths::PROJECT_FETCH, axum::routing::post(fetch::<S>))
         .route(paths::PLANS, get(plans::<S>).post(add_plan::<S>))
         .route(paths::QUEUE, get(queue::<S>).post(edit_queue::<S>))
         .route(paths::PROJECT_NEXT, get(project_next::<S>))
@@ -334,8 +337,12 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::NotFound
         } else if error.downcast_ref::<NameError>().is_some() {
             ErrorCode::BadName
-        } else if error.downcast_ref::<Unkeepable>().is_some() {
+        } else if error.downcast_ref::<Unkeepable>().is_some()
+            || error.downcast_ref::<BadRemote>().is_some()
+        {
             ErrorCode::BadRequest
+        } else if error.downcast_ref::<FetchFailed>().is_some() {
+            ErrorCode::FetchFailed
         } else if error.downcast_ref::<NotSignedIn>().is_some() {
             ErrorCode::Unauthorized
         } else if error.downcast_ref::<NotAllowed>().is_some() {
@@ -560,11 +567,47 @@ struct PageSegments {
     path: String,
 }
 
-/// The query of the route that finds a directory's project
-#[derive(Deserialize)]
+/// The query of the route that finds a directory's project: one `dir`, and a `remote` for each
+/// URL its checkout fetches from
+#[derive(Debug, PartialEq, Eq)]
 struct FindQuery {
-    /// The directory, absolute, as the service's host sees it
+    /// The directory, absolute, as the client's host sees it
     dir: PathBuf,
+    /// The URLs its checkout fetches from, in the order to try them
+    remotes: Vec<String>,
+}
+
+impl FindQuery {
+    /// Reads the query from its pairs, since a key may repeat
+    ///
+    /// # Arguments
+    ///
+    /// * `pairs` - Each key and value, in the order sent
+    fn read(pairs: Vec<(String, String)>) -> Result<FindQuery, Failure> {
+        // one directory, and any number of remotes
+        let mut dir = None;
+        let mut remotes = Vec::new();
+        for (key, value) in pairs {
+            match key.as_str() {
+                "dir" if dir.is_none() => dir = Some(PathBuf::from(value)),
+                "dir" => {
+                    return Err(Failure::new(
+                        ErrorCode::BadRequest,
+                        "name one `dir`, not several",
+                    ));
+                }
+                "remote" => remotes.push(value),
+                other => {
+                    return Err(Failure::new(
+                        ErrorCode::BadRequest,
+                        format!("`{other}` is not a query of this route: send `dir` and `remote`"),
+                    ));
+                }
+            }
+        }
+        let dir = dir.ok_or_else(|| Failure::new(ErrorCode::BadRequest, "name a `dir`"))?;
+        Ok(FindQuery { dir, remotes })
+    }
 }
 
 /// The segments of a route under one runner's session
@@ -644,8 +687,8 @@ impl ChangesQuery {
             (None, _) => true,
             // or one plan of it
             (Some(wanted), Some(plan)) => &plan.plan == wanted,
-            // and a project's own change is no plan's
-            (Some(_), None) => false,
+            // and a project's own change is no plan's, unless it concerns each of them
+            (Some(_), None) => change.reaches_every_plan(),
         }
     }
 }
@@ -692,21 +735,39 @@ async fn projects<S: Serves>(State(serves): State<S>) -> Result<Json<Vec<Project
     Ok(Json(projects))
 }
 
-/// Registers a project for a repo: 201 if it was, 409 if its name or repo is taken
+/// Registers a project for a repo on this host or by its git remote: 201 if it was, 409 if its
+/// name or repo is taken
 ///
 /// # Arguments
 ///
 /// * `serves` - The service
-/// * `new` - The project's name and a directory in its repo
+/// * `new` - The project's name, and a directory in its repo or its remote
 #[instrument(name = "api::add_project", skip_all, err(Debug))]
 async fn add_project<S: Serves>(
     State(serves): State<S>,
     Body(new): Body<NewProject>,
 ) -> Result<(StatusCode, Json<AddedProject>), Failure> {
-    // the repo is a directory on this host
-    directory(&new.repo, "repo").await?;
     // register it, unless its name or its repo is another project's
-    let added = serves.service().add_project(&new.name, &new.repo).await?;
+    let service = serves.service();
+    let added = match (&new.repo, &new.remote) {
+        // a repo is a directory on this host
+        (Some(repo), None) => {
+            directory(repo, "repo").await?;
+            service.add_project(&new.name, repo).await?
+        }
+        // a remote is cloned before it is kept
+        (None, Some(remote)) => {
+            service
+                .add_remote_project(&new.name, &remote.url, remote.branch.as_deref())
+                .await?
+        }
+        _ => {
+            return Err(Failure::new(
+                ErrorCode::BadRequest,
+                "name one of a `repo` on the service's host and a git `remote`",
+            ));
+        }
+    };
     let status = match added {
         AddedProject::Added(_) => StatusCode::CREATED,
         AddedProject::NameTaken | AddedProject::RepoTaken { .. } => StatusCode::CONFLICT,
@@ -714,27 +775,66 @@ async fn add_project<S: Serves>(
     Ok((status, Json(added)))
 }
 
-/// Finds the project a directory belongs to, a linked worktree's main repo's for one in it
+/// Finds the project a directory belongs to, a linked worktree's main repo's for one in it, or
+/// the remote project one of its checkout's remotes was registered by
 ///
 /// # Arguments
 ///
 /// * `serves` - The service
-/// * `query` - The directory
+/// * `pairs` - The query: the directory, and the URLs its checkout fetches from
 #[instrument(name = "api::find_project", skip_all, err(Debug))]
 async fn find_project<S: Serves>(
     State(serves): State<S>,
-    Params(query): Params<FindQuery>,
+    Params(pairs): Params<Vec<(String, String)>>,
 ) -> Result<Json<Project>, Failure> {
-    // the directory is one on this host
-    directory(&query.dir, "dir").await?;
-    // the project registered for its repo, or for its nearest registered ancestor outside git
-    match serves.service().find_project(&query.dir).await? {
+    // a directory named from the root, on this host or the client's
+    let query = FindQuery::read(pairs)?;
+    if !query.dir.is_absolute() {
+        return Err(Failure::new(
+            ErrorCode::BadRequest,
+            format!("`dir` must be absolute, and {} is not", query.dir.display()),
+        ));
+    }
+    // the project registered for its repo or nearest ancestor here, or for one of its remotes
+    let found = serves
+        .service()
+        .find_project(&query.dir, &query.remotes)
+        .await?;
+    match found {
         Some(project) => Ok(Json(project)),
-        None => Err(Failure::new(
+        None if query.remotes.is_empty() => Err(Failure::new(
             ErrorCode::NotFound,
             format!("no project is registered for {}", query.dir.display()),
         )),
+        None => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!(
+                "no project is registered for {} or its remotes, {}",
+                query.dir.display(),
+                query.remotes.join(", ")
+            ),
+        )),
     }
+}
+
+/// Fetches a remote project's branch: 200 whether it moved or not, 422 for a local project
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::fetch", skip_all, err(Debug))]
+async fn fetch<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<(StatusCode, Json<Fetched>), Failure> {
+    // fetch it, if it has a remote to fetch from
+    let fetched = serves.service().fetch(&segments.project).await?;
+    let status = match fetched {
+        Fetched::Moved { .. } | Fetched::Unchanged { .. } => StatusCode::OK,
+        Fetched::Local => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(fetched)))
 }
 
 /// Lists a project's plans, by name
@@ -1875,7 +1975,8 @@ async fn add_user<S: Serves>(
 
 #[cfg(test)]
 mod tests {
-    use super::{ChangesQuery, Failure};
+    use super::{ChangesQuery, Failure, FindQuery, Query};
+    use crate::remote::{BadRemote, FetchFailed};
     use crate::store::{NotListed, NotRegistered, Unkeepable};
     use reef_api::{Change, ErrorCode, Project};
     use reef_model::PlanName;
@@ -1907,9 +2008,14 @@ mod tests {
             project: Project {
                 name: "reef".to_string(),
                 repo: "/src/reef".into(),
+                remote: None,
             },
         };
         let gap = Change::Missed { count: 2 };
+        let fetched = Change::ProjectFetched {
+            project: "reef".to_string(),
+            commit: "0123456".to_string(),
+        };
         let queue = Change::QueueChanged {
             project: "reef".to_string(),
         };
@@ -1931,8 +2037,41 @@ mod tests {
         assert!(!one.follows(&other));
         assert!(!one.follows(&project));
         assert!(!one.follows(&queue));
+        // a fetch is the project's, but moves every plan's docs, so it reaches each plan's
+        assert!(one.follows(&fetched));
+        assert!(!query(Some("shoal"), Some("central")).follows(&fetched));
         // and a gap reaches everyone
         assert!(one.follows(&gap));
+    }
+
+    /// The query that finds a project takes one directory and any number of remotes, in order
+    #[test]
+    fn find_query_takes_one_dir_and_any_remotes() {
+        // a query's pairs as the route's extractor reads them, a key repeated
+        let pairs = |query: &str| {
+            let uri: axum::http::Uri = format!("/api/v1/find-project?{query}").parse().unwrap();
+            Query::<Vec<(String, String)>>::try_from_uri(&uri)
+                .expect("the pairs read")
+                .0
+        };
+        let read = FindQuery::read(pairs(
+            "dir=%2Fsrc%2Fr&remote=git%40h%3Ao%2Fr&remote=https%3A%2F%2Fh%2Fo%2Fr",
+        ))
+        .expect("the query reads");
+        assert_eq!(read.dir, std::path::Path::new("/src/r"));
+        assert_eq!(read.remotes, ["git@h:o/r", "https://h/o/r"]);
+        // a directory alone, as a client before remotes sends it
+        assert!(
+            FindQuery::read(pairs("dir=%2Fsrc"))
+                .unwrap()
+                .remotes
+                .is_empty()
+        );
+        // no directory, two of them, or a key the route doesn't know is refused
+        for bad in ["remote=x", "dir=%2Fa&dir=%2Fb", "dir=%2Fa&remotes=x"] {
+            let error = FindQuery::read(pairs(bad)).expect_err(bad);
+            assert_eq!(error.0.code, ErrorCode::BadRequest, "{bad}");
+        }
     }
 
     /// Each of the service's errors a client caused is named by its kind, and the rest are
@@ -1954,6 +2093,14 @@ mod tests {
             (
                 anyhow::Error::from(Unkeepable("no".to_string())),
                 ErrorCode::BadRequest,
+            ),
+            (
+                anyhow::Error::from(BadRemote("no".to_string())),
+                ErrorCode::BadRequest,
+            ),
+            (
+                anyhow::Error::from(FetchFailed("unreachable".to_string())),
+                ErrorCode::FetchFailed,
             ),
             (anyhow::anyhow!("shoal fell over"), ErrorCode::Internal),
         ];

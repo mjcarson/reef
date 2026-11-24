@@ -66,9 +66,15 @@ impl Drop for Follow {
 #[cfg(not(feature = "web"))]
 type Follow = ();
 
-/// The changes that mean reading a plan again: a put, a page edited, a whole plan written, or
-/// a gap
-const PLAN_KINDS: &[&str] = &["nodes-put", "pages-put", "plan-written", "missed"];
+/// The changes that mean reading a plan again: a put, a page edited, a whole plan written, its
+/// project's remote fetched to a new commit, or a gap
+const PLAN_KINDS: &[&str] = &[
+    "nodes-put",
+    "pages-put",
+    "plan-written",
+    "project-fetched",
+    "missed",
+];
 
 /// The changes that mean reading a node's work again: a revision captured, a comment kept, a
 /// thread marked, threads followed to a new revision, a review marked, decisions kept, or a gap
@@ -101,12 +107,13 @@ struct Counter {
 }
 
 /// The changes that mean reading a project's queue again: an edit of it, a plan listed, or any
-/// change to a plan, which can make an entry ready or waiting
+/// change to a plan or the docs its plans read, which can make an entry ready or waiting
 const PROJECT_KINDS: &[&str] = &[
     "queue-changed",
     "plan-added",
     "nodes-put",
     "plan-written",
+    "project-fetched",
     "missed",
 ];
 

@@ -5022,6 +5022,7 @@ dependencies = [
  "axum",
  "deepsize2",
  "getrandom 0.4.3",
+ "gix",
  "libc",
  "reef",
  "reef-api",

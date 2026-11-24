@@ -12,11 +12,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The environment git reads a repo from instead of the directory it runs in
-const GIT_ENV: &[&str] = &[
+pub(crate) const GIT_ENV: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",
     "GIT_COMMON_DIR",
     "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
 ];
 
 /// Where a directory was located

@@ -23,12 +23,19 @@
 //! [auth]
 //! # whether every caller must sign in; off, reef answers anyone who reaches its port
 //! required = true
+//!
+//! [remotes]
+//! # where the clones of projects registered by their git URLs are kept, absolute
+//! clones = "/home/me/.local/share/reef/clones"
+//! # how often every one of them is fetched, in seconds, minutes or hours; `0s` never
+//! fetch_every = "5m"
 //! ```
 
 use reef_api::config::env_dir;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// The environment variable naming reef's config file, which `reef-api` shares with clients
 pub use reef_api::config::CONFIG_VAR;
@@ -43,6 +50,8 @@ pub struct Conf {
     pub api: ApiSettings,
     /// Whether callers sign in
     pub auth: AuthSettings,
+    /// Where projects registered by their git URLs are cloned, and how often they are fetched
+    pub remotes: RemoteSettings,
     /// The file this was read from, if one was
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -94,6 +103,26 @@ pub struct AuthSettings {
     pub required: bool,
 }
 
+/// Where projects registered by their git URLs are cloned, and how often they are fetched
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RemoteSettings {
+    /// The directory every clone is kept in, or the default under `$XDG_DATA_HOME`
+    pub clones: Option<PathBuf>,
+    /// How often every remote project is fetched, such as `5m`, or `0s` for never
+    pub fetch_every: String,
+}
+
+impl Default for RemoteSettings {
+    /// Clones in the default directory, each fetched every five minutes
+    fn default() -> Self {
+        RemoteSettings {
+            clones: None,
+            fetch_every: "5m".to_string(),
+        }
+    }
+}
+
 impl Default for ApiSettings {
     /// Localhost, at the port reef's clients look for it on
     fn default() -> Self {
@@ -122,6 +151,8 @@ impl Conf {
         let mut conf: Conf = toml::from_str(&text)
             .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))?;
         conf.source = Some(path);
+        // an interval that can't be read is said now, rather than once the service is up
+        conf.fetch_every()?;
         Ok(conf)
     }
 
@@ -142,16 +173,62 @@ impl Conf {
         if let Some(dir) = &self.shoal.data {
             return Ok(dir.clone());
         }
-        // else XDG's data home, else its default under the home directory
+        // else reef's directory in XDG's data home
+        Ok(self.data_home("shoal.data")?.join("shoal"))
+    }
+
+    /// The directory remote projects' clones are kept in: the one configured, else the default
+    ///
+    /// The default sits beside shoal's: `$XDG_DATA_HOME/reef/clones`, else
+    /// `~/.local/share/reef/clones`. A clone's path is kept with its project, so one configured
+    /// must be absolute.
+    pub fn clones_dir(&self) -> anyhow::Result<PathBuf> {
+        // a configured directory wins, if it names one place whatever the service's cwd
+        if let Some(dir) = &self.remotes.clones {
+            if !dir.is_absolute() {
+                anyhow::bail!(
+                    "{} is {}, which is not absolute: name the directory from the root",
+                    self.key("remotes.clones"),
+                    dir.display()
+                );
+            }
+            return Ok(dir.clone());
+        }
+        // else reef's directory in XDG's data home
+        Ok(self.data_home("remotes.clones")?.join("clones"))
+    }
+
+    /// How often every remote project is fetched, or `None` if never
+    pub fn fetch_every(&self) -> anyhow::Result<Option<Duration>> {
+        // a number and its unit, refused with the key to change
+        let every = parse_every(&self.remotes.fetch_every).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} is `{}`, which is not an interval: write a whole number of seconds, minutes \
+                 or hours, such as `30s`, `5m` or `1h`, or `0s` for never",
+                self.key("remotes.fetch_every"),
+                self.remotes.fetch_every
+            )
+        })?;
+        // nothing between fetches is never fetching
+        Ok(Some(every).filter(|every| !every.is_zero()))
+    }
+
+    /// reef's own directory in XDG's data home, else in its default under the home directory
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key that would name a directory instead, for the message if there is none
+    fn data_home(&self, key: &str) -> anyhow::Result<PathBuf> {
+        // XDG's data home, else its default under the home directory
         let base = env_dir("XDG_DATA_HOME")
             .or_else(|| env_dir("HOME").map(|home| home.join(".local").join("share")))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "no data directory for shoal: set {}, or `XDG_DATA_HOME` or `HOME`",
-                    self.key("shoal.data")
+                    "no data directory for reef: set {}, or `XDG_DATA_HOME` or `HOME`",
+                    self.key(key)
                 )
             })?;
-        Ok(base.join("reef").join("shoal"))
+        Ok(base.join("reef"))
     }
 
     /// Names a key and the file it is set in, for a message that says what to change
@@ -168,9 +245,36 @@ impl Conf {
     }
 }
 
+/// Reads an interval written as a whole number and a unit: `s`, `m` or `h`
+///
+/// A bare `0` is no interval at all. Returns `None` for anything else.
+///
+/// # Arguments
+///
+/// * `text` - The interval as written, such as `5m`
+fn parse_every(text: &str) -> Option<Duration> {
+    // nothing at all needs no unit
+    let text = text.trim();
+    if text == "0" {
+        return Some(Duration::ZERO);
+    }
+    // the digits, then the unit they count
+    let digits = text.find(|c: char| !c.is_ascii_digit())?;
+    let (count, unit) = text.split_at(digits);
+    let count: u64 = count.parse().ok()?;
+    let seconds = match unit {
+        "s" => count,
+        "m" => count.checked_mul(60)?,
+        "h" => count.checked_mul(60 * 60)?,
+        _ => return None,
+    };
+    Some(Duration::from_secs(seconds))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Conf;
+    use super::{Conf, parse_every};
+    use std::time::Duration;
 
     /// A config sets each key it names and leaves the rest at their defaults
     #[test]
@@ -219,5 +323,59 @@ mod tests {
         // `adress` is not a key
         let parsed = toml::from_str::<Conf>("[shoal]\nadress = \"127.0.0.1:12100\"\n");
         assert!(parsed.is_err(), "a misspelled key was accepted");
+    }
+
+    /// Remote projects are fetched every five minutes unless the config says otherwise
+    #[test]
+    fn fetch_every_reads_its_unit() {
+        // the default
+        let conf: Conf = toml::from_str("").expect("an empty config parses");
+        assert_eq!(conf.fetch_every().unwrap(), Some(Duration::from_secs(300)));
+        // each unit, and zero for never
+        assert_eq!(parse_every("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_every("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_every("1h"), Some(Duration::from_secs(3600)));
+        let never: Conf = toml::from_str("[remotes]\nfetch_every = \"0s\"\n").expect("it parses");
+        assert_eq!(never.fetch_every().unwrap(), None);
+        assert_eq!(parse_every("0"), Some(Duration::ZERO));
+        // no unit, an unknown one, a fraction or a sign is refused, naming the key
+        for bad in ["5", "5d", "1.5m", "-1s", "m", ""] {
+            assert_eq!(parse_every(bad), None, "`{bad}` was read");
+        }
+        let bad: Conf = toml::from_str("[remotes]\nfetch_every = \"5\"\n").expect("it parses");
+        let error = bad
+            .fetch_every()
+            .expect_err("an interval with no unit was read");
+        assert!(error.to_string().contains("remotes.fetch_every"), "{error}");
+    }
+
+    /// A configured clones directory is used as it is, and must be absolute
+    #[test]
+    fn clones_dir_must_be_absolute() {
+        // an absolute directory wins over the default
+        let conf: Conf =
+            toml::from_str("[remotes]\nclones = \"/srv/reef/clones\"\n").expect("it parses");
+        assert_eq!(
+            conf.clones_dir().unwrap(),
+            std::path::Path::new("/srv/reef/clones")
+        );
+        // a relative one would move with the service's working directory, so it is refused
+        let conf: Conf = toml::from_str("[remotes]\nclones = \"clones\"\n").expect("it parses");
+        let error = conf
+            .clones_dir()
+            .expect_err("a relative directory was used");
+        assert!(error.to_string().contains("remotes.clones"), "{error}");
+    }
+
+    /// With nothing configured, clones sit beside shoal's data, under reef's data directory
+    #[test]
+    fn clones_default_beside_shoals_data() {
+        // both defaults, whichever variable this test runs with
+        let conf = Conf::default();
+        let (Ok(data), Ok(clones)) = (conf.data_dir(), conf.clones_dir()) else {
+            return;
+        };
+        assert_eq!(data.parent(), clones.parent());
+        assert!(clones.ends_with("reef/clones"), "{}", clones.display());
     }
 }

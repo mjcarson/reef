@@ -70,10 +70,12 @@ pub use node::{
     StalePut, StoredNode, lift, puts_for, records,
 };
 pub use page::{
-    PLAN_PAGES_MAX_BYTES, PageEdit, PageEdited, PageListing, PageWrite, StoredPage,
-    WRITE_BODY_MAX, check_page_path,
+    PLAN_PAGES_MAX_BYTES, PageEdit, PageEdited, PageListing, PageWrite, StoredPage, WRITE_BODY_MAX,
+    check_page_path,
 };
-pub use project::{AddedPlan, AddedProject, NewPlan, NewProject, PlanInfo, Project};
+pub use project::{
+    AddedPlan, AddedProject, Fetched, NewPlan, NewProject, NewRemote, PlanInfo, Project, Remote,
+};
 pub use queue::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};
 pub use revision::{
     Anchor, FileDiff, FileStatus, FileSummary, Hunk, Line, LineKind, Revision, Side,

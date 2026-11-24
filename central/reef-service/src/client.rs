@@ -17,10 +17,10 @@ use crate::schema::{
     LOOPS, LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey, NodeRow, NodeRowDelete,
     NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter,
     PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet,
-    QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient, ReefQueryKinds,
-    RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter, RevisionRowGet, TOKENS,
-    TokenRow, TokenRowDelete, TokenRowFilter, TokenRowGet, USERS, UserRow, UserRowFilter,
-    UserRowGet, WorkRow, WorkRowFilter, WorkRowGet,
+    QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES, ReefClient, ReefQueryKinds,
+    RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow, RevisionFileRowGet, RevisionRow,
+    RevisionRowFilter, RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter,
+    TokenRowGet, USERS, UserRow, UserRowFilter, UserRowGet, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -955,6 +955,36 @@ impl Backend for ShoalBackend {
             version: Some(vec![row.version]),
         };
         written(self.client.send_one(delete.if_matches(filter)).await)
+    }
+
+    /// Reads every remote row, in project order
+    #[instrument(name = "ShoalBackend::remotes", skip_all, err(Debug))]
+    async fn remotes(&self) -> anyhow::Result<Vec<RemoteRow>> {
+        // every remote sits in the one listing partition
+        let get = RemoteRowGet::new(vec![REMOTES.to_string()]);
+        self.read::<_, RemoteRow>(get).await
+    }
+
+    /// Writes one remote row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_remote", skip_all, err(Debug))]
+    async fn write_remote(&self, row: RemoteRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = RemoteRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
     }
 }
 

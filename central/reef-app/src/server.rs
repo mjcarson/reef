@@ -84,9 +84,17 @@ pub async fn serve() -> anyhow::Result<()> {
     };
     // each request knowing where it came from, so the first user is added only from this host
     let app = router(service).into_make_service_with_connect_info::<SocketAddr>();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(stopping)
-        .await?;
+    let serving = async {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopping)
+            .await
+    };
+    // fetching every remote project on its interval meanwhile, and stopping any fetch still
+    // running once the server ends
+    tokio::select! {
+        served = serving => served?,
+        () = service.follow_remotes() => {}
+    }
     Ok(())
 }
 

@@ -84,8 +84,12 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
     if let Some(note) = service.sign_in_note().await? {
         eprintln!("reef-serve: {note}");
     }
-    // serve until told to stop, then wait for the requests still open
-    api::serve(listener, service.clone(), stopped()).await?;
+    // serve until told to stop, then wait for the requests still open, fetching every remote
+    // project on its interval meanwhile, and stopping any fetch still running once it ends
+    tokio::select! {
+        served = api::serve(listener, service.clone(), stopped()) => served?,
+        () = service.follow_remotes() => {}
+    }
     // the service is this task's alone once every request has let go of it
     match released(service).await {
         Some(service) => service.close().await?,

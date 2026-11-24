@@ -8,7 +8,8 @@
 //! | Route | Template |
 //! |---|---|
 //! | `GET`, `POST` | [`PROJECTS`] |
-//! | `GET ?dir=` | [`FIND_PROJECT`] |
+//! | `GET ?dir=&remote=` | [`FIND_PROJECT`] |
+//! | `POST` | [`PROJECT_FETCH`] |
 //! | `GET`, `POST` | [`PLANS`] |
 //! | `GET`, `POST` | [`QUEUE`] |
 //! | `GET` | [`PROJECT_NEXT`] |
@@ -55,8 +56,12 @@ pub const PREFIX: &str = "/api/v1";
 /// Every project: listed by `GET`, registered by `POST`
 pub const PROJECTS: &str = "/api/v1/projects";
 
-/// The project a directory belongs to, named by the `dir` query
+/// The project a directory belongs to, named by the `dir` query, or that one of its checkout's
+/// remotes, each a `remote` query, was registered by
 pub const FIND_PROJECT: &str = "/api/v1/find-project";
+
+/// A remote project's fetch, which `POST` asks for
+pub const PROJECT_FETCH: &str = "/api/v1/projects/{project}/fetch";
 
 /// A project's plans: listed by `GET`, added to by `POST`
 pub const PLANS: &str = "/api/v1/projects/{project}/plans";
@@ -224,13 +229,30 @@ pub fn encode(text: &str) -> String {
     out
 }
 
-/// The path of the project a directory belongs to
+/// The path of the project a directory belongs to, or one of its checkout's remotes
 ///
 /// # Arguments
 ///
 /// * `dir` - The directory, as the service's host sees it
-pub fn find_project(dir: &str) -> String {
-    format!("{FIND_PROJECT}?dir={}", encode(dir))
+/// * `remotes` - The URLs its checkout fetches from, without their credentials, in the order to
+///   try them
+pub fn find_project(dir: &str, remotes: &[String]) -> String {
+    // the directory, then each remote in the order given
+    let mut path = format!("{FIND_PROJECT}?dir={}", encode(dir));
+    for remote in remotes {
+        path.push_str("&remote=");
+        path.push_str(&encode(remote));
+    }
+    path
+}
+
+/// The path of a remote project's fetch
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn fetch(project: &str) -> String {
+    format!("{PROJECTS}/{}/fetch", encode(project))
 }
 
 /// The path of a project's plans
@@ -661,6 +683,10 @@ mod tests {
             super::work("reef"),
             super::WORK.replace("{project}", "reef")
         );
+        assert_eq!(
+            super::fetch("reef"),
+            super::PROJECT_FETCH.replace("{project}", "reef")
+        );
         let node = plan.node("C30").unwrap();
         let work = super::NODE_WORK
             .replace("{project}", "reef")
@@ -746,8 +772,14 @@ mod tests {
             "/api/v1/changes?project=reef&plan=central"
         );
         assert_eq!(
-            super::find_project("/src/my repo"),
+            super::find_project("/src/my repo", &[]),
             "/api/v1/find-project?dir=%2Fsrc%2Fmy%20repo"
+        );
+        // each remote is a query of its own, in the order given
+        let remotes = ["git@h:o/r.git".to_string(), "https://h/o/r".to_string()];
+        assert_eq!(
+            super::find_project("/src/r", &remotes),
+            "/api/v1/find-project?dir=%2Fsrc%2Fr&remote=git%40h%3Ao%2Fr.git&remote=https%3A%2F%2Fh%2Fo%2Fr"
         );
     }
 }

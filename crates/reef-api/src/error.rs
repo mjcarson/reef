@@ -27,6 +27,8 @@ pub enum ErrorCode {
     Forbidden,
     /// The service failed (500)
     Internal,
+    /// The service couldn't fetch from a project's git remote, which it names (502)
+    FetchFailed,
 }
 
 impl ErrorCode {
@@ -38,6 +40,7 @@ impl ErrorCode {
             ErrorCode::Unauthorized => 401,
             ErrorCode::Forbidden => 403,
             ErrorCode::Internal => 500,
+            ErrorCode::FetchFailed => 502,
         }
     }
 }
@@ -98,5 +101,12 @@ mod tests {
         );
         assert_eq!(error.code.status(), 401);
         assert_eq!(ErrorCode::Forbidden.status(), 403);
+        // a remote that couldn't be fetched is a gateway's failure, not the service's
+        let error = ApiError::new(ErrorCode::FetchFailed, "git fetch failed");
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["code"],
+            "fetch-failed"
+        );
+        assert_eq!(error.code.status(), 502);
     }
 }

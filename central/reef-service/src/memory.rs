@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::{
     CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
-use crate::schema::{LOOPS, PROJECTS, TOKENS, USERS};
+use crate::schema::{LOOPS, PROJECTS, REMOTES, TOKENS, USERS};
 
 /// A node's partition of revisions: its project and its `plan/id`
 type NodePartition = (String, String);
@@ -53,6 +53,8 @@ struct Tables {
     users: BTreeMap<String, BTreeMap<String, UserRow>>,
     /// Every token, by the partition it is kept in and then by hash
     tokens: BTreeMap<String, BTreeMap<String, TokenRow>>,
+    /// Every project's git remote, by the partition it is kept in and then by project
+    remotes: BTreeMap<String, BTreeMap<String, RemoteRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -989,6 +991,36 @@ impl Backend for MemoryBackend {
         if partition.is_empty() {
             tables.tokens.remove(&row.list);
         }
+        Ok(Written::Applied)
+    }
+
+    /// Reads every remote row, in project order
+    async fn remotes(&self) -> anyhow::Result<Vec<RemoteRow>> {
+        let tables = self.tables();
+        // the one listing partition, whole
+        Ok(tables
+            .remotes
+            .get(REMOTES)
+            .map(|partition| partition.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Writes one remote row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_remote(&self, row: RemoteRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its key hashes
+        let partition = tables.remotes.entry(row.list.clone()).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.project).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.project.clone(), row);
         Ok(Written::Applied)
     }
 }

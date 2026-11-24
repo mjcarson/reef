@@ -61,6 +61,8 @@ suite!(
     resolves_answer_with_their_status,
     reviews_answer_with_their_status,
     loop_routes_answer_with_their_status,
+    a_pushed_doc_change_appears_after_a_fetch,
+    remote_registrations_answer_with_their_status,
 );
 
 /// The API listens on a loopback address, and refuses any other until users sign in

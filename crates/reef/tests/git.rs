@@ -223,6 +223,74 @@ fn upstream_matches_at_upstream() {
     );
 }
 
+/// A checkout's remotes are the URLs `git remote get-url` gives, with no user or password in
+/// them, the current branch's upstream's remote first, then `origin`, then the rest by name
+#[test]
+fn remote_urls_match_git_remote_get_url() {
+    let dir = fresh("remotes");
+    let repo = repo(&dir.join("repo"));
+    // with no remote, there are none
+    assert!(Checkout::open(&repo).unwrap().remote_urls().is_empty());
+    // three remotes, one URL with a token in it, and `main` tracking the last of them by name
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "alpha",
+            "https://ghp_token@example.com/o/alpha.git",
+        ],
+    );
+    git(
+        &repo,
+        &["remote", "add", "origin", "git@example.com:o/reef.git"],
+    );
+    git(
+        &repo,
+        &[
+            "remote",
+            "add",
+            "zeta",
+            "ssh://git:hunter2@example.com/o/zeta.git",
+        ],
+    );
+    git(&repo, &["config", "branch.main.remote", "zeta"]);
+    git(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
+    // each is git's own URL, its user and password left out, in the order to try them
+    let urls = Checkout::open(&repo).unwrap().remote_urls();
+    assert_eq!(
+        urls,
+        [
+            "ssh://example.com/o/zeta.git",
+            "example.com:o/reef.git",
+            "https://example.com/o/alpha.git",
+        ]
+    );
+    for url in &urls {
+        assert!(
+            !url.contains("ghp_token") && !url.contains("hunter2"),
+            "{url}"
+        );
+    }
+    // a remote with no user is the URL git gives, as it gives it
+    let plain = repo_with_remote(&dir.join("plain"), "/srv/reef.git");
+    let expected = git(&plain, &["remote", "get-url", "origin"]);
+    assert_eq!(Checkout::open(&plain).unwrap().remote_urls(), [expected]);
+}
+
+/// A fresh repo with one commit and an `origin`
+///
+/// # Arguments
+///
+/// * `dir` - Where to make it
+/// * `url` - Its `origin`'s URL
+fn repo_with_remote(dir: &Path, url: &str) -> PathBuf {
+    // the repo, then the remote
+    let repo = repo(dir);
+    git(&repo, &["remote", "add", "origin", url]);
+    repo
+}
+
 /// The default branch is the one `origin/HEAD` names, local if it can be, else `main` or
 /// `master`, else none
 #[test]

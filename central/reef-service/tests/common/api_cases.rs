@@ -7,12 +7,12 @@
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
-    Commented, EditLoop, ErrorCode, FileDiff, FollowedThread, Listing, Loop, LoopEdit, LoopEdited,
-    LoopState, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, NodePut, NodeWrite,
-    PageEdit, PageEdited, PageListing, PageWrite, Pane, Place, PlanInfo, PlanWrite, Project,
-    PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, ResolveThread, Resolved, Resolves,
-    ResolvingCommit, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode, StoredPage,
-    Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord, paths,
+    Commented, EditLoop, ErrorCode, Fetched, FileDiff, FollowedThread, Listing, Loop, LoopEdit,
+    LoopEdited, LoopState, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, NodePut,
+    NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Pane, Place, PlanInfo, PlanWrite,
+    Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, ResolveThread, Resolved,
+    Resolves, ResolvingCommit, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode,
+    StoredPage, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord, paths,
 };
 use reef_api::{MarkReview, Review, ReviewState, Reviewed, Writer};
 use reef_model::{
@@ -71,32 +71,24 @@ pub async fn client_puts_a_node_and_lists_plans<B: Backend + 'static>(
 ) -> anyhow::Result<()> {
     // a project of its own, for a fresh repo, registered through the API
     let repo = git::repo(&ax.dir.join("api"))?;
-    let new = NewProject {
-        name: "api".to_string(),
-        repo: repo.clone(),
-    };
+    let new = NewProject::dir("api", repo.clone());
     let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
     let project = Project {
         name: "api".to_string(),
         repo: repo.clone(),
+        remote: None,
     };
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(added, AddedProject::Added(project.clone()));
     // the name again, for another repo, is a conflict
-    let other = NewProject {
-        name: "api".to_string(),
-        repo: git::repo(&ax.dir.join("other"))?,
-    };
+    let other = NewProject::dir("api", git::repo(&ax.dir.join("other"))?);
     let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &other).await?;
     assert_eq!(
         (status, taken),
         (StatusCode::CONFLICT, AddedProject::NameTaken)
     );
     // and so is the repo again, under another name, naming the project that has it
-    let again = NewProject {
-        name: "again".to_string(),
-        repo: repo.clone(),
-    };
+    let again = NewProject::dir("again", repo.clone());
     let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &again).await?;
     let expected = AddedProject::RepoTaken {
         project: "api".to_string(),
@@ -107,7 +99,7 @@ pub async fn client_puts_a_node_and_lists_plans<B: Backend + 'static>(
     let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, ["api", "reef"]);
     let dir = repo.to_str().expect("the repo is a utf-8 path");
-    let (status, found): (_, Project) = ax.client.get(&paths::find_project(dir)).await?;
+    let (status, found): (_, Project) = ax.client.get(&paths::find_project(dir, &[])).await?;
     assert_eq!((status, found), (StatusCode::OK, project));
     // a plan listed in it is created once, and left as it is after that
     let plan = PlanName::new("api", "main")?;
@@ -244,7 +236,7 @@ pub async fn errors_say_what_is_missing<B: Backend + 'static>(ax: Ax<B>) -> anyh
     // a directory no project's repo holds finds no project
     let lonely = git::repo(&ax.dir.join("lonely"))?;
     let lonely = lonely.to_str().expect("the repo is a utf-8 path");
-    let (status, error): (_, ApiError) = ax.client.get(&paths::find_project(lonely)).await?;
+    let (status, error): (_, ApiError) = ax.client.get(&paths::find_project(lonely, &[])).await?;
     assert_eq!(
         (status, error.code),
         (StatusCode::NOT_FOUND, ErrorCode::NotFound)
@@ -272,10 +264,7 @@ pub async fn errors_say_what_is_missing<B: Backend + 'static>(ax: Ax<B>) -> anyh
         error.message
     );
     // a repo named relative to wherever the service started is refused
-    let relative = NewProject {
-        name: "rel".to_string(),
-        repo: "some/repo".into(),
-    };
+    let relative = NewProject::dir("rel", "some/repo");
     let (status, error): (_, ApiError) = ax.client.post(paths::PROJECTS, &relative).await?;
     assert_eq!(
         (status, error.code),
@@ -1788,5 +1777,246 @@ pub async fn reviews_answer_with_their_status<B: Backend + 'static>(
         let change: Change = serde_json::from_str(&event.data)?;
         assert_eq!(change, expected);
     }
+    Ok(())
+}
+
+/// A remote project's docs are its clone's at the commit last fetched: a doc pushed after it is
+/// unseen until a fetch, which tells each follower of the project's plans
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+pub async fn a_pushed_doc_change_appears_after_a_fetch<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a repo published to a bare remote, its design doc with one section
+    let before = "# Design\n\n## Old\n\nThe old words.\n";
+    let (bare, checkout) = git::published(&ax.dir.join("up"), &[("docs/design.md", before)])?;
+    let url = format!("file://{}", bare.display());
+    // registered by its URL: its branch the remote's default, its commit the one pushed
+    let new = NewProject::remote("up", url.clone(), None);
+    let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
+    assert_eq!(status, StatusCode::CREATED, "{added:?}");
+    let AddedProject::Added(project) = added else {
+        anyhow::bail!("registering a remote project: {added:?}");
+    };
+    let remote = project.remote.expect("a remote project names its remote");
+    let pushed = git::run(&checkout, &["rev-parse", "HEAD"])?;
+    assert_eq!(
+        (
+            remote.url.as_str(),
+            remote.branch.as_str(),
+            remote.commit.as_str()
+        ),
+        (url.as_str(), "main", pushed.as_str())
+    );
+    // a plan of it, and a node linking the doc's section
+    let plan = PlanName::new("up", "main")?;
+    let request = NewPlan {
+        name: "main".to_string(),
+    };
+    let (_, _): (_, AddedPlan) = ax.client.post(&paths::plans("up"), &request).await?;
+    let mut node = work("A", &[], 0);
+    node.spec.docs = vec!["docs/design.md#old".to_string()];
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&plan), &one(node, None))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    // its page shows the old words, and a section only a later commit has can't be linked
+    let page = format!("{}docs/design.html", paths::docs(&plan));
+    let html = ax.client.open(&page).await?.text().await?;
+    assert!(html.contains("The old words"), "{html}");
+    let mut later = work("B", &[], 1);
+    later.spec.docs = vec!["docs/design.md#new".to_string()];
+    let (status, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&plan), &one(later.clone(), None))
+        .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // a change pushed is unseen until a fetch
+    let after = "# Design\n\n## Old\n\nThe new words.\n\n## New\n\nA section of its own.\n";
+    git::write(&checkout, "docs/design.md", after)?;
+    git::run(&checkout, &["commit", "-qam", "revised"])?;
+    let tip = git::push(&checkout)?;
+    let html = ax.client.open(&page).await?.text().await?;
+    assert!(html.contains("The old words"), "{html}");
+    // fetched with a follower of the plan listening
+    let response = ax
+        .client
+        .open(&paths::changes(Some("up"), Some("main")))
+        .await?;
+    let mut events = Events::new(response);
+    let (status, fetched): (_, Fetched) = ax.client.post(&paths::fetch("up"), &()).await?;
+    let moved = Fetched::Moved {
+        from: pushed,
+        to: tip.clone(),
+    };
+    assert_eq!((status, fetched), (StatusCode::OK, moved));
+    // the follower hears its project's docs moved
+    let event = events.next().await?.expect("the stream sent the fetch");
+    assert_eq!(event.event, "project-fetched");
+    let change: Change = serde_json::from_str(&event.data)?;
+    let expected = Change::ProjectFetched {
+        project: "up".to_string(),
+        commit: tip.clone(),
+    };
+    assert_eq!(change, expected);
+    // the page shows the new words, the new section can be linked, and the project names its tip
+    let html = ax.client.open(&page).await?.text().await?;
+    assert!(html.contains("The new words"), "{html}");
+    assert!(!html.contains("The old words"), "{html}");
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&plan), &one(later, None))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    let (_, projects): (_, Vec<Project>) = ax.client.get(paths::PROJECTS).await?;
+    let up = projects
+        .into_iter()
+        .find(|project| project.name == "up")
+        .expect("the remote project is listed");
+    assert_eq!(up.remote.map(|remote| remote.commit), Some(tip.clone()));
+    // and fetching again finds its branch where it was
+    let (status, again): (_, Fetched) = ax.client.post(&paths::fetch("up"), &()).await?;
+    assert_eq!(
+        (status, again),
+        (StatusCode::OK, Fetched::Unchanged { commit: tip })
+    );
+    Ok(())
+}
+
+/// Registering a remote project answers with its status: a bad URL or request is refused, a
+/// remote that can't be fetched is its failure and leaves no clone, a repo or name taken is a
+/// conflict, and a clone of its repo finds it by its remotes
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+pub async fn remote_registrations_answer_with_their_status<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a repo published to a bare remote
+    let (bare, checkout) = git::published(&ax.dir.join("up"), &[("README.md", "# Up\n")])?;
+    let url = format!("file://{}", bare.display());
+    let clones = ax.dir.join("clones");
+    let count = |dir: &std::path::Path| std::fs::read_dir(dir).map(|dir| dir.count()).unwrap_or(0);
+    // a URL that leaks a secret, runs a command or is relative, a bad branch, or a request
+    // naming both a repo and a remote or neither, is a bad request
+    let mut both = NewProject::dir("both", ax.repo.clone());
+    both.remote = NewProject::remote("both", url.clone(), None).remote;
+    let neither = NewProject {
+        name: "neither".to_string(),
+        repo: None,
+        remote: None,
+    };
+    let bad = [
+        NewProject::remote("leak", "https://ada:hunter2@example.com/up.git", None),
+        NewProject::remote("token", "https://ghp_token@example.com/up.git", None),
+        NewProject::remote("ext", "ext::sh -c touch% /tmp/pwned", None),
+        NewProject::remote("rel", "../up.git", None),
+        NewProject::remote("branch", url.clone(), Some("-x".to_string())),
+        both,
+        neither,
+    ];
+    for new in bad {
+        let (status, error): (_, ApiError) = ax.client.post(paths::PROJECTS, &new).await?;
+        assert_eq!(
+            (status, error.code),
+            (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+            "{}: {}",
+            new.name,
+            error.message
+        );
+        assert!(
+            !error.message.contains("hunter2") && !error.message.contains("ghp_token"),
+            "{}",
+            error.message
+        );
+    }
+    // a remote that can't be reached, or a branch it doesn't have, is the remote's failure
+    let nowhere = format!("file://{}", ax.dir.join("nowhere.git").display());
+    let unfetched = [
+        NewProject::remote("gone", nowhere, None),
+        NewProject::remote("nobranch", url.clone(), Some("nope".to_string())),
+    ];
+    for new in unfetched {
+        let (status, error): (_, ApiError) = ax.client.post(paths::PROJECTS, &new).await?;
+        assert_eq!(
+            (status, error.code),
+            (StatusCode::BAD_GATEWAY, ErrorCode::FetchFailed),
+            "{}: {}",
+            new.name,
+            error.message
+        );
+    }
+    // and leaves no clone behind
+    assert_eq!(count(&clones), 0, "a failed registration left a clone");
+    // registered once, the same repo by another spelling is taken, and so is its name
+    let new = NewProject::remote("up", url.clone(), None);
+    let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
+    assert_eq!(status, StatusCode::CREATED, "{added:?}");
+    let spelled = format!("{}/", bare.display());
+    let again = NewProject::remote("again", spelled, None);
+    let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &again).await?;
+    let expected = AddedProject::RepoTaken {
+        project: "up".to_string(),
+    };
+    assert_eq!((status, taken), (StatusCode::CONFLICT, expected));
+    let (other, _) = git::published(&ax.dir.join("other"), &[("README.md", "# Other\n")])?;
+    let renamed = NewProject::remote("up", format!("file://{}", other.display()), None);
+    let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &renamed).await?;
+    assert_eq!(
+        (status, taken),
+        (StatusCode::CONFLICT, AddedProject::NameTaken)
+    );
+    // only the one registered keeps a clone
+    assert_eq!(count(&clones), 1, "a refused registration left a clone");
+    // a local project has nothing to fetch, and a project that isn't registered isn't found
+    let (status, local): (_, Fetched) = ax.client.post(&paths::fetch("reef"), &()).await?;
+    assert_eq!(
+        (status, local),
+        (StatusCode::UNPROCESSABLE_ENTITY, Fetched::Local)
+    );
+    let (status, error): (_, ApiError) = ax.client.post(&paths::fetch("missing"), &()).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
+    );
+    // a clone of its repo finds it, by any spelling of its remote, from a directory on the
+    // service's host or from one that isn't
+    let here = checkout.to_str().expect("the checkout is a utf-8 path");
+    let remotes = [bare.display().to_string()];
+    let (status, found): (_, Project) = ax.client.get(&paths::find_project(here, &remotes)).await?;
+    assert_eq!((status, found.name.as_str()), (StatusCode::OK, "up"));
+    let bare_name = url
+        .strip_suffix(".git")
+        .expect("the remote is a `.git` repo");
+    let elsewhere = [
+        format!("{bare_name}/"),
+        "https://example.com/other".to_string(),
+    ];
+    let (status, found): (_, Project) = ax
+        .client
+        .get(&paths::find_project("/on/another/host", &elsewhere[..1]))
+        .await?;
+    assert_eq!((status, found.name.as_str()), (StatusCode::OK, "up"));
+    // and a remote no project was registered by finds none, where a relative dir is refused
+    let (status, error): (_, ApiError) = ax
+        .client
+        .get(&paths::find_project("/on/another/host", &elsewhere[1..]))
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+    );
+    let (status, error): (_, ApiError) = ax
+        .client
+        .get(&paths::find_project("some/dir", &remotes))
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
     Ok(())
 }

@@ -10,7 +10,7 @@ use std::future::Future;
 
 use crate::schema::{
     CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -511,4 +511,19 @@ pub trait Backend: Send + Sync {
     ///
     /// * `row` - The row to delete, as it was read
     fn delete_token(&self, row: &TokenRow) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads every remote row, in project order
+    fn remotes(&self) -> impl Future<Output = anyhow::Result<Vec<RemoteRow>>> + Send;
+
+    /// Writes one remote row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_remote(
+        &self,
+        row: RemoteRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 }

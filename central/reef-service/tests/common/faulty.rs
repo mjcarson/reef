@@ -7,7 +7,7 @@
 use reef_model::PlanName;
 use reef_service::schema::{
     CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -54,6 +54,9 @@ pub struct Faults {
     refuse_comment_write: AtomicBool,
     /// Refuse the next write of a loop row as moved, as another writer having written would
     refuse_loop_write: AtomicBool,
+    /// Fail the next insert of a project row, before writing it, as a registration killed after
+    /// its remote's row would be
+    fail_project_insert: AtomicBool,
 }
 
 impl Faults {
@@ -124,6 +127,12 @@ impl Faults {
     /// the store's read and its write would be
     pub fn refuse_next_loop_write(&self) {
         self.refuse_loop_write.store(true, Ordering::SeqCst);
+    }
+
+    /// Fails the next insert of a project row, before writing it, as a registration killed
+    /// between its remote's row and its project's would leave it
+    pub fn fail_next_project_insert(&self) {
+        self.fail_project_insert.store(true, Ordering::SeqCst);
     }
 
     /// Lets `writes` writes of a queue row through, then fails the next before writing it
@@ -227,6 +236,14 @@ impl<B: Backend> Backend for Faulty<B> {
     ///
     /// * `row` - The project's row
     async fn insert_project(&self, row: ProjectRow) -> anyhow::Result<Written> {
+        // a fault armed for this write fails it before anything is written
+        if self
+            .faults
+            .fail_project_insert
+            .swap(false, Ordering::SeqCst)
+        {
+            anyhow::bail!("killed before registering project `{}`", row.name);
+        }
         self.inner.insert_project(row).await
     }
 
@@ -666,5 +683,20 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `row` - The row to delete, as it was read
     async fn delete_token(&self, row: &TokenRow) -> anyhow::Result<Written> {
         self.inner.delete_token(row).await
+    }
+
+    /// Reads every remote row
+    async fn remotes(&self) -> anyhow::Result<Vec<RemoteRow>> {
+        self.inner.remotes().await
+    }
+
+    /// Writes one remote row, if its condition holds
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_remote(&self, row: RemoteRow, expect: Expect) -> anyhow::Result<Written> {
+        self.inner.write_remote(row, expect).await
     }
 }

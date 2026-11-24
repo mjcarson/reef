@@ -9,12 +9,13 @@ use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
 use reef_model::{EntryState, Status, WaitsOn};
 use reef_render::{Layered, MemSource, ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
-    Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered, PageEdit,
-    PageEdited, PageWrite, Place, Puts, QueueEdit, Queued, Refusal, RevisionKey, Rewrite, StalePut,
+    AddedProject, Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
+    PageEdit, PageEdited, PageWrite, Place, Puts, QueueEdit, Queued, Refusal, RevisionKey, Rewrite,
+    StalePut,
 };
 use std::time::Duration;
 
-use super::{DESIGN, Sx, doc, group, member, work};
+use super::{DESIGN, Sx, doc, git, group, member, work};
 
 /// A problem at a node's name, as check gives a stored node's
 ///
@@ -1270,5 +1271,53 @@ pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Re
         matches!(&added, UserAdded::Added(bob) if !bob.admin),
         "{added:?}"
     );
+    Ok(())
+}
+
+/// A service given an interval fetches every remote project on it, so a pushed doc is read
+/// without anyone asking for a fetch
+///
+/// # Arguments
+///
+/// * `sx` - The service, its project and plan
+pub async fn remotes_are_fetched_on_their_interval<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    // a service that fetches every remote project often
+    let service = sx.service.fetching_every(Some(Duration::from_millis(100)));
+    // and a remote project of a published repo, with a plan
+    let before = "# Design\n\nThe old words.\n";
+    let (bare, checkout) = git::published(&sx.dir.join("up"), &[("docs/design.md", before)])?;
+    let url = format!("file://{}", bare.display());
+    let added = service.add_remote_project("up", &url, None).await?;
+    assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
+    let plan = PlanName::new("up", "main")?;
+    assert!(service.add_plan(&plan).await?);
+    // a change pushed, and no fetch asked for
+    git::write(&checkout, "docs/design.md", "# Design\n\nThe new words.\n")?;
+    git::run(&checkout, &["commit", "-qam", "revised"])?;
+    let tip = git::push(&checkout)?;
+    let page = service.doc_page(&plan, "docs/design.html").await?;
+    assert!(page.is_some_and(|page| page.contains("The old words")));
+    // read once the service has followed its remotes for a while
+    let seen = async {
+        loop {
+            let page = service.doc_page(&plan, "docs/design.html").await?;
+            if page.is_some_and(|page| page.contains("The new words")) {
+                return anyhow::Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::select! {
+        () = service.follow_remotes() => anyhow::bail!("following the remotes stopped"),
+        seen = tokio::time::timeout(Duration::from_secs(30), seen) => seen??,
+    }
+    // and the project names the commit it fetched
+    let up = service
+        .projects()
+        .await?
+        .into_iter()
+        .find(|project| project.name == "up")
+        .expect("the remote project is listed");
+    assert_eq!(up.remote.map(|remote| remote.commit), Some(tip));
     Ok(())
 }

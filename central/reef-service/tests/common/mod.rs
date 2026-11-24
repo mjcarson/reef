@@ -186,10 +186,11 @@ impl<B: Backend> Fx<B> {
 }
 
 impl<B: Backend> Fx<B> {
-    /// A service over this fixture's store, its project and plan kept
+    /// A service over this fixture's store, its project and plan kept, cloning remote projects
+    /// into the case's own directory
     pub fn serve(self) -> Sx<B> {
         Sx {
-            service: Service::new(self.store),
+            service: Service::new(self.store).cloning_into(Some(self.dir.join("clones"))),
             faults: self.faults,
             plan: self.plan,
             repo: self.repo,

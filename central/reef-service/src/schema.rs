@@ -1,6 +1,7 @@
 //! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
 //! its nodes' work records, each node's captured revisions and their files, each plan's
-//! comments, the terminal loops, and the users and the tokens they sign in with
+//! comments, the terminal loops, the users and the tokens they sign in with, and the git remotes
+//! projects were registered by
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
@@ -8,7 +9,8 @@
 //! revision, and a project's queue and its work records each sit in a partition of their own. A
 //! node's revisions sit in the node's partition, and each revision's files in the revision's.
 //! Every loop shares one constant partition, as projects do, sorted by the pane it feeds, and so
-//! do every user, sorted by name, and every token, sorted by its hash.
+//! do every user, sorted by name, every token, sorted by its hash, and every remote, sorted by its
+//! project's name.
 //! Sort keys are a single `String` there, so each table sorts by a name, an id, a path, a rank, a
 //! node's name within its project, or a revision's number padded to sort as a number does.
 //!
@@ -36,6 +38,9 @@ pub const USERS: &str = "users";
 
 /// The one partition every token is kept in
 pub const TOKENS: &str = "tokens";
+
+/// The one partition every project's git remote is kept in
+pub const REMOTES: &str = "remotes";
 
 /// A project: a name and the repo its plans describe
 #[derive(
@@ -455,6 +460,31 @@ pub struct TokenRow {
     pub record: String,
 }
 
+/// The git remote a project was registered by, and what the service last fetched of it
+///
+/// Every remote shares one partition, sorted by its project's name, as projects do. A project
+/// registered by its URL keeps its clone's path in its [`ProjectRow`], and this row beside it, so
+/// projects needed no new field. Its record is one JSON field, so what a remote keeps can change
+/// without changing this table.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct RemoteRow {
+    /// The listing partition, always [`REMOTES`]
+    #[shoal(partition)]
+    pub list: String,
+    /// The name of the project it was registered for, which sorts the listing
+    #[shoal(sort)]
+    pub project: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// The remote as JSON: its URL, its branch, the clone's path, and the commit last fetched
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -490,6 +520,8 @@ pub struct Reef {
     pub users: PersistentSortedTable<UserRow, FileSystem>,
     /// Every token, by its hash
     pub tokens: PersistentSortedTable<TokenRow, FileSystem>,
+    /// Every project's git remote, by project
+    pub remotes: PersistentSortedTable<RemoteRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -498,7 +530,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 12274714408389238397;
+    const SCHEMA_ID: u64 = 14793265169819812354;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -515,6 +547,7 @@ mod tests {
         ("DecisionRow", 18226743367225770895),
         ("UserRow", 15958980047123333854),
         ("TokenRow", 10275253647765591281),
+        ("RemoteRow", 9724887961174009599),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory
