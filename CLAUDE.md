@@ -3,7 +3,7 @@
 ## This repo's plan lives in central reef
 
 reef's own plan is `reef/central`, held by central reef: a `reef-serve` running as the systemd
-user unit `reef` (`central/README.md`, "Running it for real"). The reef skill
+user unit `reef` (`docs/src/internals/own-plan.md`). The reef skill
 (`.claude/skills/reef`) says how to keep it in step with the work. What only this repo adds:
 
 - **`plan/` is the plan's export.** It is generated, so never edit it by hand: the next export
@@ -18,4 +18,6 @@ user unit `reef` (`central/README.md`, "Running it for real"). The reef skill
   it over the central one, so pass `install` `--no-skill`, and don't run `skill` here.
 - **Run `reef` from the repo's root.** If it says nothing answers, start the server with
   `systemctl --user start reef`. A new binary is a reinstall and a restart
-  (`central/README.md`).
+  (`docs/src/internals/own-plan.md`).
+- **The docs are an mdbook in `docs/`.** Each page is a file under `docs/src`, listed in
+  `docs/src/SUMMARY.md`; `mdbook build docs` builds it. The READMEs only point into it.

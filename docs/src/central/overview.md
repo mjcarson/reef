@@ -1,18 +1,18 @@
-# Central reef
+# What central reef is
 
 Central reef keeps plans on a server instead of in a book's markdown. A team shares one server:
 every project's plans live there, every write is checked against the whole plan, and the CLI,
 Claude Code and a browser all read and write the same nodes.
 
-These pages are for the people who run it and the people who use it. The service's internals,
-its JSON API and its store are in [central/README.md](../../central/README.md).
+This part of the book is for the people who run it and the people who use it. The service's
+internals, its JSON API and its store are in [Internals](../internals/central.md).
 
-| Page | For | What it covers |
+| Chapter | For | What it covers |
 |---|---|---|
-| [Deploying](deploy.md) | whoever runs the server | building it, its config, TLS, a systemd unit, the first admin |
-| [Projects and plans](projects-and-plans.md) | anyone who starts a plan | registering a repo, making a plan, writing or importing its nodes |
-| [Using it](using.md) | everyone | the CLI from another host, signing in, the app, Claude Code |
-| [Administering](administering.md) | admins | users and tokens, upgrades, backups, what it can't do yet |
+| [Deploying](deploy/index.md) | whoever runs the server | building it, its config, TLS, a systemd unit, the first admin |
+| [Projects and plans](projects/index.md) | anyone who starts a plan | registering a repo, making a plan, writing or importing its nodes |
+| [Using it](using/index.md) | everyone | the CLI from another host, signing in, the app, Claude Code |
+| [Administering](admin/index.md) | admins | users and tokens, upgrades, backups, what it can't do yet |
 
 ## How it fits together
 
@@ -44,10 +44,10 @@ its JSON API and its store are in [central/README.md](../../central/README.md).
 
 - **One person on one machine:** reef-serve as a systemd user unit on loopback, with no config
   and no sign-in. This is how reef's own plan runs. See
-  [One person on localhost](deploy.md#one-person-on-localhost).
+  [One person on localhost](deploy/localhost.md).
 - **A team server:** reef-app as a system service under an account of its own, serving other
-  hosts over TLS, with sign-in required and projects registered by their git URLs. The rest of
-  [Deploying](deploy.md) walks through it.
+  hosts over TLS, with sign-in required and projects registered by their git URLs. [Deploying](deploy/index.md)
+  walks through it.
 
 ## Where things are
 

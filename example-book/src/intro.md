@@ -2,7 +2,7 @@
 
 This is reef's example, and its proof of concept: the scans plan from
 shoal's `ScanSupport` branch, migrated to reef as
-`docs/migrating-shoal.md` proposes. Shoal's pages were copied in unchanged, with three exceptions:
+`docs/src/appendix/migrating-shoal.md` proposes. Shoal's pages were copied in unchanged, with three exceptions:
 
 - **The plan's nodes** in `future-work/scans/plan/` were written by
   `mdbook-reef import` from the *whole plan* mermaid diagram on
