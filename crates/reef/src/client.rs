@@ -6,6 +6,10 @@
 //! that is taken, is an answer, not an error. When nothing answers at the service's address, the
 //! error says where the CLI looked, which key set it, and how to start the service.
 //!
+//! The service is called at `[api] url` if the config names one, over TLS to another host,
+//! trusting the system's roots and `[api] ca`'s, else at `[api] address` on this host, over plain
+//! HTTP and past any proxy a shell has set.
+//!
 //! Every request sends the token kept for the service, if one is, as `Authorization: Bearer`,
 //! read from where [`credentials`](crate::credentials) says for each request. A service that asks
 //! the caller to sign in answers 401, which comes back as an `unauthorized` error saying to run
@@ -22,7 +26,6 @@ use reef_api::{
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
@@ -38,9 +41,7 @@ pub struct Client {
     http: reqwest::Client,
     /// The service's root, such as `http://127.0.0.1:12180`
     base: String,
-    /// The address the service is called at
-    address: SocketAddr,
-    /// Where that address came from, for a message that says what to change
+    /// Where that root came from, for a message that says what to change
     origin: String,
     /// Where the token it signs in with comes from
     held: Held,
@@ -53,24 +54,38 @@ impl Client {
     ///
     /// * `conf` - The CLI's part of reef's config
     pub fn new(conf: &Conf) -> anyhow::Result<Client> {
-        // the service is on this host, so no proxy a shell has set is asked to reach it
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .connect_timeout(CONNECT_WAIT)
-            .build()?;
-        let address = conf.api.address;
-        // a config that set the address is named, else the key that would change the default
-        let origin = match conf.source {
-            Some(_) => format!("set by {}", conf.key("api.address")),
-            None => format!(
-                "reef's default; set {} to change it",
-                conf.key("api.address")
-            ),
+        // the root `url` names, else this host's address over plain HTTP
+        let (base, key) = match &conf.api.url {
+            Some(url) => {
+                let base = root(url).map_err(|error| {
+                    anyhow::anyhow!("{} is `{url}`, {error}", conf.key("api.url"))
+                })?;
+                (base, "api.url")
+            }
+            None => (format!("http://{}", conf.api.address), "api.address"),
         };
+        // a config that set the root is named, else the key that would change the default
+        let origin = match conf.source {
+            Some(_) => format!("set by {}", conf.key(key)),
+            None => format!("reef's default; set {} to change it", conf.key(key)),
+        };
+        let mut http = reqwest::Client::builder().connect_timeout(CONNECT_WAIT);
+        // a service on this host is reached past any proxy a shell has set
+        if conf.api.url.is_none() {
+            http = http.no_proxy();
+        }
+        // the roots its certificate is trusted by, beside the system's own
+        if let Some(ca) = &conf.api.ca {
+            let roots = roots(ca).map_err(|error| {
+                anyhow::anyhow!("{} is {}: {error}", conf.key("api.ca"), ca.display())
+            })?;
+            for root in roots {
+                http = http.add_root_certificate(root);
+            }
+        }
         Ok(Client {
-            http,
-            base: format!("http://{address}"),
-            address,
+            http: http.build()?,
+            base,
             origin,
             held: credentials::held(conf.credentials.as_deref()),
         })
@@ -79,11 +94,6 @@ impl Client {
     /// The service's root, such as `http://127.0.0.1:12180`, which a login is kept by
     pub fn base(&self) -> &str {
         &self.base
-    }
-
-    /// The address the service is called at
-    pub fn address(&self) -> std::net::SocketAddr {
-        self.address
     }
 
     /// Where the token this client signs in with comes from
@@ -781,7 +791,7 @@ impl Client {
         // a service asking to sign in says how, but a wrong name or password says that
         if status == 401 && path != paths::TOKENS {
             let held = token.is_some().then_some(&self.held);
-            return Err(signed_out(&self.address, held).into());
+            return Err(signed_out(&self.base, held).into());
         }
         decode(status, path, &text)
     }
@@ -792,17 +802,81 @@ impl Client {
     ///
     /// * `error` - What the HTTP client failed with
     fn unreachable(&self, error: reqwest::Error) -> anyhow::Error {
-        // nothing listening is the service not running, which only starting it fixes
-        if error.is_connect() {
+        // every cause, since the outermost says only that the request failed
+        let causes =
+            std::iter::successors(std::error::Error::source(&error), |cause| cause.source())
+                .collect::<Vec<_>>();
+        // a connection refused is nothing listening: the service not running, which only
+        // starting it fixes
+        let refused = causes.iter().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::ConnectionRefused)
+        });
+        if error.is_connect() && refused {
             return anyhow::anyhow!(
                 "reef's service isn't running at {} ({}): start it with `reef-serve`",
-                self.address,
+                self.base,
                 self.origin
             );
         }
-        // anything else, such as a connection dropped partway, as it came
-        anyhow::anyhow!("calling reef's service at {}: {error}", self.address)
+        // anything else, such as a certificate refused, a name that resolves nowhere or a
+        // connection dropped partway, with every cause
+        let causes = causes.iter().map(ToString::to_string).collect::<Vec<_>>();
+        match causes.is_empty() {
+            true => anyhow::anyhow!("calling reef's service at {}: {error}", self.base),
+            false => anyhow::anyhow!(
+                "calling reef's service at {}: {error}: {}",
+                self.base,
+                causes.join(": ")
+            ),
+        }
     }
+}
+
+/// A service's root as `[api] url` names it: http or https, a host and maybe a port, and nothing
+/// after, with no `/` at its end, so one root is kept by one spelling of it
+///
+/// # Arguments
+///
+/// * `url` - The URL the config names
+fn root(url: &str) -> Result<String, String> {
+    // a URL at all, its host lowercased and a scheme's own port dropped
+    let parsed =
+        reqwest::Url::parse(url).map_err(|error| format!("which is not a URL: {error}"))?;
+    // the two schemes the service speaks
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "whose scheme `{}` is not http or https",
+            parsed.scheme()
+        ));
+    }
+    // somewhere to call
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("which names no host".to_string());
+    }
+    // a login, not a URL, says who is calling
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("which carries a user: sign in with `reef login` instead".to_string());
+    }
+    // the root alone, since every route's path is added to it
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("which is not a root: name the scheme, host and port alone".to_string());
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// The roots a PEM file holds, which the service's certificate is trusted by
+///
+/// # Arguments
+///
+/// * `path` - The PEM file
+fn roots(path: &Path) -> anyhow::Result<Vec<reqwest::Certificate>> {
+    // every certificate in it, and at least one
+    let pem = std::fs::read(path)?;
+    let roots = reqwest::Certificate::from_pem_bundle(&pem)?;
+    anyhow::ensure!(!roots.is_empty(), "it holds no PEM certificate");
+    Ok(roots)
 }
 
 /// Reads an answer's body by its status: a success as the route's type, a failure as an
@@ -839,9 +913,9 @@ pub fn decode<T: DeserializeOwned>(status: u16, path: &str, text: &str) -> anyho
 ///
 /// # Arguments
 ///
-/// * `address` - The address the service is called at
+/// * `address` - Where the service is called, its root
 /// * `held` - Where the token sent came from, or `None` if none was sent
-pub fn signed_out(address: &std::net::SocketAddr, held: Option<&Held>) -> ApiError {
+pub fn signed_out(address: &str, held: Option<&Held>) -> ApiError {
     // no token is a login to make, and a refused one a login to make again
     let message = match held {
         None => format!(
@@ -875,7 +949,7 @@ pub fn is_code(error: &anyhow::Error, code: ErrorCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, decode, is_code, signed_out};
+    use super::{Client, decode, is_code, root, signed_out};
     use crate::conf::Conf;
     use crate::credentials::Held;
     use reef_api::{AddedProject, ErrorCode, Project};
@@ -884,9 +958,9 @@ mod tests {
     /// A 401 says to log in, naming the address and where a refused token came from
     #[test]
     fn unauthorized_says_to_log_in() {
-        let address = "127.0.0.1:12180".parse().unwrap();
+        let address = "http://127.0.0.1:12180";
         // no token sent: log in
-        let none = signed_out(&address, None);
+        let none = signed_out(address, None);
         assert_eq!(none.code, ErrorCode::Unauthorized);
         assert!(none.message.contains("127.0.0.1:12180"), "{}", none.message);
         assert!(
@@ -896,7 +970,7 @@ mod tests {
         );
         // a kept token refused: log in again, naming the file
         let file = Held::File(PathBuf::from("/home/ada/.config/reef/credentials.toml"));
-        let refused = signed_out(&address, Some(&file));
+        let refused = signed_out(address, Some(&file));
         assert!(
             refused.message.contains("credentials.toml"),
             "{}",
@@ -904,7 +978,7 @@ mod tests {
         );
         assert!(refused.message.contains("again"), "{}", refused.message);
         // a token given outright: the variable, never the token
-        let outright = signed_out(&address, Some(&Held::Token("reef_secret".into())));
+        let outright = signed_out(address, Some(&Held::Token("reef_secret".into())));
         assert!(
             outright.message.contains("$REEF_TOKEN"),
             "{}",
@@ -949,6 +1023,60 @@ mod tests {
         let old = decode::<AddedProject>(404, "/w", "").expect_err("nothing read");
         assert!(old.to_string().contains("no route /w"), "{old}");
         assert!(old.to_string().contains("restart it"), "{old}");
+    }
+
+    /// A root is read as one spelling of it, and a URL that isn't one is refused
+    #[test]
+    fn url_names_a_root() {
+        // a trailing `/`, a capital, or https's own port are one root
+        for url in ["https://Reef.Example:12443/", "https://reef.example:12443"] {
+            assert_eq!(root(url).unwrap(), "https://reef.example:12443");
+        }
+        assert_eq!(
+            root("https://reef.example:443").unwrap(),
+            "https://reef.example"
+        );
+        assert_eq!(
+            root("http://127.0.0.1:12180").unwrap(),
+            "http://127.0.0.1:12180"
+        );
+        // another scheme, a path, a query, a user or no URL at all is refused
+        for bad in [
+            "ftp://reef.example",
+            "https://reef.example/api",
+            "https://reef.example/?a=1",
+            "https://ada:pw@reef.example",
+            "reef.example:12443",
+        ] {
+            assert!(root(bad).is_err(), "`{bad}` was read as a root");
+        }
+    }
+
+    /// A client named by `url` calls it, and one whose `ca` can't be read says which key
+    #[test]
+    fn url_and_ca_build_the_client() {
+        // the root `url` names wins over the address
+        let mut conf = Conf::default();
+        conf.api.url = Some("https://reef.example:12443/".to_string());
+        let client = Client::new(&conf).unwrap();
+        assert_eq!(client.base(), "https://reef.example:12443");
+        // a URL that isn't a root names the key
+        conf.api.url = Some("https://reef.example/api".to_string());
+        let error = Client::new(&conf)
+            .err()
+            .expect("a path was taken for a root");
+        assert!(error.to_string().contains("`api.url`"), "{error}");
+        // and a root file that isn't there, or holds no certificate, names its key
+        conf.api.url = None;
+        conf.api.ca = Some(PathBuf::from("/nowhere/reef-ca.pem"));
+        let error = Client::new(&conf).err().expect("a missing root was read");
+        assert!(error.to_string().contains("`api.ca`"), "{error}");
+        let empty = std::env::temp_dir().join(format!("reef-ca-{}.pem", std::process::id()));
+        std::fs::write(&empty, "not a certificate\n").unwrap();
+        conf.api.ca = Some(empty.clone());
+        let error = Client::new(&conf).err().expect("an empty root was read");
+        assert!(error.to_string().contains("no PEM certificate"), "{error}");
+        std::fs::remove_file(&empty).unwrap();
     }
 
     /// With nothing listening, the error names the address, where it came from, and the fix

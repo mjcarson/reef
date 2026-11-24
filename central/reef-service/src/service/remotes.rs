@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::time::MissedTickBehavior;
 use tracing::instrument;
 
-use super::Service;
+use super::{Asker, Service};
 use crate::backend::Backend;
 use crate::remote::{self, BadRemote};
 use crate::store::{KeptRemote, NotRegistered};
@@ -51,6 +51,38 @@ impl<B: Backend> Service<B> {
         self
     }
 
+    /// Clones remote projects from these hosts alone, or from any if there are none
+    ///
+    /// # Arguments
+    ///
+    /// * `hosts` - The hosts a remote may name, in any case, or none for any host
+    pub fn cloning_from(mut self, hosts: Vec<String>) -> Self {
+        self.hosts = hosts.iter().map(|host| host.to_ascii_lowercase()).collect();
+        self
+    }
+
+    /// Checks a remote's host is one this service clones from
+    ///
+    /// A URL with no host, a path on this host, is judged by who asks instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `url` - The remote's URL, checked already
+    fn judge_host(&self, url: &gix::Url) -> Result<(), BadRemote> {
+        // any host, if none is named, and a path on this host has none
+        let Some(host) = url.host() else {
+            return Ok(());
+        };
+        if self.hosts.is_empty() || self.hosts.contains(&host.to_ascii_lowercase()) {
+            return Ok(());
+        }
+        Err(BadRemote(format!(
+            "this service clones remote projects from {} alone, and `{host}` is not one: ask its \
+             admin to add it to `remotes.hosts` in its config",
+            self.hosts.join(", ")
+        )))
+    }
+
     /// Registers a project by its git remote, cloning the branch whose docs it reads
     ///
     /// Refuses a name another project has, or a repo another project was registered by,
@@ -61,16 +93,26 @@ impl<B: Backend> Service<B> {
     /// * `name` - The project's name
     /// * `url` - The URL the service clones and fetches
     /// * `branch` - The branch whose docs it reads, or `None` for the remote's default
+    /// * `asker` - Who asks, since a path on this host is an admin's to name once callers sign in
     #[instrument(name = "Service::add_remote_project", skip_all, err(Debug))]
     pub async fn add_remote_project(
         &self,
         name: &str,
         url: &str,
         branch: Option<&str>,
+        asker: Asker<'_>,
     ) -> anyhow::Result<AddedProject> {
         // a name and a URL every project keeps to, and somewhere to clone it
         PlanName::new(name, "plan")?;
-        remote::checked(url)?;
+        let checked = remote::checked(url)?;
+        // a path on this host is an admin's to name, and another host one this service clones from
+        match checked.scheme {
+            gix::url::Scheme::File => {
+                self.judge_on_host(asker, "register a project by a path on its host")
+                    .await?;
+            }
+            _ => self.judge_host(&checked)?,
+        }
         let Some(clones) = &self.clones else {
             return Err(BadRemote(
                 "this service keeps no clones of remote projects: set `remotes.clones` in its \

@@ -1,15 +1,21 @@
 //! The part of reef's config the CLI reads: where the JSON API is served
 //!
 //! The CLI reads the service's own config file, found by `reef_api::config`, so the two meet at
-//! the address one file names. It reads `[api] address` alone and ignores every other key, since
-//! the service is what checks the rest of the file. The token it signs in with is kept apart, in
-//! a credentials file of the user's own ([`credentials`](crate::credentials)), which
-//! `--credentials` can name.
+//! the address one file names. It reads `[api]`'s `address`, `url` and `ca` alone and ignores
+//! every other key, since the service is what checks the rest of the file. On the service's own
+//! host it calls `address`, over plain HTTP; on another host, `url` names the service, over TLS,
+//! and `ca` a root its certificate is trusted by beside the system's. The token it signs in with
+//! is kept apart, in a credentials file of the user's own ([`credentials`](crate::credentials)),
+//! which `--credentials` can name.
 //!
 //! ```toml
 //! [api]
-//! # where the JSON API listens, and so where the CLI calls it
+//! # where the JSON API listens on this host, and so where the CLI calls it
 //! address = "127.0.0.1:12180"
+//! # or, on another host, the service's root, which wins over `address`
+//! url = "https://reef.example:12443"
+//! # a PEM root to trust the service's certificate by, beside the system's own
+//! ca = "/home/me/.config/reef/ca.pem"
 //! ```
 
 use serde::Deserialize;
@@ -35,8 +41,12 @@ pub struct Conf {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ApiSettings {
-    /// The address the service listens on
+    /// The address the service listens on over plain HTTP, on this host
     pub address: SocketAddr,
+    /// The service's root, such as `https://reef.example:12443`, which wins over `address`
+    pub url: Option<String>,
+    /// A PEM root the service's certificate is trusted by, beside the system's own
+    pub ca: Option<PathBuf>,
 }
 
 impl Default for ApiSettings {
@@ -46,6 +56,8 @@ impl Default for ApiSettings {
             address: reef_api::DEFAULT_ADDRESS
                 .parse()
                 .expect("reef-api's default address is an address"),
+            url: None,
+            ca: None,
         }
     }
 }
@@ -109,6 +121,20 @@ mod tests {
         // the CLI keeps the API's address alone
         assert_eq!(conf.api.address.to_string(), "[::1]:9000");
         assert_eq!(conf.source, None);
+    }
+
+    /// A service on another host is named by its root, and a root to trust its certificate by
+    #[test]
+    fn reads_the_url_and_ca() {
+        // the service's keys beside the CLI's, as one file holds them on the service's host
+        let text = "[api]\naddress = \"127.0.0.1:12180\"\nurl = \"https://reef.example:12443\"\n\
+                    ca = \"/etc/reef/ca.pem\"\n\n[api.tls]\naddress = \"0.0.0.0:12443\"\n";
+        let conf = Conf::parse(text).expect("the config parses");
+        assert_eq!(conf.api.url.as_deref(), Some("https://reef.example:12443"));
+        assert_eq!(conf.api.ca, Some("/etc/reef/ca.pem".into()));
+        // and neither said is the address alone
+        let conf = Conf::parse("").expect("an empty config parses");
+        assert_eq!((conf.api.url, conf.api.ca), (None, None));
     }
 
     /// A config that says nothing of the API leaves it at the service's default

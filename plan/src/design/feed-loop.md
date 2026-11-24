@@ -529,8 +529,9 @@ the app, and the app's answers back ([M9](../milestones/m9.md)).
     memory and on disk, as Claude Code keeps them.
 - **Answering is approving.** Whoever can answer a session's prompts can let its tools run on the
   runner's machine, so sign-in ([C48](../milestones/m10.md)) guards these routes as it guards every other,
-  once reef's config requires it. The service listens on loopback only until it serves over TLS
-  ([C51](../milestones/m10.md)).
+  once reef's config requires it, and refuses a write from a page of another origin. The
+  service serves plain HTTP on loopback alone, and other hosts over TLS only with sign-in
+  required ([C51](../milestones/m10.md)).
 
 ### What X5 found
 

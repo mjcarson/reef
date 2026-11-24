@@ -2,7 +2,9 @@
 
 Each step checks one of M4's to M10's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
 it saw; the script exits 1 if any failed. C48's sign-in runs last, on a server of its own that asks
-every caller to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`).
+every caller to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`), then
+C51's, on another that serves over TLS beside it (127.0.0.1:12192 and 12193, under `origin`), with
+a page of another origin served from 127.0.0.1:12194.
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -21,12 +23,15 @@ then, with Playwright installed:
 plan's figures are taken on. `--only` runs the checks whose names start with one of those given.
 """
 
+import functools
+import http.server
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -56,6 +61,11 @@ BOOK = {}
 SIGN_IN_WORK = WORK / "sign-in"
 SIGN_IN_URL = "http://127.0.0.1:12191"
 PASSWORD = "correct horse battery"
+# C51's server, over plain HTTP and TLS, and the page of another origin that posts to it
+ORIGIN_WORK = WORK / "origin"
+ORIGIN_URL = "http://127.0.0.1:12192"
+ORIGIN_TLS = "https://127.0.0.1:12193"
+ELSEWHERE = "http://127.0.0.1:12194"
 
 
 def check(label, ok, seen):
@@ -1526,6 +1536,121 @@ def c48_a_browser_signs_in_and_reaches_its_plan(browser):
         stop(server)
 
 
+def origin_reef(*args):
+    """Runs the reef CLI against C51's server, over its loopback port, with credentials of its own."""
+    return run(REEF / "target/debug/reef", "--conf", ORIGIN_WORK / "reef.toml",
+               "--credentials", ORIGIN_WORK / "credentials.toml", *args, cwd=ORIGIN_WORK / "repo")
+
+
+class QuietPages(http.server.SimpleHTTPRequestHandler):
+    """Serves the page of another origin, saying nothing of each request."""
+
+    def log_message(self, format, *args):
+        """Logs nothing, so the check's output stays its own."""
+
+
+ELSEWHERE_PAGE = """<!doctype html>
+<title>Another origin</title>
+<form id="out" method="post" action="{url}/sign-out"><button>Sign out</button></form>
+<form id="queue" method="post" action="{url}/app/queue" enctype="text/plain">
+<input name='{{"project":"check","plan":"first","' value='"}}'><button>Queue</button></form>
+"""
+
+
+def c51_a_cross_origin_write_is_refused(browser):
+    """C51: a page on another port of this host posts with the cookie and is refused, while the app's own writes
+    go through, and over TLS the app is reached with a Secure cookie."""
+    # a server of its own, over plain HTTP and TLS, asking every caller to sign in, with a user and a plan
+    if ORIGIN_WORK.exists():
+        shutil.rmtree(ORIGIN_WORK)
+    repo = ORIGIN_WORK / "repo"
+    repo.mkdir(parents=True)
+    run("git", "-C", repo, "-c", "init.defaultBranch=main", "init", "-q")
+    run("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+        "-keyout", ORIGIN_WORK / "key.pem", "-out", ORIGIN_WORK / "cert.pem", "-days", "1", "-subj", "/CN=localhost",
+        "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
+    (ORIGIN_WORK / "reef.toml").write_text(
+        f'[api]\naddress = "{ORIGIN_URL.removeprefix("http://")}"\n\n'
+        f'[api.tls]\naddress = "{ORIGIN_TLS.removeprefix("https://")}"\n'
+        f'cert = "{ORIGIN_WORK / "cert.pem"}"\nkey = "{ORIGIN_WORK / "key.pem"}"\n\n'
+        f'[shoal]\ndata = "{ORIGIN_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
+    )
+    server = start(ORIGIN_WORK / "reef.toml", ORIGIN_URL, ORIGIN_WORK / "server.log")
+    # the page of another origin, on another port of the same host, so the same site
+    pages = ORIGIN_WORK / "elsewhere"
+    pages.mkdir()
+    (pages / "index.html").write_text(ELSEWHERE_PAGE.format(url=ORIGIN_URL))
+    handler = functools.partial(QuietPages, directory=str(pages))
+    elsewhere = http.server.ThreadingHTTPServer(("127.0.0.1", int(ELSEWHERE.rsplit(":", 1)[1])), handler)
+    threading.Thread(target=elsewhere.serve_forever, daemon=True).start()
+    try:
+        password = ORIGIN_WORK / "password"
+        password.write_text(PASSWORD + "\n")
+        origin_reef("user", "add", "ada", "--password-file", password)
+        origin_reef("login", "--user", "ada", "--password-file", password)
+        origin_reef("project", "add", "check", "--repo", repo)
+        origin_reef("plan", "new", "first")
+        first = ORIGIN_WORK / "a1.yaml"
+        first.write_text(node_yaml("A1", "A1 The first"))
+        origin_reef("node", "put", first)
+
+        def signed_in(context, root):
+            """Signs a context in on a root's sign-in page, and waits for its plan to draw."""
+            page = context.new_page()
+            page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+            page.goto(root + "/plans/check/first")
+            page.fill("#name", "ada")
+            page.fill("#password", PASSWORD)
+            page.click("button[type=submit]")
+            page.wait_for_selector(".reef-app-plan-name", timeout=20000)
+            wait_drawn(page)
+            return page
+
+        def still_signed_in(page):
+            """Whether the page's cookie still signs ada in, as the app's own call says."""
+            return page.evaluate("() => fetch('/app/me').then(r => r.json()).then(me => me.user && me.user.name)")
+
+        # over plain HTTP: signed in, then the other origin's forms post with the cookie
+        context = browser.new_context(viewport={"width": 1400, "height": 900})
+        page = signed_in(context, ORIGIN_URL)
+        cookie = next(c for c in context.cookies() if c["name"] == "reef_sign_in")
+        refused = {}
+        for form in ["out", "queue"]:
+            page.goto(ELSEWHERE + "/")
+            with page.expect_navigation() as answer:
+                page.click(f"#{form} button")
+            refused[form] = (answer.value.status, "its own pages" in page.content())
+        page.goto(ORIGIN_URL + "/plans/check/first")
+        page.wait_for_selector(".reef-app-plan-name", timeout=20000)
+        kept = still_signed_in(page)
+        # the app's own page writes: a put from its own fetch, and its own Sign out
+        puts = {"puts": [{"node": {"spec": {"id": "A2", "title": "A2 From the page", "description": {
+            "why": "Without A2, something is missing.", "what": "With A2, it is there."}},
+            "body": "# A2\n", "order": 1}, "read": None}]}
+        own = page.evaluate("""(puts) => fetch('/api/v1/projects/check/plans/first/nodes', {method: 'POST',
+            headers: {'content-type': 'application/json'}, body: JSON.stringify(puts)}).then(r => r.status)""", puts)
+        page.screenshot(path=str(SHOTS / "reef-app-cross-origin.png"))
+        page.click(".reef-app-user button[type=submit]")
+        page.wait_for_url("**/sign-in**")
+        signed_out = page.url.removeprefix(ORIGIN_URL)
+        context.close()
+        # over TLS: the app reached on its other listener, its cookie Secure
+        secure = browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
+        page = signed_in(secure, ORIGIN_TLS)
+        tls_cookie = next(c for c in secure.cookies() if c["name"] == "reef_sign_in")
+        tls_name = page.inner_text(".reef-app-user-name")
+        page.screenshot(path=str(SHOTS / "reef-app-over-tls.png"))
+        secure.close()
+        check("C51 a cross-origin write is refused, and the same page's own writes go through",
+              refused == {"out": (403, True), "queue": (403, True)} and kept == "ada" and own == 200
+              and signed_out == "/sign-in" and not cookie["secure"] and tls_cookie["secure"] and tls_name == "ada",
+              {"refused": refused, "still signed in": kept, "own put": own, "signed out": signed_out,
+               "plain cookie secure": cookie["secure"], "tls cookie secure": tls_cookie["secure"], "over tls": tls_name})
+    finally:
+        elsewhere.shutdown()
+        stop(server)
+
+
 def main():
     setup()
     server = start()
@@ -1574,6 +1699,8 @@ def main():
             stop(server)
             if not ONLY or any("c48_a_browser_signs_in_and_reaches_its_plan".startswith(name) for name in ONLY):
                 c48_a_browser_signs_in_and_reaches_its_plan(browser)
+            if not ONLY or any("c51_a_cross_origin_write_is_refused".startswith(name) for name in ONLY):
+                c51_a_cross_origin_write_is_refused(browser)
             browser.close()
     finally:
         stop(server)

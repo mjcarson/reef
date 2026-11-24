@@ -62,6 +62,37 @@ impl Cx {
         Cx::over(ax)
     }
 
+    /// Serves a fresh twin that asks every caller to sign in over TLS beside its loopback port,
+    /// and writes a config naming its TLS root and the CA it is trusted by, as another host's
+    ///
+    /// # Arguments
+    ///
+    /// * `case` - The case's name, which names its directory
+    async fn over_tls(case: &str) -> anyhow::Result<Cx> {
+        // as `signing_in`, over TLS too
+        let ax = common::Fx::memory(&format!("cli-{case}"))
+            .await?
+            .api_over_tls()
+            .await?;
+        let tls = ax.tls.as_ref().expect("the fixture serves over TLS");
+        // the root another host calls, by the name its certificate names, and the CA's root
+        let conf = ax.dir.join("reef.toml");
+        std::fs::write(
+            &conf,
+            format!(
+                "[api]\nurl = \"https://localhost:{}/\"\nca = \"{}\"\n",
+                tls.address.port(),
+                tls.minted.ca.display()
+            ),
+        )?;
+        let credentials = ax.dir.join("home/reef/credentials.toml");
+        Ok(Cx {
+            ax,
+            conf,
+            credentials,
+        })
+    }
+
     /// Writes a config naming a served twin's address, beside a credentials file of the case's
     /// own
     ///
@@ -271,6 +302,75 @@ async fn login_lets_the_cli_write_until_logout() -> anyhow::Result<()> {
     assert!(refused.contains("run `reef login`"), "{refused}");
     let again = cx.reef(&repo, &["logout"]).await?;
     assert!(again.contains("not logged in"), "{again}");
+    Ok(())
+}
+
+/// reef serves over TLS beside its loopback port, and the CLI given `[api] url` and `ca` signs in
+/// and writes over it, refusing a certificate it has no root for
+#[tokio::test]
+async fn the_cli_signs_in_and_writes_over_tls() -> anyhow::Result<()> {
+    let cx = Cx::over_tls("tls").await?;
+    let repo = cx.ax.repo.clone();
+    let port = cx.ax.tls.as_ref().expect("served over TLS").address.port();
+    let root = format!("https://localhost:{port}");
+    let password = cx.ax.dir.join("password");
+    std::fs::write(&password, "correct horse battery\n")?;
+    let password = password.to_str().expect("the case's dir is utf-8");
+    // the first user, over TLS from this host, is an admin
+    let added = cx
+        .reef(&repo, &["user", "add", "ada", "--password-file", password])
+        .await?;
+    assert!(added.contains("added `ada`, an admin"), "{added}");
+    // nobody logged in is told where, by the root the config names
+    let node = cx.yaml("c1.yaml", &work("C1", &[]))?;
+    let (_, refused) = cx.failing(&repo, &["node", "put", &node]).await?;
+    assert!(refused.contains(&root), "{refused}");
+    assert!(refused.contains("run `reef login`"), "{refused}");
+    // a login keeps its token by that root, with no `/` at its end
+    let login = cx
+        .reef(
+            &repo,
+            &["login", "--user", "ada", "--password-file", password],
+        )
+        .await?;
+    assert!(login.contains(&root), "{login}");
+    let kept = std::fs::read_to_string(&cx.credentials)?;
+    assert!(kept.contains(&format!("\"{root}\"")), "{kept}");
+    // so the CLI finds the project, writes over TLS, and reads it back
+    let put = cx.reef(&repo, &["node", "put", &node]).await?;
+    assert!(put.contains("C1"), "{put}");
+    let got = cx.reef(&repo, &["node", "get", "C1"]).await?;
+    assert!(got.contains("C1 Some work"), "{got}");
+    // and the loopback port still answers this host, over plain HTTP
+    let me = cx
+        .ax
+        .client
+        .get::<reef_api::Me>(reef_api::paths::ME)
+        .await?;
+    assert_eq!(me.0, reqwest::StatusCode::OK);
+    // a CLI with no root for the certificate refuses it, saying so rather than that nothing runs
+    let untrusting = cx.ax.dir.join("untrusting.toml");
+    std::fs::write(&untrusting, format!("[api]\nurl = \"{root}\"\n"))?;
+    let credentials = cx
+        .credentials
+        .to_str()
+        .expect("the credentials are a utf-8 path");
+    let untrusting = untrusting.to_str().expect("the case's dir is utf-8");
+    let line = [
+        "reef",
+        "--conf",
+        untrusting,
+        "--credentials",
+        credentials,
+        "whoami",
+    ];
+    let mut out = Vec::new();
+    let error = reef::run(reef::Cli::from_args(line)?, &repo, &mut out)
+        .await
+        .expect_err("a certificate no root signs was trusted");
+    let message = format!("{error:#}");
+    assert!(message.contains("certificate"), "{message}");
+    assert!(!message.contains("isn't running"), "{message}");
     Ok(())
 }
 

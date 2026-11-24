@@ -3,7 +3,7 @@
 //! The config is a TOML file, read from `$REEF_CONFIG`, else `$XDG_CONFIG_HOME/reef/config.toml`,
 //! else `~/.config/reef/config.toml`. A default path with no file there means every default; a
 //! path named by `$REEF_CONFIG` or by a caller must exist. `reef_api::config` finds it, so the
-//! CLI, which reads `[api] address` alone, finds the same file.
+//! CLI, which reads `[api]`'s `address`, `url` and `ca` alone, finds the same file.
 //!
 //! ```toml
 //! [shoal]
@@ -17,8 +17,19 @@
 //! memory = "256MiB"
 //!
 //! [api]
-//! # where the JSON API listens: a loopback address until reef serves over TLS (C51)
+//! # where the JSON API listens over plain HTTP: a loopback address, for this host alone
 //! address = "127.0.0.1:12180"
+//! # where a client on another host reaches the service, and a root it trusts for its cert; the
+//! # CLI reads these two, and the service leaves them be
+//! url = "https://reef.example:12443"
+//! ca = "/home/me/.config/reef/ca.pem"
+//!
+//! [api.tls]
+//! # where the JSON API listens over TLS too, on any address, which needs `[auth] required`
+//! address = "0.0.0.0:12443"
+//! # the certificate chain and its private key, as PEM
+//! cert = "/etc/reef/fullchain.pem"
+//! key = "/etc/reef/privkey.pem"
 //!
 //! [auth]
 //! # whether every caller must sign in; off, reef answers anyone who reaches its port
@@ -29,6 +40,8 @@
 //! clones = "/home/me/.local/share/reef/clones"
 //! # how often every one of them is fetched, in seconds, minutes or hours; `0s` never
 //! fetch_every = "5m"
+//! # the hosts a remote may be cloned from; unset or empty, any
+//! hosts = ["github.com", "git.example"]
 //! ```
 
 use reef_api::config::env_dir;
@@ -87,8 +100,26 @@ impl Default for ShoalSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApiSettings {
-    /// The address it listens on, which must be a loopback one until reef serves over TLS (C51)
+    /// The address it listens on over plain HTTP, which must be a loopback one
     pub address: SocketAddr,
+    /// Where it listens over TLS too, for other hosts, if anywhere
+    pub tls: Option<TlsSettings>,
+    /// Where a client on another host reaches the service: the CLI's alone, left be here
+    pub url: Option<String>,
+    /// A root a client trusts the service's certificate by: the CLI's alone, left be here
+    pub ca: Option<PathBuf>,
+}
+
+/// Where the JSON API listens over TLS, and the certificate it serves
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsSettings {
+    /// The address it listens on, which may be any
+    pub address: SocketAddr,
+    /// The certificate chain, as PEM, the server's own first
+    pub cert: PathBuf,
+    /// The certificate's private key, as PEM
+    pub key: PathBuf,
 }
 
 /// Whether callers sign in
@@ -111,25 +142,31 @@ pub struct RemoteSettings {
     pub clones: Option<PathBuf>,
     /// How often every remote project is fetched, such as `5m`, or `0s` for never
     pub fetch_every: String,
+    /// The hosts a remote may be cloned from, or empty for any
+    pub hosts: Vec<String>,
 }
 
 impl Default for RemoteSettings {
-    /// Clones in the default directory, each fetched every five minutes
+    /// Clones in the default directory, each fetched every five minutes, from any host
     fn default() -> Self {
         RemoteSettings {
             clones: None,
             fetch_every: "5m".to_string(),
+            hosts: Vec::new(),
         }
     }
 }
 
 impl Default for ApiSettings {
-    /// Localhost, at the port reef's clients look for it on
+    /// Localhost, at the port reef's clients look for it on, and no TLS
     fn default() -> Self {
         ApiSettings {
             address: reef_api::DEFAULT_ADDRESS
                 .parse()
                 .expect("reef-api's default address is an address"),
+            tls: None,
+            url: None,
+            ca: None,
         }
     }
 }
@@ -315,6 +352,45 @@ mod tests {
         // a host name is not an address
         let parsed = toml::from_str::<Conf>("[api]\naddress = \"localhost:9000\"\n");
         assert!(parsed.is_err(), "a host name was read as an address");
+    }
+
+    /// TLS is off unless `[api.tls]` names an address, a certificate and its key
+    #[test]
+    fn tls_is_off_unless_named() {
+        // nothing said is plain HTTP alone
+        let conf: Conf = toml::from_str("").expect("an empty config parses");
+        assert!(conf.api.tls.is_none());
+        // and all three said, TLS on any address, beside the loopback one
+        let text = "[api]\naddress = \"127.0.0.1:12180\"\nurl = \"https://reef.example:12443\"\n\
+                    ca = \"/etc/reef/ca.pem\"\n\n[api.tls]\naddress = \"0.0.0.0:12443\"\n\
+                    cert = \"/etc/reef/cert.pem\"\nkey = \"/etc/reef/key.pem\"\n";
+        let conf: Conf = toml::from_str(text).expect("it parses");
+        let tls = conf.api.tls.expect("TLS was named");
+        assert_eq!(tls.address.to_string(), "0.0.0.0:12443");
+        assert_eq!(tls.cert, std::path::Path::new("/etc/reef/cert.pem"));
+        assert_eq!(tls.key, std::path::Path::new("/etc/reef/key.pem"));
+        // the client's keys are read, so one file serves both
+        assert_eq!(conf.api.url.as_deref(), Some("https://reef.example:12443"));
+        assert_eq!(conf.api.ca, Some("/etc/reef/ca.pem".into()));
+        // a certificate with no key, or a misspelt key, is refused
+        let parsed = toml::from_str::<Conf>("[api.tls]\naddress = \"0.0.0.0:1\"\ncert = \"c\"\n");
+        assert!(parsed.is_err(), "TLS with no key was read");
+        let parsed = toml::from_str::<Conf>(
+            "[api.tls]\naddress = \"0.0.0.0:1\"\ncert = \"c\"\nkey = \"k\"\nkye = \"k\"\n",
+        );
+        assert!(parsed.is_err(), "a misspelt key was read");
+    }
+
+    /// Remotes come from any host unless `[remotes] hosts` lists some
+    #[test]
+    fn remote_hosts_default_to_any() {
+        // nothing said is any host
+        let conf: Conf = toml::from_str("").expect("an empty config parses");
+        assert!(conf.remotes.hosts.is_empty());
+        // and a list, those alone
+        let conf: Conf = toml::from_str("[remotes]\nhosts = [\"github.com\", \"git.example\"]\n")
+            .expect("it parses");
+        assert_eq!(conf.remotes.hosts, ["github.com", "git.example"]);
     }
 
     /// A misspelled key is refused rather than ignored

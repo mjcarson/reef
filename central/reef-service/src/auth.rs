@@ -4,36 +4,77 @@
 //! reef-serve wraps the JSON API in [`guard`], and reef-app wraps its whole router, its pages,
 //! its server functions and the JSON API it mounts, so one layer decides for both front doors.
 //!
-//! - **Who is calling comes first.** The layer reads a token from `Authorization: Bearer`, else
-//!   from the sign-in cookie, asks the service whose it is, and hands every route a [`Caller`]:
-//!   the user, the token, and whether the request came from the service's own host.
+//! - **Where a write comes from comes first.** A write a browser sends from a page of another
+//!   origin is refused 403, with sign-in on or off ([`origin::judge`](crate::origin::judge)), so
+//!   a page on another port of this host, or another site, can't write through a visitor.
+//! - **Then who is calling.** The layer reads a token from `Authorization: Bearer`, else from
+//!   the sign-in cookie, asks the service whose it is, and hands every route a [`Caller`]: the
+//!   user, the token, whether the request came from the service's own host, and whether it came
+//!   over TLS. Each connection's [`Peer`] says the last two.
 //! - **Off unless reef's config requires it.** With sign-in off every request goes through, as it
 //!   did before users, and only adding or listing users asks who is calling.
 //! - **On, everything but signing in is guarded** ([`judge`]): the JSON API's reads and writes,
 //!   the change stream, docs, the app's pages and server functions. A page a browser opens is
 //!   sent to the sign-in page, and anything else is answered 401.
 //! - **The sign-in page is plain HTML the service serves,** so reef-serve has one too, and it
-//!   runs no script at all. Signing in sets an HttpOnly, SameSite=Strict cookie, without
-//!   `Secure` until reef serves over TLS (C51), and goes on only to a path of this origin
-//!   ([`safe_next`]).
+//!   runs no script at all. Signing in sets an HttpOnly, SameSite=Strict cookie, `Secure` when
+//!   the request came over TLS, and goes on only to a path of this origin ([`safe_next`]).
 
 use axum::Router;
+use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, Form, FromRequestParts, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
+use axum::serve::IncomingStream;
 use reef_api::user::SIGN_IN_COOKIE;
 use reef_api::{ApiError, ErrorCode, TokenKind, User, paths};
 use reef_render::paths::escape;
 use serde::Deserialize;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use tokio::net::TcpListener;
 use tracing::instrument;
 
 use crate::api::{Failure, Serves};
+use crate::origin;
 use crate::service::BROWSER_TOKEN_LIFE;
+
+/// Where a connection comes from, and whether it came over TLS, as each request learns it
+///
+/// Both servers serve with `into_make_service_with_connect_info::<Peer>()`, which
+/// [`serve_router`](crate::api::serve_router) does for them, so the guard finds it on every
+/// request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Peer {
+    /// The address the connection came from
+    pub address: SocketAddr,
+    /// Whether it came over TLS
+    pub tls: bool,
+}
+
+impl Peer {
+    /// Whether the connection came from the service's own host, over loopback
+    pub fn is_local(&self) -> bool {
+        self.address.ip().to_canonical().is_loopback()
+    }
+}
+
+impl Connected<IncomingStream<'_, TcpListener>> for Peer {
+    /// A connection over plain HTTP, and the address it came from
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The connection axum accepted
+    fn connect_info(stream: IncomingStream<'_, TcpListener>) -> Peer {
+        Peer {
+            address: *stream.remote_addr(),
+            tls: false,
+        }
+    }
+}
 
 /// Who a request comes from, as the guard found: every route can take one
 #[derive(Clone, Default)]
@@ -44,6 +85,8 @@ pub struct Caller {
     pub token: Option<String>,
     /// Whether the request came from the service's own host
     pub local: bool,
+    /// Whether the request came over TLS, so a cookie set for it is `Secure`
+    pub secure: bool,
 }
 
 impl std::fmt::Debug for Caller {
@@ -57,6 +100,7 @@ impl std::fmt::Debug for Caller {
             .field("user", &self.user)
             .field("token", &self.token.as_ref().map(|_| "…"))
             .field("local", &self.local)
+            .field("secure", &self.secure)
             .finish()
     }
 }
@@ -249,16 +293,37 @@ fn wants_html(headers: &HeaderMap) -> bool {
 /// # Arguments
 ///
 /// * `token` - The token
-fn sign_in_cookie(token: &str) -> String {
+/// * `secure` - Whether it is set over TLS, so the browser sends it over TLS alone
+fn sign_in_cookie(token: &str, secure: bool) -> String {
     format!(
-        "{SIGN_IN_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
-        BROWSER_TOKEN_LIFE.as_secs()
+        "{SIGN_IN_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
+        BROWSER_TOKEN_LIFE.as_secs(),
+        secure_attribute(secure)
     )
 }
 
 /// The cookie that clears the sign-in cookie
-fn cleared_cookie() -> String {
-    format!("{SIGN_IN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+///
+/// # Arguments
+///
+/// * `secure` - Whether it is set over TLS, as the cookie it clears was
+fn cleared_cookie(secure: bool) -> String {
+    format!(
+        "{SIGN_IN_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}",
+        secure_attribute(secure)
+    )
+}
+
+/// The `Secure` attribute a cookie set over TLS carries, or nothing over plain HTTP
+///
+/// # Arguments
+///
+/// * `secure` - Whether the cookie is set over TLS
+fn secure_attribute(secure: bool) -> &'static str {
+    match secure {
+        true => "; Secure",
+        false => "",
+    }
 }
 
 /// The answer to a request that must sign in first: 401, saying how
@@ -300,8 +365,8 @@ pub fn guard<S: Serves>(router: Router, serves: S) -> Router {
         .layer(middleware::from_fn_with_state(serves, check::<S>))
 }
 
-/// The layer itself: finds who is calling, then lets the request go on, refuses it, or sends
-/// its browser to sign in
+/// The layer itself: refuses a write from another origin, finds who is calling, then lets the
+/// request go on, refuses it, or sends its browser to sign in
 ///
 /// # Arguments
 ///
@@ -310,11 +375,18 @@ pub fn guard<S: Serves>(router: Router, serves: S) -> Router {
 /// * `next` - The route the request goes on to
 async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: Next) -> Response {
     let service = serves.service();
-    // from the service's own host, as the connection says
-    let local = request
+    // from the service's own host, and over TLS, as the connection says
+    let peer = request
         .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|ConnectInfo(peer)| peer.ip().to_canonical().is_loopback());
+        .get::<ConnectInfo<Peer>>()
+        .map(|ConnectInfo(peer)| *peer);
+    let local = peer.is_some_and(|peer| peer.is_local());
+    let secure = peer.is_some_and(|peer| peer.tls);
+    // a write from a page of another origin goes no further, signed in or not
+    if let Err(message) = origin::judge(request.method(), request.headers(), request.uri(), secure)
+    {
+        return Failure(ApiError::new(ErrorCode::Forbidden, message)).into_response();
+    }
     // the token sent, and whom it signs in
     let presented = presented(request.headers());
     let user = match &presented {
@@ -342,9 +414,12 @@ async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: N
         Verdict::Pass => {
             // every route under the layer reads its caller from here
             let token = presented.map(|(token, _)| token);
-            request
-                .extensions_mut()
-                .insert(Caller { user, token, local });
+            request.extensions_mut().insert(Caller {
+                user,
+                token,
+                local,
+                secure,
+            });
             next.run(request).await
         }
         Verdict::Refuse => refused(),
@@ -361,7 +436,7 @@ async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: N
             // a cookie that signs nobody in is cleared, so the browser stops sending it
             if from_cookie
                 && named == Named::Unknown
-                && let Ok(value) = HeaderValue::from_str(&cleared_cookie())
+                && let Ok(value) = HeaderValue::from_str(&cleared_cookie(secure))
             {
                 response.headers_mut().insert(header::SET_COOKIE, value);
             }
@@ -497,11 +572,13 @@ async fn sign_in_page<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service that knows its users
+/// * `caller` - Who is calling, and whether over TLS
 /// * `headers` - The request's headers, whose user agent labels the token
 /// * `form` - The name, the password and where to go
 #[instrument(name = "auth::sign_in", skip_all)]
 async fn sign_in<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     headers: HeaderMap,
     Form(form): Form<SignInForm>,
 ) -> Response {
@@ -519,7 +596,7 @@ async fn sign_in<S: Serves>(
     match issued {
         // the cookie, then on to where it was going
         Ok(Some(issued)) => {
-            let cookie = sign_in_cookie(&issued.token);
+            let cookie = sign_in_cookie(&issued.token, caller.secure);
             (
                 StatusCode::SEE_OTHER,
                 [(header::LOCATION, next), (header::SET_COOKIE, cookie)],
@@ -557,7 +634,7 @@ async fn sign_out<S: Serves>(State(serves): State<S>, caller: Caller) -> Respons
         StatusCode::SEE_OTHER,
         [
             (header::LOCATION, paths::SIGN_IN.to_string()),
-            (header::SET_COOKIE, cleared_cookie()),
+            (header::SET_COOKIE, cleared_cookie(caller.secure)),
         ],
     )
         .into_response()
@@ -565,7 +642,9 @@ async fn sign_out<S: Serves>(State(serves): State<S>, caller: Caller) -> Respons
 
 #[cfg(test)]
 mod tests {
-    use super::{Named, Verdict, cookie, judge, presented, safe_next};
+    use super::{
+        Named, Verdict, cleared_cookie, cookie, judge, presented, safe_next, sign_in_cookie,
+    };
     use axum::http::{HeaderMap, HeaderValue, Method, header};
 
     /// Only a path of this origin is followed after sign-in
@@ -699,6 +778,17 @@ mod tests {
             ),
             Verdict::Refuse
         );
+    }
+
+    /// A cookie set over TLS is `Secure`, and one over plain HTTP isn't
+    #[test]
+    fn cookies_over_tls_are_secure() {
+        // set and cleared over TLS, both carry it
+        assert!(sign_in_cookie("tok", true).ends_with("; Secure"));
+        assert!(cleared_cookie(true).ends_with("; Secure"));
+        // over plain HTTP neither does, since a browser drops a Secure cookie set without TLS
+        assert!(!sign_in_cookie("tok", false).contains("Secure"));
+        assert!(!cleared_cookie(false).contains("Secure"));
     }
 
     /// A token is read from a bearer header first, else the sign-in cookie

@@ -35,8 +35,12 @@ reef = { path = "../crates/reef" }
 axum = "0.8"
 # the change stream's broadcast as a stream of server-sent events
 tokio-stream = { version = "0.1", features = ["sync"] }
-# a plain HTTP client, for the API's tests and its bench alone
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# an HTTP client, for the API's tests and its bench alone, over TLS too as the CLI speaks it
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+# TLS for the listener beside loopback, over ring, the provider reqwest's rustls uses as well
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# a certificate minted for each test that serves over TLS
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

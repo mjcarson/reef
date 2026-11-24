@@ -9,9 +9,9 @@ use reef_model::{Diagnostic, Graph, NodeSpec, PlanName, nodes_from_records};
 use reef_model::{EntryState, Status, WaitsOn};
 use reef_render::{Layered, MemSource, ROOT, Renderer, RepoSource, Sections};
 use reef_service::{
-    AddedProject, Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
-    PageEdit, PageEdited, PageWrite, Place, Puts, QueueEdit, Queued, Refusal, RevisionKey, Rewrite,
-    StalePut,
+    AddedProject, Asker, Backend, Checked, NodePut, NodeRemove, NodeWrite, NotListed,
+    NotRegistered, PageEdit, PageEdited, PageWrite, Place, Puts, QueueEdit, Queued, Refusal,
+    RevisionKey, Rewrite, StalePut,
 };
 use std::time::Duration;
 
@@ -1222,7 +1222,7 @@ pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Res
 /// * `sx` - The service and its plan
 pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     use reef_api::{NewUser, UserAdded};
-    use reef_service::{Asker, NotAllowed, NotSignedIn};
+    use reef_service::{NotAllowed, NotSignedIn};
     let new = |name: &str| NewUser {
         name: name.to_string(),
         password: "correct horse battery".to_string(),
@@ -1287,7 +1287,9 @@ pub async fn remotes_are_fetched_on_their_interval<B: Backend>(sx: Sx<B>) -> any
     let before = "# Design\n\nThe old words.\n";
     let (bare, checkout) = git::published(&sx.dir.join("up"), &[("docs/design.md", before)])?;
     let url = format!("file://{}", bare.display());
-    let added = service.add_remote_project("up", &url, None).await?;
+    let added = service
+        .add_remote_project("up", &url, None, Asker::default())
+        .await?;
     assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
     let plan = PlanName::new("up", "main")?;
     assert!(service.add_plan(&plan).await?);
@@ -1319,5 +1321,42 @@ pub async fn remotes_are_fetched_on_their_interval<B: Backend>(sx: Sx<B>) -> any
         .find(|project| project.name == "up")
         .expect("the remote project is listed");
     assert_eq!(up.remote.map(|remote| remote.commit), Some(tip));
+    Ok(())
+}
+
+/// A service given hosts to clone from refuses a remote that names another, however its URL
+/// is written, and still takes a path on its own host, which has none
+///
+/// # Arguments
+///
+/// * `sx` - The service, its project and plan
+pub async fn remotes_come_from_the_hosts_listed<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    use reef_service::remote::BadRemote;
+    // a service that clones from one host alone, named in another case
+    let service = sx.service.cloning_from(vec!["Git.Example".to_string()]);
+    // a remote on any other host is refused before anything is fetched, naming the key
+    for url in [
+        "https://elsewhere.example/up.git",
+        "ssh://git@ELSEWHERE.example/up.git",
+        "git@elsewhere.example:up.git",
+        "git://git.example.elsewhere.example/up.git",
+    ] {
+        let refused = service
+            .add_remote_project("up", url, None, Asker::default())
+            .await
+            .expect_err(url);
+        let bad = refused
+            .downcast_ref::<BadRemote>()
+            .unwrap_or_else(|| panic!("{url}: {refused}"));
+        assert!(bad.0.contains("`remotes.hosts`"), "{url}: {bad}");
+        assert!(bad.0.contains("git.example"), "{url}: {bad}");
+    }
+    // a path on this host names no host, so the list leaves it be
+    let (bare, _) = git::published(&sx.dir.join("up"), &[("README.md", "# Up\n")])?;
+    let url = format!("file://{}", bare.display());
+    let added = service
+        .add_remote_project("up", &url, None, Asker::default())
+        .await?;
+    assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
     Ok(())
 }

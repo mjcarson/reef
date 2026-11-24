@@ -2,14 +2,17 @@
 //!
 //! It listens on reef's `api.address`, where the CLI, the MCP server and the hooks look for the
 //! JSON API, so the app takes reef-serve's place. Under `dx serve`, dx names the address instead
-//! and proxies to it. Either way only a loopback address is taken, until reef serves over TLS
-//! (C51). Every route, the pages, the server functions and the JSON API alike, sits under the one
-//! layer that signs callers in, [`auth::guard`], which serves the sign-in page beside them.
+//! and proxies to it. Either way only a loopback address is taken for plain HTTP; other hosts
+//! reach the app over TLS, on the listener `[api.tls]` adds beside it. Every route, the pages,
+//! the server functions and the JSON API alike, sits under the one layer that signs callers in
+//! and refuses writes from other origins, [`auth::guard`], which serves the sign-in page beside
+//! them.
 
 use axum::Router;
 use axum::http::header;
 use axum::routing::get;
-use reef_service::{Conf, Service, api, auth};
+use reef_service::api::Listeners;
+use reef_service::{Conf, Service, api, auth, tls};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use tokio::net::TcpListener;
@@ -57,20 +60,23 @@ pub fn router(service: &'static Service) -> Router {
 
 /// Reads reef's config, listens, opens the service and serves the app until a signal
 ///
-/// The address is taken before shoal starts, so a port that is taken or an address that isn't
-/// local stops it before a pool locks the data directory.
+/// The addresses are taken before shoal starts, so a port that is taken, an address that isn't
+/// local, or a certificate that can't be read stops it before a pool locks the data directory.
 #[instrument(name = "server::serve", skip_all, err(Debug))]
 pub async fn serve() -> anyhow::Result<()> {
     // Dioxus's logger, which an in-process pool's spans go to as well
     dioxus::logger::initialize_default();
     // reef's config, from `$REEF_CONFIG` or the default path
     let conf = Conf::load(None)?;
-    let listener = listen(&conf).await?;
+    let listeners = Listeners {
+        plain: listen(&conf).await?,
+        tls: tls::bind(&conf).await?,
+    };
     // shoal in this process, or the external node the config names: opened once per process
     let service = Service::shared(&conf).await?;
     eprintln!(
-        "reef-app: serving the app and reef's JSON API on http://{}, shoal {}",
-        listener.local_addr()?,
+        "reef-app: serving the app and reef's JSON API on {}, shoal {}",
+        listeners.roots()?.join(" and "),
         service.mode().name()
     );
     // that callers must sign in, if they must, and how to add the first user
@@ -82,13 +88,9 @@ pub async fn serve() -> anyhow::Result<()> {
         stopped().await;
         service.end_changes();
     };
-    // each request knowing where it came from, so the first user is added only from this host
-    let app = router(service).into_make_service_with_connect_info::<SocketAddr>();
-    let serving = async {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(stopping)
-            .await
-    };
+    // on every listener, each request knowing its peer, so the first user is added only from
+    // this host and a cookie set over TLS is Secure
+    let serving = api::serve_router(router(service), listeners, stopping);
     // fetching every remote project on its interval meanwhile, and stopping any fetch still
     // running once the server ends
     tokio::select! {
@@ -109,10 +111,11 @@ async fn listen(conf: &Conf) -> anyhow::Result<TcpListener> {
         return api::bind(conf).await;
     };
     let address: SocketAddr = dioxus::cli_config::fullstack_address_or_localhost();
-    // only this host, until reef serves over TLS, whoever chose the address
+    // only this host over plain HTTP, whoever chose the address
     anyhow::ensure!(
         address.ip().is_loopback(),
-        "reef-app serves localhost only until it serves over TLS (C51), and dx gave it {address}"
+        "reef-app serves plain HTTP to localhost only, and dx gave it {address}: serve other \
+         hosts over TLS with `[api.tls]`"
     );
     TcpListener::bind(address)
         .await

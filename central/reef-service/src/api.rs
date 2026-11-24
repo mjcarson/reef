@@ -71,8 +71,13 @@
 //! - **Signed in when reef asks it.** [`serve`] wraps the router in [`auth::guard`](crate::auth::guard),
 //!   which hands each route its [`Caller`] and, with sign-in required, answers 401 to a caller
 //!   whose token signs nobody in. A 401 says `WWW-Authenticate: Bearer`.
-//! - **Localhost only.** [`bind`] refuses any address but a loopback one until reef serves over
-//!   TLS (C51).
+//! - **Plain HTTP on localhost, TLS beside it.** [`bind`] refuses any address but a loopback
+//!   one for plain HTTP, which this host's CLI, hooks and first admin call. Other hosts reach
+//!   the API over TLS, on the listener `[api.tls]` adds ([`tls::bind`](crate::tls::bind)), and
+//!   [`serve_router`] serves one router on both.
+//! - **Writes from another origin are refused.** The guard judges every write a browser sends
+//!   by where it came from ([`origin`](crate::origin)), so a page of another origin can't write
+//!   through a visitor's browser, signed in or not.
 
 use axum::extract::{
     DefaultBodyLimit, FromRequest, FromRequestParts, Path as Segment, Query, Request, State,
@@ -98,7 +103,6 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -107,12 +111,13 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt};
 use tracing::instrument;
 
-use crate::auth::{self, Caller};
+use crate::auth::{self, Caller, Peer};
 use crate::backend::Backend;
 use crate::conf::Conf;
 use crate::remote::{BadRemote, FetchFailed};
 use crate::service::{Asker, NoSession, NotAllowed, NotSignedIn, Service};
 use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
+use crate::tls::{self, TlsListener};
 
 /// A handle on a service that a router holds and clones into every request
 ///
@@ -246,10 +251,11 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .with_state(serves)
 }
 
-/// Listens where reef's config says the API is served, refusing any but a loopback address
+/// Listens over plain HTTP where reef's config says the API is served, refusing any but a
+/// loopback address
 ///
-/// Nothing is served over TLS until C51, so nothing but this host may reach the API, signed in or
-/// not.
+/// Plain HTTP is for this host alone, signed in or not; other hosts are served over TLS, on the
+/// listener [`Listeners::bind`] adds where `[api.tls]` says.
 ///
 /// # Arguments
 ///
@@ -257,11 +263,11 @@ pub fn router<S: Serves>(serves: S) -> Router {
 #[instrument(name = "api::bind", skip_all, err(Debug))]
 pub async fn bind(conf: &Conf) -> anyhow::Result<TcpListener> {
     let address = conf.api.address;
-    // only this host, until reef serves over TLS
+    // only this host, over plain HTTP
     anyhow::ensure!(
         address.ip().is_loopback(),
-        "reef's JSON API serves localhost only until it serves over TLS (C51), and {address} is \
-         not a loopback address: set {} to 127.0.0.1 or [::1]",
+        "reef's JSON API serves plain HTTP to localhost only, and {address} is not a loopback \
+         address: set {} to 127.0.0.1 or [::1], and serve other hosts over TLS with `[api.tls]`",
         conf.key("api.address")
     );
     // a port another program holds is named, with the key that chose it
@@ -273,36 +279,135 @@ pub async fn bind(conf: &Conf) -> anyhow::Result<TcpListener> {
     })
 }
 
-/// Serves the API on a listener until told to stop, then waits for the requests still open
+/// Where a server listens: plain HTTP on loopback, and TLS beside it if reef's config says
+pub struct Listeners {
+    /// Plain HTTP, on a loopback address, for this host
+    pub plain: TcpListener,
+    /// TLS, on any address, for other hosts, if `[api.tls]` names a certificate
+    pub tls: Option<TlsListener>,
+}
+
+impl From<TcpListener> for Listeners {
+    /// Plain HTTP alone
+    ///
+    /// # Arguments
+    ///
+    /// * `plain` - The loopback listener
+    fn from(plain: TcpListener) -> Listeners {
+        Listeners { plain, tls: None }
+    }
+}
+
+impl Listeners {
+    /// Listens everywhere reef's config says: plain HTTP on loopback, then TLS if it names a
+    /// certificate
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - reef's config, whose `api.address` and `api.tls` name where to listen
+    #[instrument(name = "Listeners::bind", skip_all, err(Debug))]
+    pub async fn bind(conf: &Conf) -> anyhow::Result<Listeners> {
+        // this host's first, so a mistake in either stops the server before shoal starts
+        let plain = bind(conf).await?;
+        let tls = tls::bind(conf).await?;
+        Ok(Listeners { plain, tls })
+    }
+
+    /// The root each listener serves at, such as `http://127.0.0.1:12180`, for a server to say
+    pub fn roots(&self) -> std::io::Result<Vec<String>> {
+        // plain HTTP, then TLS if there is a listener for it
+        let mut roots = vec![format!("http://{}", self.plain.local_addr()?)];
+        if let Some(tls) = &self.tls {
+            roots.push(format!(
+                "https://{}",
+                axum::serve::Listener::local_addr(tls)?
+            ));
+        }
+        Ok(roots)
+    }
+}
+
+/// Serves a router on every listener until told to stop, then waits for the requests still open
 ///
-/// The router is wrapped in [`auth::guard`], and each request knows the address it came from,
-/// so the first user can be added only from this host. Stopping ends the service's change stream
-/// first, since a follower's stream never ends of its own accord and a graceful stop waits for
-/// every open request.
+/// Each request knows its [`Peer`]: the address it came from, so the first user can be added
+/// only from this host, and whether it came over TLS, so a cookie set for it is `Secure`. One
+/// stop ends both listeners, and either one failing ends the other.
 ///
 /// # Arguments
 ///
-/// * `listener` - Where to serve, from [`bind`]
+/// * `router` - The router to serve, guarded already
+/// * `listeners` - Where to serve, from [`Listeners::bind`]
+/// * `stop` - Resolves when the server should stop
+#[instrument(name = "api::serve_router", skip_all, err(Debug))]
+pub async fn serve_router(
+    router: Router,
+    listeners: Listeners,
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    // one stop, seen by every listener's graceful shutdown
+    let (stopped, stopping) = tokio::sync::watch::channel(false);
+    let told = |mut stopping: tokio::sync::watch::Receiver<bool>| async move {
+        // stopped, or the stop dropped as the other listener failed
+        let _ = stopping.wait_for(|stopped| *stopped).await;
+    };
+    // plain HTTP, and TLS beside it, each request knowing its peer
+    let plain = axum::serve(
+        listeners.plain,
+        router.clone().into_make_service_with_connect_info::<Peer>(),
+    )
+    .with_graceful_shutdown(told(stopping.clone()));
+    let tls = listeners.tls.map(|tls| {
+        axum::serve(tls, router.into_make_service_with_connect_info::<Peer>())
+            .with_graceful_shutdown(told(stopping))
+    });
+    let serving = async move {
+        match tls {
+            Some(tls) => {
+                tokio::try_join!(plain.into_future(), tls.into_future())?;
+            }
+            None => plain.await?,
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let relay = async move {
+        stop.await;
+        let _ = stopped.send(true);
+    };
+    tokio::pin!(serving, relay);
+    // a server that ends before the stop has failed; else, once told, wait for it to finish
+    tokio::select! {
+        served = &mut serving => return Ok(served?),
+        () = &mut relay => {}
+    }
+    serving.await?;
+    Ok(())
+}
+
+/// Serves the API on its listeners until told to stop, then waits for the requests still open
+///
+/// The router is wrapped in [`auth::guard`] and served by [`serve_router`]. Stopping ends the
+/// service's change stream first, since a follower's stream never ends of its own accord and a
+/// graceful stop waits for every open request.
+///
+/// # Arguments
+///
+/// * `listeners` - Where to serve, from [`Listeners::bind`], or a loopback listener from [`bind`]
 /// * `serves` - The service every route calls
 /// * `stop` - Resolves when the server should stop
 #[instrument(name = "api::serve", skip_all, err(Debug))]
 pub async fn serve<S: Serves>(
-    listener: TcpListener,
+    listeners: impl Into<Listeners>,
     serves: S,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    // every route guarded, each request knowing where it came from
+    // every route guarded
     let router = auth::guard(router(serves.clone()), serves.clone());
-    let app = router.into_make_service_with_connect_info::<SocketAddr>();
     // once told to stop, end the change stream so its followers' requests finish
     let stopping = async move {
         stop.await;
         serves.service().end_changes();
     };
-    axum::serve(listener, app)
-        .with_graceful_shutdown(stopping)
-        .await?;
-    Ok(())
+    serve_router(router, listeners.into(), stopping).await
 }
 
 /// An error a route answers with: its code's status, and the error as the body
@@ -736,29 +841,39 @@ async fn projects<S: Serves>(State(serves): State<S>) -> Result<Json<Vec<Project
 }
 
 /// Registers a project for a repo on this host or by its git remote: 201 if it was, 409 if its
-/// name or repo is taken
+/// name or repo is taken, and 403 if, with sign-in required, a caller who isn't an admin names
+/// a directory or a path on this host
 ///
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling
 /// * `new` - The project's name, and a directory in its repo or its remote
 #[instrument(name = "api::add_project", skip_all, err(Debug))]
 async fn add_project<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Body(new): Body<NewProject>,
 ) -> Result<(StatusCode, Json<AddedProject>), Failure> {
-    // register it, unless its name or its repo is another project's
+    // register it, unless its name or its repo is another project's, or its caller may not
     let service = serves.service();
+    let asker = Asker {
+        user: caller.user.as_ref(),
+        local: caller.local,
+    };
     let added = match (&new.repo, &new.remote) {
-        // a repo is a directory on this host
+        // a repo is a directory on this host, an admin's to name before anything looks at it
         (Some(repo), None) => {
+            service
+                .judge_on_host(asker, "register a project by a directory on its host")
+                .await?;
             directory(repo, "repo").await?;
-            service.add_project(&new.name, repo).await?
+            service.add_project(&new.name, repo, asker).await?
         }
         // a remote is cloned before it is kept
         (None, Some(remote)) => {
             service
-                .add_remote_project(&new.name, &remote.url, remote.branch.as_deref())
+                .add_remote_project(&new.name, &remote.url, remote.branch.as_deref(), asker)
                 .await?
         }
         _ => {

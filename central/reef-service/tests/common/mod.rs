@@ -19,6 +19,7 @@ pub mod page_cases;
 pub mod queue_cases;
 pub mod service_cases;
 pub mod sign_in_cases;
+pub mod tls;
 pub mod user_cases;
 pub mod work_cases;
 

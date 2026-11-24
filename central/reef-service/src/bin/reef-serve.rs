@@ -6,17 +6,19 @@
 //! ```
 //!
 //! It reads reef's config (`--conf`, else `$REEF_CONFIG`, else the default path), listens on
-//! `api.address`, which must be a loopback address, then opens the service: shoal in this
+//! `api.address` over plain HTTP, which must be a loopback address, and over TLS on
+//! `api.tls.address` if `[api.tls]` names a certificate, then opens the service: shoal in this
 //! process with `embedded`, or the external node `shoal.address` names. With `[auth] required`
-//! it says callers must sign in, and while reef has no user, how to add the first. It listens before shoal
-//! starts, so a port that is taken or an address that isn't local stops it before a pool locks
-//! the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
+//! it says callers must sign in, and while reef has no user, how to add the first. It listens
+//! before shoal starts, so a port that is taken, an address that isn't local, or a certificate
+//! that can't be read stops it before a pool locks the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
 //! still open, and closes the service, stopping an in-process pool cleanly.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
-use reef_service::{Conf, Service, api};
+use reef_service::api::{self, Listeners};
+use reef_service::{Conf, Service};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -70,14 +72,14 @@ fn main() -> ExitCode {
 /// * `conf` - The config file named on the command line, if one was
 #[instrument(name = "reef_serve::run", skip_all, err(Debug))]
 async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
-    // reef's config, and the address it names, before shoal starts
+    // reef's config, and where it says to listen, before shoal starts
     let conf = Conf::load(conf.as_deref())?;
-    let listener = api::bind(&conf).await?;
+    let listeners = Listeners::bind(&conf).await?;
     // shoal in this process, or the external node the config names
     let service = Arc::new(Service::open(&conf).await?);
     eprintln!(
-        "reef-serve: serving reef's JSON API on http://{}, shoal {}",
-        listener.local_addr()?,
+        "reef-serve: serving reef's JSON API on {}, shoal {}",
+        listeners.roots()?.join(" and "),
         service.mode().name()
     );
     // that callers must sign in, if they must, and how to add the first user
@@ -87,7 +89,7 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
     // serve until told to stop, then wait for the requests still open, fetching every remote
     // project on its interval meanwhile, and stopping any fetch still running once it ends
     tokio::select! {
-        served = api::serve(listener, service.clone(), stopped()) => served?,
+        served = api::serve(listeners, service.clone(), stopped()) => served?,
         () = service.follow_remotes() => {}
     }
     // the service is this task's alone once every request has let go of it

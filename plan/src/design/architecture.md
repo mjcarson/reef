@@ -160,9 +160,10 @@ versions, validation, atomic writes and derived state would each be written seve
   stream, and one that falls behind is told how many changes it missed.
 - **Each new kind of data adds three things:** an operation on the service, a JSON route and a
   server function. This holds for the queue, work records, comments and the loop's state.
-- **Signed in when reef's config asks, and localhost only.** One layer signs callers in for
-  both front doors ([Users and sign-in](#users-and-sign-in)), and the service listens on
-  loopback only until it serves over TLS ([C51](../milestones/m10.md)).
+- **Signed in when reef's config asks, plain HTTP on localhost, and TLS beside it.** One layer
+  signs callers in for both front doors ([Users and sign-in](#users-and-sign-in)), and refuses
+  writes from other origins. The loopback port serves plain HTTP to this host, and other hosts
+  are served over TLS on a listener beside it ([Served beyond localhost](#served-beyond-localhost)).
 
 ## Users and sign-in
 
@@ -200,9 +201,10 @@ localhost ([C51](../milestones/m10.md)) both build on it.
   `$REEF_CREDENTIALS` names a file, in that order, so a test or a script decides for itself.
 - **A browser signs in on the service's own page.** `/sign-in` is plain HTML reef-service
   serves, so reef-serve has one too, under a policy that lets no script run. Its form sets an
-  HttpOnly, SameSite=Strict cookie for 30 days, without `Secure` until TLS, and goes on only to a
-  path of this origin.
-- **The first user comes from the service's own host,** and is an admin. After that only an admin
+  HttpOnly, SameSite=Strict cookie for 30 days, `Secure` when it is set over TLS, and goes on
+  only to a path of this origin.
+- **The first user comes from the service's own host,** over loopback, and is an admin. After
+  that only an admin
   adds or lists users. This holds whether sign-in is on or off, so users can be added before it
   is turned on, and nobody can plant an admin while it is off.
 - **A wrong name and a wrong password are told alike.** A name no user has is checked against a
@@ -210,9 +212,10 @@ localhost ([C51](../milestones/m10.md)) both build on it.
 - **Tokens looked up are trusted for a minute,** in the service's memory, so a request costs no
   read of shoal. reef-service is shoal's only writer, so a revoke drops its token at once.
 - **What sign-in leaves to later.** A cookie ignores ports, so a page on another loopback port is
-  same-site, and nothing checks a request's origin: [C51](../milestones/m10.md) adds origin and CSRF checks
-  with TLS. Changing a password, removing a user, listing and revoking tokens and slowing
-  repeated failures are [C77](../milestones/m10.md)'s, and every write's author is [C50](../milestones/m10.md)'s.
+  same-site and its posts carry the cookie: [C51](../milestones/m10.md)'s origin check refuses them
+  ([Served beyond localhost](#served-beyond-localhost)). Changing a password, removing a user,
+  listing and revoking tokens and slowing repeated failures are [C77](../milestones/m10.md)'s, and every
+  write's author is [C50](../milestones/m10.md)'s.
 
 ### What C48 found
 
@@ -228,6 +231,73 @@ localhost ([C51](../milestones/m10.md)) both build on it.
   from the first paint.
 - **The sign-in page's policy blocks a script's fetch,** as `default-src 'none'` should, so
   nothing injected into the page could call the API with its cookie.
+
+## Served beyond localhost
+
+reef bound loopback alone, spoke plain HTTP, and checked no request's origin, so another host
+couldn't reach it, and any page a browser opened could post to it on localhost. Anyone who
+reached it could also have it read or clone what was on its host ([C51](../milestones/m10.md)).
+
+### Design choices
+
+- **Plain HTTP on loopback, TLS beside it.** `[api] address` stays plain HTTP and loopback only,
+  for the service's own host: its CLI, hooks and MCP server, and its first admin. `[api.tls]`
+  adds a second listener on any address that speaks TLS with the PEM chain and key it names,
+  through rustls over ring. reef's own unit, and every test that binds loopback, run as before.
+- **TLS only with sign-in required.** Other hosts reaching a service that answers anyone would
+  let anyone on the network write, so `tls::bind` refuses `[api.tls]` unless `[auth] required`
+  is set.
+- **One router on both listeners, each request knowing its peer.** `api::serve_router` serves
+  it on both, under one stop, for reef-serve and reef-app alike. Every request carries a `Peer`:
+  the address it came from, so the first user is still added from a loopback peer alone, and
+  whether it came over TLS, so the sign-in cookie is `Secure` there.
+- **Handshakes run beside each other.** `TlsListener` hands axum a connection once its
+  handshake is done, and runs each handshake as a task of its own, at most 128 at once, under
+  10 s, so a client that opens a connection and says nothing never holds up the next.
+- **Writes judged by their origin, with no token.** As Go's `CrossOriginProtection` judges
+  them, every write a browser sends, with sign-in on or off: a `Sec-Fetch-Site` of `same-origin`
+  or `none` goes on, and any other is refused 403; without one, an `Origin` must name the
+  scheme the connection speaks and the host and port the request was sent to. A request with
+  neither is no browser's, as the CLI's, and goes on, and so does every read, which no page of
+  another origin can read the answer to without CORS. One check in the guard covers the JSON
+  API, the app's server functions, whose decoder reads a body of any type, and the sign-in form.
+- **The CLI calls a root.** `[api] url` names the service on another host, and wins over
+  `address`, and `[api] ca` a PEM root its certificate is trusted by beside the system's. A
+  login is kept by the root, one spelling of it. The service accepts both keys and leaves them
+  be, so one file serves both.
+- **What is on the service's host is an admin's.** With sign-in required, registering a project
+  by a directory, or by a remote that names a path on the host, `file://` or bare, takes an
+  admin, judged before the path is looked at. `[remotes] hosts`, if set, names the only hosts a
+  remote may be cloned from, for every caller, so nobody points the service's git at its
+  internal network.
+- **What it leaves to later.** A renewed certificate is read at the next restart. There is no
+  HSTS, since the loopback port is plain HTTP on a name a browser may share, and no reading of a
+  reverse proxy's forwarded headers. With sign-in off, a page whose name a DNS rebinding points
+  at loopback is the plain port's own origin, which [C80](../milestones/m10.md) closes.
+
+### What C51 found
+
+- **Tried live on a scratch `reef-serve`,** TLS on every interface beside a loopback port, over a
+  data directory of its own:
+  - the first user, asked for over TLS from the host's LAN address, was refused as not from its
+    host, and added over loopback;
+  - a `reef` on `[api] url` by the host's name signed in, registered a project, put and read a
+    node, and kept its login by the `https://` root;
+  - a put naming another origin, another port or plain `http` was refused 403, and one naming the
+    service's own origin, or none, was applied;
+  - a user who isn't an admin was refused a directory, `/etc` and a `file://` remote, and a
+    remote off `[remotes] hosts` was refused for an admin too.
+- **A self-signed certificate must be a leaf.** `openssl req -x509` marks its certificate a CA,
+  which rustls refuses as a server's own (`CaUsedAsEndEntity`); one made with
+  `basicConstraints=critical,CA:FALSE` is served.
+- **The app's own writes pass the check unchanged.** Every browser check of the app's drags,
+  saves, comments and sessions passed with it on, since Chromium says `Sec-Fetch-Site:
+  same-origin` for each, and a form a page on another loopback port posts, the cookie and all,
+  is answered 403.
+- **A refused certificate is a connect error too,** so the CLI says the service isn't running
+  only when the connection was refused, and gives every cause otherwise.
+- **No fresh data directory.** C51 adds no table and changes no row, so the schema is as it was,
+  and the scratch server's plan read back across its restarts.
 
 ## The CLI
 
@@ -269,11 +339,14 @@ app.
   entry ready, waiting with the needs it waits on, in progress, blocked, done or missing.
   `next` follows the queue across the project's plans, naming nodes in full when it reads
   several, and `--plan` narrows it, leaving other plans' entries out.
-- **It reads the service's own config, for `[api] address` alone.** `reef_api::config` finds the
-  file for both (`--conf`, else `$REEF_CONFIG`, else the XDG path), so they meet at the address
-  one file names. The CLI ignores every other key; the service checks them.
-- **It says so and stops when the service isn't running.** The message names the address, the
-  key that set it, and `reef-serve`. Only one process can open shoal's data directory, and a
+- **It reads the service's own config, for `[api]`'s `address`, `url` and `ca` alone.**
+  `reef_api::config` finds the file for both (`--conf`, else `$REEF_CONFIG`, else the XDG path),
+  so they meet at the address one file names; on another host, `url` names the service's root
+  over TLS ([Served beyond localhost](#served-beyond-localhost)). The CLI ignores every other key;
+  the service checks them.
+- **It says so and stops when the service isn't running.** The message names the root, the key
+  that set it, and `reef-serve`, for a connection refused alone; a certificate refused, or any
+  other failure, is said with every cause. Only one process can open shoal's data directory, and a
   CLI that started a nightly server from another workspace would own a process nobody stops.
 - **A library under a thin binary.** `reef::run` takes the command line, the working directory
   and where to print, so the service's tests drive the real commands against a served twin.

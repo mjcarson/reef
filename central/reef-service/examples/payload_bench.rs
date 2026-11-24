@@ -34,7 +34,7 @@ use reef_model::{Graph, Payload, PlanName, nodes_from_records};
 use reef_render::paths::{Target, resolve};
 use reef_render::{DocSource, Layered, MemSource, Renderer, RepoSource, Sections};
 use reef_service::{
-    Backend, Checked, Conf, NodePut, NodeWrite, PageEdit, PageEdited, PageWrite, PlanWrite,
+    Asker, Backend, Checked, Conf, NodePut, NodeWrite, PageEdit, PageEdited, PageWrite, PlanWrite,
     Service, api,
 };
 use std::path::{Path, PathBuf};
@@ -124,7 +124,9 @@ async fn bench<B: Backend + 'static>(
 ) -> anyhow::Result<()> {
     // the plan with its docs in the repo, written unchecked
     let plan = PlanName::new("example", "book")?;
-    service.add_project("example", book.docs).await?;
+    service
+        .add_project("example", book.docs, Asker::default())
+        .await?;
     service.add_plan(&plan).await?;
     service
         .store()
@@ -132,7 +134,9 @@ async fn bench<B: Backend + 'static>(
         .await?;
     // and the same plan in a project whose repo is empty, its docs as its own pages
     let paged = PlanName::new("paged", "book")?;
-    service.add_project("paged", book.empty).await?;
+    service
+        .add_project("paged", book.empty, Asker::default())
+        .await?;
     service.add_plan(&paged).await?;
     let write = PlanWrite {
         nodes: book.nodes.to_vec(),

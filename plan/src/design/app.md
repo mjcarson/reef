@@ -151,8 +151,9 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
   routes ([C53](../milestones/m3.md)), so one port serves both.
 - **Live refresh from the change stream.** When Claude puts a node, the app reads the plan
   again and draws the new revision where the old one was.
-- **The app listens where the CLI looks.** Its server is its own `axum::serve` on `[api] address`,
-  loopback only until [C51](../milestones/m10.md), rather than `dioxus::serve`, which listens on `PORT` or 8080. It takes
+- **The app listens where the CLI looks.** Its server is reef-service's `api::serve_router` on
+  `[api] address`, plain HTTP on loopback, and over TLS beside it where `[api.tls]` says
+  ([C51](../milestones/m10.md)), rather than `dioxus::serve`, which listens on `PORT` or 8080. It takes
   reef-serve's place: only one process can open shoal's data directory. Under `dx serve`, dx names
   the address and proxies its own port to it.
 - **Plans at `/plans/{project}/{plan}`, server functions under `/app/`,** so neither meets the

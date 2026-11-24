@@ -256,6 +256,26 @@ impl<B: Backend> Service<B> {
         self.requires_sign_in
     }
 
+    /// Checks the asker may register what is on the service's host: a directory, or a path a
+    /// remote names
+    ///
+    /// With sign-in off anyone may, as anyone may do anything, and the service serves this host
+    /// alone; on, only an admin, since the service reads or clones what they name.
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `doing` - What they ask to do, for the refusal
+    #[instrument(name = "Service::judge_on_host", skip_all, err(Debug))]
+    pub async fn judge_on_host(&self, asker: Asker<'_>, doing: &str) -> anyhow::Result<()> {
+        // anyone, with sign-in off
+        if !self.requires_sign_in {
+            return Ok(());
+        }
+        // else an admin, as the stored rows say
+        is_admin(&self.store.users().await?, asker, doing)
+    }
+
     /// What a server says of signing in as it starts: that callers must, and how to add the
     /// first user while there is none, or nothing with sign-in off
     #[instrument(name = "Service::sign_in_note", skip_all, err(Debug))]

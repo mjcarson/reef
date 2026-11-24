@@ -3,10 +3,13 @@
 //!
 //! Each case's server runs on a port of its own, chosen by the OS, over the same store a service
 //! case would get: the `reef` project registered for a fresh git repo, and `reef/central` listed.
+//! A case that serves over TLS too gets a second port, on every interface, with a certificate
+//! minted for it, and a client that trusts it.
 
 use reef_api::ApiError;
 use reef_model::PlanName;
-use reef_service::{Backend, Conf, Service, api};
+use reef_service::api::Listeners;
+use reef_service::{Backend, Conf, Service, TlsSettings, api};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -18,6 +21,7 @@ use tokio::task::JoinHandle;
 
 use super::Fx;
 use super::faulty::Faulty;
+use super::tls::{Minted, minted};
 
 /// How long a case waits for any one answer or event
 pub const WAIT: Duration = Duration::from_secs(10);
@@ -49,6 +53,28 @@ impl Client {
             base,
             token: None,
         }
+    }
+
+    /// A client of a server over TLS, trusting the roots a PEM file holds
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The server's root, an `https://` one
+    /// * `ca` - The PEM file of the roots its certificate is trusted by
+    pub fn trusting(base: String, ca: &std::path::Path) -> anyhow::Result<Client> {
+        // the case's own CA alone, past any proxy, following no redirect
+        let pem = std::fs::read(ca)?;
+        let http = reqwest::Client::builder()
+            .no_proxy()
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(reqwest::Certificate::from_pem(&pem)?)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Client {
+            http,
+            base,
+            token: None,
+        })
     }
 
     /// The same client, every request sending a token
@@ -184,12 +210,24 @@ impl Client {
     }
 }
 
+/// The listener a served service has over TLS, beside its loopback one
+pub struct OverTls {
+    /// A client of it, trusting the case's CA, signed in as nobody
+    pub client: Client,
+    /// The address it listens on, every interface's, at a port of its own
+    pub address: SocketAddr,
+    /// The certificate it serves, its key, and the CA it is trusted by
+    pub minted: Minted,
+}
+
 /// A served service, a client of it, and the project and plan a case works in
 pub struct Ax<B: Backend + 'static> {
     /// The client, which knows only `reef-api`'s types
     pub client: Client,
     /// The address the server listens on, for a config to name
     pub address: SocketAddr,
+    /// The listener over TLS, for a case that serves one
+    pub tls: Option<OverTls>,
     /// The service the server calls, for a case to end its change stream
     pub service: Arc<Service<Faulty<B>>>,
     /// The plan the case works in, listed before the case starts
@@ -221,6 +259,54 @@ impl<B: Backend + 'static> Fx<B> {
         self.api_with(true).await
     }
 
+    /// Serves this fixture's store asking every caller to sign in, on a loopback port and over
+    /// TLS on every interface, with a certificate minted for this host
+    pub async fn api_over_tls(self) -> anyhow::Result<Ax<B>> {
+        // the service, shared by the server and the case
+        let sx = self.serve();
+        let service = Arc::new(sx.service.requiring_sign_in(true));
+        // a certificate for this host, and any free ports, the TLS one on every interface
+        let minted = minted(&sx.dir.join("tls"))?;
+        let mut conf = Conf::default();
+        conf.api.address = "127.0.0.1:0".parse()?;
+        conf.auth.required = true;
+        conf.api.tls = Some(TlsSettings {
+            address: "0.0.0.0:0".parse()?,
+            cert: minted.cert.clone(),
+            key: minted.key.clone(),
+        });
+        let listeners = Listeners::bind(&conf).await?;
+        let address = listeners.plain.local_addr()?;
+        let tls = listeners
+            .tls
+            .as_ref()
+            .map(axum::serve::Listener::local_addr)
+            .transpose()?
+            .ok_or_else(|| anyhow::anyhow!("`[api.tls]` bound no listener"))?;
+        // called by its name, which the certificate names, as another host would
+        let over = OverTls {
+            client: Client::trusting(format!("https://localhost:{}", tls.port()), &minted.ca)?,
+            address: tls,
+            minted,
+        };
+        // served until the fixture is dropped
+        let server = tokio::spawn(api::serve(
+            listeners,
+            service.clone(),
+            std::future::pending(),
+        ));
+        Ok(Ax {
+            client: Client::new(format!("http://{address}")),
+            address,
+            tls: Some(over),
+            service,
+            plan: sx.plan,
+            repo: sx.repo,
+            dir: sx.dir,
+            server,
+        })
+    }
+
     /// Serves this fixture's store on a loopback port of its own, asking callers to sign in or
     /// not, and makes a client of it
     ///
@@ -246,6 +332,7 @@ impl<B: Backend + 'static> Fx<B> {
         Ok(Ax {
             client: Client::new(base),
             address,
+            tls: None,
             service,
             plan: sx.plan,
             repo: sx.repo,

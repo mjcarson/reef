@@ -72,7 +72,12 @@ cores = 2                     # the in-process pool's shards
 memory = "256MiB"             # each shard's memory budget
 
 [api]
-address = "127.0.0.1:12180"   # where the JSON API listens, and `reef` calls it: loopback only
+address = "127.0.0.1:12180"   # where the JSON API listens over plain HTTP, and `reef` calls it: loopback only
+
+[api.tls]                     # other hosts, over TLS, beside it; needs `[auth] required`
+address = "0.0.0.0:12443"     # any address
+cert = "/etc/reef/fullchain.pem"   # the certificate chain, as PEM, the server's own first
+key = "/etc/reef/privkey.pem"      # its private key, as PEM
 
 [auth]
 required = true               # every caller signs in; default false, which answers anyone
@@ -80,6 +85,7 @@ required = true               # every caller signs in; default false, which answ
 [remotes]
 clones = "/home/me/.local/share/reef/clones"   # remote projects' clones; default $XDG_DATA_HOME/reef/clones
 fetch_every = "5m"            # how often every remote project is fetched, in s, m or h; "0s" never
+hosts = ["github.com"]        # the hosts a remote may be cloned from; default any
 ```
 
 Only one process can open a data directory. `Service::shared` opens the process's service once,
@@ -258,14 +264,22 @@ that `Service::shared` opens. Every route is one service call, and every body an
   everything through. On, everything but signing in and the app's static files needs a user: a
   page a browser opens is sent to `/sign-in?next=…`, and anything else is answered 401 with
   `WWW-Authenticate: Bearer`.
-- **The first user comes from the service's own host**, and is an admin; after that only an admin
-  adds users, whether sign-in is required or not, so users can be added before it is turned on.
-- **Localhost only.** `api::bind` refuses any address but a loopback one until reef serves over
-  TLS (C51).
+- **A write from a page of another origin is refused,** 403, with sign-in on or off, as Go's
+  `CrossOriginProtection` judges it (`origin::judge`): a `Sec-Fetch-Site` other than
+  `same-origin` or `none`, or without one, an `Origin` that isn't the scheme, host and port the
+  request was sent to. A request with neither, as the CLI, the MCP server and the hooks send,
+  goes on, and so does every read.
+- **The first user comes from the service's own host**, over loopback, and is an admin; after
+  that only an admin adds users, whether sign-in is required or not, so users can be added before
+  it is turned on.
+- **Plain HTTP on localhost, TLS beside it.** `api::bind` refuses any address but a loopback one
+  for plain HTTP, and `tls::bind` adds a listener over TLS on any address where `[api.tls]` names
+  one, refused unless sign-in is required. `api::serve_router` serves one router on both, and
+  each request knows its `Peer`: where it came from, and whether over TLS.
 
 `reef-serve` serves it alone, until reef-app mounts it. It listens before it opens shoal, so a
-taken port or an address that isn't local stops it first, and on SIGINT or SIGTERM it ends the
-change stream, waits for open requests and closes the service.
+taken port, an address that isn't local or a certificate that can't be read stops it first, and
+on SIGINT or SIGTERM it ends the change stream, waits for open requests and closes the service.
 
 ```sh
 cargo +nightly run --release -p reef-service --features embedded --bin reef-serve   # in-process
@@ -364,15 +378,62 @@ reef logout                        # the token revoked at the service, and forgo
 - **A password is asked for on the terminal** with echo off, never taken as an argument, or read
   from `--password-file PATH` (`-` for standard input). The service keeps only its argon2id hash.
 - **A login keeps a token, never the password,** in `$XDG_CONFIG_HOME/reef/credentials.toml`,
-  readable by its owner alone, a token for each server by its root (`http://127.0.0.1:12180`).
+  readable by its owner alone, a token for each server by its root (`http://127.0.0.1:12180`,
+  or the `https://` one `[api] url` names).
   Every request reads it again, so the MCP server, the hooks and a runner started before the
   login send it too. `--credentials PATH` names another file, `$REEF_TOKEN` gives a token
   outright, and `$REEF_CREDENTIALS` names a file, in that order, before the default.
 - **A browser signs in at `/sign-in`,** which sets an HttpOnly, SameSite=Strict cookie for 30
-  days, without `Secure` until reef serves over TLS. The app's bar names whom it is signed in as,
-  beside a Sign out.
+  days, `Secure` when it signs in over TLS. The app's bar names whom it is signed in as, beside a
+  Sign out.
 - **A refused `reef` says how to sign in**, naming the service's address and the file its token
   came from.
+
+### Serving other hosts
+
+The loopback port stays plain HTTP, for the service's own host. Other hosts reach the JSON API,
+and the app, over TLS on a second listener, which sign-in must be required for:
+
+```toml
+[api]
+address = "127.0.0.1:12180"         # this host's CLI, hooks and MCP server, as before
+
+[api.tls]
+address = "0.0.0.0:12443"
+cert = "/etc/reef/fullchain.pem"
+key = "/etc/reef/privkey.pem"
+
+[auth]
+required = true
+```
+
+The first admin is added on the service's host, over loopback, with `reef user add`. A `reef` on
+another host names the service by its root, and a root to trust its certificate by if the system
+doesn't already:
+
+```toml
+[api]
+url = "https://reef.example:12443"   # wins over `address`
+ca = "/home/me/.config/reef/ca.pem"  # beside the system's roots, and `$SSL_CERT_FILE`'s
+```
+
+- **The certificate is read as the server starts,** so a renewed one is served from the next
+  restart. A chain or key that can't be read, or a key that isn't the certificate's, stops it,
+  naming the key that set the file.
+- **A `reef` refusing the certificate says so,** with every cause, rather than that the service
+  isn't running.
+- **A self-signed certificate must be a leaf.** `openssl req -x509` makes a CA unless told
+  otherwise, and rustls refuses a CA as a server's own (`CaUsedAsEndEntity`), so add
+  `-addext basicConstraints=critical,CA:FALSE`, or sign it with a CA of your own and name that
+  CA as `ca`.
+- **Only an admin registers what is on the service's host,** once sign-in is required: a
+  directory (`--repo`), or a remote that names a path on it, `file://` or bare. A user who isn't
+  one is refused before the path is looked at. `[remotes] hosts` limits the hosts a remote may
+  be cloned from, for every caller.
+- **Known limits:** no HSTS, since the loopback port is plain HTTP on a name the browser may
+  share; no reading of a reverse proxy's `X-Forwarded-*`, so a proxy in front makes every caller
+  look local; and on the plain port, with sign-in off, a page whose name a DNS rebinding points at
+  loopback is the same origin as the service (C80).
 
 ### Projects from remote repos
 
@@ -410,10 +471,12 @@ reef project ls                     # shoal  git@github.com:org/shoal.git (`main
   keys or credential helpers. A URL with a password, a user over http(s), or a relative path is
   refused, as is any transport but file, git, ssh, http and https, since every caller sees a
   project's URL and `ext::` would run a command. Git never prompts, and stops after 5 minutes.
+- **A path on the service's host is an admin's to name,** with sign-in required, and
+  `[remotes] hosts`, if set, names the only hosts a remote may be cloned from.
 - **Known limits:** a clone is never removed, since a project can't be; moving `[remotes] clones`
-  leaves the paths projects keep behind; a doc kept in LFS reads as its pointer; and until C51
-  limits it, anyone who can reach the API can have the service clone any repo its account can
-  read, as `--repo` lets them read any directory today.
+  leaves the paths projects keep behind; a doc kept in LFS reads as its pointer; and with sign-in
+  off, anyone who can reach the loopback port can have the service clone any repo its account
+  can read, or read any directory with `--repo`.
 
 ### Plans and choices kept
 
@@ -490,10 +553,11 @@ the pages and the JSON API alike.
   browser whose sign-in lapses finds its change stream closed and its calls answered 401, and
   is offered the sign-in page again, which brings it back where it was.
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
-  place. Only one process can open shoal's data directory, so run one or the other. Under
+  place, and over TLS beside it where `[api.tls]` says. Only one process can open shoal's data
+  directory, so run one or the other. Under
   `dx serve`, dx names the server's address and proxies its own port to it; point `[api] address`
   at dx's port to reach it from the CLI.
-- **It is served by its own `axum::serve`, not `dioxus::serve`,** which would listen on `PORT`
+- **It is served by `api::serve_router`, not `dioxus::serve`,** which would listen on `PORT`
   or 8080. It stops on SIGINT or SIGTERM, ending the change stream first.
 - **`embedded` goes to the server build alone,** since dx keeps default features on in the wasm
   build too: `@server --platform server --features embedded`. `tests/tree.rs` checks the wasm

@@ -68,4 +68,5 @@ suite!(
     page_edits_are_checked,
     each_plan_reads_its_own_pages,
     the_first_user_needs_this_host,
+    remotes_come_from_the_hosts_listed,
 );

@@ -8,7 +8,8 @@
 
 mod common;
 
-use reef_service::{Conf, api};
+use reef_service::api::Listeners;
+use reef_service::{Conf, TlsSettings, api};
 
 /// Expands each case into a test against the twin, and one against an in-process pool
 macro_rules! suite {
@@ -65,7 +66,8 @@ suite!(
     remote_registrations_answer_with_their_status,
 );
 
-/// The API listens on a loopback address, and refuses any other until users sign in
+/// The API listens on a loopback address over plain HTTP, and refuses any other, which only TLS
+/// serves
 #[tokio::test]
 async fn server_binds_to_localhost_only() -> anyhow::Result<()> {
     // every address but a loopback one is refused, naming the key that set it
@@ -90,5 +92,77 @@ async fn server_binds_to_localhost_only() -> anyhow::Result<()> {
     }
     // the default is localhost too
     assert!(Conf::default().api.address.ip().is_loopback());
+    Ok(())
+}
+
+/// TLS is refused with sign-in off, plain HTTP still binds loopback only beside it, and a
+/// certificate or key that can't be read is named with its key
+#[tokio::test]
+async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()> {
+    // a certificate, and another's key, in a directory of the case's own
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("api-tls");
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    let minted = common::tls::minted(&dir.join("ours"))?;
+    let other = common::tls::minted(&dir.join("other"))?;
+    // a config serving it on every interface, beside loopback, asking callers to sign in
+    let conf = |cert: &std::path::Path, key: &std::path::Path, required: bool| {
+        let mut conf = Conf::default();
+        conf.api.address = "127.0.0.1:0".parse().unwrap();
+        conf.auth.required = required;
+        conf.api.tls = Some(TlsSettings {
+            address: "0.0.0.0:0".parse().unwrap(),
+            cert: cert.to_path_buf(),
+            key: key.to_path_buf(),
+        });
+        conf
+    };
+    // with sign-in off, other hosts would reach a service that answers anyone
+    let refused = Listeners::bind(&conf(&minted.cert, &minted.key, false))
+        .await
+        .err()
+        .expect("TLS was served with sign-in off")
+        .to_string();
+    assert!(refused.contains("`auth.required`"), "{refused}");
+    assert!(refused.contains("`api.tls`"), "{refused}");
+    // a chain that isn't there, holds no certificate, or isn't its key's, names the files
+    let missing = dir.join("missing.pem");
+    let garbage = dir.join("garbage.pem");
+    std::fs::write(&garbage, "not a certificate\n")?;
+    for (cert, key, says) in [
+        (&missing, &minted.key, "missing.pem"),
+        (&garbage, &minted.key, "holds no PEM certificate"),
+        (&minted.cert, &missing, "missing.pem"),
+        (&minted.cert, &garbage, "garbage.pem"),
+        (&minted.cert, &other.key, "serving the certificate"),
+    ] {
+        let refused = Listeners::bind(&conf(cert, key, true))
+            .await
+            .err()
+            .expect(says)
+            .to_string();
+        assert!(refused.contains(says), "{says}: {refused}");
+        assert!(refused.contains("`api.tls.cert`"), "{says}: {refused}");
+    }
+    // plain HTTP beside it still takes loopback alone
+    let mut wide = conf(&minted.cert, &minted.key, true);
+    wide.api.address = "0.0.0.0:0".parse()?;
+    let refused = Listeners::bind(&wide)
+        .await
+        .err()
+        .expect("plain HTTP bound wide");
+    assert!(refused.to_string().contains("localhost only"), "{refused}");
+    // and a certificate its key signs serves on every interface, beside loopback
+    let listeners = Listeners::bind(&conf(&minted.cert, &minted.key, true)).await?;
+    let tls = listeners.tls.as_ref().expect("TLS was named");
+    assert!(
+        axum::serve::Listener::local_addr(tls)?
+            .ip()
+            .is_unspecified()
+    );
+    let roots = listeners.roots()?;
+    assert!(roots[0].starts_with("http://127.0.0.1:"), "{roots:?}");
+    assert!(roots[1].starts_with("https://0.0.0.0:"), "{roots:?}");
     Ok(())
 }

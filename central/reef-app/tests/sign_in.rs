@@ -1,5 +1,6 @@
 //! The app's server asking every caller to sign in: one layer guards its pages, its server
-//! functions and the JSON API it mounts, and the page a browser signs in on is the service's
+//! functions and the JSON API it mounts, refusing writes from other origins, and the page a
+//! browser signs in on is the service's
 //!
 //! The service is the process's own, so this suite runs in a binary of its own, apart from
 //! `app.rs`, whose server asks nobody to sign in.
@@ -8,9 +9,9 @@
 #![recursion_limit = "256"]
 
 use reef_api::{Me, NewUser, UserAdded, paths};
-use reef_service::{Asker, Conf, Service};
+use reef_service::{Asker, Conf, Service, api};
 use reqwest::StatusCode;
-use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, LOCATION, SET_COOKIE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, COOKIE, LOCATION, ORIGIN, SET_COOKIE};
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -18,7 +19,8 @@ use std::path::Path;
 const PASSWORD: &str = "correct horse battery";
 
 /// One layer guards the app's pages, its server functions and the JSON API: nobody signed in is
-/// sent to sign in or refused, and a browser that signs in is shown whom it is signed in as
+/// sent to sign in or refused, a browser that signs in is shown whom it is signed in as, and a
+/// post from a page of another origin is refused, its cookie and all
 #[test]
 fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
     // a fresh directory under cargo's target dir, rather than a tmpfs `/tmp`
@@ -61,9 +63,12 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         // the app's router on any free local port, each request knowing where it came from
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address: SocketAddr = listener.local_addr()?;
-        let app =
-            reef_app::server::router(service).into_make_service_with_connect_info::<SocketAddr>();
-        tokio::spawn(async move { axum::serve(listener, app).await });
+        let app = reef_app::server::router(service);
+        tokio::spawn(api::serve_router(
+            app,
+            listener.into(),
+            std::future::pending(),
+        ));
         let base = format!("http://{address}");
         let http = reqwest::Client::builder()
             .no_proxy()
@@ -160,6 +165,56 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         assert!(me.required);
         let answer = get(paths::PROJECTS).header(COOKIE, &cookie).send().await?;
         assert_eq!(answer.status(), StatusCode::OK);
+        // but a page on another port of this host, the same site, posts with the cookie and is
+        // refused, whether its browser says so or only names its origin
+        let elsewhere = "http://127.0.0.1:1";
+        for (path, body) in [
+            ("/app/save", "{}"),
+            ("/app/queue", "{}"),
+            (paths::PROJECTS, "{}"),
+            (paths::SIGN_OUT, ""),
+        ] {
+            for (header, value) in [("sec-fetch-site", "same-site"), ("origin", elsewhere)] {
+                let answer = http
+                    .post(format!("{base}{path}"))
+                    .header(CONTENT_TYPE, "text/plain")
+                    .header(COOKIE, &cookie)
+                    .header(header, value)
+                    .body(body)
+                    .send()
+                    .await?;
+                assert_eq!(answer.status(), StatusCode::FORBIDDEN, "{path} {header}");
+                let text = answer.text().await?;
+                assert!(text.contains("its own pages"), "{path}: {text}");
+            }
+        }
+        // as is a sign-in form another origin posts, which would sign the browser in as another
+        let answer = http
+            .post(format!("{base}{}", paths::SIGN_IN))
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(ORIGIN, elsewhere)
+            .body(format!("name=ada&password={}", paths::encode(PASSWORD)))
+            .send()
+            .await?;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        assert!(answer.headers().get(SET_COOKIE).is_none());
+        // the refused sign-out left the cookie signing ada in
+        let me: Me = get("/app/me")
+            .header(COOKIE, &cookie)
+            .send()
+            .await?
+            .json()
+            .await?;
+        assert_eq!(me.user.map(|user| user.name).as_deref(), Some("ada"));
+        // and the app's own page signs out, as its browser says it is the same origin
+        let answer = http
+            .post(format!("{base}{}", paths::SIGN_OUT))
+            .header(COOKIE, &cookie)
+            .header("sec-fetch-site", "same-origin")
+            .header(ORIGIN, &base)
+            .send()
+            .await?;
+        assert_eq!(answer.status(), StatusCode::SEE_OTHER);
         anyhow::Ok(())
     })
 }

@@ -35,8 +35,8 @@
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
 //! - **Config** ([`config`]): where reef's config file is, which the service and its clients read.
 //!
-//! The service serves localhost only until it serves over TLS (C51), at [`DEFAULT_ADDRESS`]
-//! unless reef's config names another.
+//! The service serves plain HTTP to localhost, at [`DEFAULT_ADDRESS`] unless reef's config names
+//! another, and other hosts over TLS where its `[api.tls]` says.
 
 pub mod change;
 pub mod comment;
