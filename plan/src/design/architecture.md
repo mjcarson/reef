@@ -214,8 +214,9 @@ localhost ([C51](../milestones/m10.md)) both build on it.
 - **What sign-in leaves to later.** A cookie ignores ports, so a page on another loopback port is
   same-site and its posts carry the cookie: [C51](../milestones/m10.md)'s origin check refuses them
   ([Served beyond localhost](#served-beyond-localhost)). Changing a password, removing a user,
-  listing and revoking tokens and slowing repeated failures are [C77](../milestones/m10.md)'s, and every
-  write's author is [C50](../milestones/m10.md)'s.
+  listing and revoking tokens and slowing repeated failures came with [C77](../milestones/m10.md)
+  ([Managing users and tokens](#managing-users-and-tokens)), and every write's author is
+  [C50](../milestones/m10.md)'s.
 
 ### What C48 found
 
@@ -298,6 +299,72 @@ reached it could also have it read or clone what was on its host ([C51](../miles
   only when the connection was refused, and gives every cause otherwise.
 - **No fresh data directory.** C51 adds no table and changes no row, so the schema is as it was,
   and the scratch server's plan read back across its restarts.
+
+## Managing users and tokens
+
+C48 gave reef users and tokens, but a password couldn't be changed, a user couldn't be removed, a
+token could be revoked only by its own logout, a sole admin who lost their password couldn't be got
+back, an open change stream outlived its token, and nothing slowed a guesser ([C77](../milestones/m10.md)).
+
+### Design choices
+
+- **A token is named by an id cut from its hash,** the first 16 hex digits of its SHA-256, so a
+  listing shows no token and nothing a token could be rebuilt from. Everyone lists their own
+  tokens, the one they sent marked, and revokes any of them; an admin lists and revokes anyone's.
+  An id the caller may not see is answered as no token at all, 404.
+- **Your own password needs your current one, and leaves your tokens,** so hooks and other
+  machines keep working, and `reef token revoke --others` is there if it leaked. An admin setting
+  another user's needs no current one, and revokes every token of theirs, since whoever held the
+  old password shouldn't stay signed in.
+- **An admin removes a user, never the last admin.** The user's row goes under the users' lock,
+  over its version, then every token of theirs. A token issued before its user was added signs
+  nobody in, so a new user given an old name inherits nothing, even from a removal whose token
+  deletes stopped partway ([Users and tokens](store.md#users-and-tokens)).
+- **A revoke reaches whatever trusted the token.** Each revoke, removal and admin reset drops the
+  user's tokens from the minute-long lookup cache, before and after the rows go, and bumps a
+  counter every open change stream watches, so a stream opened with a token that signs nobody in
+  ends at once, and its browser's reconnect is refused. Each stream also looks every minute, for a
+  browser token's expiry.
+- **Failures slowed by name and by address, before any hash.** A name may fail 5 times and an
+  address 20, an IPv6 one by its /64, which one host can fill; then each try waits, from a
+  second, doubling to 5 minutes, answered 429 with `Retry-After`, its password unchecked even when
+  right. Each try counts as a failure as it is let through, and a success takes it back, so a
+  burst sent at once is judged as if one came after another. A success clears the name, failures
+  lapse an hour after the last, and at most 4096 keys of each kind are kept, the lapsed and then
+  the oldest going first. The token route, the sign-in form and your own password change share it.
+  Slowing rather than locking out means a guesser can't keep a user out for long.
+- **A lost admin is recovered from the store, never over the API.** `reef-serve recover NAME`
+  opens the store as the service does, asks for a new password twice with echo off, sets it, makes
+  the user an admin and revokes their tokens, or adds them as an admin if no user has the name.
+  Whoever can open the store holds the data already; a loopback caller may not, since any user of
+  the host reaches loopback. An in-process pool locks the data directory, so the service is
+  stopped first, and the command says so when it isn't. With shoal on a node of its own it runs
+  beside the service, which then trusts a revoked token for up to a minute.
+- **One prompt for both binaries.** Asking for a password on the terminal with echo off moved from
+  the CLI into `reef_api::prompt`, behind a `prompt` feature the browser's build never turns on.
+- **The app's account page** ([The shell](app.md#the-shell)) holds your password, your tokens
+  and, for an admin, every user, through server functions that call the service's own methods, as
+  the JSON API's routes do.
+
+### What C77 found
+
+- **Tried live on a scratch `reef-serve`,** sign-in required, over a data directory the binary
+  before C77 wrote, which read back unchanged, since C77 adds no table and changes no row:
+  - a wrong current password was refused and the right one changed ada's, her token still
+    signing in; a second login and `reef token revoke --others` left one token;
+  - bob's change stream, opened with his token, ended 16 ms after an admin revoked it, and his put
+    was refused;
+  - five wrong logins for bob, then the right password, answered 429 with `Retry-After: 1`;
+  - an admin removed bob, and the last admin stayed;
+  - `reef-serve recover ada`, run while the service held the data, said to stop it first; run
+    after, it set ada's password, made her an admin and revoked her token, and a name nobody had
+    was added as an admin.
+- **shoal's lock error reaches the binary by its name.** The pool passes shoal's start error on in
+  its `Debug` form, so `recover` knows a held data directory by `StorageDirectoryLocked`, as well
+  as by shoal's words for it.
+- **A page's buttons do nothing before its script runs,** so the browser check clicks until a
+  field opens before it types. No password field sits in a `form`, so an early submit sends
+  nothing.
 
 ## The CLI
 

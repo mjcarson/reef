@@ -181,8 +181,12 @@ pub const PROJECT_SESSIONS: &str = "/api/v1/projects/{project}/sessions";
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
 
-/// Tokens: one issued by `POST` for a user's name and password
+/// Tokens: one issued by `POST` for a user's name and password, and the caller's listed by
+/// `GET`, or a user's an admin names with the `user` query
 pub const TOKENS: &str = "/api/v1/tokens";
+
+/// One token, by its id, revoked by `DELETE`
+pub const TOKEN: &str = "/api/v1/tokens/{id}";
 
 /// The token the caller sent, revoked by `DELETE`
 pub const CURRENT_TOKEN: &str = "/api/v1/tokens/current";
@@ -193,6 +197,13 @@ pub const ME: &str = "/api/v1/me";
 /// reef's users: listed by `GET` and added to by `POST`, by an admin, or the first from the
 /// service's own host
 pub const USERS: &str = "/api/v1/users";
+
+/// One user, removed by `DELETE`, by an admin
+pub const USER: &str = "/api/v1/users/{name}";
+
+/// One user's password, changed by `PUT`: their own with their current one, or another's by an
+/// admin
+pub const USER_PASSWORD: &str = "/api/v1/users/{name}/password";
 
 /// The browser's sign-in page by `GET`, and its form sent by `POST`, which sets the sign-in
 /// cookie
@@ -620,6 +631,42 @@ pub fn project_sessions(project: &str) -> String {
     format!("{PROJECTS}/{}/sessions", encode(project))
 }
 
+/// The path of one user's tokens, as an admin lists them
+///
+/// # Arguments
+///
+/// * `user` - The user's name
+pub fn tokens_of(user: &str) -> String {
+    format!("{TOKENS}?user={}", encode(user))
+}
+
+/// The path of one token, by its id
+///
+/// # Arguments
+///
+/// * `id` - The token's id, as a listing of tokens shows it
+pub fn token(id: &str) -> String {
+    format!("{TOKENS}/{}", encode(id))
+}
+
+/// The path of one user
+///
+/// # Arguments
+///
+/// * `name` - The user's name
+pub fn user(name: &str) -> String {
+    format!("{USERS}/{}", encode(name))
+}
+
+/// The path of one user's password
+///
+/// # Arguments
+///
+/// * `name` - The user's name
+pub fn user_password(name: &str) -> String {
+    format!("{}/password", self::user(name))
+}
+
 /// The path of the change stream, narrowed to a project or to one plan
 ///
 /// # Arguments
@@ -744,6 +791,15 @@ mod tests {
         assert_eq!(
             super::project_sessions("reef"),
             fill(super::PROJECT_SESSIONS)
+        );
+        // and a token, a user, their password and an admin's listing of their tokens
+        let user = |template: &str| template.replace("{id}", "0a1b").replace("{name}", "ada");
+        assert_eq!(super::token("0a1b"), user(super::TOKEN));
+        assert_eq!(super::user("ada"), user(super::USER));
+        assert_eq!(super::user_password("ada"), user(super::USER_PASSWORD));
+        assert_eq!(
+            super::tokens_of("ada"),
+            format!("{}?user=ada", super::TOKENS)
         );
         // and a doc's page fills in the rest of the docs' template
         let page = super::DOC

@@ -486,6 +486,16 @@ pub trait Backend: Send + Sync {
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 
+    /// Deletes one user row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    fn delete_user(&self, row: &UserRow) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads every token row, in hash order
+    fn tokens(&self) -> impl Future<Output = anyhow::Result<Vec<TokenRow>>> + Send;
+
     /// Reads the token row kept under a token's hash, if one is
     ///
     /// # Arguments

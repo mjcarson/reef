@@ -1232,6 +1232,7 @@ pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Re
     let remote = Asker {
         user: None,
         local: false,
+        ..Default::default()
     };
     let refused = sx
         .service
@@ -1247,6 +1248,7 @@ pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Re
     let local = Asker {
         user: None,
         local: true,
+        ..Default::default()
     };
     let UserAdded::Added(ada) = sx.service.add_user(new("ada"), local).await? else {
         anyhow::bail!("ada wasn't added from this host");
@@ -1265,6 +1267,7 @@ pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Re
     let by_ada = Asker {
         user: Some(&ada),
         local: false,
+        ..Default::default()
     };
     let added = sx.service.add_user(new("bob"), by_ada).await?;
     assert!(

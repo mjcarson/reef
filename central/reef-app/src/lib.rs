@@ -4,7 +4,8 @@
 //! queue of work to take first (`queue`). The server answers
 //! the app's server functions, which call `reef-service`, and serves reef's JSON API on the same
 //! port, so the CLI, the MCP server and the app all reach one service. When the server asks
-//! callers to sign in, the bar says whom it takes the browser for (`sign_in`).
+//! callers to sign in, the bar says whom it takes the browser for (`sign_in`), and links to
+//! their account page, for their password and tokens, and every user to an admin (`account`).
 //!
 //! dx builds two sides from this crate: the wasm client with `web`, and the server with
 //! `server`, or `embedded` for shoal in-process.
@@ -16,6 +17,7 @@
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
+pub mod account;
 pub mod app;
 pub mod calls;
 pub mod canvas;

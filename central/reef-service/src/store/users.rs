@@ -8,7 +8,14 @@
 //!   `if_absent`, so a name taken is refused rather than written over.
 //! - **A token is a row under its hash.** The token itself is never stored, so the rows can't be
 //!   read back into tokens. A token is kept `if_absent`, and revoked by a delete over the version
-//!   read.
+//!   read. A user's tokens are found by reading the whole partition, which only listing,
+//!   revoking by id and removing a user do.
+//! - **Removed under the same lock, never the last admin.** The judge sees every user first, so
+//!   whoever may not remove learns nothing of who exists. Then the user's row is deleted over its
+//!   version, and every token of theirs after it. A token the delete missed signs nobody in,
+//!   since a token issued before its user was added was another user's.
+//! - **A password rewritten over the version read,** so a change checked against the current
+//!   password can't write over another made since.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another user's or another token's.
 
@@ -71,6 +78,20 @@ pub enum UserKept {
     NameTaken,
 }
 
+/// What came of removing a user from the store
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserDropped {
+    /// The user was removed, and this many of their tokens with them
+    Removed {
+        /// How many tokens were dropped
+        revoked: usize,
+    },
+    /// No user has the name
+    NoSuchUser,
+    /// The user is the last admin, who stays
+    LastAdmin,
+}
+
 /// A user's record, as its row keeps it
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct KeptUser {
@@ -123,6 +144,22 @@ fn read_user(row: UserRow) -> anyhow::Result<StoredUser> {
         },
         password: kept.password,
         version: row.version,
+    })
+}
+
+/// A user's row, as the store writes one
+///
+/// # Arguments
+///
+/// * `name` - The user's name
+/// * `kept` - Their record
+/// * `version` - The row's version
+fn user_row(name: &str, kept: &KeptUser, version: u64) -> anyhow::Result<UserRow> {
+    Ok(UserRow {
+        list: USERS.to_string(),
+        name: name.to_string(),
+        version,
+        record: serde_json::to_string(kept)?,
     })
 }
 
@@ -219,12 +256,7 @@ impl<B: Backend> Store<B> {
             admin,
             created_at: user.created_at,
         };
-        let row = UserRow {
-            list: USERS.to_string(),
-            name: name.to_string(),
-            version: 1,
-            record: serde_json::to_string(&kept)?,
-        };
+        let row = user_row(name, &kept, 1)?;
         // where no user of the name is, so a user is never written over
         match self.backend.write_user(row, Expect::Absent).await? {
             Written::Applied => Ok(UserKept::Added(user)),
@@ -233,6 +265,124 @@ impl<B: Backend> Store<B> {
                 anyhow::bail!("user `{name}` wasn't added: {refusal:?}")
             }
         }
+    }
+
+    /// Removes a user under the users' lock, and every token of theirs, judged against every
+    /// user as they stand
+    ///
+    /// The judge sees every user and refuses the removal with an error before anything else is
+    /// said, so a caller who may not remove learns nothing of who exists. The last admin is never
+    /// removed.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The user's name
+    /// * `judge` - Refuses the removal, or lets it go on
+    #[instrument(name = "Store::remove_user", skip_all, err(Debug))]
+    pub async fn remove_user<J>(&self, name: &str, judge: J) -> anyhow::Result<UserDropped>
+    where
+        J: FnOnce(&[StoredUser]) -> anyhow::Result<()> + Send,
+    {
+        // under the lock, against every user as they stand
+        let _held = self.user_lock.lock().await;
+        let users = self.users().await?;
+        judge(&users)?;
+        let Some(stored) = users.iter().find(|stored| stored.user.name == name) else {
+            return Ok(UserDropped::NoSuchUser);
+        };
+        // an admin stays while no other admin would
+        let admins = users.iter().filter(|stored| stored.user.admin).count();
+        if stored.user.admin && admins <= 1 {
+            return Ok(UserDropped::LastAdmin);
+        }
+        // the row as it was read, deleted only at its version
+        let row = UserRow {
+            list: USERS.to_string(),
+            name: name.to_string(),
+            version: stored.version,
+            record: String::new(),
+        };
+        match self.backend.delete_user(&row).await? {
+            Written::Applied => {}
+            // nothing else writes a user while the lock is held, so this is no race
+            Written::Refused(refusal) => {
+                anyhow::bail!("user `{name}` wasn't removed: {refusal:?}")
+            }
+        }
+        // then every token of theirs
+        let revoked = self.drop_tokens_of(name).await?;
+        Ok(UserDropped::Removed { revoked })
+    }
+
+    /// Rewrites a user's password, and whether they are an admin, over the version read,
+    /// returning whether it was written
+    ///
+    /// # Arguments
+    ///
+    /// * `stored` - The user, as read
+    /// * `password` - Their new password as an argon2id PHC string
+    /// * `admin` - Whether they are an admin from now on
+    #[instrument(name = "Store::rewrite_user", skip_all, err(Debug))]
+    pub async fn rewrite_user(
+        &self,
+        stored: &StoredUser,
+        password: &str,
+        admin: bool,
+    ) -> anyhow::Result<bool> {
+        // under the lock, so a removal reads the user as written
+        let _held = self.user_lock.lock().await;
+        let kept = KeptUser {
+            password: password.to_string(),
+            admin,
+            created_at: stored.user.created_at,
+        };
+        let row = user_row(&stored.user.name, &kept, stored.version + 1)?;
+        // only over the version read, so a change since is never written over
+        match self
+            .backend
+            .write_user(row, Expect::Version(stored.version))
+            .await?
+        {
+            Written::Applied => Ok(true),
+            Written::Refused(_) => Ok(false),
+        }
+    }
+
+    /// Lists every token, or one user's, in hash order
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The one user whose tokens to list, or `None` for every token
+    #[instrument(name = "Store::tokens", skip_all, err(Debug))]
+    pub async fn tokens(&self, user: Option<&str>) -> anyhow::Result<Vec<StoredToken>> {
+        // the whole partition, each row checked against its full key
+        let rows = self.backend.tokens().await?;
+        let mut tokens = Vec::with_capacity(rows.len());
+        for row in rows {
+            let read = read_token(row)?;
+            // only the user's, if one is named
+            if user.is_none_or(|user| read.user == user) {
+                tokens.push(read);
+            }
+        }
+        Ok(tokens)
+    }
+
+    /// Drops every token of a user's, returning how many were dropped
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user's name
+    #[instrument(name = "Store::drop_tokens_of", skip_all, err(Debug))]
+    pub async fn drop_tokens_of(&self, user: &str) -> anyhow::Result<usize> {
+        // each as read, a token gone already not counted
+        let mut dropped = 0;
+        for token in self.tokens(Some(user)).await? {
+            if self.drop_token(&token).await? {
+                dropped += 1;
+            }
+        }
+        Ok(dropped)
     }
 
     /// Gets the token kept under a hash, if one is

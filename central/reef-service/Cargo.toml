@@ -19,9 +19,12 @@ rkyv.workspace = true
 deepsize2.workspace = true
 reef-model.workspace = true
 reef-render.workspace = true
-reef-api.workspace = true
+# with its prompt, which `reef-serve recover` asks a lost admin's new password with
+reef-api = { workspace = true, features = ["prompt"] }
 axum.workspace = true
 tokio-stream.workspace = true
+# a change stream cut short once its token signs nobody in, at the version axum's tree holds
+futures-util = "0.3"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

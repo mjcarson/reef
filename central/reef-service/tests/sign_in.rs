@@ -53,4 +53,11 @@ suite!(
     cross_origin_writes_are_refused_with_sign_in_off,
     signing_in_over_tls_sets_a_secure_cookie,
     only_an_admin_registers_what_is_on_the_host,
+    a_revoked_token_signs_nothing_in,
+    repeated_wrong_passwords_are_slowed,
+    passwords_are_changed_by_their_user_or_set_by_an_admin,
+    an_admin_removes_a_user_and_their_tokens,
+    tokens_are_listed_and_revoked_by_their_user,
+    a_change_stream_ends_when_its_token_is_revoked,
+    the_host_recovers_a_lost_admin,
 );

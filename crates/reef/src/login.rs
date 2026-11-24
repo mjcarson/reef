@@ -1,16 +1,20 @@
-//! Signing in from the terminal: `reef login`, `logout` and `whoami`, and adding and listing
-//! users
+//! Signing in from the terminal: `reef login`, `logout` and `whoami`, adding, listing and
+//! removing users and changing their passwords, and listing and revoking tokens
 //!
 //! - **A password is asked for on the terminal,** with echo off, never taken as an argument,
 //!   which shells keep in their history. `--password-file` reads one from a file, or from
-//!   standard input as `-`, for a script.
+//!   standard input as `-`, for a script ([`reef_api::prompt`]).
 //! - **A login keeps a token, never the password,** in the credentials file, a server each.
 //! - **A logout revokes the token at the service, then forgets it here,** even when the service
 //!   can't be reached, so a token never outlives the login it was kept for on this host.
 //! - **The first user is added from the service's own host** while it has none, and is an admin.
+//! - **Your own password needs your current one,** and leaves your tokens signing in; an admin
+//!   setting another user's revokes every token of theirs.
+//! - **A token is named by its id,** cut from its hash, so a listing never shows a token.
 
-use reef_api::{ErrorCode, NewUser, SignIn, UserAdded};
-use std::io::{BufRead, Write};
+use reef_api::prompt::{read_new_password, read_password};
+use reef_api::{ErrorCode, NewUser, PasswordChange, SignIn, TokenInfo, UserAdded, UserRemoved};
+use std::io::Write;
 use std::path::Path;
 
 use crate::client::{Client, is_code};
@@ -42,106 +46,6 @@ fn own_name() -> anyhow::Result<String> {
         .ok()
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| anyhow::anyhow!("no user name is set here: name one with `--user NAME`"))
-}
-
-/// Reads a password from a file, from standard input as `-`, or else from the terminal with
-/// echo off
-///
-/// # Arguments
-///
-/// * `prompt` - What to ask on the terminal
-/// * `file` - The file to read it from instead, or `-` for standard input
-pub fn read_password(prompt: &str, file: Option<&Path>) -> anyhow::Result<String> {
-    // a file's first line, its line ending left off
-    if let Some(file) = file {
-        let text = match file == Path::new("-") {
-            true => {
-                let mut line = String::new();
-                std::io::stdin().lock().read_line(&mut line)?;
-                line
-            }
-            false => std::fs::read_to_string(file)
-                .map_err(|error| anyhow::anyhow!("reading {}: {error}", file.display()))?,
-        };
-        return Ok(first_line(&text));
-    }
-    // else the terminal itself, which a pipe into standard input can't stand in for
-    ask_terminal(prompt)
-}
-
-/// A file's first line, its line ending left off
-///
-/// # Arguments
-///
-/// * `text` - The file's text
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().to_string()
-}
-
-/// Asks for a password on the terminal, with echo off while it is typed
-///
-/// # Arguments
-///
-/// * `prompt` - What to ask
-fn ask_terminal(prompt: &str) -> anyhow::Result<String> {
-    // the controlling terminal, read and written directly
-    let mut tty = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "there is no terminal to ask for a password on: pass `--password-file PATH`, or \
-                 `-` for standard input"
-            )
-        })?;
-    write!(tty, "{prompt}")?;
-    tty.flush()?;
-    // echo off until the line is read, and back on however reading ends
-    let line = {
-        let _quiet = Quiet::new(&tty)?;
-        let mut line = String::new();
-        std::io::BufReader::new(&tty).read_line(&mut line)?;
-        line
-    };
-    // the newline the user typed wasn't echoed, so the next output starts a line of its own
-    writeln!(tty)?;
-    Ok(first_line(&line))
-}
-
-/// The terminal's echo turned off, and turned back on when this is dropped
-struct Quiet<'a> {
-    /// The terminal
-    tty: &'a std::fs::File,
-    /// Its settings before echo was turned off
-    was: rustix::termios::Termios,
-}
-
-impl<'a> Quiet<'a> {
-    /// Turns the terminal's echo off
-    ///
-    /// # Arguments
-    ///
-    /// * `tty` - The terminal
-    fn new(tty: &'a std::fs::File) -> anyhow::Result<Quiet<'a>> {
-        use rustix::termios::{LocalModes, OptionalActions, tcgetattr, tcsetattr};
-        // what it was, to put back
-        let was = tcgetattr(tty)?;
-        let mut quiet = was.clone();
-        // nothing typed shown, though a newline still ends the line
-        quiet.local_modes -= LocalModes::ECHO;
-        quiet.local_modes |= LocalModes::ECHONL;
-        tcsetattr(tty, OptionalActions::Now, &quiet)?;
-        Ok(Quiet { tty, was })
-    }
-}
-
-impl Drop for Quiet<'_> {
-    /// Turns the terminal's echo back on, as it was
-    fn drop(&mut self) {
-        use rustix::termios::{OptionalActions, tcsetattr};
-        let _ = tcsetattr(self.tty, OptionalActions::Now, &self.was);
-    }
 }
 
 /// Logs in: trades a user's name and password for a token, and keeps it for the service
@@ -286,18 +190,8 @@ pub async fn user_add<W: Write>(
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the password once from a file, or twice on the terminal, so a slip isn't kept
-    let password = match password_file {
-        Some(file) => read_password("", Some(file))?,
-        None => {
-            let first = read_password(&format!("password for `{name}`: "), None)?;
-            let again = read_password("the same again: ", None)?;
-            anyhow::ensure!(
-                first == again,
-                "the two passwords differ, so no user was added"
-            );
-            first
-        }
-    };
+    let password = read_new_password(&format!("password for `{name}`: "), password_file)
+        .map_err(|error| anyhow::anyhow!("{error}, so no user was added"))?;
     let new = NewUser {
         name: name.to_string(),
         password,
@@ -331,23 +225,231 @@ pub async fn user_ls<W: Write>(client: &Client, out: &mut W) -> anyhow::Result<(
     Ok(())
 }
 
+/// Where a password change reads its passwords from instead of the terminal
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PasswordFiles<'a> {
+    /// The new password's file, or `-` for standard input
+    pub new: Option<&'a Path>,
+    /// The current password's file, or `-` for standard input
+    pub current: Option<&'a Path>,
+}
+
+/// Changes a password: your own with your current one, which leaves your tokens, or another
+/// user's as an admin, which revokes theirs
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `name` - The user whose password to set, else this `reef`'s own user's
+/// * `files` - Where to read the passwords from instead of the terminal
+/// * `out` - Where to say what was done
+pub async fn user_passwd<W: Write>(
+    client: &Client,
+    name: Option<&str>,
+    files: PasswordFiles<'_>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // whom this `reef` signs in, which decides whose password is its own
+    let me = client.me().await?.user;
+    let own = me.as_ref().map(|user| user.name.as_str());
+    let Some(name) = name.or(own) else {
+        anyhow::bail!(
+            "this `reef` signs nobody in at {}: run `reef login`, or name the user",
+            client.base()
+        );
+    };
+    // your own needs your current password, and another's doesn't
+    let current = match own == Some(name) {
+        true => {
+            let prompt = format!("current password for `{name}`: ");
+            Some(read_password(&prompt, files.current)?)
+        }
+        false => None,
+    };
+    let prompt = format!("new password for `{name}`: ");
+    let password = read_new_password(&prompt, files.new)
+        .map_err(|error| anyhow::anyhow!("{error}, so the password is as it was"))?;
+    let own_change = current.is_some();
+    let change = PasswordChange { current, password };
+    let changed = client.change_password(name, &change).await?;
+    // your tokens still sign you in, and another's were revoked
+    match own_change {
+        true => writeln!(
+            out,
+            "changed your password at {}; your tokens still sign you in, and `reef token ls` \
+             lists them",
+            client.base()
+        )?,
+        false => writeln!(
+            out,
+            "set the password of `{name}` at {}, revoking {}",
+            client.base(),
+            tokens(changed.revoked)
+        )?,
+    }
+    Ok(())
+}
+
+/// Removes a user and revokes their tokens, which only an admin may, and never the last admin
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `name` - The user's name
+/// * `out` - Where to say what was done
+pub async fn user_rm<W: Write>(client: &Client, name: &str, out: &mut W) -> anyhow::Result<()> {
+    match client.remove_user(name).await? {
+        UserRemoved::Removed { revoked } => {
+            writeln!(
+                out,
+                "removed `{name}` from {}, revoking {}",
+                client.base(),
+                tokens(revoked)
+            )?;
+            Ok(())
+        }
+        UserRemoved::NoSuchUser => anyhow::bail!("no user is named `{name}` at {}", client.base()),
+        UserRemoved::LastAdmin => anyhow::bail!(
+            "`{name}` is the last admin of {}, so stays: add another with `reef user add NAME \
+             --admin` first",
+            client.base()
+        ),
+    }
+}
+
+/// Lists your tokens, or another user's as an admin, the one this `reef` sends marked
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `user` - The user whose tokens to list, else your own
+/// * `out` - Where to list them
+pub async fn token_ls<W: Write>(
+    client: &Client,
+    user: Option<&str>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let listed = client.tokens(user).await?;
+    if listed.is_empty() {
+        writeln!(out, "no tokens sign {} in", user.unwrap_or("you"))?;
+    }
+    for token in &listed {
+        writeln!(out, "{}", token_line(token))?;
+    }
+    Ok(())
+}
+
+/// One token as a listing shows it: its id, kind, when it was issued and expires, its label,
+/// and whether this `reef` sends it
+///
+/// # Arguments
+///
+/// * `token` - The token
+fn token_line(token: &TokenInfo) -> String {
+    // a kind of a fixed width, so the columns after it line up
+    let kind = match token.kind {
+        reef_api::TokenKind::Cli => "cli    ",
+        reef_api::TokenKind::Browser => "browser",
+    };
+    let expires = token
+        .expires_at
+        .map(|at| format!("  expires {}", crate::start::when(at)))
+        .unwrap_or_default();
+    let current = if token.current { "  (this reef)" } else { "" };
+    format!(
+        "{}  {kind}  issued {}{expires}  {}{current}",
+        token.id,
+        crate::start::when(token.created_at),
+        token.label
+    )
+}
+
+/// Revokes tokens by their ids, or every token of yours but the one this `reef` sends
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `ids` - The tokens' ids
+/// * `others` - Whether to revoke every token of yours but this `reef`'s instead
+/// * `out` - Where to say what was done
+pub async fn token_revoke<W: Write>(
+    client: &Client,
+    ids: &[String],
+    others: bool,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the others are every token listed but the one sent
+    let ids: Vec<String> = match others {
+        true => client
+            .tokens(None)
+            .await?
+            .into_iter()
+            .filter(|token| !token.current)
+            .map(|token| token.id)
+            .collect(),
+        false => ids.to_vec(),
+    };
+    if ids.is_empty() {
+        writeln!(out, "no other token signs you in")?;
+    }
+    // each in turn, a token the service doesn't hold for you said so
+    for id in &ids {
+        match client.revoke_token(id).await {
+            Ok(_) => writeln!(out, "revoked {id}")?,
+            Err(error) if is_code(&error, ErrorCode::NotFound) => {
+                anyhow::bail!("{error}")
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// How many tokens, said in words
+///
+/// # Arguments
+///
+/// * `count` - How many
+fn tokens(count: usize) -> String {
+    match count {
+        1 => "1 token".to_string(),
+        count => format!("{count} tokens"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{first_line, read_password};
+    use super::{token_line, tokens};
+    use reef_api::{TokenInfo, TokenKind};
 
-    /// A password file's first line is the password, its line ending left off
+    /// A token's line shows its id, kind, times and label, and marks the one this `reef` sends
     #[test]
-    fn a_password_file_loses_its_newline() {
-        // each line ending, and none
-        assert_eq!(first_line("hunter22\n"), "hunter22");
-        assert_eq!(first_line("hunter22\r\n"), "hunter22");
-        assert_eq!(first_line("hunter22"), "hunter22");
-        assert_eq!(first_line("one\ntwo\n"), "one");
-        assert_eq!(first_line(""), "");
-        // read from a file, the same
-        let file = std::env::temp_dir().join(format!("reef-password-{}", std::process::id()));
-        std::fs::write(&file, "correct horse\n").unwrap();
-        assert_eq!(read_password("", Some(&file)).unwrap(), "correct horse");
-        let _ = std::fs::remove_file(&file);
+    fn a_token_line_marks_the_one_sent() {
+        // a terminal's, which never expires, sent by this `reef`
+        let mut token = TokenInfo {
+            id: "0123456789abcdef".into(),
+            user: "ada".into(),
+            kind: TokenKind::Cli,
+            label: "reef on laptop".into(),
+            created_at: 0,
+            expires_at: None,
+            current: true,
+        };
+        assert_eq!(
+            token_line(&token),
+            "0123456789abcdef  cli      issued 1970-01-01 00:00:00 +0000  reef on laptop  (this reef)"
+        );
+        // a browser's, which expires, and isn't
+        token.kind = TokenKind::Browser;
+        token.expires_at = Some(1_795_000_000_123);
+        token.current = false;
+        assert_eq!(
+            token_line(&token),
+            "0123456789abcdef  browser  issued 1970-01-01 00:00:00 +0000  expires 2026-11-18 \
+             11:06:40 +0000  reef on laptop"
+        );
+        // and counts read as words
+        assert_eq!(tokens(1), "1 token");
+        assert_eq!(tokens(0), "0 tokens");
     }
 }

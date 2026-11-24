@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 # the service's data types, and the JSON API's requests, answers, routes and config location
-reef-api = { path = "../reef-api" }
+reef-api = { path = "../reef-api", features = ["prompt"] }
 # plan names, and the frontmatter `reef node put` reads and `reef node get` prints
 reef-model = { workspace = true, features = ["parse"] }
 # a book's node files read as mdbook-reef reads them, and the links in them moved for import
@@ -32,6 +32,3 @@ schemars = "1"
 # carry of its start, all but the snapshot, which gix can't stage. Pinned, since it is 0.x and
 # breaks often; X3 chose it over git2, which builds libgit2 from C and runs no filter drivers
 gix = { version = "=0.90.0", default-features = false, features = ["blob-diff", "merge", "revision", "sha1", "max-performance"] }
-# a password asked for on the terminal with echo off, through the safe termios calls rustix
-# makes, at the version gix's tree already holds
-rustix = { version = "1", features = ["termios"] }

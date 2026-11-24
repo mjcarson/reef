@@ -657,6 +657,20 @@ impl<B: Backend> Backend for Faulty<B> {
         self.inner.write_user(row, expect).await
     }
 
+    /// Deletes one user row, if it is still at the version read
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_user(&self, row: &UserRow) -> anyhow::Result<Written> {
+        self.inner.delete_user(row).await
+    }
+
+    /// Reads every token row
+    async fn tokens(&self) -> anyhow::Result<Vec<TokenRow>> {
+        self.inner.tokens().await
+    }
+
     /// Reads the token row kept under a hash
     ///
     /// # Arguments

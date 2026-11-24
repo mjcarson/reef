@@ -4977,7 +4977,6 @@ dependencies = [
  "reef-render",
  "reqwest",
  "rmcp",
- "rustix",
  "schemars",
  "serde",
  "serde_json",
@@ -4990,6 +4989,7 @@ name = "reef-api"
 version = "0.1.0"
 dependencies = [
  "reef-model",
+ "rustix",
  "serde",
 ]
 
@@ -5061,6 +5061,7 @@ dependencies = [
  "argon2",
  "axum",
  "deepsize2",
+ "futures-util",
  "getrandom 0.4.3",
  "gix",
  "libc",

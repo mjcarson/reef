@@ -288,6 +288,15 @@ partition, as projects and loops are.
   version read.
 - **Every row is checked against its full key on read,** so a hash collision is caught rather
   than served as another user's.
+- **A user's tokens are found by reading the whole partition** ([C77](../milestones/m10.md)), since a token
+  is keyed by its hash alone. Only listing tokens, revoking one by its id and removing or
+  resetting a user read it.
+- **Removed under the same lock, never the last admin.** The judge sees every user before anything
+  is said of who exists, then the user's row is deleted over its version, and each token of
+  theirs after it. A token issued before its user was added signs nobody in, so a token a removal
+  missed never signs in a new user of the name.
+- **A password is rewritten over the version read,** so a change checked against the current
+  password can't write over one made since.
 
 ## Remotes
 

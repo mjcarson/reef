@@ -1,5 +1,6 @@
-//! The app's pages: the picker, and a plan's own page
+//! The app's pages: the picker, a plan's own page, and the account page
 
+use crate::account::Account;
 use crate::calls::{self, ProjectPlans};
 use crate::canvas::{Canvas, Keyed};
 use crate::live::use_changes;
@@ -27,6 +28,17 @@ code { font-size: 0.92em; }
 .reef-app-user { display: flex; gap: 0.6rem; align-items: baseline; font-size: 0.85rem; color: var(--muted); }
 .reef-app-user strong { color: var(--fg); }
 .reef-app-user form { margin: 0; }
+.reef-app-user a { color: inherit; }
+.reef-app-account-part { margin: 0 0 2rem; }
+.reef-app-account-part h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+.reef-app-fields { display: grid; grid-template-columns: max-content minmax(0, 18rem); gap: 0.4rem 0.8rem; align-items: center; }
+.reef-app-fields input, .reef-app-account-acts input { font: inherit; padding: 0.3rem 0.4rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+.reef-app-account-table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+.reef-app-account-table th, .reef-app-account-table td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
+.reef-app-account-table td.reef-app-account-label { white-space: normal; overflow-wrap: anywhere; }
+.reef-app-account-acts { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.reef-app-account-said { margin: 0.4rem 0 0; font-size: 0.85rem; }
+@media (max-width: 40rem) { .reef-app-fields { grid-template-columns: minmax(0, 1fr); } }
 .reef-app-projects { list-style: none; padding: 0; margin: 0; display: grid; gap: 1rem; }
 .reef-app-project { border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1.1rem; background: var(--panel); }
 .reef-app-project h2 { margin: 0; font-size: 1.15rem; }
@@ -151,7 +163,7 @@ code { font-size: 0.92em; }
 .reef-app-open-where { font-size: 0.8rem; color: var(--muted); }
 .reef-app-open-text { overflow-wrap: anywhere; }
 .reef-app-open-none { padding: 4px 10px; }
-.reef-app-sessions, .reef-app-sessions-toggle, .reef-app-user { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
+.reef-app-sessions, .reef-app-sessions-toggle, .reef-app-user, .reef-app-account { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
 .reef-app-sessions-toggle { margin-left: auto; }
 .reef-app-waiting { margin-left: 0.35rem; font-size: 0.75rem; color: var(--links); }
 .reef-app-sessions-toggle.some .reef-app-waiting { font-weight: 600; }
@@ -228,6 +240,9 @@ pub enum Route {
     /// One plan, full-window
     #[route("/plans/:project/:plan")]
     PlanPage { project: String, plan: String },
+    /// Your password and tokens, and every user to an admin
+    #[route("/account")]
+    Account {},
 }
 
 /// The app: its stylesheets, then whichever page the path names

@@ -10,6 +10,13 @@ repository.workspace = true
 # the nodes, their specs, the problems check finds and the viewer's payload, without YAML parsing
 reef-model.workspace = true
 serde.workspace = true
+# a password asked for on the terminal with echo off, through the safe termios calls rustix
+# offers, for the CLI and reef-serve alone, never a browser's build
+rustix = { version = "1", features = ["termios"], optional = true }
+
+[features]
+# asking for a password on the terminal, or reading one from a file
+prompt = ["dep:rustix"]
 
 [dev-dependencies]
 serde_json.workspace = true

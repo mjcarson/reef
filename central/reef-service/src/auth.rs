@@ -19,6 +19,8 @@
 //! - **The sign-in page is plain HTML the service serves,** so reef-serve has one too, and it
 //!   runs no script at all. Signing in sets an HttpOnly, SameSite=Strict cookie, `Secure` when
 //!   the request came over TLS, and goes on only to a path of this origin ([`safe_next`]).
+//! - **Repeated failures are slowed.** A sign-in that must wait, after too many failed for its
+//!   name or from its address, is answered 429 with the page again, saying how long.
 
 use axum::Router;
 use axum::extract::connect_info::Connected;
@@ -34,13 +36,13 @@ use reef_api::{ApiError, ErrorCode, TokenKind, User, paths};
 use reef_render::paths::escape;
 use serde::Deserialize;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tokio::net::TcpListener;
 use tracing::instrument;
 
 use crate::api::{Failure, Serves};
 use crate::origin;
-use crate::service::BROWSER_TOKEN_LIFE;
+use crate::service::{Asker, BROWSER_TOKEN_LIFE, TooManyTries};
 
 /// Where a connection comes from, and whether it came over TLS, as each request learns it
 ///
@@ -87,6 +89,20 @@ pub struct Caller {
     pub local: bool,
     /// Whether the request came over TLS, so a cookie set for it is `Secure`
     pub secure: bool,
+    /// The address the request came from, if the connection said
+    pub address: Option<IpAddr>,
+}
+
+impl Caller {
+    /// The caller as the service judges one asking of its users or tokens
+    pub fn asker(&self) -> Asker<'_> {
+        Asker {
+            user: self.user.as_ref(),
+            local: self.local,
+            token: self.token.as_deref(),
+            address: self.address,
+        }
+    }
 }
 
 impl std::fmt::Debug for Caller {
@@ -101,6 +117,7 @@ impl std::fmt::Debug for Caller {
             .field("token", &self.token.as_ref().map(|_| "…"))
             .field("local", &self.local)
             .field("secure", &self.secure)
+            .field("address", &self.address)
             .finish()
     }
 }
@@ -382,6 +399,7 @@ async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: N
         .map(|ConnectInfo(peer)| *peer);
     let local = peer.is_some_and(|peer| peer.is_local());
     let secure = peer.is_some_and(|peer| peer.tls);
+    let address = peer.map(|peer| peer.address.ip());
     // a write from a page of another origin goes no further, signed in or not
     if let Err(message) = origin::judge(request.method(), request.headers(), request.uri(), secure)
     {
@@ -419,6 +437,7 @@ async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: N
                 token,
                 local,
                 secure,
+                address,
             });
             next.run(request).await
         }
@@ -589,9 +608,16 @@ async fn sign_in<S: Serves>(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("a browser");
     let label: String = format!("browser: {agent}").chars().take(120).collect();
+    let name = form.name.trim();
     let issued = serves
         .service()
-        .sign_in(form.name.trim(), &form.password, TokenKind::Browser, &label)
+        .sign_in(
+            name,
+            &form.password,
+            TokenKind::Browser,
+            &label,
+            caller.address,
+        )
         .await;
     match issued {
         // the cookie, then on to where it was going
@@ -612,6 +638,19 @@ async fn sign_in<S: Serves>(
                 Some("That name and password don't match a user of reef."),
             ),
         ),
+        // too many failed lately: the form again, saying how long to wait
+        Err(error) if error.downcast_ref::<TooManyTries>().is_some() => {
+            let mut response = page(
+                StatusCode::TOO_MANY_REQUESTS,
+                sign_in_html(&next, &form.name, Some(&error.to_string())),
+            );
+            if let Some(wait) = error.downcast_ref::<TooManyTries>()
+                && let Ok(value) = HeaderValue::from_str(&wait.seconds().to_string())
+            {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+            response
+        }
         Err(error) => Failure::from(error).into_response(),
     }
 }

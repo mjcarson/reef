@@ -13,12 +13,24 @@
 //! before shoal starts, so a port that is taken, an address that isn't local, or a certificate
 //! that can't be read stops it before a pool locks the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
 //! still open, and closes the service, stopping an in-process pool cleanly.
+//!
+//! ```sh
+//! reef-serve recover ada [--password-file PATH] [--conf PATH]
+//! ```
+//!
+//! `recover` gets a lost admin back from the store itself, never over the API: it asks for a new
+//! password twice with echo off, or reads `--password-file`, sets it, makes the user an admin and
+//! revokes their tokens, or adds them as an admin if no user has the name. Whoever can open the
+//! store holds the service's data already, so nobody else is asked. An in-process pool locks the
+//! data directory, so stop the service first; an external node can be reached while it runs, and
+//! the running service then trusts a revoked token for up to a minute.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
 use reef_service::api::{self, Listeners};
-use reef_service::{Conf, Service};
+use reef_service::service::Recovered;
+use reef_service::{Conf, Mode, Service};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -29,6 +41,33 @@ use tracing::instrument;
 /// How long to wait for the last request's hold on the service to go once the server stops
 const RELEASE_WAIT: Duration = Duration::from_secs(2);
 
+/// What a command line can ask for, and how
+const USAGE: &str = "usage: reef-serve [--conf PATH]\n       \
+                     reef-serve recover NAME [--password-file PATH] [--conf PATH]";
+
+/// What reef-serve is asked to do
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Command {
+    /// Serve the JSON API until told to stop
+    Serve,
+    /// Recover a lost admin from the store itself
+    Recover {
+        /// The user's name
+        name: String,
+        /// Where to read their new password from instead of the terminal
+        password_file: Option<PathBuf>,
+    },
+}
+
+/// A command line, read
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Args {
+    /// The config file it names, if it names one
+    conf: Option<PathBuf>,
+    /// What it asks for
+    command: Command,
+}
+
 /// Serves the JSON API until told to stop
 fn main() -> ExitCode {
     // shoal's shards get the stack reef's schema needs, before any thread starts
@@ -37,11 +76,11 @@ fn main() -> ExitCode {
     unsafe {
         reef_service::pool::widen_stacks()
     };
-    // `--conf PATH` alone; anything else is a mistake worth saying
-    let conf = match conf_path(std::env::args_os().skip(1)) {
-        Ok(conf) => conf,
+    // serving, or recovering an admin; anything else is a mistake worth saying
+    let args = match read_args(std::env::args_os().skip(1)) {
+        Ok(args) => args,
         Err(message) => {
-            eprintln!("reef-serve: {message}\nusage: reef-serve [--conf PATH]");
+            eprintln!("reef-serve: {message}\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -56,7 +95,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(conf)) {
+    let done = match args.command {
+        Command::Serve => runtime.block_on(run(args.conf)),
+        Command::Recover {
+            name,
+            password_file,
+        } => runtime.block_on(recover(args.conf, &name, password_file.as_deref())),
+    };
+    match done {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("reef-serve: {error:#}");
@@ -102,6 +148,69 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Recovers a lost admin from the store itself: their new password set, made an admin, their
+/// tokens revoked, or added as an admin if no user has the name
+///
+/// # Arguments
+///
+/// * `conf` - The config file named on the command line, if one was
+/// * `name` - The user's name
+/// * `password_file` - Where to read the new password from instead of the terminal
+#[instrument(name = "reef_serve::recover", skip_all, err(Debug))]
+async fn recover(
+    conf: Option<PathBuf>,
+    name: &str,
+    password_file: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    // the config, and the new password before anything is opened, so a slip opens nothing
+    let conf = Conf::load(conf.as_deref())?;
+    let prompt = format!("new password for `{name}`: ");
+    let password = reef_api::prompt::read_new_password(&prompt, password_file)
+        .map_err(|error| anyhow::anyhow!("{error}, so nothing was changed"))?;
+    // the store, which a running service holds when shoal runs inside it
+    let service = Service::open(&conf)
+        .await
+        .map_err(|error| held(error, &conf))?;
+    let recovered = service.recover_admin(name, password).await;
+    let mode = service.mode();
+    service.close().await?;
+    match recovered? {
+        Recovered::Reset { revoked, was_admin } => {
+            let made = if was_admin { "" } else { ", made an admin," };
+            eprintln!(
+                "reef-serve: set the password of `{name}`{made} and revoked {revoked} token(s)"
+            );
+        }
+        Recovered::Added => eprintln!("reef-serve: added `{name}` as an admin"),
+    }
+    // a running service over an external node trusted a token it looked up for a minute
+    if mode == Mode::External {
+        eprintln!("reef-serve: a service running now may trust a revoked token for up to a minute");
+    }
+    Ok(())
+}
+
+/// Says a store another process holds is the running service's, and to stop it first
+///
+/// # Arguments
+///
+/// * `error` - Why the store didn't open
+/// * `conf` - reef's config, whose data directory it is
+fn held(error: anyhow::Error, conf: &Conf) -> anyhow::Error {
+    // shoal says so when its storage directory is locked, by its error's name or in words
+    let said = format!("{error:#}");
+    match said.contains("StorageDirectoryLocked") || said.contains("another process holds") {
+        true => error.context(format!(
+            "reef is running over {}, so stop it first (`systemctl --user stop reef`) and run \
+             this again",
+            conf.data_dir()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|_| "its data directory".to_string())
+        )),
+        false => error,
+    }
+}
+
 /// Resolves on the first SIGINT or SIGTERM
 async fn stopped() {
     // a terminal's ctrl-c, or a supervisor's stop
@@ -145,56 +254,154 @@ async fn released(mut service: Arc<Service>) -> Option<Service> {
     }
 }
 
-/// The config file a command line names, or `None` for the default
+/// Reads a command line: `--conf PATH` alone to serve, or `recover NAME`, with
+/// `--password-file PATH` and `--conf PATH` in any order
 ///
 /// # Arguments
 ///
 /// * `args` - The arguments after the program's name
-fn conf_path(mut args: impl Iterator<Item = OsString>) -> Result<Option<PathBuf>, String> {
+fn read_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let mut conf = None;
+    let mut recover = false;
+    let mut name = None;
+    let mut password_file = None;
     while let Some(arg) = args.next() {
+        let text = arg.to_str().unwrap_or_default();
         // `--conf X` or `--conf=X`, once
-        let path = if arg == "--conf" {
-            args.next()
-                .map(PathBuf::from)
-                .ok_or_else(|| "`--conf` needs a path".to_string())?
-        } else if let Some(path) = arg.to_str().and_then(|arg| arg.strip_prefix("--conf=")) {
-            PathBuf::from(path)
+        if let Some(path) = flag(&arg, "--conf", &mut args)? {
+            if conf.replace(path).is_some() {
+                return Err("`--conf` is given twice".to_string());
+            }
+        // and a recovery's password file, once
+        } else if recover && let Some(path) = flag(&arg, "--password-file", &mut args)? {
+            if password_file.replace(path).is_some() {
+                return Err("`--password-file` is given twice".to_string());
+            }
+        // the command comes first, then the name
+        } else if text == "recover" && !recover {
+            recover = true;
+        } else if recover && name.is_none() && !text.starts_with('-') && !text.is_empty() {
+            name = Some(text.to_string());
         } else {
             return Err(format!("unknown argument `{}`", arg.to_string_lossy()));
-        };
-        if conf.replace(path).is_some() {
-            return Err("`--conf` is given twice".to_string());
         }
     }
-    Ok(conf)
+    let command = match (recover, name) {
+        (false, _) => Command::Serve,
+        (true, Some(name)) => Command::Recover {
+            name,
+            password_file,
+        },
+        (true, None) => return Err("`recover` needs the name of the user to recover".to_string()),
+    };
+    Ok(Args { conf, command })
+}
+
+/// A flag's path, if the argument is the flag, as `--flag X` or `--flag=X`
+///
+/// # Arguments
+///
+/// * `arg` - The argument
+/// * `name` - The flag, such as `--conf`
+/// * `args` - The arguments after it, the next of which is its path when spelt apart
+fn flag(
+    arg: &OsString,
+    name: &str,
+    args: &mut impl Iterator<Item = OsString>,
+) -> Result<Option<PathBuf>, String> {
+    // the flag, then its path
+    if arg == name {
+        return args
+            .next()
+            .map(|path| Some(PathBuf::from(path)))
+            .ok_or_else(|| format!("`{name}` needs a path"));
+    }
+    // or the two joined by `=`
+    let joined = arg
+        .to_str()
+        .and_then(|arg| arg.strip_prefix(name))
+        .and_then(|rest| rest.strip_prefix('='));
+    Ok(joined.map(PathBuf::from))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::conf_path;
+    use super::{Args, Command, read_args};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
-    /// Reads the config path out of a command line
+    /// Reads a command line
     ///
     /// # Arguments
     ///
     /// * `args` - The arguments after the program's name
-    fn path(args: &[&str]) -> Result<Option<PathBuf>, String> {
-        conf_path(args.iter().map(OsString::from))
+    fn read(args: &[&str]) -> Result<Args, String> {
+        read_args(args.iter().map(OsString::from))
     }
 
-    /// Both spellings of `--conf`, the default, and the mistakes it refuses
+    /// Serving takes one `--conf` in either spelling, and refuses anything else
     #[test]
-    fn conf_path_reads_one_conf() {
+    fn serving_reads_one_conf() {
         // either spelling names the file, and none means the default
-        assert_eq!(path(&["--conf", "a.toml"]), Ok(Some("a.toml".into())));
-        assert_eq!(path(&["--conf=b.toml"]), Ok(Some("b.toml".into())));
-        assert_eq!(path(&[]), Ok(None));
+        let serve = |conf: Option<&str>| Args {
+            conf: conf.map(PathBuf::from),
+            command: Command::Serve,
+        };
+        assert_eq!(read(&["--conf", "a.toml"]), Ok(serve(Some("a.toml"))));
+        assert_eq!(read(&["--conf=b.toml"]), Ok(serve(Some("b.toml"))));
+        assert_eq!(read(&[]), Ok(serve(None)));
         // a missing path, a second config or anything else is refused
-        assert!(path(&["--conf"]).is_err());
-        assert!(path(&["--conf", "a", "--conf=b"]).is_err());
-        assert!(path(&["serve"]).is_err());
+        assert!(read(&["--conf"]).is_err());
+        assert!(read(&["--conf", "a", "--conf=b"]).is_err());
+        assert!(read(&["serve"]).is_err());
+        assert!(read(&["--password-file", "p"]).is_err());
+    }
+
+    /// `recover` takes a name, and a password file and a config in any order
+    #[test]
+    fn recover_reads_a_name_and_its_flags() {
+        // the name alone asks on the terminal
+        assert_eq!(
+            read(&["recover", "ada"]),
+            Ok(Args {
+                conf: None,
+                command: Command::Recover {
+                    name: "ada".into(),
+                    password_file: None,
+                },
+            })
+        );
+        // with both flags, before and after the name, either spelling
+        let both = Args {
+            conf: Some("r.toml".into()),
+            command: Command::Recover {
+                name: "ada".into(),
+                password_file: Some("-".into()),
+            },
+        };
+        assert_eq!(
+            read(&["--conf", "r.toml", "recover", "ada", "--password-file", "-"]),
+            Ok(both.clone())
+        );
+        assert_eq!(
+            read(&["recover", "--password-file=-", "ada", "--conf=r.toml"]),
+            Ok(both)
+        );
+        // no name, two names, a flag twice or a flag of its own are refused
+        assert!(read(&["recover"]).is_err());
+        assert!(read(&["recover", "ada", "bob"]).is_err());
+        assert!(
+            read(&[
+                "recover",
+                "ada",
+                "--password-file",
+                "a",
+                "--password-file",
+                "b"
+            ])
+            .is_err()
+        );
+        assert!(read(&["recover", "ada", "--admin"]).is_err());
+        assert!(read(&["recover", "ada", "--password-file"]).is_err());
     }
 }

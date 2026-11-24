@@ -305,6 +305,153 @@ async fn login_lets_the_cli_write_until_logout() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The CLI changes a password, lists and revokes tokens, and removes a user, and says what it
+/// refuses
+#[tokio::test]
+async fn the_cli_manages_passwords_users_and_tokens() -> anyhow::Result<()> {
+    let cx = Cx::signing_in("manage").await?;
+    let repo = cx.ax.repo.clone();
+    // a password file for each password the case uses
+    let file = |name: &str, password: &str| -> anyhow::Result<String> {
+        let path = cx.ax.dir.join(name);
+        std::fs::write(&path, format!("{password}\n"))?;
+        Ok(path.to_str().expect("the case's dir is utf-8").to_string())
+    };
+    let old = file("old", "correct horse battery")?;
+    let new = file("new", "a newer horse battery")?;
+    let wrong = file("wrong", "not the password")?;
+    // ada, the first admin, logged in, and bob and carol beside her
+    cx.reef(&repo, &["user", "add", "ada", "--password-file", &old])
+        .await?;
+    cx.reef(
+        &repo,
+        &[
+            "login",
+            "--user",
+            "ada",
+            "--password-file",
+            &old,
+            "--label",
+            "first",
+        ],
+    )
+    .await?;
+    for name in ["bob", "carol"] {
+        cx.reef(&repo, &["user", "add", name, "--password-file", &old])
+            .await?;
+    }
+    // her one token, marked as this reef's
+    let listed = cx.reef(&repo, &["token", "ls"]).await?;
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    assert!(
+        listed.contains("cli") && listed.contains("first  (this reef)"),
+        "{listed}"
+    );
+    // her own password needs her current one, right, and keeps her token signing in
+    let (_, refused) = cx
+        .failing(
+            &repo,
+            &[
+                "user",
+                "passwd",
+                "--current-file",
+                &wrong,
+                "--password-file",
+                &new,
+            ],
+        )
+        .await?;
+    assert!(refused.contains("doesn't match"), "{refused}");
+    let changed = cx
+        .reef(
+            &repo,
+            &[
+                "user",
+                "passwd",
+                "--current-file",
+                &old,
+                "--password-file",
+                &new,
+            ],
+        )
+        .await?;
+    assert!(changed.contains("changed your password"), "{changed}");
+    assert!(cx.reef(&repo, &["whoami"]).await?.starts_with("`ada`"));
+    // a second login, by the new one, leaves two tokens, and `--others` revokes the first
+    let (_, refused) = cx
+        .failing(&repo, &["login", "--user", "ada", "--password-file", &old])
+        .await?;
+    assert!(refused.contains("don't match"), "{refused}");
+    cx.reef(
+        &repo,
+        &[
+            "login",
+            "--user",
+            "ada",
+            "--password-file",
+            &new,
+            "--label",
+            "second",
+        ],
+    )
+    .await?;
+    let listed = cx.reef(&repo, &["token", "ls"]).await?;
+    assert_eq!(listed.lines().count(), 2, "{listed}");
+    let first = names(&listed)[0].to_string();
+    let revoked = cx.reef(&repo, &["token", "revoke", "--others"]).await?;
+    assert_eq!(revoked.trim(), format!("revoked {first}"));
+    let listed = cx.reef(&repo, &["token", "ls"]).await?;
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    assert!(listed.contains("second  (this reef)"), "{listed}");
+    // a token of nobody's is said so
+    let (_, refused) = cx
+        .failing(&repo, &["token", "revoke", "0123456789abcdef"])
+        .await?;
+    assert!(refused.contains("no token of yours"), "{refused}");
+    // bob's, set by an admin, revokes the token he had
+    cx.reef(&repo, &["logout"]).await?;
+    cx.reef(&repo, &["login", "--user", "bob", "--password-file", &old])
+        .await?;
+    cx.reef(&repo, &["logout"]).await?;
+    cx.reef(
+        &repo,
+        &["login", "--user", "carol", "--password-file", &old],
+    )
+    .await?;
+    // carol, no admin, sets nobody's password, lists nobody's tokens and removes nobody
+    let (_, refused) = cx
+        .failing(&repo, &["user", "passwd", "bob", "--password-file", &new])
+        .await?;
+    assert!(refused.contains("only an admin"), "{refused}");
+    let (_, refused) = cx.failing(&repo, &["token", "ls", "--user", "bob"]).await?;
+    assert!(refused.contains("only an admin"), "{refused}");
+    let (_, refused) = cx.failing(&repo, &["user", "rm", "bob"]).await?;
+    assert!(refused.contains("only an admin"), "{refused}");
+    // back as ada, she sets bob's, which revokes his token, and lists his tokens
+    cx.reef(&repo, &["login", "--user", "ada", "--password-file", &new])
+        .await?;
+    let bobs = cx.reef(&repo, &["token", "ls", "--user", "bob"]).await?;
+    assert!(bobs.contains("no tokens sign bob in"), "{bobs}");
+    let set = cx
+        .reef(&repo, &["user", "passwd", "bob", "--password-file", &new])
+        .await?;
+    assert!(set.contains("set the password of `bob`"), "{set}");
+    // she removes carol, revoking her token, and carol is gone
+    let removed = cx.reef(&repo, &["user", "rm", "carol"]).await?;
+    assert!(
+        removed.contains("removed `carol`") && removed.contains("revoking 1 token"),
+        "{removed}"
+    );
+    let users = cx.reef(&repo, &["user", "ls"]).await?;
+    assert_eq!(names(&users), ["ada", "bob"]);
+    let (_, refused) = cx.failing(&repo, &["user", "rm", "carol"]).await?;
+    assert!(refused.contains("no user is named `carol`"), "{refused}");
+    // and the last admin stays
+    let (_, refused) = cx.failing(&repo, &["user", "rm", "ada"]).await?;
+    assert!(refused.contains("last admin"), "{refused}");
+    Ok(())
+}
+
 /// reef serves over TLS beside its loopback port, and the CLI given `[api] url` and `ca` signs in
 /// and writes over it, refusing a certificate it has no root for
 #[tokio::test]

@@ -2,7 +2,7 @@
 //! twin
 
 use reef_api::TokenKind;
-use reef_service::UserKept;
+use reef_service::{UserDropped, UserKept};
 
 use super::{Fx, Reopen};
 
@@ -76,5 +76,79 @@ pub async fn users_and_tokens_are_kept_by_key<B: Reopen>(fx: Fx<B>) -> anyhow::R
     assert!(fx.store.drop_token(&read).await?);
     assert!(!fx.store.drop_token(&read).await?);
     assert_eq!(fx.store.token(&hash).await?, None);
+    Ok(())
+}
+
+/// A user is removed under the lock with every token of theirs, never the last admin, and a
+/// password is rewritten only over the version read
+///
+/// # Arguments
+///
+/// * `fx` - The store
+pub async fn users_are_removed_with_their_tokens<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // an admin and a user, with two tokens of bob's and one of ada's
+    fx.store
+        .add_user("ada", "$argon2id$ada", |_| Ok(true))
+        .await?;
+    fx.store
+        .add_user("bob", "$argon2id$bob", |_| Ok(false))
+        .await?;
+    for (hash, user) in [("c", "bob"), ("a", "bob"), ("b", "ada")] {
+        let hash = hash.repeat(64);
+        fx.store
+            .keep_token(&hash, user, TokenKind::Cli, "a case", None)
+            .await?;
+    }
+    // every token in hash order, or one user's
+    let hashes = |tokens: Vec<reef_service::StoredToken>| -> Vec<String> {
+        tokens
+            .into_iter()
+            .map(|token| token.hash[..1].to_string())
+            .collect()
+    };
+    assert_eq!(hashes(fx.store.tokens(None).await?), ["a", "b", "c"]);
+    assert_eq!(hashes(fx.store.tokens(Some("bob")).await?), ["a", "c"]);
+    assert!(fx.store.tokens(Some("carol")).await?.is_empty());
+    // a password rewritten over the version read, and a stale read written nowhere
+    let bob = fx.store.user("bob").await?.expect("bob reads back");
+    assert!(fx.store.rewrite_user(&bob, "$argon2id$new", false).await?);
+    assert!(!fx.store.rewrite_user(&bob, "$argon2id$stale", true).await?);
+    let rewritten = fx.store.user("bob").await?.expect("bob reads back");
+    assert_eq!(rewritten.password, "$argon2id$new");
+    assert_eq!(rewritten.user, bob.user);
+    // the judge is heard first, even for a user nobody has
+    let refused = fx
+        .store
+        .remove_user("nobody", |_| anyhow::bail!("not allowed"))
+        .await;
+    assert!(refused.is_err());
+    let missing = fx.store.remove_user("nobody", |_| Ok(())).await?;
+    assert_eq!(missing, UserDropped::NoSuchUser);
+    // the last admin stays, and their tokens with them
+    let last = fx.store.remove_user("ada", |_| Ok(())).await?;
+    assert_eq!(last, UserDropped::LastAdmin);
+    assert!(fx.store.user("ada").await?.is_some());
+    // bob goes, his tokens with him, and ada's stay
+    let removed = fx.store.remove_user("bob", |_| Ok(())).await?;
+    assert_eq!(removed, UserDropped::Removed { revoked: 2 });
+    assert_eq!(fx.store.user("bob").await?, None);
+    assert_eq!(hashes(fx.store.tokens(None).await?), ["b"]);
+    // and so it reads once the store is reopened
+    let fx = fx.reopen().await?;
+    let names: Vec<_> = fx
+        .store
+        .users()
+        .await?
+        .into_iter()
+        .map(|stored| stored.user.name)
+        .collect();
+    assert_eq!(names, ["ada"]);
+    assert_eq!(hashes(fx.store.tokens(None).await?), ["b"]);
+    // a second admin lets the first go
+    fx.store
+        .add_user("dan", "$argon2id$dan", |_| Ok(true))
+        .await?;
+    let removed = fx.store.remove_user("ada", |_| Ok(())).await?;
+    assert_eq!(removed, UserDropped::Removed { revoked: 1 });
     Ok(())
 }

@@ -167,6 +167,13 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
   change stream closed and its calls answered 401: the bar says live updates stopped, and a call
   that failed says it needs signing in, each linking the sign-in page, which comes back to the
   same route.
+- **An account page at `/account`** ([C77](../milestones/m10.md)), which the bar's name links to: your
+  password, changed with your current one; your tokens, by id, kind, label and dates, this
+  browser's marked and each other revoked from there; and, for an admin, every user, whose
+  password they set or whom they remove, asked to confirm first. Its server functions,
+  `/app/account` and the posts under it, call the service as the JSON API's routes do
+  ([Managing users and tokens](architecture.md#managing-users-and-tokens)). No password field sits
+  in a `form`, so nothing typed is sent before the page's script runs.
 
 ## Docs in central mode
 

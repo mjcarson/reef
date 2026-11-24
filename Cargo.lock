@@ -2235,7 +2235,6 @@ dependencies = [
  "reef-render",
  "reqwest",
  "rmcp",
- "rustix",
  "schemars",
  "serde",
  "serde_json",
@@ -2248,6 +2247,7 @@ name = "reef-api"
 version = "0.1.0"
 dependencies = [
  "reef-model",
+ "rustix",
  "serde",
  "serde_json",
 ]

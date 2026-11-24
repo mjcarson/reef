@@ -20,7 +20,8 @@ use crate::schema::{
     QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES, ReefClient, ReefQueryKinds,
     RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow, RevisionFileRowGet, RevisionRow,
     RevisionRowFilter, RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter,
-    TokenRowGet, USERS, UserRow, UserRowFilter, UserRowGet, WorkRow, WorkRowFilter, WorkRowGet,
+    TokenRowGet, USERS, UserRow, UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowFilter,
+    WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -905,6 +906,29 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Deletes one user row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    #[instrument(name = "ShoalBackend::delete_user", skip_all, err(Debug))]
+    async fn delete_user(&self, row: &UserRow) -> anyhow::Result<Written> {
+        // the row under its name, only if no write moved it on since the read
+        let delete = UserRowDelete::new(row.list.clone(), row.name.clone());
+        let filter = UserRowFilter {
+            version: Some(vec![row.version]),
+        };
+        written(self.client.send_one(delete.if_matches(filter)).await)
+    }
+
+    /// Reads every token row, in hash order
+    #[instrument(name = "ShoalBackend::tokens", skip_all, err(Debug))]
+    async fn tokens(&self) -> anyhow::Result<Vec<TokenRow>> {
+        // every token sits in the one listing partition
+        let get = TokenRowGet::new(vec![TOKENS.to_string()]);
+        self.read::<_, TokenRow>(get).await
     }
 
     /// Reads the token row kept under a token's hash, if one is

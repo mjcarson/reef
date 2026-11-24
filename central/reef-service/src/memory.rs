@@ -934,6 +934,43 @@ impl Backend for MemoryBackend {
         Ok(Written::Applied)
     }
 
+    /// Deletes one user row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_user(&self, row: &UserRow) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let Some(partition) = tables.users.get_mut(&row.list) else {
+            return Ok(Written::Refused(Refusal::Missing));
+        };
+        // judged as `if_matches` judges it: a row must be stored, and at the version read
+        match partition.get(&row.name) {
+            None => return Ok(Written::Refused(Refusal::Missing)),
+            Some(stored) if stored.version != row.version => {
+                return Ok(Written::Refused(Refusal::Moved));
+            }
+            Some(_) => {}
+        }
+        partition.remove(&row.name);
+        // and a partition left empty is gone, as it never existed
+        if partition.is_empty() {
+            tables.users.remove(&row.list);
+        }
+        Ok(Written::Applied)
+    }
+
+    /// Reads every token row, in hash order
+    async fn tokens(&self) -> anyhow::Result<Vec<TokenRow>> {
+        let tables = self.tables();
+        // the one listing partition, whole
+        Ok(tables
+            .tokens
+            .get(TOKENS)
+            .map(|partition| partition.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
     /// Reads the token row kept under a token's hash, if one is
     ///
     /// # Arguments

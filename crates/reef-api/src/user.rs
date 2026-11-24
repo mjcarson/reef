@@ -5,6 +5,11 @@
 //! were given for a user's name and password, and a browser sends the cookie the sign-in page set.
 //! A token is shown once, when it is issued, and the service keeps only its hash. A password is
 //! kept only as its argon2id hash.
+//!
+//! Each user lists their own tokens, each by an id cut from its hash, and revokes any of them; an
+//! admin lists and revokes anyone's. A user changes their own password with their current one,
+//! and an admin sets anyone else's, which revokes that user's tokens. Only an admin removes a
+//! user, and never the last admin.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -26,6 +31,9 @@ pub const PASSWORD_MAX: usize = 1024;
 
 /// The most characters a user's name may hold
 pub const USER_NAME_MAX: usize = 64;
+
+/// How many hex digits of a token's hash make its id: 64 bits, which no two tokens share
+pub const TOKEN_ID_LEN: usize = 16;
 
 /// A user of reef, as the service shows one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +157,75 @@ pub struct SignedOut {
     pub revoked: bool,
 }
 
+/// A token as a listing shows it: never the token, only an id cut from its hash
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenInfo {
+    /// The first [`TOKEN_ID_LEN`] hex digits of the token's SHA-256, which revoke it
+    pub id: String,
+    /// The name of the user it signs in
+    pub user: String,
+    /// What it was issued to
+    pub kind: TokenKind,
+    /// What it is for, as the caller that asked for it said
+    pub label: String,
+    /// When it was issued, in milliseconds since the Unix epoch
+    pub created_at: u64,
+    /// When it stops signing anyone in, in milliseconds since the Unix epoch, if it ever does
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    /// Whether it is the token the listing's request sent
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// A request to change a user's password
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordChange {
+    /// The user's current password, which their own change needs and an admin's for another
+    /// user doesn't
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// The new password
+    pub password: String,
+}
+
+impl fmt::Debug for PasswordChange {
+    /// Shows the request with both passwords left out
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PasswordChange")
+            .field("current", &self.current.as_ref().map(|_| "…"))
+            .field("password", &"…")
+            .finish()
+    }
+}
+
+/// What came of changing a password
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordChanged {
+    /// How many of the user's tokens were revoked with it: none for their own change, all of
+    /// them for an admin's
+    pub revoked: usize,
+}
+
+/// What came of removing a user
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UserRemoved {
+    /// The user was removed, and every token of theirs revoked
+    Removed {
+        /// How many tokens were revoked
+        revoked: usize,
+    },
+    /// No user has that name
+    NoSuchUser,
+    /// The user is reef's last admin, who stays until another is added
+    LastAdmin,
+}
+
 /// Who the service takes the caller for
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Me {
@@ -219,6 +296,24 @@ pub fn check_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether text has a token id's shape: [`TOKEN_ID_LEN`] lowercase hex digits
+///
+/// # Arguments
+///
+/// * `id` - The text to check
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::user::is_token_id;
+///
+/// assert!(is_token_id("0123456789abcdef"));
+/// assert!(!is_token_id("current"));
+/// ```
+pub fn is_token_id(id: &str) -> bool {
+    id.len() == TOKEN_ID_LEN && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Whether text has a token's shape: the prefix, then 64 lowercase hex digits
 ///
 /// A token of any other shape is never looked up, so a guess can't reach the store.
@@ -247,8 +342,8 @@ pub fn is_token_shaped(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        IssuedToken, Me, NewUser, SignIn, TokenKind, User, UserAdded, check_password,
-        check_user_name, is_token_shaped,
+        IssuedToken, Me, NewUser, PasswordChange, SignIn, TokenInfo, TokenKind, User, UserAdded,
+        UserRemoved, check_password, check_user_name, is_token_id, is_token_shaped,
     };
     use serde_json::json;
 
@@ -298,6 +393,39 @@ mod tests {
                 .get("expires_at")
                 .is_none()
         );
+        // a token's listing never says the token, and a CLI token's no expiry
+        let info = TokenInfo {
+            id: "0123456789abcdef".into(),
+            user: "ada".into(),
+            kind: TokenKind::Cli,
+            label: "reef on laptop".into(),
+            created_at: 7,
+            expires_at: None,
+            current: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&info).unwrap(),
+            json!({"id": "0123456789abcdef", "user": "ada", "kind": "cli",
+                   "label": "reef on laptop", "created_at": 7, "current": true})
+        );
+        // an admin's change names no current password, and says nothing of one
+        let change: PasswordChange = serde_json::from_value(json!({"password": "p"})).unwrap();
+        assert_eq!(change.current, None);
+        assert!(
+            serde_json::to_value(&change)
+                .unwrap()
+                .get("current")
+                .is_none()
+        );
+        // a removal is tagged as the other outcomes are
+        assert_eq!(
+            serde_json::to_value(UserRemoved::Removed { revoked: 2 }).unwrap(),
+            json!({"removed": {"revoked": 2}})
+        );
+        assert_eq!(
+            serde_json::to_value(UserRemoved::LastAdmin).unwrap(),
+            json!("last-admin")
+        );
         // and nobody signed in reads as no user
         let me: Me = serde_json::from_value(json!({"required": true})).unwrap();
         assert_eq!(
@@ -334,6 +462,16 @@ mod tests {
             expires_at: Some(9),
         };
         assert!(!format!("{issued:?}").contains("reef_secret"));
+        // a password change's passwords, both of them
+        let change = PasswordChange {
+            current: Some("hunter22".into()),
+            password: "hunter33".into(),
+        };
+        let shown = format!("{change:?}");
+        assert!(
+            !shown.contains("hunter22") && !shown.contains("hunter33"),
+            "{shown}"
+        );
     }
 
     /// Names keep the project rule, passwords their bounds, and tokens their shape
@@ -354,5 +492,10 @@ mod tests {
         assert!(!is_token_shaped(&format!("reef_{}", "F".repeat(64))));
         assert!(!is_token_shaped(&format!("reef_{}", "f".repeat(63))));
         assert!(!is_token_shaped(&format!("beef_{}", "f".repeat(64))));
+        // token ids
+        assert!(is_token_id("0123456789abcdef"));
+        assert!(!is_token_id("0123456789ABCDEF"));
+        assert!(!is_token_id("0123456789abcde"));
+        assert!(!is_token_id("current"));
     }
 }

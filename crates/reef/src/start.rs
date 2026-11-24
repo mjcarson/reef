@@ -342,7 +342,7 @@ fn show<W: Write>(record: &WorkRecord, out: &mut W) -> anyhow::Result<()> {
 /// # Arguments
 ///
 /// * `ms` - The milliseconds since the epoch
-fn when(ms: u64) -> String {
+pub(crate) fn when(ms: u64) -> String {
     // whole seconds, as git writes a commit's time
     let seconds = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
     gix::date::Time::new(seconds, 0).format_or_unix(gix::date::time::format::ISO8601)

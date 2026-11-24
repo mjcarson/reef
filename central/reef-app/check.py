@@ -4,7 +4,8 @@ Each step checks one of M4's to M10's criteria, or how the app shows a node's wo
 it saw; the script exits 1 if any failed. C48's sign-in runs last, on a server of its own that asks
 every caller to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`), then
 C51's, on another that serves over TLS beside it (127.0.0.1:12192 and 12193, under `origin`), with
-a page of another origin served from 127.0.0.1:12194.
+a page of another origin served from 127.0.0.1:12194, then C77's account page, on a third
+(127.0.0.1:12196, under `account`).
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -66,6 +67,9 @@ ORIGIN_WORK = WORK / "origin"
 ORIGIN_URL = "http://127.0.0.1:12192"
 ORIGIN_TLS = "https://127.0.0.1:12193"
 ELSEWHERE = "http://127.0.0.1:12194"
+# C77's server, whose users and tokens the account page manages
+ACCOUNT_WORK = WORK / "account"
+ACCOUNT_URL = "http://127.0.0.1:12196"
 
 
 def check(label, ok, seen):
@@ -1651,6 +1655,127 @@ def c51_a_cross_origin_write_is_refused(browser):
         stop(server)
 
 
+def account_reef(who, *args, check_ok=True):
+    """Runs the reef CLI against C77's server as one user, each with a credentials file of their own."""
+    line = [REEF / "target/debug/reef", "--conf", ACCOUNT_WORK / "reef.toml",
+            "--credentials", ACCOUNT_WORK / f"{who}.toml", *args]
+    done = subprocess.run(line, cwd=ACCOUNT_WORK / "repo", capture_output=True, text=True)
+    if check_ok and done.returncode != 0:
+        raise RuntimeError(f"{' '.join(map(str, line))} failed: {done.stderr}")
+    return done.stdout + done.stderr
+
+
+def c77_the_account_page_manages_passwords_and_tokens(browser):
+    """C77: the account page changes a password, revokes a token and, for an admin, sets another's password and
+    removes a user, and the sign-in page says to wait after repeated wrong passwords."""
+    # a server of its own that asks every caller to sign in, with ada, an admin, and bob, each logged in at a terminal
+    if ACCOUNT_WORK.exists():
+        shutil.rmtree(ACCOUNT_WORK)
+    repo = ACCOUNT_WORK / "repo"
+    repo.mkdir(parents=True)
+    run("git", "-C", repo, "-c", "init.defaultBranch=main", "init", "-q")
+    (ACCOUNT_WORK / "reef.toml").write_text(
+        f'[api]\naddress = "{ACCOUNT_URL.removeprefix("http://")}"\n\n'
+        f'[shoal]\ndata = "{ACCOUNT_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
+    )
+    server = start(ACCOUNT_WORK / "reef.toml", ACCOUNT_URL, ACCOUNT_WORK / "server.log")
+    try:
+        old = ACCOUNT_WORK / "old"
+        old.write_text(PASSWORD + "\n")
+        new_password = "a newer horse battery"
+        new = ACCOUNT_WORK / "new"
+        new.write_text(new_password + "\n")
+        account_reef("ada", "user", "add", "ada", "--password-file", old)
+        account_reef("ada", "login", "--user", "ada", "--password-file", old, "--label", "ada's terminal")
+        account_reef("ada", "user", "add", "bob", "--password-file", old)
+        account_reef("bob", "login", "--user", "bob", "--password-file", old, "--label", "bob's terminal")
+        terminal = next(line.split()[0] for line in account_reef("ada", "token", "ls").splitlines()
+                        if "(this reef)" in line)
+        # ada signs in in a browser, and comes to her account page
+        context = browser.new_context(viewport={"width": 1200, "height": 900})
+        page = context.new_page()
+        page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+        page.goto(ACCOUNT_URL + "/account")
+        page.fill("#name", "ada")
+        page.fill("#password", PASSWORD)
+        page.click("button[type=submit]")
+        page.wait_for_selector(".reef-app-account table", timeout=20000)
+        landed = page.url.removeprefix(ACCOUNT_URL)
+        # once the page's script runs, a click opens bob's password field; before it, a click does nothing
+        bob_row = 'tr[data-user="bob"]'
+        for _ in range(40):
+            page.click(f"{bob_row} button[data-act=set-password]")
+            if page.query_selector(f"{bob_row} input[type=password]"):
+                break
+            time.sleep(0.25)
+        page.click(f"{bob_row} button[data-act=keep]")
+        # her tokens: the terminal's and this browser's, which is marked and has no revoke
+        rows = page.eval_on_selector_all(".reef-app-account-part:nth-of-type(2) tbody tr",
+                                         "rows => rows.map(r => [r.dataset.token, r.innerText])")
+        marked = [text for _, text in rows if "this browser" in text]
+        # the terminal's revoked from here, and the terminal is signed in no more
+        page.click(f'tr[data-token="{terminal}"] button[data-act=revoke]')
+        page.wait_for_selector(f'tr[data-token="{terminal}"]', state="detached", timeout=10000)
+        revoked_said = page.inner_text(".reef-app-account-said")
+        terminal_after = account_reef("ada", "whoami")
+        # her own password changed with her current one
+        page.fill("#account-current", PASSWORD)
+        page.fill("#account-new", new_password)
+        page.fill("#account-again", new_password)
+        page.click("button[data-act=change-password]")
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('.reef-app-account-said')].some(p => p.textContent.includes('password is changed'))",
+            timeout=10000)
+        old_login = account_reef("ada", "login", "--user", "ada", "--password-file", old, check_ok=False)
+        new_login = account_reef("ada", "login", "--user", "ada", "--password-file", new)
+        # as an admin she sets bob's, which revokes his terminal's token
+        page.click(f"{bob_row} button[data-act=set-password]")
+        page.fill(f"{bob_row} input[type=password]", new_password)
+        page.click(f"{bob_row} button[data-act=confirm-password]")
+        page.wait_for_function(
+            "() => [...document.querySelectorAll('.reef-app-account-said')].some(p => p.textContent.includes('Set the password of bob'))",
+            timeout=10000)
+        set_said = [text for text in page.eval_on_selector_all(".reef-app-account-said", "ps => ps.map(p => p.textContent)")
+                    if "bob" in text]
+        bob_after = account_reef("bob", "whoami")
+        page.screenshot(path=str(SHOTS / "reef-app-account.png"))
+        # and removes him, once she confirms it
+        page.click(f"{bob_row} button[data-act=remove]")
+        page.click(f"{bob_row} button[data-act=confirm-remove]")
+        page.wait_for_selector(bob_row, state="detached", timeout=10000)
+        users = account_reef("ada", "user", "ls")
+        own_row = page.inner_text('tr[data-user="ada"]')
+        context.close()
+        # a browser that tries a wrong password over and over is told to wait, even with the right one
+        stranger = browser.new_context()
+        guess = stranger.new_page()
+        guess.goto(ACCOUNT_URL + "/sign-in")
+        for _ in range(5):
+            guess.fill("#name", "ada")
+            guess.fill("#password", "not the password")
+            guess.click("button[type=submit]")
+            guess.wait_for_selector(".problem")
+        guess.fill("#name", "ada")
+        guess.fill("#password", new_password)
+        with guess.expect_navigation() as answer:
+            guess.click("button[type=submit]")
+        waited = (answer.value.status, guess.inner_text(".problem"))
+        guess.screenshot(path=str(SHOTS / "reef-app-sign-in-wait.png"))
+        stranger.close()
+        check("C77 the account page changes a password, revokes a token and, for an admin, removes a user",
+              landed == "/account" and len(rows) == 2 and len(marked) == 1 and "Revoke" not in marked[0]
+              and f"Revoked {terminal}" in revoked_said and terminal_after.startswith("nobody")
+              and "don't match" in old_login and "logged in to" in new_login
+              and any("revoking 1 token" in text for text in set_said) and bob_after.startswith("nobody")
+              and users.split() == ["ada", "admin"] and "(you)" in own_row
+              and waited[0] == 429 and "try again in" in waited[1],
+              {"landed": landed, "tokens": rows, "revoked": revoked_said, "terminal after": terminal_after.strip(),
+               "old login": old_login.strip(), "new login": new_login.strip(), "set": set_said,
+               "bob after": bob_after.strip(), "users": users.strip(), "own row": own_row, "waited": waited})
+    finally:
+        stop(server)
+
+
 def main():
     setup()
     server = start()
@@ -1701,6 +1826,8 @@ def main():
                 c48_a_browser_signs_in_and_reaches_its_plan(browser)
             if not ONLY or any("c51_a_cross_origin_write_is_refused".startswith(name) for name in ONLY):
                 c51_a_cross_origin_write_is_refused(browser)
+            if not ONLY or any("c77_the_account_page_manages_passwords_and_tokens".startswith(name) for name in ONLY):
+                c77_the_account_page_manages_passwords_and_tokens(browser)
             browser.close()
     finally:
         stop(server)

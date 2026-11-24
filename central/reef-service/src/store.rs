@@ -60,7 +60,7 @@ mod work;
 
 pub use comment::{Followed, Pending};
 pub use remotes::{KeptRemote, StoredRemote};
-pub use users::{StoredToken, StoredUser, UserKept};
+pub use users::{StoredToken, StoredUser, UserDropped, UserKept};
 
 pub use revision::FILE_ROW_MAX;
 

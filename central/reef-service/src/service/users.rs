@@ -13,22 +13,40 @@
 //!   expires after 30 days, and a terminal's at its logout. Text that isn't shaped as a token is
 //!   never looked up.
 //! - **Tokens looked up are trusted for a minute,** so a request doesn't cost a read of shoal.
-//!   reef-service is shoal's only writer, so a revoke here drops its token at once.
+//!   reef-service is shoal's only writer, so a revoke here drops its token at once. A token
+//!   issued before its user was added signs nobody in, since it was another user's of that name.
+//! - **Repeated failures are slowed** ([`throttle`](super::throttle)), by the name tried and the
+//!   address tried from, before any hash is checked.
+//! - **Everyone lists and revokes their own tokens,** each named by an id cut from its hash, and
+//!   an admin anyone's. A token that isn't the caller's to see is answered as no token at all.
+//! - **A password is changed by its user, with their current one,** which leaves their tokens,
+//!   or set by an admin for another user, which revokes theirs. Only an admin removes a user,
+//!   their tokens with them, and never the last admin.
+//! - **A lost admin is recovered from the store itself** ([`Service::recover_admin`]), by
+//!   whoever can open it, as `reef-serve recover` does, never over the API.
+//! - **A revoke is told to the change streams.** Each revoke, removal or reset bumps a counter
+//!   [`Service::signed_out`] watches, so a stream whose token stops signing anyone in ends.
 
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
-use reef_api::user::{PASSWORD_MAX, check_password, check_user_name, is_token_shaped};
-use reef_api::{IssuedToken, NewUser, TokenKind, User, UserAdded};
+use reef_api::user::{
+    PASSWORD_MAX, TOKEN_ID_LEN, check_password, check_user_name, is_token_id, is_token_shaped,
+};
+use reef_api::{
+    IssuedToken, NewUser, PasswordChange, PasswordChanged, TokenInfo, TokenKind, User, UserAdded,
+    UserRemoved,
+};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 use tracing::instrument;
 
 use super::Service;
 use crate::backend::Backend;
-use crate::store::{StoredUser, Unkeepable, UserKept};
+use crate::store::{StoredToken, StoredUser, Unkeepable, UserDropped, UserKept};
 
 /// How long a browser's token signs it in: 30 days
 pub const BROWSER_TOKEN_LIFE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -68,14 +86,61 @@ impl std::fmt::Display for NotAllowed {
 
 impl std::error::Error for NotAllowed {}
 
-/// Who asks to add or list users: the user their token signs in, and whether they call from the
-/// service's own host
-#[derive(Debug, Clone, Copy, Default)]
+/// A user that isn't there, named
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoUser(pub String);
+
+impl std::fmt::Display for NoUser {
+    /// Says no user has the name
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no user is named `{}`", self.0)
+    }
+}
+
+impl std::error::Error for NoUser {}
+
+/// Who asks of reef's users or tokens: the user their token signs in, the token itself, and
+/// where they call from
+#[derive(Clone, Copy, Default)]
 pub struct Asker<'a> {
     /// The user the caller's token signs in, if it signs one in
     pub user: Option<&'a User>,
     /// Whether the caller reached the service from its own host
     pub local: bool,
+    /// The token the caller sent, if it sent one
+    pub token: Option<&'a str>,
+    /// The address the caller called from, if it is known
+    pub address: Option<IpAddr>,
+}
+
+impl std::fmt::Debug for Asker<'_> {
+    /// Shows the asker with its token left out
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Asker")
+            .field("user", &self.user)
+            .field("local", &self.local)
+            .field("token", &self.token.map(|_| "…"))
+            .field("address", &self.address)
+            .finish()
+    }
+}
+
+/// What came of recovering a lost admin
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recovered {
+    /// The user's password was set, and they are an admin, every token of theirs revoked
+    Reset {
+        /// How many tokens were revoked
+        revoked: usize,
+        /// Whether they were an admin already
+        was_admin: bool,
+    },
+    /// No user had the name, so one was added as an admin
+    Added,
 }
 
 /// A token looked up lately, and when
@@ -147,6 +212,18 @@ impl Tokens {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(hash);
     }
+
+    /// Forgets every token of a user's, so their next lookups read the store
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user's name
+    fn forget_user(&self, user: &str) {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|_, found| found.user.name != user);
+    }
 }
 
 /// Makes a new token: the prefix, then 32 random bytes as lowercase hex
@@ -174,6 +251,45 @@ pub fn token_hash(token: &str) -> String {
 /// * `bytes` - The bytes
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// A token's id: the first [`TOKEN_ID_LEN`] hex digits of its hash
+///
+/// # Arguments
+///
+/// * `hash` - The token's SHA-256, as 64 lowercase hex digits
+fn token_id(hash: &str) -> String {
+    hash.chars().take(TOKEN_ID_LEN).collect()
+}
+
+/// A token as a listing shows it
+///
+/// # Arguments
+///
+/// * `stored` - The token, as the store keeps it
+/// * `sent` - The hash of the token the listing's request sent, if it sent one
+fn token_info(stored: StoredToken, sent: Option<&str>) -> TokenInfo {
+    TokenInfo {
+        id: token_id(&stored.hash),
+        current: sent == Some(stored.hash.as_str()),
+        user: stored.user,
+        kind: stored.kind,
+        label: stored.label,
+        created_at: stored.created_at,
+        expires_at: stored.expires_at,
+    }
+}
+
+/// The user an asker's token signs in, or a refusal saying to sign in first
+///
+/// # Arguments
+///
+/// * `asker` - Who asks
+/// * `doing` - What they ask to do, for the refusal
+fn signed_in_user<'a>(asker: Asker<'a>, doing: &str) -> anyhow::Result<&'a User> {
+    asker
+        .user
+        .ok_or_else(|| NotSignedIn(format!("sign in to reef to {doing}")).into())
 }
 
 /// The milliseconds since the Unix epoch
@@ -346,6 +462,7 @@ impl<B: Backend> Service<B> {
     /// * `password` - The user's password
     /// * `kind` - What the token is issued to
     /// * `label` - What the token is for
+    /// * `from` - The address the sign-in came from, if it is known
     #[instrument(name = "Service::sign_in", skip_all, err(Debug))]
     pub async fn sign_in(
         &self,
@@ -353,7 +470,10 @@ impl<B: Backend> Service<B> {
         password: &str,
         kind: TokenKind,
         label: &str,
+        from: Option<IpAddr>,
     ) -> anyhow::Result<Option<IssuedToken>> {
+        // one that must wait is refused before any hashing, and the rest counted until they sign in
+        self.throttle.attempt(name, from, Instant::now())?;
         // a password too long to hash quickly matches nobody's
         if password.len() > PASSWORD_MAX {
             return Ok(None);
@@ -368,6 +488,7 @@ impl<B: Backend> Service<B> {
         let Some(stored) = stored.filter(|_| matched) else {
             return Ok(None);
         };
+        self.throttle.succeeded(name, from);
         // a token for them, kept only by its hash
         let token = new_token()?;
         let expires_at = match kind {
@@ -414,6 +535,11 @@ impl<B: Backend> Service<B> {
         let Some(user) = self.store.user(&stored.user).await? else {
             return Ok(None);
         };
+        // nor one issued before its user was added, which was an earlier user's of the name
+        if stored.created_at < user.user.created_at {
+            self.store.drop_token(&stored).await?;
+            return Ok(None);
+        }
         self.tokens.remember(&hash, &user.user, stored.expires_at);
         Ok(Some(user.user))
     }
@@ -435,7 +561,318 @@ impl<B: Backend> Service<B> {
         let Some(stored) = self.store.token(&hash).await? else {
             return Ok(false);
         };
-        self.store.drop_token(&stored).await
+        let dropped = self.store.drop_token(&stored).await?;
+        self.revoked();
+        Ok(dropped)
+    }
+
+    /// Lists the asker's tokens, or another user's to an admin, the one the asker sent marked,
+    /// oldest first
+    ///
+    /// An expired token is dropped as it is found, and left out.
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `of` - The user whose tokens to list, if not the asker's own
+    #[instrument(name = "Service::tokens", skip_all, err(Debug))]
+    pub async fn tokens(
+        &self,
+        asker: Asker<'_>,
+        of: Option<&str>,
+    ) -> anyhow::Result<Vec<TokenInfo>> {
+        // the asker's own, or another's if the stored rows say the asker is an admin
+        let me = signed_in_user(asker, "list tokens")?;
+        let whose = of.unwrap_or(&me.name);
+        if whose != me.name {
+            is_admin(
+                &self.store.users().await?,
+                asker,
+                "list another user's tokens",
+            )?;
+        }
+        // the token sent, by its hash, to mark it
+        let sent = asker
+            .token
+            .filter(|token| is_token_shaped(token))
+            .map(token_hash);
+        let now = now_ms();
+        let mut listed = Vec::new();
+        for stored in self.store.tokens(Some(whose)).await? {
+            // an expired one signs nobody in, so goes
+            if stored.expired(now) {
+                self.store.drop_token(&stored).await?;
+                continue;
+            }
+            listed.push(token_info(stored, sent.as_deref()));
+        }
+        listed.sort_by_key(|token| token.created_at);
+        Ok(listed)
+    }
+
+    /// Revokes a token by its id: one of the asker's own, or anyone's by an admin, returning
+    /// whether there was one to revoke
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `id` - The token's id, as a listing shows it
+    #[instrument(name = "Service::revoke_token", skip_all, err(Debug))]
+    pub async fn revoke_token(&self, asker: Asker<'_>, id: &str) -> anyhow::Result<bool> {
+        let me = signed_in_user(asker, "revoke a token")?;
+        // text not shaped as an id names no token
+        if !is_token_id(id) {
+            return Ok(false);
+        }
+        // the tokens it names that the asker may see: their own, or any to an admin
+        let named: Vec<StoredToken> = self
+            .store
+            .tokens(None)
+            .await?
+            .into_iter()
+            .filter(|token| token.hash.starts_with(id))
+            .collect();
+        let admin = match named.iter().any(|token| token.user != me.name) {
+            true => is_admin(&self.store.users().await?, asker, "").is_ok(),
+            false => false,
+        };
+        let mut visible: Vec<StoredToken> = named
+            .into_iter()
+            .filter(|token| admin || token.user == me.name)
+            .collect();
+        // 64 bits of a hash name one token; if they ever named two, neither is guessed at
+        anyhow::ensure!(
+            visible.len() <= 1,
+            "token id `{id}` names {} tokens, so none was revoked",
+            visible.len()
+        );
+        let Some(token) = visible.pop() else {
+            return Ok(false);
+        };
+        // forgotten here first, so no lookup trusts it while it is dropped
+        self.tokens.forget(&token.hash);
+        let dropped = self.store.drop_token(&token).await?;
+        self.tokens.forget(&token.hash);
+        self.revoked();
+        Ok(dropped)
+    }
+
+    /// Changes a user's password: the asker's own with their current one, which leaves their
+    /// tokens, or another user's by an admin, which revokes every token of theirs
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `name` - The user whose password it is
+    /// * `change` - The current password, for the asker's own, and the new one
+    #[instrument(name = "Service::change_password", skip_all, err(Debug))]
+    pub async fn change_password(
+        &self,
+        asker: Asker<'_>,
+        name: &str,
+        change: PasswordChange,
+    ) -> anyhow::Result<PasswordChanged> {
+        let me = signed_in_user(asker, "change a password")?;
+        // a new password the service can keep
+        check_password(&change.password).map_err(Unkeepable)?;
+        match me.name == name {
+            true => self.change_own_password(asker, name, change).await,
+            false => self.set_password(asker, name, change.password).await,
+        }
+    }
+
+    /// Changes the asker's own password, checked against their current one as a sign-in is
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `name` - The asker's name
+    /// * `change` - The current password and the new one
+    async fn change_own_password(
+        &self,
+        asker: Asker<'_>,
+        name: &str,
+        change: PasswordChange,
+    ) -> anyhow::Result<PasswordChanged> {
+        // one's own needs the current password, slowed as a sign-in is
+        let Some(current) = change.current else {
+            return Err(Unkeepable(
+                "your own password changes with your current one: send it as `current`".into(),
+            )
+            .into());
+        };
+        self.throttle.attempt(name, asker.address, Instant::now())?;
+        let Some(stored) = self.store.user(name).await? else {
+            return Err(NoUser(name.to_string()).into());
+        };
+        let matched = self
+            .verify_password(current, stored.password.clone())
+            .await?;
+        if !matched {
+            return Err(NotAllowed(
+                "your current password doesn't match, so the password is as it was".to_string(),
+            )
+            .into());
+        }
+        self.throttle.succeeded(name, asker.address);
+        // over the row read, so a change made since isn't written over
+        let password = self.hash_password(change.password).await?;
+        let written = self
+            .store
+            .rewrite_user(&stored, &password, stored.user.admin)
+            .await?;
+        anyhow::ensure!(
+            written,
+            "the password of `{name}` changed while this change was checked, so it wasn't \
+             written: try again"
+        );
+        Ok(PasswordChanged { revoked: 0 })
+    }
+
+    /// Sets another user's password, as an admin, revoking every token of theirs
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `name` - The user whose password it is
+    /// * `password` - The new password
+    async fn set_password(
+        &self,
+        asker: Asker<'_>,
+        name: &str,
+        password: String,
+    ) -> anyhow::Result<PasswordChanged> {
+        // an admin, as the stored rows say, before a word of who exists
+        let users = self.store.users().await?;
+        is_admin(&users, asker, "set another user's password")?;
+        let Some(stored) = users.into_iter().find(|stored| stored.user.name == name) else {
+            return Err(NoUser(name.to_string()).into());
+        };
+        let password = self.hash_password(password).await?;
+        let written = self
+            .store
+            .rewrite_user(&stored, &password, stored.user.admin)
+            .await?;
+        anyhow::ensure!(
+            written,
+            "`{name}` changed while their password was set, so it wasn't: try again"
+        );
+        // set by someone else, so whoever held the old one signs in no more
+        let revoked = self.revoke_all(name).await?;
+        Ok(PasswordChanged { revoked })
+    }
+
+    /// Removes a user and every token of theirs, which only an admin may, and never the last
+    /// admin
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `name` - The user's name
+    #[instrument(name = "Service::remove_user", skip_all, err(Debug))]
+    pub async fn remove_user(&self, asker: Asker<'_>, name: &str) -> anyhow::Result<UserRemoved> {
+        // judged against every user under the store's lock
+        let dropped = self
+            .store
+            .remove_user(name, |users| is_admin(users, asker, "remove a user"))
+            .await?;
+        Ok(match dropped {
+            UserDropped::Removed { revoked } => {
+                // no lookup trusts a token of theirs from now on
+                self.tokens.forget_user(name);
+                self.revoked();
+                UserRemoved::Removed { revoked }
+            }
+            UserDropped::NoSuchUser => UserRemoved::NoSuchUser,
+            UserDropped::LastAdmin => UserRemoved::LastAdmin,
+        })
+    }
+
+    /// Recovers a lost admin: sets their password, makes them an admin and revokes their tokens,
+    /// or adds them as an admin if no user has the name
+    ///
+    /// Nobody is asked who they are: whoever can open the store holds the service's data, as
+    /// `reef-serve recover` does on the service's host. It is never reached over the API.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The user's name
+    /// * `password` - Their new password
+    #[instrument(name = "Service::recover_admin", skip_all, err(Debug))]
+    pub async fn recover_admin(&self, name: &str, password: String) -> anyhow::Result<Recovered> {
+        // a name and a password the service can keep
+        check_user_name(name).map_err(Unkeepable)?;
+        check_password(&password).map_err(Unkeepable)?;
+        let password = self.hash_password(password).await?;
+        let Some(stored) = self.store.user(name).await? else {
+            // nobody of the name, so a new admin, judged by nobody
+            return match self.store.add_user(name, &password, |_| Ok(true)).await? {
+                UserKept::Added(_) => Ok(Recovered::Added),
+                UserKept::NameTaken => {
+                    anyhow::bail!("`{name}` was added while it was recovered: run it again")
+                }
+            };
+        };
+        // the new password, an admin from now on, over the row read
+        let written = self.store.rewrite_user(&stored, &password, true).await?;
+        anyhow::ensure!(
+            written,
+            "`{name}` changed while it was recovered, so it wasn't: run it again"
+        );
+        let revoked = self.revoke_all(name).await?;
+        Ok(Recovered::Reset {
+            revoked,
+            was_admin: stored.user.admin,
+        })
+    }
+
+    /// Resolves once a token signs nobody in: revoked, expired, or its user removed
+    ///
+    /// It looks again after each revoke this service makes, and every minute, for an expiry.
+    /// A lookup that fails is tried again at the next look, rather than taken for a revoke.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token
+    pub async fn signed_out(&self, token: String) {
+        let mut revocations = self.revocations.subscribe();
+        loop {
+            // after a revoke, or a minute on
+            tokio::select! {
+                changed = revocations.changed() => {
+                    // a service that is gone signs nobody in
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                () = tokio::time::sleep(TOKEN_TRUST) => {}
+            }
+            match self.signed_in(&token).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return,
+                Err(error) => tracing::warn!("a change stream's token wasn't looked up: {error:#}"),
+            }
+        }
+    }
+
+    /// Revokes every token of a user's, returning how many were revoked
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The user's name
+    async fn revoke_all(&self, name: &str) -> anyhow::Result<usize> {
+        // forgotten before and after the drop, so no lookup between trusts one
+        self.tokens.forget_user(name);
+        let revoked = self.store.drop_tokens_of(name).await?;
+        self.tokens.forget_user(name);
+        self.revoked();
+        Ok(revoked)
+    }
+
+    /// Tells every change stream that a token may have stopped signing anyone in
+    fn revoked(&self) {
+        self.revocations
+            .send_modify(|count| *count = count.wrapping_add(1));
     }
 
     /// Hashes a password off the async threads, as an argon2id PHC string

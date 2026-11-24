@@ -7,9 +7,10 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, Decision, FileDiff, Loop, Marked, Me, PlanInfo, Project, QueueEdit, QueueListing,
-    Queued, Review, ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, Target,
-    Thread, ThreadState, Transcript,
+    Commented, Decision, FileDiff, Loop, Marked, Me, PasswordChange, PasswordChanged, PlanInfo,
+    Project, QueueEdit, QueueListing, Queued, Review, ReviewState, Reviewed, Revision, Session,
+    SessionAct, SessionActed, SignedOut, Target, Thread, ThreadState, TokenInfo, Transcript, User,
+    UserRemoved,
 };
 #[cfg(feature = "server")]
 use reef_api::{MarkReview, MarkThread, NewReply, NewThread, Writer};
@@ -34,14 +35,119 @@ pub struct ProjectPlans {
     tracing::instrument(name = "calls::me", skip_all, err(Debug))
 )]
 pub async fn me() -> Result<Me, ServerFnError> {
-    // the caller the guard found for this request, or nobody outside one
-    let caller = dioxus::fullstack::FullstackContext::current()
-        .and_then(|context| context.extension::<reef_service::auth::Caller>())
-        .unwrap_or_default();
+    // the caller the guard found for this request
+    let caller = caller();
     Ok(Me {
         user: caller.user,
         required: crate::server::service().sign_in_required(),
     })
+}
+
+/// The caller the guard found for this request, or nobody outside one
+#[cfg(feature = "server")]
+fn caller() -> reef_service::auth::Caller {
+    dioxus::fullstack::FullstackContext::current()
+        .and_then(|context| context.extension::<reef_service::auth::Caller>())
+        .unwrap_or_default()
+}
+
+/// What the account page shows: who this browser is signed in as, their tokens, and every user
+/// to an admin
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Account {
+    /// Whom the server takes this browser for, and whether it asks callers to sign in
+    pub me: Me,
+    /// Their tokens, oldest first, this browser's marked
+    pub tokens: Vec<TokenInfo>,
+    /// Every user, if they are an admin, else none
+    pub users: Vec<User>,
+}
+
+/// Who this browser is signed in as, their tokens, and every user if they are an admin
+#[get("/app/account")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::account", skip_all, err(Debug))
+)]
+pub async fn account() -> Result<Account, ServerFnError> {
+    let caller = caller();
+    let service = crate::server::service();
+    let me = Me {
+        user: caller.user.clone(),
+        required: service.sign_in_required(),
+    };
+    // nobody signed in has no tokens to show
+    let Some(user) = &caller.user else {
+        return Ok(Account {
+            me,
+            tokens: Vec::new(),
+            users: Vec::new(),
+        });
+    };
+    let tokens = service.tokens(caller.asker(), None).await.map_err(failed)?;
+    // every user only to an admin
+    let users = match user.admin {
+        true => service.users(caller.asker()).await.map_err(failed)?,
+        false => Vec::new(),
+    };
+    Ok(Account { me, tokens, users })
+}
+
+/// Changes a password: this browser's user's own with their current one, or another user's by
+/// an admin, which revokes that user's tokens
+///
+/// # Arguments
+///
+/// * `name` - The user whose password it is
+/// * `change` - The current password, for one's own, and the new one
+#[post("/app/account/password")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::change_password", skip_all, err(Debug))
+)]
+pub async fn change_password(
+    name: String,
+    change: PasswordChange,
+) -> Result<PasswordChanged, ServerFnError> {
+    crate::server::service()
+        .change_password(caller().asker(), &name, change)
+        .await
+        .map_err(failed)
+}
+
+/// Revokes a token by its id: one of this browser's user's, or anyone's by an admin
+///
+/// # Arguments
+///
+/// * `id` - The token's id, as the account page lists it
+#[post("/app/account/revoke")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::revoke_token", skip_all, err(Debug))
+)]
+pub async fn revoke_token(id: String) -> Result<SignedOut, ServerFnError> {
+    let revoked = crate::server::service()
+        .revoke_token(caller().asker(), &id)
+        .await
+        .map_err(failed)?;
+    Ok(SignedOut { revoked })
+}
+
+/// Removes a user and their tokens, which only an admin may, and never the last admin
+///
+/// # Arguments
+///
+/// * `name` - The user's name
+#[post("/app/account/remove")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::remove_user", skip_all, err(Debug))
+)]
+pub async fn remove_user(name: String) -> Result<UserRemoved, ServerFnError> {
+    crate::server::service()
+        .remove_user(caller().asker(), &name)
+        .await
+        .map_err(failed)
 }
 
 /// Whether a call failed because the server asks this browser to sign in, and it isn't

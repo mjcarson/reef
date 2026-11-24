@@ -7,14 +7,17 @@
 use reef_api::user::SIGN_IN_COOKIE;
 use reef_api::{
     AddedProject, ApiError, Checked, ErrorCode, IssuedToken, Listing, Me, NewProject, NewUser,
-    Project, SignIn, SignedOut, TokenKind, User, UserAdded, paths,
+    PasswordChange, PasswordChanged, Project, SignIn, SignedOut, TokenInfo, TokenKind, User,
+    UserAdded, UserRemoved, paths,
 };
 use reef_model::{Description, NodeSpec, PlanName};
-use reef_service::{Asker, Backend};
+use reef_service::service::token_hash;
+use reef_service::{Asker, Backend, Recovered, Unkeepable};
 use reqwest::header::{
-    ACCEPT, CONTENT_SECURITY_POLICY, COOKIE, LOCATION, SET_COOKIE, WWW_AUTHENTICATE,
+    ACCEPT, CONTENT_SECURITY_POLICY, COOKIE, LOCATION, RETRY_AFTER, SET_COOKIE, WWW_AUTHENTICATE,
 };
 use reqwest::{Method, StatusCode};
+use std::time::Duration;
 
 use super::Fx;
 use super::git;
@@ -72,6 +75,7 @@ async fn first_admin<B: Backend + 'static>(ax: &Ax<B>, name: &str) -> anyhow::Re
     let asker = Asker {
         user: None,
         local: true,
+        ..Default::default()
     };
     match ax.service.add_user(new_user(name, false), asker).await? {
         UserAdded::Added(user) => Ok(user),
@@ -813,5 +817,657 @@ pub async fn only_an_admin_registers_what_is_on_the_host<B: Backend + 'static>(
         let (status, added): (_, AddedProject) = ada.post(paths::PROJECTS, &new).await?;
         assert_eq!(status, StatusCode::CREATED, "{}: {added:?}", new.name);
     }
+    Ok(())
+}
+
+/// Signs a user in through the JSON API with a password, returning the answer's status and the
+/// token issued, if one was
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+/// * `name` - The user's name
+/// * `password` - The password tried
+async fn try_sign_in<B: Backend + 'static>(
+    ax: &Ax<B>,
+    name: &str,
+    password: &str,
+) -> anyhow::Result<(StatusCode, Option<String>)> {
+    let request = SignIn {
+        name: name.to_string(),
+        password: password.to_string(),
+        label: Some(format!("{name}'s case")),
+    };
+    let response = ax
+        .client
+        .raw(
+            ax.client
+                .request(Method::POST, paths::TOKENS)
+                .json(&request),
+        )
+        .await?;
+    let status = response.status();
+    // a token only with a 201
+    let token = match status == StatusCode::CREATED {
+        true => Some(response.json::<IssuedToken>().await?.token),
+        false => None,
+    };
+    Ok((status, token))
+}
+
+/// Adds a user as the admin a client signs in, with the cases' password
+///
+/// # Arguments
+///
+/// * `admin` - A client signed in as an admin
+/// * `name` - The new user's name
+/// * `is_admin` - Whether they are to be an admin
+async fn add_by(admin: &Client, name: &str, is_admin: bool) -> anyhow::Result<()> {
+    let (status, added): (_, UserAdded) =
+        admin.post(paths::USERS, &new_user(name, is_admin)).await?;
+    anyhow::ensure!(
+        status == StatusCode::CREATED,
+        "adding `{name}` answered {status}: {added:?}"
+    );
+    Ok(())
+}
+
+/// The id a listing shows a token by
+///
+/// # Arguments
+///
+/// * `token` - The token
+fn id_of(token: &str) -> String {
+    token_hash(token)[..reef_api::user::TOKEN_ID_LEN].to_string()
+}
+
+/// Whether a token still signs anyone in, as `/api/v1/me` says
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+/// * `token` - The token
+async fn signs_in<B: Backend + 'static>(ax: &Ax<B>, token: &str) -> anyhow::Result<bool> {
+    let (_, me): (_, Me) = ax.client.signed(token).get(paths::ME).await?;
+    Ok(me.user.is_some())
+}
+
+/// A token revoked by its id signs nothing in at once, though it was looked up a moment before,
+/// whether its user or an admin revokes it, and a browser's cookie as well as a terminal's
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn a_revoked_token_signs_nothing_in<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    // two terminals of bob's, each looked up so the service trusts it for a while
+    let (_, first) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    let (_, second) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    let (first, second) = (first.expect("bob signs in"), second.expect("bob signs in"));
+    assert!(signs_in(&ax, &first).await? && signs_in(&ax, &second).await?);
+    // bob revokes his second by its id, from his first, and it stops at once
+    let bob = ax.client.signed(&first);
+    let response = bob
+        .raw(bob.request(Method::DELETE, &paths::token(&id_of(&second))))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let revoked: SignedOut = response.json().await?;
+    assert!(revoked.revoked);
+    is_refused(
+        ax.client.signed(&second).open(paths::PROJECTS).await?,
+        "a revoked token",
+    )
+    .await?;
+    assert!(!signs_in(&ax, &second).await?);
+    // revoked again, it is nothing of his
+    let response = bob
+        .raw(bob.request(Method::DELETE, &paths::token(&id_of(&second))))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // an admin revokes his first, and a write with it is refused
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::token(&id_of(&first))))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let request = bob
+        .request(Method::POST, &paths::nodes(&ax.plan))
+        .json(&work("C9"));
+    is_refused(bob.raw(request).await?, "a write with a revoked token").await?;
+    // a browser's cookie revoked by its id sends the browser back to sign in
+    let form = ax
+        .client
+        .request(Method::POST, paths::SIGN_IN)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(format!(
+            "name=bob&password={}&next=%2F",
+            PASSWORD.replace(' ', "+")
+        ));
+    let signed = ax.client.raw(form).await?;
+    let cookie = set_cookie(&signed).expect("the form sets a cookie");
+    let token = cookie
+        .split(';')
+        .next()
+        .and_then(|pair| pair.split_once('='))
+        .map(|(_, token)| token.to_string())
+        .expect("the cookie holds a token");
+    let page = |token: &str| {
+        ax.client
+            .request(Method::GET, "/")
+            .header(ACCEPT, "text/html")
+            .header(COOKIE, format!("{SIGN_IN_COOKIE}={token}"))
+    };
+    let (_, listed): (_, Vec<TokenInfo>) = ada.get(&paths::tokens_of("bob")).await?;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].kind, TokenKind::Browser);
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::token(&listed[0].id)))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sent_back = ax.client.raw(page(&token)).await?;
+    assert_eq!(sent_back.status(), StatusCode::SEE_OTHER);
+    let location = sent_back
+        .headers()
+        .get(LOCATION)
+        .and_then(|value| value.to_str().ok());
+    assert!(
+        location.is_some_and(|location| location.starts_with(paths::SIGN_IN)),
+        "{location:?}"
+    );
+    Ok(())
+}
+
+/// Repeated wrong passwords are slowed: after the free failures the next sign-in waits, its
+/// password unchecked, said as a 429 with how long, while another name signs in, and once the
+/// wait passes the right password signs in again
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn repeated_wrong_passwords_are_slowed<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    // five wrong passwords are each told so
+    for _ in 0..5 {
+        let (status, _) = try_sign_in(&ax, "bob", "not the password").await?;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // then even the right one waits, told how long
+    let request = SignIn {
+        name: "bob".to_string(),
+        password: PASSWORD.to_string(),
+        label: None,
+    };
+    let response = ax
+        .client
+        .raw(
+            ax.client
+                .request(Method::POST, paths::TOKENS)
+                .json(&request),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry = response
+        .headers()
+        .get(RETRY_AFTER)
+        .map(|value| value.to_str().unwrap_or_default().to_string());
+    assert_eq!(retry.as_deref(), Some("1"));
+    let error: ApiError = response.json().await?;
+    assert_eq!(
+        (error.code, error.retry_after),
+        (ErrorCode::TooManyTries, Some(1))
+    );
+    assert!(
+        error.message.contains("try again in 1 s"),
+        "{}",
+        error.message
+    );
+    // and the browser's form says the same, with the page again
+    let form = ax
+        .client
+        .request(Method::POST, paths::SIGN_IN)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(format!(
+            "name=bob&password={}&next=%2F",
+            PASSWORD.replace(' ', "+")
+        ));
+    let page = ax.client.raw(form).await?;
+    assert_eq!(page.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(page.headers().contains_key(RETRY_AFTER));
+    assert!(set_cookie(&page).is_none());
+    assert!(page.text().await?.contains("try again in"));
+    // another name signs in meanwhile, from the same address
+    let (status, _) = try_sign_in(&ax, "ada", PASSWORD).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    // once the wait passes, the right password signs bob in, and his failures are forgotten
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let (status, token) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(token.is_some());
+    let (status, _) = try_sign_in(&ax, "bob", "not the password").await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// A user changes their own password with their current one, keeping their tokens, and an
+/// admin sets another's, revoking theirs; nobody else sets anyone's
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn passwords_are_changed_by_their_user_or_set_by_an_admin<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    let (_, bob_token) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    let bob_token = bob_token.expect("bob signs in");
+    let bob = ax.client.signed(&bob_token);
+    let change = |current: Option<&str>, password: &str| PasswordChange {
+        current: current.map(str::to_string),
+        password: password.to_string(),
+    };
+    let new = "a newer horse battery";
+    // his own needs his current password, right, and a new one the service keeps
+    let (status, error): (_, ApiError) = bob
+        .put(&paths::user_password("bob"), &change(None, new))
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    let wrong = change(Some("not the password"), new);
+    let (status, error): (_, ApiError) = bob.put(&paths::user_password("bob"), &wrong).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::FORBIDDEN, ErrorCode::Forbidden)
+    );
+    let short = change(Some(PASSWORD), "short");
+    let (status, _): (_, ApiError) = bob.put(&paths::user_password("bob"), &short).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // with it, the new one signs him in, the old one doesn't, and his token still does
+    let (status, changed): (_, PasswordChanged) = bob
+        .put(&paths::user_password("bob"), &change(Some(PASSWORD), new))
+        .await?;
+    assert_eq!((status, changed.revoked), (StatusCode::OK, 0));
+    assert_eq!(
+        try_sign_in(&ax, "bob", PASSWORD).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(try_sign_in(&ax, "bob", new).await?.0, StatusCode::CREATED);
+    assert!(signs_in(&ax, &bob_token).await?);
+    // he sets nobody else's, and nobody signed in sets any
+    let (status, error): (_, ApiError) = bob
+        .put(&paths::user_password("ada"), &change(None, new))
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::FORBIDDEN, ErrorCode::Forbidden)
+    );
+    let request = ax
+        .client
+        .request(Method::PUT, &paths::user_password("bob"))
+        .json(&change(Some(new), PASSWORD));
+    is_refused(
+        ax.client.raw(request).await?,
+        "an anonymous password change",
+    )
+    .await?;
+    // an admin sets his, needing no current one, and both his tokens stop
+    let (status, changed): (_, PasswordChanged) = ada
+        .put(&paths::user_password("bob"), &change(None, PASSWORD))
+        .await?;
+    assert_eq!((status, changed.revoked), (StatusCode::OK, 2));
+    assert!(!signs_in(&ax, &bob_token).await?);
+    assert_eq!(
+        try_sign_in(&ax, "bob", new).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        try_sign_in(&ax, "bob", PASSWORD).await?.0,
+        StatusCode::CREATED
+    );
+    // and a user nobody has is said so, to an admin
+    let (status, error): (_, ApiError) = ada
+        .put(&paths::user_password("nobody"), &change(None, new))
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotFound)
+    );
+    // an admin's own is their own, and needs their current one
+    let (status, _): (_, ApiError) = ada
+        .put(&paths::user_password("ada"), &change(None, new))
+        .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+/// An admin removes a user, whose tokens stop at once; the last admin stays; nobody else removes
+/// anyone; and a new user of the same name is signed in by no token of the old one's
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn an_admin_removes_a_user_and_their_tokens<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    add_by(&ada, "carol", false).await?;
+    let (_, bob_token) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    let bob_token = bob_token.expect("bob signs in");
+    assert!(signs_in(&ax, &bob_token).await?);
+    // a user who isn't an admin removes nobody, and nobody signed in is told to sign in
+    let carol = signed_in(&ax, "carol").await?;
+    let response = carol
+        .raw(carol.request(Method::DELETE, &paths::user("bob")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let error: ApiError = response.json().await?;
+    assert_eq!(error.code, ErrorCode::Forbidden);
+    assert!(signs_in(&ax, &bob_token).await?);
+    let request = ax.client.request(Method::DELETE, &paths::user("bob"));
+    is_refused(ax.client.raw(request).await?, "an anonymous removal").await?;
+    // an admin removes bob, and his token, trusted a moment ago, stops at once
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::user("bob")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let removed: UserRemoved = response.json().await?;
+    assert_eq!(removed, UserRemoved::Removed { revoked: 1 });
+    assert!(!signs_in(&ax, &bob_token).await?);
+    assert_eq!(
+        try_sign_in(&ax, "bob", PASSWORD).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // gone, he is said so
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::user("bob")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.json::<UserRemoved>().await?,
+        UserRemoved::NoSuchUser
+    );
+    // the last admin stays, until there is another
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::user("ada")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.json::<UserRemoved>().await?,
+        UserRemoved::LastAdmin
+    );
+    // a token kept for a bob before the new bob was added signs the new one in no more
+    let stale = format!("{}{}", reef_api::user::TOKEN_PREFIX, "5a".repeat(32));
+    ax.service
+        .store()
+        .keep_token(
+            &token_hash(&stale),
+            "bob",
+            TokenKind::Cli,
+            "an old bob's",
+            None,
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    add_by(&ada, "bob", false).await?;
+    assert!(!signs_in(&ax, &stale).await?);
+    is_refused(
+        ax.client.signed(&stale).open(paths::PROJECTS).await?,
+        "an old bob's token",
+    )
+    .await?;
+    assert_eq!(ax.service.store().token(&token_hash(&stale)).await?, None);
+    // and the new bob signs in with his own
+    assert_eq!(
+        try_sign_in(&ax, "bob", PASSWORD).await?.0,
+        StatusCode::CREATED
+    );
+    Ok(())
+}
+
+/// Everyone lists their own tokens, oldest first, the one sent marked and no token shown, and
+/// only an admin lists or revokes another user's
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn tokens_are_listed_and_revoked_by_their_user<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    let (_, first) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let (_, second) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    let (first, second) = (first.expect("bob signs in"), second.expect("bob signs in"));
+    // bob's own, from his second, oldest first, the second marked and no token in the answer
+    let bob = ax.client.signed(&second);
+    let response = bob.raw(bob.request(Method::GET, paths::TOKENS)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let text = response.text().await?;
+    assert!(!text.contains(&first) && !text.contains(&second), "{text}");
+    let listed: Vec<TokenInfo> = serde_json::from_str(&text)?;
+    let seen: Vec<_> = listed
+        .iter()
+        .map(|token| {
+            (
+                token.id.clone(),
+                token.user.as_str(),
+                token.kind,
+                token.label.as_str(),
+                token.current,
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (id_of(&first), "bob", TokenKind::Cli, "bob's case", false),
+            (id_of(&second), "bob", TokenKind::Cli, "bob's case", true),
+        ]
+    );
+    // he lists nobody else's, and nobody signed in lists any
+    let (status, error): (_, ApiError) = bob.get(&paths::tokens_of("ada")).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::FORBIDDEN, ErrorCode::Forbidden)
+    );
+    is_refused(ax.client.open(paths::TOKENS).await?, "an anonymous listing").await?;
+    // nor revokes another's: an admin's token is no token of his
+    let (_, ada_tokens): (_, Vec<TokenInfo>) = ada.get(paths::TOKENS).await?;
+    assert_eq!(ada_tokens.len(), 1);
+    assert!(ada_tokens[0].current);
+    let response = bob
+        .raw(bob.request(Method::DELETE, &paths::token(&ada_tokens[0].id)))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let (_, still): (_, Vec<TokenInfo>) = ada.get(paths::TOKENS).await?;
+    assert_eq!(still.len(), 1);
+    // an id of no shape names nothing
+    let response = bob
+        .raw(bob.request(Method::DELETE, &paths::token("zz")))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // an admin lists bob's, marking none, and revokes one
+    let (status, bobs): (_, Vec<TokenInfo>) = ada.get(&paths::tokens_of("bob")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bobs.len(), 2);
+    assert!(bobs.iter().all(|token| !token.current));
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::token(&id_of(&first))))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let (_, left): (_, Vec<TokenInfo>) = bob.get(paths::TOKENS).await?;
+    assert_eq!(
+        left.iter()
+            .map(|token| token.id.clone())
+            .collect::<Vec<_>>(),
+        [id_of(&second)]
+    );
+    Ok(())
+}
+
+/// Reads a change stream until it ends, or until a while passes, returning whether it ended
+///
+/// # Arguments
+///
+/// * `stream` - The stream's answer
+/// * `within` - How long to wait for its end
+async fn ends(stream: &mut reqwest::Response, within: Duration) -> anyhow::Result<bool> {
+    let deadline = tokio::time::Instant::now() + within;
+    loop {
+        // each chunk read, until none is left or the wait is over
+        match tokio::time::timeout_at(deadline, stream.chunk()).await {
+            Ok(Ok(Some(_))) => {}
+            Ok(Ok(None)) => return Ok(true),
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
+/// An open change stream ends once its token is revoked, while another's stays open and is
+/// sent the changes after
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn a_change_stream_ends_when_its_token_is_revoked<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    let (_, bob_token) = try_sign_in(&ax, "bob", PASSWORD).await?;
+    let bob_token = bob_token.expect("bob signs in");
+    let bob = ax.client.signed(&bob_token);
+    // a stream each, open
+    let mut bobs = bob.open(paths::CHANGES).await?;
+    let mut adas = ada.open(paths::CHANGES).await?;
+    assert_eq!(
+        (bobs.status(), adas.status()),
+        (StatusCode::OK, StatusCode::OK)
+    );
+    assert!(!ends(&mut bobs, Duration::from_millis(200)).await?);
+    // bob's token revoked by an admin ends his stream, at once
+    let response = ada
+        .raw(ada.request(Method::DELETE, &paths::token(&id_of(&bob_token))))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        ends(&mut bobs, Duration::from_secs(5)).await?,
+        "bob's stream outlived his token"
+    );
+    // and opening another is refused
+    is_refused(
+        bob.open(paths::CHANGES).await?,
+        "a stream with a revoked token",
+    )
+    .await?;
+    // ada's is still open, and is sent the next change
+    let (status, _): (_, Checked) = ada.post(&paths::nodes(&ax.plan), &work("C2")).await?;
+    assert_eq!(status, StatusCode::OK);
+    let chunk = tokio::time::timeout(Duration::from_secs(5), adas.chunk()).await??;
+    let chunk = chunk.map(|bytes| String::from_utf8_lossy(&bytes).to_string());
+    assert!(
+        chunk.as_deref().is_some_and(|text| text.contains("C2")),
+        "{chunk:?}"
+    );
+    Ok(())
+}
+
+/// A lost admin is recovered from the store itself: their password set, an admin made of them,
+/// their tokens revoked, or a new admin added for a name nobody has
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking callers to sign in
+pub async fn the_host_recovers_a_lost_admin<B: Backend + 'static>(fx: Fx<B>) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    add_by(&ada, "bob", false).await?;
+    let (_, ada_token) = try_sign_in(&ax, "ada", PASSWORD).await?;
+    let ada_token = ada_token.expect("ada signs in");
+    // ada's password is lost: recovered, her tokens stop and the new one signs her in
+    let new = "a recovered horse battery";
+    let recovered = ax.service.recover_admin("ada", new.to_string()).await?;
+    assert_eq!(
+        recovered,
+        Recovered::Reset {
+            revoked: 2,
+            was_admin: true
+        }
+    );
+    assert!(!signs_in(&ax, &ada_token).await?);
+    assert_eq!(
+        try_sign_in(&ax, "ada", PASSWORD).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, token) = try_sign_in(&ax, "ada", new).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let ada = ax.client.signed(&token.expect("ada signs in"));
+    // bob, recovered, is an admin from now on
+    let recovered = ax.service.recover_admin("bob", new.to_string()).await?;
+    assert_eq!(
+        recovered,
+        Recovered::Reset {
+            revoked: 0,
+            was_admin: false
+        }
+    );
+    let (_, users): (_, Vec<User>) = ada.get(paths::USERS).await?;
+    let admins: Vec<_> = users
+        .iter()
+        .filter(|user| user.admin)
+        .map(|user| user.name.as_str())
+        .collect();
+    assert_eq!(admins, ["ada", "bob"]);
+    // a name nobody has is added, as an admin
+    let recovered = ax.service.recover_admin("zed", new.to_string()).await?;
+    assert_eq!(recovered, Recovered::Added);
+    let (status, token) = try_sign_in(&ax, "zed", new).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, me): (_, Me) = ax
+        .client
+        .signed(&token.expect("zed signs in"))
+        .get(paths::ME)
+        .await?;
+    assert!(me.user.is_some_and(|user| user.admin));
+    // a password the service can't keep is refused, and changes nothing
+    let refused = ax
+        .service
+        .recover_admin("ada", "short".to_string())
+        .await
+        .expect_err("kept a short password");
+    assert!(
+        refused.downcast_ref::<Unkeepable>().is_some(),
+        "{refused:#}"
+    );
+    assert_eq!(try_sign_in(&ax, "ada", new).await?.0, StatusCode::CREATED);
     Ok(())
 }

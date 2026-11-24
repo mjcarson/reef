@@ -233,20 +233,25 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST /api/v1/loops` `EditLoop` | `LoopEdited`: 200 if written, 409 if the pane's loop feeds another project or plan or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or in its plan |
 | `GET /api/v1/projects/{project}/loops` | every `Loop` feeding the project, by pane |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
-| `POST /api/v1/tokens` `SignIn` | `IssuedToken`: 201, or 401 if no user has that name and password, the same words for either |
+| `POST /api/v1/tokens` `SignIn` | `IssuedToken`: 201, 401 if no user has that name and password, the same words for either, or 429 with `Retry-After` if too many failed lately |
+| `GET /api/v1/tokens?user=` | every `TokenInfo` of the caller's, the one it sent marked `current`, or of the user an admin names; 401 or 403 otherwise |
 | `DELETE /api/v1/tokens/current` | `SignedOut`: the token the caller sent revoked, or 401 if it sent none |
+| `DELETE /api/v1/tokens/{id}` | `SignedOut`: the token revoked, or 404 unless it is the caller's, or any to an admin |
 | `GET /api/v1/me` | `Me`: the user the caller's token signs in, and whether sign-in is required |
 | `GET /api/v1/users` | every `User` to an admin, none while there are none, 401 or 403 to anyone else |
 | `POST /api/v1/users` `NewUser` | `UserAdded`: 201, 409 if the name is taken, 401 or 403 unless an admin asks, or the first user is added from the service's own host |
+| `DELETE /api/v1/users/{name}` | `UserRemoved`: 200 with how many tokens were revoked, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
+| `PUT /api/v1/users/{name}/password` `PasswordChange` | `PasswordChanged`: 200, the caller's own with its `current`, or another's by an admin, which revokes their tokens; 403 if `current` doesn't match, 404 if no user has the name, 429 if too many failed lately |
 | `GET /sign-in?next=` | the browser's sign-in page, plain HTML that runs no script |
-| `POST /sign-in` (a form) | the sign-in cookie set and 303 to `next`, a path of this origin, or the form again with a 401 |
+| `POST /sign-in` (a form) | the sign-in cookie set and 303 to `next`, a path of this origin, or the form again with a 401, or a 429 if too many failed lately |
 | `POST /sign-out` | the cookie's token revoked, the cookie cleared, and 303 to `/sign-in` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
   ``{"refused":[{"source":"reef/central/C11","line":null,"message":"needs `X`, which is not a node"}]}``.
 - **An error is an `ApiError`**, `{"code":…,"message":…}`: `not-registered`, `not-listed` and
   `not-found` are 404, `bad-name` and `bad-request` 400, `unauthorized` 401, `forbidden` 403,
-  `internal` 500, and `fetch-failed` 502, a remote git couldn't fetch. A `repo` a client sends
+  `too-many-tries` 429, with `retry_after` in seconds, `internal` 500, and `fetch-failed` 502, a
+  remote git couldn't fetch. A `repo` a client sends
   must be an absolute directory on the service's host. A `dir` must be absolute, and is matched
   against local projects only if the service's host has it, so a checkout on another host finds
   its project by its `remote`s alone.
@@ -263,7 +268,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
   cookie, and hands each route its `Caller`. With `[auth] required` off, the default, it lets
   everything through. On, everything but signing in and the app's static files needs a user: a
   page a browser opens is sent to `/sign-in?next=…`, and anything else is answered 401 with
-  `WWW-Authenticate: Bearer`.
+  `WWW-Authenticate: Bearer`. A change stream opened with a token ends once the token signs
+  nobody in: revoked, expired, or its user removed or given a new password by an admin.
 - **A write from a page of another origin is refused,** 403, with sign-in on or off, as Go's
   `CrossOriginProtection` judges it (`origin::judge`): a `Sec-Fetch-Site` other than
   `same-origin` or `none`, or without one, an `Origin` that isn't the scheme, host and port the
@@ -372,6 +378,11 @@ reef user add ada                  # from the service's host: the first user, an
 reef login --user ada              # its token, kept for every `reef` this user runs here
 reef whoami                        # whom the service takes this `reef` for
 reef user add bob                  # as an admin; `reef user ls` lists them
+reef user passwd                   # your own password, with your current one
+reef user passwd bob               # as an admin: bob's, which revokes his tokens
+reef user rm bob                   # as an admin: bob and his tokens, never the last admin
+reef token ls                      # your tokens, this reef's marked; `--user bob` as an admin
+reef token revoke 3f9c0a1b2d4e5f60 # one by its id; `--others` every one but this reef's
 reef logout                        # the token revoked at the service, and forgotten here
 ```
 
@@ -385,7 +396,25 @@ reef logout                        # the token revoked at the service, and forgo
   outright, and `$REEF_CREDENTIALS` names a file, in that order, before the default.
 - **A browser signs in at `/sign-in`,** which sets an HttpOnly, SameSite=Strict cookie for 30
   days, `Secure` when it signs in over TLS. The app's bar names whom it is signed in as, beside a
-  Sign out.
+  Sign out, and the name opens `/account`: your password, your tokens, each revoked from there,
+  and, for an admin, every user, whose password they set or whom they remove.
+- **Repeated wrong passwords are slowed.** A name may fail 5 times, and an address 20, an IPv6
+  one by its /64; then each try waits, from a second, doubling to 5 minutes, refused with 429
+  before its password is checked. A success clears the name, and failures are forgotten an hour
+  after the last. Your own password change is slowed the same way.
+- **A lost admin is recovered on the service's host,** from the store itself, never over the
+  API: stop the service, which holds its data directory, then
+
+  ```sh
+  systemctl --user stop reef
+  reef-serve recover ada            # a new password, asked twice; ada made an admin
+  systemctl --user start reef
+  ```
+
+  It revokes ada's tokens, and adds ada as an admin if no user has the name. `--password-file`
+  reads the password from a file, and `--conf` names the service's config. With shoal on a node
+  of its own, it runs while the service does, which then trusts a revoked token for up to a
+  minute.
 - **A refused `reef` says how to sign in**, naming the service's address and the file its token
   came from.
 

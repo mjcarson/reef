@@ -29,6 +29,8 @@ pub enum ErrorCode {
     Internal,
     /// The service couldn't fetch from a project's git remote, which it names (502)
     FetchFailed,
+    /// Too many sign-ins failed for the name or from the address, so this one must wait (429)
+    TooManyTries,
 }
 
 impl ErrorCode {
@@ -39,6 +41,7 @@ impl ErrorCode {
             ErrorCode::BadName | ErrorCode::BadRequest => 400,
             ErrorCode::Unauthorized => 401,
             ErrorCode::Forbidden => 403,
+            ErrorCode::TooManyTries => 429,
             ErrorCode::Internal => 500,
             ErrorCode::FetchFailed => 502,
         }
@@ -52,6 +55,9 @@ pub struct ApiError {
     pub code: ErrorCode,
     /// What went wrong, for a person to read
     pub message: String,
+    /// How many seconds to wait before trying again, when the error says to wait
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
 }
 
 impl ApiError {
@@ -65,7 +71,18 @@ impl ApiError {
         ApiError {
             code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    /// The same error, saying how long to wait before trying again
+    ///
+    /// # Arguments
+    ///
+    /// * `seconds` - How many seconds to wait
+    pub fn retry_after(mut self, seconds: u64) -> ApiError {
+        self.retry_after = Some(seconds);
+        self
     }
 }
 
@@ -108,5 +125,15 @@ mod tests {
             "fetch-failed"
         );
         assert_eq!(error.code.status(), 502);
+        // a sign-in that must wait says how long, and an error that needn't says nothing of it
+        let error = ApiError::new(ErrorCode::TooManyTries, "wait").retry_after(4);
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({"code": "too-many-tries", "message": "wait", "retry_after": 4})
+        );
+        assert_eq!(error.code.status(), 429);
+        let read: ApiError =
+            serde_json::from_value(json!({"code": "internal", "message": "x"})).unwrap();
+        assert_eq!(read.retry_after, None);
     }
 }

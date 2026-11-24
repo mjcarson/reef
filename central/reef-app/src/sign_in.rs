@@ -1,8 +1,8 @@
 //! Who the app is signed in as, and signing out, in the bar of every page
 //!
 //! The sign-in page itself is reef-service's, plain HTML with no script, so a browser that isn't
-//! signed in never loads the app. Once it is, the bar says whom the server takes it for and offers
-//! to sign out, when the server asks callers to sign in at all. A browser whose sign-in lapses,
+//! signed in never loads the app. Once it is, the bar says whom the server takes it for, linking
+//! to their account page, and offers to sign out, when the server asks callers to sign in at all. A browser whose sign-in lapses,
 //! its token revoked or expired, finds the change stream refused and its calls answered 401, and
 //! is offered the sign-in page again, which brings it back where it was.
 
@@ -50,7 +50,12 @@ pub fn SignedInAs() -> Element {
                         "Live updates stopped: sign in again"
                     }
                 }
-                span { "signed in as " strong { class: "reef-app-user-name", "{user.name}" } }
+                span {
+                    "signed in as "
+                    Link { to: Route::Account {}, title: "Your password and tokens",
+                        strong { class: "reef-app-user-name", "{user.name}" }
+                    }
+                }
                 form { method: "post", action: paths::SIGN_OUT,
                     button { class: "reef-button", r#type: "submit", "Sign out" }
                 }

@@ -41,7 +41,9 @@
 //! - **A terminal loop is kept by its pane** ([`loops`]): the project it feeds, the node it
 //!   holds, which no other loop may take, and whether it is paused.
 //! - **Users sign in for tokens** ([`users`]), when reef's config requires it: the first user is
-//!   added from the service's own host, and the rest by an admin.
+//!   added from the service's own host, and the rest by an admin. Users change their passwords,
+//!   list and revoke their tokens, and an admin removes users; repeated failed sign-ins are
+//!   slowed ([`throttle`]).
 //! - **A project registers by its git URL too** ([`remotes`]): the service clones one branch of
 //!   it, and fetches it when asked and on the interval reef's config sets.
 //!
@@ -80,11 +82,15 @@ mod decisions;
 mod loops;
 mod remotes;
 mod sessions;
+mod throttle;
 mod users;
 mod work;
 
 pub use sessions::{KEPT_ENTRIES, NoSession, ORDERS_WAIT_MAX};
-pub use users::{Asker, BROWSER_TOKEN_LIFE, NotAllowed, NotSignedIn, token_hash};
+pub use throttle::TooManyTries;
+pub use users::{
+    Asker, BROWSER_TOKEN_LIFE, NoUser, NotAllowed, NotSignedIn, Recovered, token_hash,
+};
 
 /// The process's one service over shoal, opened on first use
 static SHARED: OnceCell<Service> = OnceCell::const_new();
@@ -107,6 +113,10 @@ pub struct Service<B = ShoalBackend> {
     requires_sign_in: bool,
     /// The tokens looked up lately, trusted for a minute
     tokens: users::Tokens,
+    /// The sign-ins that failed lately, which slow the next for the same name or address
+    throttle: throttle::Throttle,
+    /// Bumped by every revoke, so a change stream looks again at whether its token signs in
+    revocations: tokio::sync::watch::Sender<u64>,
     /// Held to hash or check a password, so only a few run at once
     hashing: tokio::sync::Semaphore,
     /// The directory remote projects are cloned into, or `None` if this service keeps no clones
@@ -196,6 +206,8 @@ impl<B: Backend> Service<B> {
             sessions: sessions::Sessions::default(),
             requires_sign_in: false,
             tokens: users::Tokens::default(),
+            throttle: throttle::Throttle::default(),
+            revocations: tokio::sync::watch::Sender::new(0),
             hashing: tokio::sync::Semaphore::new(users::HASHING_AT_ONCE),
             clones: None,
             hosts: Vec::new(),

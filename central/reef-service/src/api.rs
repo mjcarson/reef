@@ -48,11 +48,15 @@
 //! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written or joined, 409 if the pane's loop is busy or another loop or pane holds the node, 422 if the pane has no loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than the loop |
 //! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
-//! | `POST /api/v1/tokens` | `sign_in` | [`IssuedToken`]: 201, or 401 if no user has that name and password |
+//! | `POST /api/v1/tokens` | `sign_in` | [`IssuedToken`]: 201, 401 if no user has that name and password, or 429 if too many failed lately |
+//! | `GET /api/v1/tokens?user=` | `tokens` | every [`TokenInfo`] of the caller's, or of the user an admin names; 401 or 403 otherwise |
 //! | `DELETE /api/v1/tokens/current` | `sign_out` | [`SignedOut`]: 200, or 401 if no token was sent |
+//! | `DELETE /api/v1/tokens/{id}` | `revoke_token` | [`SignedOut`]: 200, or 404 unless it is the caller's, or an admin's to revoke |
 //! | `GET /api/v1/me` | `signed_in` | [`Me`]: the user the caller's token signs in, and whether sign-in is required |
 //! | `GET /api/v1/users` | `users` | every [`User`] to an admin, or none while there are none; 401 or 403 otherwise |
 //! | `POST /api/v1/users` | `add_user` | [`UserAdded`]: 201, 409 if the name is taken, 401 or 403 unless an admin, or the first from this host, asks |
+//! | `DELETE /api/v1/users/{name}` | `remove_user` | [`UserRemoved`]: 200, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
+//! | `PUT /api/v1/users/{name}/password` | `change_password` | [`PasswordChanged`]: 200, 403 if the current password doesn't match or another's is set by no admin, 404 if no user has the name, 429 if too many failed lately |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
 //!   status that says which, so a client reads one type whatever the status.
@@ -70,7 +74,8 @@
 //!   its data the change as JSON. It is live only, and narrowed by `project` and `plan`.
 //! - **Signed in when reef asks it.** [`serve`] wraps the router in [`auth::guard`](crate::auth::guard),
 //!   which hands each route its [`Caller`] and, with sign-in required, answers 401 to a caller
-//!   whose token signs nobody in. A 401 says `WWW-Authenticate: Bearer`.
+//!   whose token signs nobody in. A 401 says `WWW-Authenticate: Bearer`, and a 429
+//!   `Retry-After`. With sign-in required, a change stream ends once its token signs nobody in.
 //! - **Plain HTTP on localhost, TLS beside it.** [`bind`] refuses any address but a loopback
 //!   one for plain HTTP, which this host's CLI, hooks and first admin call. Other hosts reach
 //!   the API over TLS, on the listener `[api.tls]` adds ([`tls::bind`](crate::tls::bind)), and
@@ -98,6 +103,7 @@ use reef_api::{
     Started, StoredNode, StoredPage, Thread, TokenKind, Transcript, User, UserAdded,
     WRITE_BODY_MAX, WorkRecord, paths,
 };
+use reef_api::{PasswordChange, PasswordChanged, TokenInfo, UserRemoved};
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -115,7 +121,7 @@ use crate::auth::{self, Caller, Peer};
 use crate::backend::Backend;
 use crate::conf::Conf;
 use crate::remote::{BadRemote, FetchFailed};
-use crate::service::{Asker, NoSession, NotAllowed, NotSignedIn, Service};
+use crate::service::{NoSession, NoUser, NotAllowed, NotSignedIn, Service, TooManyTries};
 use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
 use crate::tls::{self, TlsListener};
 
@@ -241,13 +247,19 @@ pub fn router<S: Serves>(serves: S) -> Router {
         )
         .route(paths::PROJECT_SESSIONS, get(project_sessions::<S>))
         .route(paths::CHANGES, get(changes::<S>))
-        .route(paths::TOKENS, axum::routing::post(issue_token::<S>))
+        .route(paths::TOKENS, get(tokens::<S>).post(issue_token::<S>))
         .route(
             paths::CURRENT_TOKEN,
-            axum::routing::delete(revoke_token::<S>),
+            axum::routing::delete(revoke_current::<S>),
         )
+        .route(paths::TOKEN, axum::routing::delete(revoke_token::<S>))
         .route(paths::ME, get(me::<S>))
         .route(paths::USERS, get(users::<S>).post(add_user::<S>))
+        .route(paths::USER, axum::routing::delete(remove_user::<S>))
+        .route(
+            paths::USER_PASSWORD,
+            axum::routing::put(change_password::<S>),
+        )
         .with_state(serves)
 }
 
@@ -438,7 +450,9 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::NotRegistered
         } else if error.downcast_ref::<NotListed>().is_some() {
             ErrorCode::NotListed
-        } else if error.downcast_ref::<NoSession>().is_some() {
+        } else if error.downcast_ref::<NoSession>().is_some()
+            || error.downcast_ref::<NoUser>().is_some()
+        {
             ErrorCode::NotFound
         } else if error.downcast_ref::<NameError>().is_some() {
             ErrorCode::BadName
@@ -452,11 +466,18 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::Unauthorized
         } else if error.downcast_ref::<NotAllowed>().is_some() {
             ErrorCode::Forbidden
+        } else if error.downcast_ref::<TooManyTries>().is_some() {
+            ErrorCode::TooManyTries
         } else {
             ErrorCode::Internal
         };
         // the whole chain, so a failure says what it failed at
-        Failure::new(code, format!("{error:#}"))
+        let failure = ApiError::new(code, format!("{error:#}"));
+        // and one that must wait says how long
+        match error.downcast_ref::<TooManyTries>() {
+            Some(wait) => Failure(failure.retry_after(wait.seconds())),
+            None => Failure(failure),
+        }
     }
 }
 
@@ -477,7 +498,14 @@ impl IntoResponse for Failure {
         let status =
             StatusCode::from_u16(self.0.code.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let unauthorized = self.0.code == ErrorCode::Unauthorized;
+        let retry_after = self.0.retry_after;
         let mut response = (status, Json(self.0)).into_response();
+        // a caller told to wait is told how long
+        if let Some(seconds) = retry_after
+            && let Ok(value) = HeaderValue::from_str(&seconds.to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
         // a caller told to sign in is told with what
         if unauthorized {
             response.headers_mut().insert(
@@ -857,10 +885,7 @@ async fn add_project<S: Serves>(
 ) -> Result<(StatusCode, Json<AddedProject>), Failure> {
     // register it, unless its name or its repo is another project's, or its caller may not
     let service = serves.service();
-    let asker = Asker {
-        user: caller.user.as_ref(),
-        local: caller.local,
-    };
+    let asker = caller.asker();
     let added = match (&new.repo, &new.remote) {
         // a repo is a directory on this host, an admin's to name before anything looks at it
         (Some(repo), None) => {
@@ -1931,10 +1956,12 @@ async fn project_sessions<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, and the token the stream ends with
 /// * `query` - The project, and the plan within it, to narrow the stream to
 #[instrument(name = "api::changes", skip_all, err(Debug))]
 async fn changes<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Params(query): Params<ChangesQuery>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Failure> {
     // a plan is named within its project
@@ -1955,6 +1982,15 @@ async fn changes<S: Serves>(
         // only the changes it asked for, each an event named by its kind
         query.follows(&change).then(|| Ok(event(&change)))
     });
+    // with sign-in required, it ends once the token it was opened with signs nobody in
+    let token = caller.token.filter(|_| serves.service().sign_in_required());
+    let ended = async move {
+        match token {
+            Some(token) => serves.service().signed_out(token).await,
+            None => std::future::pending().await,
+        }
+    };
+    let stream = futures_util::StreamExt::take_until(stream, Box::pin(ended));
     // a comment now and then keeps a quiet stream's connection open
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -1978,13 +2014,15 @@ fn event(change: &Change) -> Event {
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, and from where
 /// * `request` - The name, the password and what the token is for
 #[instrument(name = "api::issue_token", skip_all, err(Debug))]
 async fn issue_token<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Body(request): Body<SignIn>,
 ) -> Result<(StatusCode, Json<IssuedToken>), Failure> {
-    // a terminal's token, labelled as it asked
+    // a terminal's token, labelled as it asked, slowed by the failures from where it came
     let label = request.label.as_deref().unwrap_or("reef");
     let issued = serves
         .service()
@@ -1993,6 +2031,7 @@ async fn issue_token<S: Serves>(
             &request.password,
             TokenKind::Cli,
             label,
+            caller.address,
         )
         .await?;
     // the same words for a name no user has and a wrong password
@@ -2011,8 +2050,8 @@ async fn issue_token<S: Serves>(
 ///
 /// * `serves` - The service
 /// * `caller` - Who is calling, and the token it sent
-#[instrument(name = "api::revoke_token", skip_all, err(Debug))]
-async fn revoke_token<S: Serves>(
+#[instrument(name = "api::revoke_current", skip_all, err(Debug))]
+async fn revoke_current<S: Serves>(
     State(serves): State<S>,
     caller: Caller,
 ) -> Result<Json<SignedOut>, Failure> {
@@ -2054,10 +2093,7 @@ async fn users<S: Serves>(
     caller: Caller,
 ) -> Result<Json<Vec<User>>, Failure> {
     // judged by who is calling, from where
-    let asker = Asker {
-        user: caller.user.as_ref(),
-        local: caller.local,
-    };
+    let asker = caller.asker();
     Ok(Json(serves.service().users(asker).await?))
 }
 
@@ -2076,16 +2112,126 @@ async fn add_user<S: Serves>(
     Body(new): Body<NewUser>,
 ) -> Result<(StatusCode, Json<UserAdded>), Failure> {
     // judged by who is calling, from where
-    let asker = Asker {
-        user: caller.user.as_ref(),
-        local: caller.local,
-    };
+    let asker = caller.asker();
     let added = serves.service().add_user(new, asker).await?;
     let status = match added {
         UserAdded::Added(_) => StatusCode::CREATED,
         UserAdded::NameTaken => StatusCode::CONFLICT,
     };
     Ok((status, Json(added)))
+}
+
+/// A token's path segments
+#[derive(Debug, Deserialize)]
+struct TokenSegments {
+    /// The token's id, as a listing shows it
+    id: String,
+}
+
+/// A user's path segments
+#[derive(Debug, Deserialize)]
+struct UserSegments {
+    /// The user's name
+    name: String,
+}
+
+/// The `user` query of a listing of tokens: whose, if not the caller's own
+#[derive(Debug, Default, Deserialize)]
+struct TokensQuery {
+    /// The user whose tokens to list
+    #[serde(default)]
+    user: Option<String>,
+}
+
+/// Lists the caller's tokens, or the ones of the user an admin names, the one sent marked
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, and the token it sent
+/// * `query` - Whose tokens, if not the caller's
+#[instrument(name = "api::tokens", skip_all, err(Debug))]
+async fn tokens<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Params(query): Params<TokensQuery>,
+) -> Result<Json<Vec<TokenInfo>>, Failure> {
+    let asker = caller.asker();
+    let listed = serves
+        .service()
+        .tokens(asker, query.user.as_deref())
+        .await?;
+    Ok(Json(listed))
+}
+
+/// Revokes a token by its id: 200, or 404 unless it is the caller's, or any to an admin
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling
+/// * `id` - The token's id, as a listing shows it
+#[instrument(name = "api::revoke_token", skip_all, err(Debug))]
+async fn revoke_token<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Segments(TokenSegments { id }): Segments<TokenSegments>,
+) -> Result<Json<SignedOut>, Failure> {
+    // one the caller may not see is answered as one that isn't there
+    let revoked = serves.service().revoke_token(caller.asker(), &id).await?;
+    match revoked {
+        true => Ok(Json(SignedOut { revoked })),
+        false => Err(Failure::new(
+            ErrorCode::NotFound,
+            format!("no token of yours has the id `{id}`: `reef token ls` lists them"),
+        )),
+    }
+}
+
+/// Removes a user and their tokens: 200, 404 if no user has the name, 409 if they are the last
+/// admin, and 401 or 403 unless an admin asks
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling
+/// * `name` - The user's name
+#[instrument(name = "api::remove_user", skip_all, err(Debug))]
+async fn remove_user<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Segments(UserSegments { name }): Segments<UserSegments>,
+) -> Result<(StatusCode, Json<UserRemoved>), Failure> {
+    let removed = serves.service().remove_user(caller.asker(), &name).await?;
+    let status = match removed {
+        UserRemoved::Removed { .. } => StatusCode::OK,
+        UserRemoved::NoSuchUser => StatusCode::NOT_FOUND,
+        UserRemoved::LastAdmin => StatusCode::CONFLICT,
+    };
+    Ok((status, Json(removed)))
+}
+
+/// Changes a user's password: the caller's own with their current one, or another's by an
+/// admin, which revokes that user's tokens
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, and from where
+/// * `name` - The user whose password it is
+/// * `change` - The current password, for the caller's own, and the new one
+#[instrument(name = "api::change_password", skip_all, err(Debug))]
+async fn change_password<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Segments(UserSegments { name }): Segments<UserSegments>,
+    Body(change): Body<PasswordChange>,
+) -> Result<Json<PasswordChanged>, Failure> {
+    let changed = serves
+        .service()
+        .change_password(caller.asker(), &name, change)
+        .await?;
+    Ok(Json(changed))
 }
 
 #[cfg(test)]

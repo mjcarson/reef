@@ -55,6 +55,7 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         let local = Asker {
             user: None,
             local: true,
+            ..Default::default()
         };
         anyhow::ensure!(matches!(
             service.add_user(new, local).await?,
@@ -79,6 +80,7 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         for (path, next) in [
             ("/", "%2F"),
             ("/plans/reef/central", "%2Fplans%2Freef%2Fcentral"),
+            ("/account", "%2Faccount"),
         ] {
             let answer = get(path).header(ACCEPT, "text/html").send().await?;
             assert_eq!(answer.status(), StatusCode::SEE_OTHER, "GET {path}");
@@ -101,6 +103,10 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
             (reqwest::Method::GET, "/app/projects"),
             (reqwest::Method::GET, "/app/me"),
             (reqwest::Method::POST, "/app/save"),
+            (reqwest::Method::GET, "/app/account"),
+            (reqwest::Method::POST, "/app/account/password"),
+            (reqwest::Method::POST, "/app/account/revoke"),
+            (reqwest::Method::POST, "/app/account/remove"),
             (reqwest::Method::GET, paths::PROJECTS),
             (reqwest::Method::POST, paths::PROJECTS),
         ] {
@@ -165,12 +171,35 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         assert!(me.required);
         let answer = get(paths::PROJECTS).header(COOKIE, &cookie).send().await?;
         assert_eq!(answer.status(), StatusCode::OK);
+        // the account page renders her password's form and her token, this browser's
+        let answer = get("/account")
+            .header(ACCEPT, "text/html")
+            .header(COOKIE, &cookie)
+            .send()
+            .await?;
+        assert_eq!(answer.status(), StatusCode::OK);
+        let body = answer.text().await?;
+        assert!(
+            body.contains("Your password") && body.contains("Your tokens"),
+            "{body}"
+        );
+        assert!(body.contains("this browser"), "{body}");
+        let account: reef_app::calls::Account = get("/app/account")
+            .header(COOKIE, &cookie)
+            .send()
+            .await?
+            .json()
+            .await?;
+        assert_eq!(account.tokens.len(), 1);
+        assert!(account.tokens[0].current);
+        assert_eq!(account.users.len(), 1, "an admin sees every user");
         // but a page on another port of this host, the same site, posts with the cookie and is
         // refused, whether its browser says so or only names its origin
         let elsewhere = "http://127.0.0.1:1";
         for (path, body) in [
             ("/app/save", "{}"),
             ("/app/queue", "{}"),
+            ("/app/account/password", "{}"),
             (paths::PROJECTS, "{}"),
             (paths::SIGN_OUT, ""),
         ] {

@@ -19,10 +19,10 @@ use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
     DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing, Loop,
     LoopEdited, Me, NewPlan, NewProject, NewReply, NewUser, Ordered, PageEdit, PageEdited,
-    PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
-    RecordDecisions, Report, ResolveThread, Resolved, Revision, Rewrite, Session, SessionAct,
-    SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode, StoredPage, Thread,
-    Transcript, User, UserAdded, WorkRecord, paths,
+    PageListing, PasswordChange, PasswordChanged, PlanInfo, PlanWrite, Project, Puts, QueueEdit,
+    QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Revision, Rewrite,
+    Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode,
+    StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -122,8 +122,9 @@ impl Client {
     ///
     /// * `sign_in` - The name, the password and what the token is for
     pub async fn sign_in(&self, sign_in: &SignIn) -> anyhow::Result<IssuedToken> {
+        // a 401 here is a wrong name or password, not a want of signing in
         let request = self.http.post(self.url(paths::TOKENS)).json(sign_in);
-        self.send(request, paths::TOKENS).await
+        self.send_as(request, paths::TOKENS, true).await
     }
 
     /// Revokes the token this client sends
@@ -152,6 +153,56 @@ impl Client {
     pub async fn add_user(&self, new: &NewUser) -> anyhow::Result<UserAdded> {
         let request = self.http.post(self.url(paths::USERS)).json(new);
         self.send(request, paths::USERS).await
+    }
+
+    /// Removes a user, which only an admin may, revoking their tokens
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The user's name
+    pub async fn remove_user(&self, name: &str) -> anyhow::Result<UserRemoved> {
+        let path = paths::user(name);
+        self.send(self.http.delete(self.url(&path)), &path).await
+    }
+
+    /// Changes a user's password: this client's own user's with their current one, or another's
+    /// as an admin
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The user's name
+    /// * `change` - The current password, if it is their own, and the new one
+    pub async fn change_password(
+        &self,
+        name: &str,
+        change: &PasswordChange,
+    ) -> anyhow::Result<PasswordChanged> {
+        let path = paths::user_password(name);
+        let request = self.http.put(self.url(&path)).json(change);
+        self.send(request, &path).await
+    }
+
+    /// Lists this client's user's tokens, or another user's as an admin
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user whose tokens to list, if not this client's own
+    pub async fn tokens(&self, user: Option<&str>) -> anyhow::Result<Vec<TokenInfo>> {
+        let path = match user {
+            Some(user) => paths::tokens_of(user),
+            None => paths::TOKENS.to_string(),
+        };
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Revokes a token by its id: one of this client's user's, or anyone's as an admin
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The token's id, as a listing shows it
+    pub async fn revoke_token(&self, id: &str) -> anyhow::Result<SignedOut> {
+        let path = paths::token(id);
+        self.send(self.http.delete(self.url(&path)), &path).await
     }
 
     /// Lists every project, by name
@@ -771,6 +822,23 @@ impl Client {
         request: reqwest::RequestBuilder,
         path: &str,
     ) -> anyhow::Result<T> {
+        self.send_as(request, path, false).await
+    }
+
+    /// Sends a request and reads its answer, a 401 read as the route's own error when the
+    /// request signs in, and as a want of signing in otherwise
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request, ready to send
+    /// * `path` - The route's path, for messages
+    /// * `signs_in` - Whether the request trades a name and password for a token
+    async fn send_as<T: DeserializeOwned>(
+        &self,
+        request: reqwest::RequestBuilder,
+        path: &str,
+        signs_in: bool,
+    ) -> anyhow::Result<T> {
         // the token kept for the service, if one is
         let token = self.token()?;
         let request = match &token {
@@ -789,7 +857,7 @@ impl Client {
             .await
             .map_err(|error| anyhow::anyhow!("reading {path}'s answer: {error}"))?;
         // a service asking to sign in says how, but a wrong name or password says that
-        if status == 401 && path != paths::TOKENS {
+        if status == 401 && !signs_in {
             let held = token.is_some().then_some(&self.held);
             return Err(signed_out(&self.base, held).into());
         }

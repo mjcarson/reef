@@ -49,6 +49,10 @@
 //! reef [--conf PATH] whoami
 //! reef [--conf PATH] user add <NAME> [--admin] [--password-file PATH]
 //! reef [--conf PATH] user ls
+//! reef [--conf PATH] user passwd [NAME] [--password-file PATH] [--current-file PATH]
+//! reef [--conf PATH] user rm <NAME>
+//! reef [--conf PATH] token ls [--user NAME]
+//! reef [--conf PATH] token revoke [ID]... [--others]
 //! reef skill [DIR] [--print]
 //! reef claude install [DIR]
 //! ```
@@ -342,9 +346,12 @@ pub enum Command {
     Logout,
     /// Say who the service takes this `reef` for, and whether it asks callers to sign in
     Whoami,
-    /// Add and list the service's users
+    /// Add, list and remove the service's users, and change their passwords
     #[command(subcommand)]
     User(UserCommand),
+    /// List and revoke the tokens that sign a user in
+    #[command(subcommand)]
+    Token(TokenCommand),
 }
 
 /// What can be done with the service's users
@@ -364,6 +371,45 @@ pub enum UserCommand {
     },
     /// List every user, which only an admin may
     Ls,
+    /// Change a password: your own with your current one, or another user's as an admin, which
+    /// revokes their tokens
+    ///
+    /// The passwords are asked for on the terminal, never taken as arguments.
+    Passwd {
+        /// The user whose password to set, else your own
+        name: Option<String>,
+        /// Read the new password from a file's first line, or `-` for standard input
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Read your current password from a file's first line, or `-` for standard input
+        #[arg(long, value_name = "PATH")]
+        current_file: Option<PathBuf>,
+    },
+    /// Remove a user and revoke their tokens, which only an admin may, and never the last admin
+    Rm {
+        /// The user's name
+        name: String,
+    },
+}
+
+/// What can be done with the tokens that sign a user in
+#[derive(Debug, Subcommand)]
+pub enum TokenCommand {
+    /// List your tokens, the one this `reef` sends marked, or another user's as an admin
+    Ls {
+        /// The user whose tokens to list, else your own
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
+    },
+    /// Revoke tokens by their ids, as `reef token ls` shows them
+    Revoke {
+        /// The tokens' ids
+        #[arg(required_unless_present = "others")]
+        ids: Vec<String>,
+        /// Revoke every token of yours but the one this `reef` sends
+        #[arg(long, conflicts_with = "ids")]
+        others: bool,
+    },
 }
 
 /// What can be set up for Claude Code
@@ -1182,6 +1228,26 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             login::user_add(&client, &name, admin, file.as_deref(), out).await
         }
         Command::User(UserCommand::Ls) => login::user_ls(&client, out).await,
+        Command::User(UserCommand::Passwd {
+            name,
+            password_file,
+            current_file,
+        }) => {
+            let password_file = password_file.map(|file| cwd.join(file));
+            let current_file = current_file.map(|file| cwd.join(file));
+            let files = login::PasswordFiles {
+                new: password_file.as_deref(),
+                current: current_file.as_deref(),
+            };
+            login::user_passwd(&client, name.as_deref(), files, out).await
+        }
+        Command::User(UserCommand::Rm { name }) => login::user_rm(&client, &name, out).await,
+        Command::Token(TokenCommand::Ls { user }) => {
+            login::token_ls(&client, user.as_deref(), out).await
+        }
+        Command::Token(TokenCommand::Revoke { ids, others }) => {
+            login::token_revoke(&client, &ids, others, out).await
+        }
         // written above, before the config was read
         Command::Skill { .. } => unreachable!("the skill is written before the config is read"),
         Command::Claude(_) => unreachable!("a repo is set up before the config is read"),
