@@ -3,7 +3,8 @@
 //! Its front page picks a project's plan, and each plan opens full-window, beside its project's
 //! queue of work to take first (`queue`). The server answers
 //! the app's server functions, which call `reef-service`, and serves reef's JSON API on the same
-//! port, so the CLI, the MCP server and the app all reach one service.
+//! port, so the CLI, the MCP server and the app all reach one service. When the server asks
+//! callers to sign in, the bar says whom it takes the browser for (`sign_in`).
 //!
 //! dx builds two sides from this crate: the wasm client with `web`, and the server with
 //! `server`, or `embedded` for shoal in-process.
@@ -25,5 +26,6 @@ pub mod queue;
 pub mod server;
 pub mod session;
 pub mod side;
+pub mod sign_in;
 
 pub use app::App;

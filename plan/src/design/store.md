@@ -269,3 +269,22 @@ is paused.
   a write from another process between the read and the write is caught as an error.
 - **Its record is one JSON field**, beside its version, so what a loop keeps can change
   without changing the table.
+
+## Users and tokens
+
+reef's users and the tokens they sign in with ([C48](../milestones/m10.md)), a row each in a constant
+partition, as projects and loops are.
+
+### Design choices
+
+- **A user is a row under their name,** the argon2id hash of their password and whether they are
+  an admin kept as one JSON field. The store never sees a password.
+- **Added under one lock, judged against every user.** Adding a user reads them all and hands
+  them to the caller's judge, which refuses the add or says whether the new user is an admin, so
+  two callers can't both add the first. The write is `if_absent`, so a name taken is said so
+  rather than written over.
+- **A token is a row under its SHA-256,** so a request's token is found by one get, and the rows
+  can't be read back into tokens. A token is kept `if_absent`, and revoked by a delete over the
+  version read.
+- **Every row is checked against its full key on read,** so a hash collision is caught rather
+  than served as another user's.

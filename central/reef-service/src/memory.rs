@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::{
     CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RevisionFileRow, RevisionRow, WorkRow,
+    QueueRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
-use crate::schema::{LOOPS, PROJECTS};
+use crate::schema::{LOOPS, PROJECTS, TOKENS, USERS};
 
 /// A node's partition of revisions: its project and its `plan/id`
 type NodePartition = (String, String);
@@ -49,6 +49,10 @@ struct Tables {
     loops: BTreeMap<String, BTreeMap<String, LoopRow>>,
     /// Each node's decisions, by padded number
     decisions: BTreeMap<NodePartition, BTreeMap<String, DecisionRow>>,
+    /// Every user, by the partition it is kept in and then by name
+    users: BTreeMap<String, BTreeMap<String, UserRow>>,
+    /// Every token, by the partition it is kept in and then by hash
+    tokens: BTreeMap<String, BTreeMap<String, TokenRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -889,6 +893,102 @@ impl Backend for MemoryBackend {
             return Ok(Written::Refused(refusal));
         }
         partition.insert(row.number.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Reads every user row, in name order, or the one of a name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The one user's name, or `None` for every user
+    async fn users(&self, name: Option<&str>) -> anyhow::Result<Vec<UserRow>> {
+        let tables = self.tables();
+        // the listing partition, whole or the one row of it
+        let Some(partition) = tables.users.get(USERS) else {
+            return Ok(Vec::new());
+        };
+        Ok(match name {
+            Some(name) => partition.get(name).cloned().into_iter().collect(),
+            None => partition.values().cloned().collect(),
+        })
+    }
+
+    /// Writes one user row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_user(&self, row: UserRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its key hashes
+        let partition = tables.users.entry(row.list.clone()).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.name).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.name.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Reads the token row kept under a token's hash, if one is
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The token's SHA-256, as 64 lowercase hex digits
+    async fn token(&self, hash: &str) -> anyhow::Result<Option<TokenRow>> {
+        let tables = self.tables();
+        // the one row of the listing partition
+        Ok(tables
+            .tokens
+            .get(TOKENS)
+            .and_then(|partition| partition.get(hash))
+            .cloned())
+    }
+
+    /// Writes one token row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_token(&self, row: TokenRow, expect: Expect) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its key hashes
+        let partition = tables.tokens.entry(row.list.clone()).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.hash).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.hash.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Deletes one token row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_token(&self, row: &TokenRow) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        let Some(partition) = tables.tokens.get_mut(&row.list) else {
+            return Ok(Written::Refused(Refusal::Missing));
+        };
+        // judged as `if_matches` judges it: a row must be stored, and at the version read
+        match partition.get(&row.hash) {
+            None => return Ok(Written::Refused(Refusal::Missing)),
+            Some(stored) if stored.version != row.version => {
+                return Ok(Written::Refused(Refusal::Moved));
+            }
+            Some(_) => {}
+        }
+        partition.remove(&row.hash);
+        // and a partition left empty is gone, as it never existed
+        if partition.is_empty() {
+            tables.tokens.remove(&row.list);
+        }
         Ok(Written::Applied)
     }
 }

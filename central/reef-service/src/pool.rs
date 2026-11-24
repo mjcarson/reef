@@ -21,6 +21,29 @@ use crate::schema::Reef;
 /// How long a pool may take to have every shard answer
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The stack each thread gets unless `RUST_MIN_STACK` says otherwise: 8 MiB, which shoal's
+/// shards need for reef's schema in an unoptimised build
+pub const SHARD_STACK: usize = 8 << 20;
+
+/// Gives every thread this process starts at least the stack shoal's shards need, unless
+/// `RUST_MIN_STACK` says otherwise
+///
+/// glommio starts each of shoal's shards on a thread with std's default stack, 2 MiB, which an
+/// unoptimised build of reef's thirteen tables overflows. std reads `RUST_MIN_STACK` when it
+/// starts its first thread, so a server calls this first in `main`, before any thread starts.
+/// `cargo test` and `cargo run` get the same from `central/.cargo/config.toml`.
+///
+/// # Safety
+///
+/// No other thread may be running, since it sets an environment variable.
+pub unsafe fn widen_stacks() {
+    // a stack size set already is the caller's to keep
+    if std::env::var_os("RUST_MIN_STACK").is_none() {
+        // SAFETY: the caller has started no other thread to read the environment meanwhile
+        unsafe { std::env::set_var("RUST_MIN_STACK", SHARD_STACK.to_string()) };
+    }
+}
+
 /// How often the pool's thread checks for a stop request or a dead shard
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 

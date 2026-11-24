@@ -7,7 +7,7 @@
 use reef_model::PlanName;
 use reef_service::schema::{
     CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RevisionFileRow, RevisionRow, WorkRow,
+    QueueRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -619,5 +619,52 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `expect` - What must be stored under its key
     async fn write_decision(&self, row: DecisionRow, expect: Expect) -> anyhow::Result<Written> {
         self.inner.write_decision(row, expect).await
+    }
+
+    /// Reads every user row, or the one of a name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The one user's name, or `None` for every user
+    async fn users(&self, name: Option<&str>) -> anyhow::Result<Vec<UserRow>> {
+        self.inner.users(name).await
+    }
+
+    /// Writes one user row, if its condition holds
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_user(&self, row: UserRow, expect: Expect) -> anyhow::Result<Written> {
+        self.inner.write_user(row, expect).await
+    }
+
+    /// Reads the token row kept under a hash
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The token's SHA-256
+    async fn token(&self, hash: &str) -> anyhow::Result<Option<TokenRow>> {
+        self.inner.token(hash).await
+    }
+
+    /// Writes one token row, if its condition holds
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_token(&self, row: TokenRow, expect: Expect) -> anyhow::Result<Written> {
+        self.inner.write_token(row, expect).await
+    }
+
+    /// Deletes one token row, if it is still at the version read
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    async fn delete_token(&self, row: &TokenRow) -> anyhow::Result<Written> {
+        self.inner.delete_token(row).await
     }
 }

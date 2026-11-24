@@ -1,13 +1,14 @@
 //! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
 //! its nodes' work records, each node's captured revisions and their files, each plan's
-//! comments, and the terminal loops
+//! comments, the terminal loops, and the users and the tokens they sign in with
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
 //! plans sit in that project's, a plan's nodes and its pages each sit in a partition of their
 //! revision, and a project's queue and its work records each sit in a partition of their own. A
 //! node's revisions sit in the node's partition, and each revision's files in the revision's.
-//! Every loop shares one constant partition, as projects do, sorted by the pane it feeds.
+//! Every loop shares one constant partition, as projects do, sorted by the pane it feeds, and so
+//! do every user, sorted by name, and every token, sorted by its hash.
 //! Sort keys are a single `String` there, so each table sorts by a name, an id, a path, a rank, a
 //! node's name within its project, or a revision's number padded to sort as a number does.
 //!
@@ -29,6 +30,12 @@ pub const PROJECTS: &str = "projects";
 
 /// The one partition every loop is kept in
 pub const LOOPS: &str = "loops";
+
+/// The one partition every user is kept in
+pub const USERS: &str = "users";
+
+/// The one partition every token is kept in
+pub const TOKENS: &str = "tokens";
 
 /// A project: a name and the repo its plans describe
 #[derive(
@@ -401,6 +408,53 @@ pub struct DecisionRow {
     pub record: String,
 }
 
+/// A user of reef: a name, and the hash of the password they sign in with
+///
+/// Every user shares one partition, sorted by name, as projects do. Its record is one JSON field,
+/// so what a user keeps can change without changing this table. A user is added `if_absent`.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct UserRow {
+    /// The listing partition, always [`USERS`]
+    #[shoal(partition)]
+    pub list: String,
+    /// The user's name, which sorts the listing
+    #[shoal(sort)]
+    pub name: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// The user as JSON, its password's argon2id hash among it, its name left to the field beside
+    pub record: String,
+}
+
+/// A token that signs a user in, kept by its hash alone
+///
+/// Every token shares one partition, sorted by the SHA-256 of the token, so the token a request
+/// sends is found by one get and never stored. A token is kept `if_absent` and revoked by a
+/// delete over the version read.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct TokenRow {
+    /// The listing partition, always [`TOKENS`]
+    #[shoal(partition)]
+    pub list: String,
+    /// The token's SHA-256, as 64 lowercase hex digits
+    #[shoal(sort)]
+    pub hash: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// What the token signs in as JSON: its user, its kind, its label and when it expires
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -432,6 +486,10 @@ pub struct Reef {
     pub loops: PersistentSortedTable<LoopRow, FileSystem>,
     /// Each node's decisions, by number
     pub decisions: PersistentSortedTable<DecisionRow, FileSystem>,
+    /// Every user, by name
+    pub users: PersistentSortedTable<UserRow, FileSystem>,
+    /// Every token, by its hash
+    pub tokens: PersistentSortedTable<TokenRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -440,7 +498,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 3071008669871081648;
+    const SCHEMA_ID: u64 = 12274714408389238397;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -455,6 +513,8 @@ mod tests {
         ("CommentRow", 11872189191251839750),
         ("LoopRow", 8656995277351789761),
         ("DecisionRow", 18226743367225770895),
+        ("UserRow", 15958980047123333854),
+        ("TokenRow", 10275253647765591281),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

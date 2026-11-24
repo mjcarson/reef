@@ -19,6 +19,12 @@ fn main() {
 /// Serves the app until told to stop, saying why it stopped if it failed
 #[cfg(feature = "server")]
 fn serve() -> i32 {
+    // shoal's shards get the stack reef's schema needs, before any thread starts
+    #[cfg(feature = "embedded")]
+    // SAFETY: nothing has started a thread yet
+    unsafe {
+        reef_service::pool::widen_stacks()
+    };
     // the service, the router and the listener all run on one tokio runtime
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -21,6 +21,10 @@ pub enum ErrorCode {
     BadName,
     /// The request can't be read, or asks for what the service can't keep (400)
     BadRequest,
+    /// The service asks the caller to sign in, and its token signs nobody in (401)
+    Unauthorized,
+    /// The caller is signed in, or calls from where it does, but may not do what it asked (403)
+    Forbidden,
     /// The service failed (500)
     Internal,
 }
@@ -31,6 +35,8 @@ impl ErrorCode {
         match self {
             ErrorCode::NotRegistered | ErrorCode::NotListed | ErrorCode::NotFound => 404,
             ErrorCode::BadName | ErrorCode::BadRequest => 400,
+            ErrorCode::Unauthorized => 401,
+            ErrorCode::Forbidden => 403,
             ErrorCode::Internal => 500,
         }
     }
@@ -84,5 +90,13 @@ mod tests {
             json!({"code": "not-listed", "message": "plan `reef/x` is not listed"})
         );
         assert_eq!(error.code.status(), 404);
+        // signing in names its own codes
+        let error = ApiError::new(ErrorCode::Unauthorized, "sign in");
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["code"],
+            "unauthorized"
+        );
+        assert_eq!(error.code.status(), 401);
+        assert_eq!(ErrorCode::Forbidden.status(), 403);
     }
 }

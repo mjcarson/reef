@@ -46,6 +46,11 @@ export it in `RUSTFLAGS`, where a wasm build would get it too.
 
 - **`embedded`** links shoal's engine into reef-service, which needs nightly.
 - **Without it**, reef-service is shoal's client half alone and builds on stable.
+- **Shoal's shards need a bigger stack than std's default.** glommio starts each on a thread of
+  2 MiB, which an unoptimised build of reef's thirteen tables overflows. reef-serve, reef-app and
+  reef-shoal set `RUST_MIN_STACK` to 8 MiB first thing in `main`, unless it is set already
+  (`pool::widen_stacks`), and `.cargo/config.toml`'s `[env]` does the same for `cargo test` and
+  `cargo run`.
 
 ```sh
 cargo +nightly test --workspace         # everything, with the engine (reef-shoal turns `embedded` on)
@@ -68,6 +73,9 @@ memory = "256MiB"             # each shard's memory budget
 
 [api]
 address = "127.0.0.1:12180"   # where the JSON API listens, and `reef` calls it: loopback only
+
+[auth]
+required = true               # every caller signs in; default false, which answers anyone
 ```
 
 Only one process can open a data directory. `Service::shared` opens the process's service once,
@@ -212,11 +220,20 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST /api/v1/loops` `EditLoop` | `LoopEdited`: 200 if written, 409 if the pane's loop feeds another project or plan or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or in its plan |
 | `GET /api/v1/projects/{project}/loops` | every `Loop` feeding the project, by pane |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
+| `POST /api/v1/tokens` `SignIn` | `IssuedToken`: 201, or 401 if no user has that name and password, the same words for either |
+| `DELETE /api/v1/tokens/current` | `SignedOut`: the token the caller sent revoked, or 401 if it sent none |
+| `GET /api/v1/me` | `Me`: the user the caller's token signs in, and whether sign-in is required |
+| `GET /api/v1/users` | every `User` to an admin, none while there are none, 401 or 403 to anyone else |
+| `POST /api/v1/users` `NewUser` | `UserAdded`: 201, 409 if the name is taken, 401 or 403 unless an admin asks, or the first user is added from the service's own host |
+| `GET /sign-in?next=` | the browser's sign-in page, plain HTML that runs no script |
+| `POST /sign-in` (a form) | the sign-in cookie set and 303 to `next`, a path of this origin, or the form again with a 401 |
+| `POST /sign-out` | the cookie's token revoked, the cookie cleared, and 303 to `/sign-in` |
 
 - **A refusal is an answer**, its outcome the body whatever the status, such as
   ``{"refused":[{"source":"reef/central/C11","line":null,"message":"needs `X`, which is not a node"}]}``.
 - **An error is an `ApiError`**, `{"code":…,"message":…}`: `not-registered`, `not-listed` and
-  `not-found` are 404, `bad-name` and `bad-request` 400, and `internal` 500. Paths a client sends
+  `not-found` are 404, `bad-name` and `bad-request` 400, `unauthorized` 401, `forbidden` 403,
+  and `internal` 500. Paths a client sends
   (`repo`, `dir`) must be absolute directories on the service's host.
 - **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
@@ -225,8 +242,16 @@ that `Service::shared` opens. Every route is one service call, and every body an
   data the change as JSON. It is live only: a
   client reads what it needs, then follows. One that falls behind by more than 256 changes is
   sent `missed`, with how many, and should read again. `plan` narrows it within a `project`.
-- **Localhost only.** `api::bind` refuses any address but a loopback one until users sign in
-  (M10).
+- **One layer signs callers in.** `api::serve` wraps the router in `auth::guard`, as reef-app
+  wraps its whole router. It reads a token from `Authorization: Bearer`, else the `reef_sign_in`
+  cookie, and hands each route its `Caller`. With `[auth] required` off, the default, it lets
+  everything through. On, everything but signing in and the app's static files needs a user: a
+  page a browser opens is sent to `/sign-in?next=…`, and anything else is answered 401 with
+  `WWW-Authenticate: Bearer`.
+- **The first user comes from the service's own host**, and is an admin; after that only an admin
+  adds users, whether sign-in is required or not, so users can be added before it is turned on.
+- **Localhost only.** `api::bind` refuses any address but a loopback one until reef serves over
+  TLS (C51).
 
 `reef-serve` serves it alone, until reef-app mounts it. It listens before it opens shoal, so a
 taken port or an address that isn't local stops it first, and on SIGINT or SIGTERM it ends the
@@ -308,7 +333,34 @@ reef claude install                        # the MCP entry, the hooks and the sk
   wrote, read the imported plan back, and kept work records beside it. C32's two tables and
   C34's `CommentRow` needed none either, nor did C37's resolutions, which a thread's row keeps
   only once it has one, so a row kept before reads back with none. C39's `LoopRow` moved the
-  schema's pin but needed none: its binary read back the nodes and comments C37's wrote.
+  schema's pin but needed none: its binary read back the nodes and comments C37's wrote. Nor did
+  C48's `UserRow` and `TokenRow`: its binary read back a plan the one before it wrote.
+
+### Signing in
+
+Sign-in is off unless reef's config asks for it, as reef's own unit runs with no config at all.
+To turn it on, add `[auth] required = true` to the config the service reads, restart it, then:
+
+```sh
+reef user add ada                  # from the service's host: the first user, an admin
+reef login --user ada              # its token, kept for every `reef` this user runs here
+reef whoami                        # whom the service takes this `reef` for
+reef user add bob                  # as an admin; `reef user ls` lists them
+reef logout                        # the token revoked at the service, and forgotten here
+```
+
+- **A password is asked for on the terminal** with echo off, never taken as an argument, or read
+  from `--password-file PATH` (`-` for standard input). The service keeps only its argon2id hash.
+- **A login keeps a token, never the password,** in `$XDG_CONFIG_HOME/reef/credentials.toml`,
+  readable by its owner alone, a token for each server by its root (`http://127.0.0.1:12180`).
+  Every request reads it again, so the MCP server, the hooks and a runner started before the
+  login send it too. `--credentials PATH` names another file, `$REEF_TOKEN` gives a token
+  outright, and `$REEF_CREDENTIALS` names a file, in that order, before the default.
+- **A browser signs in at `/sign-in`,** which sets an HttpOnly, SameSite=Strict cookie for 30
+  days, without `Secure` until reef serves over TLS. The app's bar names whom it is signed in as,
+  beside a Sign out.
+- **A refused `reef` says how to sign in**, naming the service's address and the file its token
+  came from.
 
 ### Plans and choices kept
 
@@ -379,6 +431,11 @@ the pages and the JSON API alike.
   user's own words, and a plan's shows the plan to approve, or to reject with feedback that
   Claude plans again from.
 
+- **It is signed in to as reef-serve is.** Its whole router, pages, server functions and the
+  JSON API, sits under `auth::guard`, and `/app/me` reads the `Caller` the guard found, so the bar
+  says whom the server takes the browser for, with a Sign out, once sign-in is required. A
+  browser whose sign-in lapses finds its change stream closed and its calls answered 401, and
+  is offered the sign-in page again, which brings it back where it was.
 - **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
   place. Only one process can open shoal's data directory, so run one or the other. Under
   `dx serve`, dx names the server's address and proxies its own port to it; point `[api] address`
@@ -475,6 +532,8 @@ is the twin's oracle.
 | `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
 | `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time and body, and a thread's target, trail, state and resolutions or a reply's thread |
 | `LoopRow` | the constant `"loops"` | the pane's key | a `version`, and the loop as JSON: its project, plan, session, node, the node it acted on, its state and when it started |
+| `UserRow` | the constant `"users"` | name | a `version`, and the user as JSON: their password's argon2id hash, whether they are an admin, and when they were added |
+| `TokenRow` | the constant `"tokens"` | the token's SHA-256 | a `version`, and what it signs in as JSON: its user, kind, label, and when it was issued and expires |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

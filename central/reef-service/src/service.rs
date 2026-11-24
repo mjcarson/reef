@@ -39,6 +39,8 @@
 //!   or by the change a commit's trailer names.
 //! - **A terminal loop is kept by its pane** ([`loops`]): the project it feeds, the node it
 //!   holds, which no other loop may take, and whether it is paused.
+//! - **Users sign in for tokens** ([`users`]), when reef's config requires it: the first user is
+//!   added from the service's own host, and the rest by an admin.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
@@ -73,9 +75,11 @@ mod comments;
 mod decisions;
 mod loops;
 mod sessions;
+mod users;
 mod work;
 
 pub use sessions::{KEPT_ENTRIES, NoSession, ORDERS_WAIT_MAX};
+pub use users::{Asker, BROWSER_TOKEN_LIFE, NotAllowed, NotSignedIn, token_hash};
 
 /// The process's one service over shoal, opened on first use
 static SHARED: OnceCell<Service> = OnceCell::const_new();
@@ -94,6 +98,12 @@ pub struct Service<B = ShoalBackend> {
     changes: Mutex<Option<broadcast::Sender<Change>>>,
     /// The sessions of runners the user started, kept in memory
     sessions: sessions::Sessions,
+    /// Whether every caller must sign in
+    requires_sign_in: bool,
+    /// The tokens looked up lately, trusted for a minute
+    tokens: users::Tokens,
+    /// Held to hash or check a password, so only a few run at once
+    hashing: tokio::sync::Semaphore,
 }
 
 impl Service<ShoalBackend> {
@@ -108,9 +118,9 @@ impl Service<ShoalBackend> {
     /// * `conf` - reef's config
     #[instrument(name = "Service::open", skip_all, err(Debug))]
     pub async fn open(conf: &Conf) -> anyhow::Result<Service> {
-        // reach shoal however the config says to
+        // reach shoal however the config says to, asking callers to sign in if it says to
         let store = Store::open(conf).await?;
-        Ok(Service::new(store))
+        Ok(Service::new(store).requiring_sign_in(conf.auth.required))
     }
 
     /// Gets the process's service, opening it on first use
@@ -147,7 +157,8 @@ impl Service<MemoryBackend> {
 }
 
 impl<B: Backend> Service<B> {
-    /// A service over a store, taking a node's brief form from the default doc sections
+    /// A service over a store, taking a node's brief form from the default doc sections, asking
+    /// no caller to sign in
     ///
     /// # Arguments
     ///
@@ -160,6 +171,9 @@ impl<B: Backend> Service<B> {
             sections: Sections::default(),
             changes: Mutex::new(Some(changes)),
             sessions: sessions::Sessions::default(),
+            requires_sign_in: false,
+            tokens: users::Tokens::default(),
+            hashing: tokio::sync::Semaphore::new(users::HASHING_AT_ONCE),
         }
     }
 

@@ -17,8 +17,12 @@
 //! memory = "256MiB"
 //!
 //! [api]
-//! # where the JSON API listens: a loopback address until users sign in
+//! # where the JSON API listens: a loopback address until reef serves over TLS (C51)
 //! address = "127.0.0.1:12180"
+//!
+//! [auth]
+//! # whether every caller must sign in; off, reef answers anyone who reaches its port
+//! required = true
 //! ```
 
 use reef_api::config::env_dir;
@@ -37,6 +41,8 @@ pub struct Conf {
     pub shoal: ShoalSettings,
     /// Where the JSON API is served
     pub api: ApiSettings,
+    /// Whether callers sign in
+    pub auth: AuthSettings,
     /// The file this was read from, if one was
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -72,8 +78,20 @@ impl Default for ShoalSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApiSettings {
-    /// The address it listens on, which must be a loopback one until users sign in
+    /// The address it listens on, which must be a loopback one until reef serves over TLS (C51)
     pub address: SocketAddr,
+}
+
+/// Whether callers sign in
+///
+/// Off, which is the default, reef answers anyone who reaches its port, as a single user's
+/// server on localhost does. On, every route but the ones that sign a user in asks who is
+/// calling.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuthSettings {
+    /// Whether every caller must sign in
+    pub required: bool,
 }
 
 impl Default for ApiSettings {
@@ -167,6 +185,20 @@ mod tests {
         assert_eq!(conf.shoal.data, None);
         // the API listens on localhost unless told otherwise
         assert_eq!(conf.api.address.to_string(), reef_api::DEFAULT_ADDRESS);
+    }
+
+    /// Sign-in is off unless the config says it is required, and a misspelt key is refused
+    #[test]
+    fn auth_is_off_unless_required() {
+        // nothing said is off
+        let conf: Conf = toml::from_str("").expect("an empty config parses");
+        assert!(!conf.auth.required);
+        // and said, on
+        let conf: Conf = toml::from_str("[auth]\nrequired = true\n").expect("it parses");
+        assert!(conf.auth.required);
+        // a key the service doesn't know would leave sign-in off unnoticed, so it is refused
+        let parsed = toml::from_str::<Conf>("[auth]\nrequried = true\n");
+        assert!(parsed.is_err(), "a misspelt key was read");
     }
 
     /// The API's address is read as an address, and one that isn't is refused

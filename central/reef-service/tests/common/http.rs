@@ -23,11 +23,15 @@ use super::faulty::Faulty;
 pub const WAIT: Duration = Duration::from_secs(10);
 
 /// A client of the JSON API, speaking only `reef-api`'s types
+#[derive(Clone)]
 pub struct Client {
-    /// The HTTP client, which keeps its connections open between requests
+    /// The HTTP client, which keeps its connections open between requests and follows no
+    /// redirect, so a case sees where the server sends a browser
     http: reqwest::Client,
     /// The server's root, such as `http://127.0.0.1:41234`
     pub base: String,
+    /// The token every request sends as `Authorization: Bearer`, if it sends one
+    token: Option<String>,
 }
 
 impl Client {
@@ -38,9 +42,49 @@ impl Client {
     /// * `base` - The server's root
     pub fn new(base: String) -> Client {
         Client {
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("a plain HTTP client builds"),
             base,
+            token: None,
         }
+    }
+
+    /// The same client, every request sending a token
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token to send as `Authorization: Bearer`
+    pub fn signed(&self, token: &str) -> Client {
+        Client {
+            token: Some(token.to_string()),
+            ..self.clone()
+        }
+    }
+
+    /// A request to a route, sending this client's token if it has one, for a case to add
+    /// headers or a body of its own
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - The request's method
+    /// * `path` - The route's path, from `reef_api::paths`
+    pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let request = self.http.request(method, format!("{}{path}", self.base));
+        match &self.token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
+    /// Sends a request a case built, waiting no longer than any answer is waited for
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request
+    pub async fn raw(&self, request: reqwest::RequestBuilder) -> anyhow::Result<reqwest::Response> {
+        Ok(tokio::time::timeout(WAIT, request.send()).await??)
     }
 
     /// Sends a request with an optional JSON body, and reads the answer's status and body
@@ -57,7 +101,7 @@ impl Client {
         body: Option<&Q>,
     ) -> anyhow::Result<(StatusCode, T)> {
         // the request, with its body as JSON if it has one
-        let mut request = self.http.request(method, format!("{}{path}", self.base));
+        let mut request = self.request(method, path);
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -135,7 +179,7 @@ impl Client {
     ///
     /// * `path` - The route's path
     pub async fn open(&self, path: &str) -> anyhow::Result<reqwest::Response> {
-        let request = self.http.get(format!("{}{path}", self.base));
+        let request = self.request(Method::GET, path);
         Ok(tokio::time::timeout(WAIT, request.send()).await??)
     }
 }
@@ -168,9 +212,25 @@ impl<B: Backend + 'static> Drop for Ax<B> {
 impl<B: Backend + 'static> Fx<B> {
     /// Serves this fixture's store on a loopback port of its own, and makes a client of it
     pub async fn api(self) -> anyhow::Result<Ax<B>> {
+        self.api_with(false).await
+    }
+
+    /// Serves this fixture's store asking every caller to sign in, and makes a client of it,
+    /// which has signed nobody in
+    pub async fn api_signing_in(self) -> anyhow::Result<Ax<B>> {
+        self.api_with(true).await
+    }
+
+    /// Serves this fixture's store on a loopback port of its own, asking callers to sign in or
+    /// not, and makes a client of it
+    ///
+    /// # Arguments
+    ///
+    /// * `required` - Whether every caller must sign in
+    async fn api_with(self, required: bool) -> anyhow::Result<Ax<B>> {
         // the service, shared by the server and the case
         let sx = self.serve();
-        let service = Arc::new(sx.service);
+        let service = Arc::new(sx.service.requiring_sign_in(required));
         // any free port on localhost
         let mut conf = Conf::default();
         conf.api.address = "127.0.0.1:0".parse()?;

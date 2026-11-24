@@ -405,6 +405,7 @@ impl Sx {
                 mode: None,
                 args: Vec::new(),
                 conf: Some(conf),
+                credentials: None,
             };
             let pick = reef::cli::PlanPick::default();
             let mut out = Vec::new();

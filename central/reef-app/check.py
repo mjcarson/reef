@@ -1,7 +1,8 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
-Each step checks one of M4's to M7's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
-it saw; the script exits 1 if any failed.
+Each step checks one of M4's to M10's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
+it saw; the script exits 1 if any failed. C48's sign-in runs last, on a server of its own that asks
+every caller to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`).
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -50,6 +51,11 @@ failed = []
 logs = []
 # the mdbook build of the plan C54 draws, which reef-view draws, for C55 to compare against
 BOOK = {}
+# C48's server, which asks every caller to sign in, its own config, repo and data, and the
+# password its user signs in with
+SIGN_IN_WORK = WORK / "sign-in"
+SIGN_IN_URL = "http://127.0.0.1:12191"
+PASSWORD = "correct horse battery"
 
 
 def check(label, ok, seen):
@@ -99,29 +105,37 @@ def setup():
     run("cargo", "build", "-q", "--release", "-p", "mdbook-reef", cwd=REEF)
 
 
-def start():
-    """Starts the built server in a process group of its own, and waits for its JSON API."""
+def start(conf=None, url=URL, log_path=None):
+    """Starts the built server in a process group of its own, and waits for its JSON API.
+
+    It waits on `/api/v1/me`, which answers whether or not the server asks callers to sign in.
+    """
     if not SERVER.exists():
         sys.exit(f"no server at {SERVER}: build it with dx first (see this script's docs)")
-    env = dict(os.environ, REEF_CONFIG=str(WORK / "reef.toml"))
+    conf = conf or WORK / "reef.toml"
+    log_path = log_path or WORK / "server.log"
+    env = dict(os.environ, REEF_CONFIG=str(conf))
     env.pop("RUSTFLAGS", None)
-    log = open(WORK / "server.log", "w")
+    log = open(log_path, "w")
     server = subprocess.Popen([SERVER], cwd=SERVER.parent, env=env, stdout=log, stderr=subprocess.STDOUT,
                               start_new_session=True)
     # shoal starts in the process, so the first answer takes a moment
     for _ in range(120):
         try:
-            with urllib.request.urlopen(f"{URL}/api/v1/projects", timeout=1) as answer:
+            with urllib.request.urlopen(f"{url}/api/v1/me", timeout=1) as answer:
                 if answer.status == 200:
                     return server
         except OSError:
             time.sleep(0.5)
     stop(server)
-    sys.exit(f"the server never answered; see {WORK / 'server.log'}")
+    sys.exit(f"the server never answered; see {log_path}")
 
 
 def stop(server):
-    """Stops the server's whole process group, as a terminal's ctrl-c would."""
+    """Stops the server's whole process group, as a terminal's ctrl-c would, once."""
+    # a server stopped already has no group left to stop
+    if server.poll() is not None:
+        return
     try:
         os.killpg(server.pid, signal.SIGINT)
         server.wait(timeout=15)
@@ -1422,6 +1436,96 @@ def c13_every_plan_opens(page):
           {"listed": links, "opened": opened})
 
 
+def signed_reef(*args):
+    """Runs the reef CLI against C48's server, with a credentials file of the check's own."""
+    return run(REEF / "target/debug/reef", "--conf", SIGN_IN_WORK / "reef.toml",
+               "--credentials", SIGN_IN_WORK / "credentials.toml", *args, cwd=SIGN_IN_WORK / "repo")
+
+
+def c48_a_browser_signs_in_and_reaches_its_plan(browser):
+    """C48: a browser that signs in reaches its plan, and signing out sends it back to sign in."""
+    # a server of its own that asks every caller to sign in, with a user, a project and a plan
+    if SIGN_IN_WORK.exists():
+        shutil.rmtree(SIGN_IN_WORK)
+    repo = SIGN_IN_WORK / "repo"
+    repo.mkdir(parents=True)
+    run("git", "-C", repo, "-c", "init.defaultBranch=main", "init", "-q")
+    (SIGN_IN_WORK / "reef.toml").write_text(
+        f'[api]\naddress = "{SIGN_IN_URL.removeprefix("http://")}"\n\n'
+        f'[shoal]\ndata = "{SIGN_IN_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
+    )
+    server = start(SIGN_IN_WORK / "reef.toml", SIGN_IN_URL, SIGN_IN_WORK / "server.log")
+    try:
+        password = SIGN_IN_WORK / "password"
+        password.write_text(PASSWORD + "\n")
+        signed_reef("user", "add", "ada", "--password-file", password)
+        signed_reef("login", "--user", "ada", "--password-file", password)
+        signed_reef("project", "add", "check", "--repo", repo)
+        signed_reef("plan", "new", "first")
+        first = SIGN_IN_WORK / "a1.yaml"
+        first.write_text(node_yaml("A1", "A1 The first"))
+        signed_reef("node", "put", first)
+        context = browser.new_context(viewport={"width": 1400, "height": 900})
+        page = context.new_page()
+        page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+        # a plan's page sends a browser that isn't signed in to sign in, and back after
+        page.goto(SIGN_IN_URL + "/plans/check/first")
+        landed = page.url.removeprefix(SIGN_IN_URL)
+        # a wrong password stays there, saying so
+        page.fill("#name", "ada")
+        page.fill("#password", "not the password")
+        page.click("button[type=submit]")
+        page.wait_for_selector(".problem")
+        wrong = (page.url.removeprefix(SIGN_IN_URL).startswith("/sign-in"), page.inner_text(".problem"))
+        page.screenshot(path=str(SHOTS / "reef-app-sign-in.png"))
+        # the right one reaches the plan, signed in as ada
+        page.fill("#password", PASSWORD)
+        page.click("button[type=submit]")
+        page.wait_for_selector(".reef-app-plan-name", timeout=20000)
+        wait_drawn(page)
+        reached = (page.url.removeprefix(SIGN_IN_URL), page.inner_text(".reef-app-plan-name"),
+                   page.inner_text(".reef-app-user-name"))
+        cookie = next(c for c in context.cookies() if c["name"] == "reef_sign_in")
+        flags = {"httpOnly": cookie["httpOnly"], "sameSite": cookie["sameSite"], "secure": cookie["secure"]}
+        # the change stream carries the cookie: a put from the terminal shows without a reload
+        second = SIGN_IN_WORK / "a2.yaml"
+        second.write_text(node_yaml("A2", "A2 The second"))
+        signed_reef("node", "put", second)
+        page.wait_for_function("() => document.querySelector('.reef-viewport').textContent.includes('A2 The second')",
+                               timeout=10000)
+        # the page's own fetches carry it, and another browser's don't
+        inside = page.evaluate("() => fetch('/api/v1/projects').then(r => r.status)")
+        other = browser.new_context()
+        stranger = other.new_page()
+        # from the stylesheet, a page of this origin anyone may open, since the sign-in page's
+        # policy lets no script fetch anything
+        stranger.goto(SIGN_IN_URL + "/reef.css")
+        outside = stranger.evaluate("() => fetch('/api/v1/projects').then(r => r.status)")
+        blocked = stranger.goto(SIGN_IN_URL + "/sign-in") and stranger.evaluate(
+            "() => fetch('/api/v1/me').then(() => 'fetched', () => 'blocked')")
+        other.close()
+        page.screenshot(path=str(SHOTS / "reef-app-signed-in.png"))
+        # signing out sends it back to sign in, and its old cookie signs nothing in
+        kept = context.cookies()
+        page.click(".reef-app-user button[type=submit]")
+        page.wait_for_url("**/sign-in**")
+        signed_out = page.url.removeprefix(SIGN_IN_URL)
+        context.add_cookies(kept)
+        page.goto(SIGN_IN_URL + "/plans/check/first")
+        again = page.url.removeprefix(SIGN_IN_URL)
+        context.close()
+        check("C48 a browser that signs in reaches its plan, and signing out sends it back to sign in",
+              landed == "/sign-in?next=%2Fplans%2Fcheck%2Ffirst" and wrong[0] and "don't match" in wrong[1]
+              and reached == ("/plans/check/first", "check/first", "ada")
+              and flags == {"httpOnly": True, "sameSite": "Strict", "secure": False}
+              and inside == 200 and outside == 401 and blocked == "blocked" and signed_out == "/sign-in"
+              and again.startswith("/sign-in?next="),
+              {"landed": landed, "wrong": wrong, "reached": reached, "cookie": flags, "fetch inside": inside,
+               "fetch outside": outside, "sign-in page fetches": blocked, "signed out": signed_out, "old cookie": again})
+    finally:
+        stop(server)
+
+
 def main():
     setup()
     server = start()
@@ -1466,6 +1570,10 @@ def main():
                 # every check, or those `--only` names
                 if not ONLY or any(step.__name__.startswith(name) for name in ONLY):
                     step(page)
+            # C48's on a server of its own, once the first has let go of nothing it needs
+            stop(server)
+            if not ONLY or any("c48_a_browser_signs_in_and_reaches_its_plan".startswith(name) for name in ONLY):
+                c48_a_browser_signs_in_and_reaches_its_plan(browser)
             browser.close()
     finally:
         stop(server)

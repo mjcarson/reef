@@ -18,8 +18,9 @@ use crate::schema::{
     NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter,
     PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet,
     QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, ReefClient, ReefQueryKinds,
-    RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter, RevisionRowGet, WorkRow,
-    WorkRowFilter, WorkRowGet,
+    RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter, RevisionRowGet, TOKENS,
+    TokenRow, TokenRowDelete, TokenRowFilter, TokenRowGet, USERS, UserRow, UserRowFilter,
+    UserRowGet, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -867,6 +868,93 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Reads every user row, in name order, or the one of a name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The one user's name, or `None` for every user
+    #[instrument(name = "ShoalBackend::users", skip_all, err(Debug))]
+    async fn users(&self, name: Option<&str>) -> anyhow::Result<Vec<UserRow>> {
+        // every user sits in the one listing partition
+        let mut get = UserRowGet::new(vec![USERS.to_string()]);
+        if let Some(name) = name {
+            get = get.sort_keys(vec![name.to_string()]);
+        }
+        self.read::<_, UserRow>(get).await
+    }
+
+    /// Writes one user row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_user", skip_all, err(Debug))]
+    async fn write_user(&self, row: UserRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = UserRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
+    }
+
+    /// Reads the token row kept under a token's hash, if one is
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The token's SHA-256, as 64 lowercase hex digits
+    #[instrument(name = "ShoalBackend::token", skip_all, err(Debug))]
+    async fn token(&self, hash: &str) -> anyhow::Result<Option<TokenRow>> {
+        // every token sits in the one listing partition, under its hash
+        let get = TokenRowGet::new(vec![TOKENS.to_string()]).sort_keys(vec![hash.to_string()]);
+        let rows = self.read::<_, TokenRow>(get).await?;
+        Ok(rows.into_iter().next())
+    }
+
+    /// Writes one token row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_token", skip_all, err(Debug))]
+    async fn write_token(&self, row: TokenRow, expect: Expect) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = TokenRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
+    }
+
+    /// Deletes one token row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    #[instrument(name = "ShoalBackend::delete_token", skip_all, err(Debug))]
+    async fn delete_token(&self, row: &TokenRow) -> anyhow::Result<Written> {
+        // the row under its hash, only if no write moved it on since the read
+        let delete = TokenRowDelete::new(row.list.clone(), row.hash.clone());
+        let filter = TokenRowFilter {
+            version: Some(vec![row.version]),
+        };
+        written(self.client.send_one(delete.if_matches(filter)).await)
     }
 }
 

@@ -5,6 +5,7 @@ use crate::canvas::{Canvas, Keyed};
 use crate::live::use_changes;
 use crate::queue::{QueuePanel, use_queue};
 use crate::session::{SessionPanel, SessionsButton, use_runners};
+use crate::sign_in::{CallFailed, SignedInAs};
 use dioxus::prelude::*;
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
@@ -20,7 +21,12 @@ html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; color:
 a { color: var(--links); }
 code { font-size: 0.92em; }
 .reef-app-picker { max-width: 52rem; margin: 0 auto; padding: 2rem 1rem; }
-.reef-app-picker h1 { margin: 0 0 1.5rem; }
+.reef-app-picker h1 { margin: 0; }
+.reef-app-picker-head { display: flex; gap: 1rem; align-items: baseline; margin: 0 0 1.5rem; }
+.reef-app-picker-head .reef-app-user { margin-left: auto; }
+.reef-app-user { display: flex; gap: 0.6rem; align-items: baseline; font-size: 0.85rem; color: var(--muted); }
+.reef-app-user strong { color: var(--fg); }
+.reef-app-user form { margin: 0; }
 .reef-app-projects { list-style: none; padding: 0; margin: 0; display: grid; gap: 1rem; }
 .reef-app-project { border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1.1rem; background: var(--panel); }
 .reef-app-project h2 { margin: 0; font-size: 1.15rem; }
@@ -145,7 +151,7 @@ code { font-size: 0.92em; }
 .reef-app-open-where { font-size: 0.8rem; color: var(--muted); }
 .reef-app-open-text { overflow-wrap: anywhere; }
 .reef-app-open-none { padding: 4px 10px; }
-.reef-app-sessions, .reef-app-sessions-toggle { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
+.reef-app-sessions, .reef-app-sessions-toggle, .reef-app-user { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
 .reef-app-sessions-toggle { margin-left: auto; }
 .reef-app-waiting { margin-left: 0.35rem; font-size: 0.75rem; color: var(--links); }
 .reef-app-sessions-toggle.some .reef-app-waiting { font-weight: 600; }
@@ -252,7 +258,10 @@ pub fn Picker() -> Element {
     let projects = use_server_future(calls::projects)?;
     rsx! {
         main { class: "reef-app-picker",
-            h1 { "reef" }
+            header { class: "reef-app-picker-head",
+                h1 { "reef" }
+                SignedInAs {}
+            }
             match &*projects.read() {
                 Some(Ok(listed)) if listed.is_empty() => rsx! {
                     p { class: "reef-app-muted",
@@ -269,7 +278,7 @@ pub fn Picker() -> Element {
                     }
                 },
                 Some(Err(error)) => rsx! {
-                    p { class: "reef-app-error", "Reading the projects failed: {error}" }
+                    p { CallFailed { error: error.clone(), doing: "Reading the projects" } }
                 },
                 None => rsx! {
                     p { class: "reef-app-muted", "Loading…" }
@@ -360,9 +369,10 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                 Link { to: Route::Picker {}, "← Plans" }
                 strong { class: "reef-app-plan-name", "{project}/{plan}" }
                 if let Some(Err(error)) = &*info.read() {
-                    span { class: "reef-app-error", "{error}" }
+                    CallFailed { error: error.clone(), doing: "Reading the plan" }
                 }
                 SessionsButton {}
+                SignedInAs {}
             }
             div { class: "reef-app-stage",
                 QueuePanel { project }

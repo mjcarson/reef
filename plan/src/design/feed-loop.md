@@ -528,8 +528,9 @@ the app, and the app's answers back ([M9](../milestones/m9.md)).
   - **Only decisions, in shoal.** A row a decision, partitioned by node. Transcripts stay in
     memory and on disk, as Claude Code keeps them.
 - **Answering is approving.** Whoever can answer a session's prompts can let its tools run on the
-  runner's machine, so sign-in ([C48](../milestones/m10.md)) guards these routes as it guards every write.
-  Until then the service listens on loopback only.
+  runner's machine, so sign-in ([C48](../milestones/m10.md)) guards these routes as it guards every other,
+  once reef's config requires it. The service listens on loopback only until it serves over TLS
+  ([C51](../milestones/m10.md)).
 
 ### What X5 found
 

@@ -5,14 +5,20 @@
 //! comes back as the error, so a caller can match on its code. A refusal, such as a project name
 //! that is taken, is an answer, not an error. When nothing answers at the service's address, the
 //! error says where the CLI looked, which key set it, and how to start the service.
+//!
+//! Every request sends the token kept for the service, if one is, as `Authorization: Bearer`,
+//! read from where [`credentials`](crate::credentials) says for each request. A service that asks
+//! the caller to sign in answers 401, which comes back as an `unauthorized` error saying to run
+//! `reef login`.
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
-    DecisionsRecorded, EditLoop, ErrorCode, FileDiff, Listing, Loop, LoopEdited, NewPlan,
-    NewProject, NewReply, Ordered, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project,
-    Puts, QueueEdit, QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved,
-    Revision, Rewrite, Session, SessionAct, SessionActed, StartWork, Started, StoredNode,
-    StoredPage, Thread, Transcript, WorkRecord, paths,
+    DecisionsRecorded, EditLoop, ErrorCode, FileDiff, IssuedToken, Listing, Loop, LoopEdited, Me,
+    NewPlan, NewProject, NewReply, NewUser, Ordered, PageEdit, PageEdited, PageListing, PlanInfo,
+    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, RecordDecisions, Report,
+    ResolveThread, Resolved, Revision, Rewrite, Session, SessionAct, SessionActed, SignIn,
+    SignedOut, StartWork, Started, StoredNode, StoredPage, Thread, Transcript, User, UserAdded,
+    WorkRecord, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -21,6 +27,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::conf::Conf;
+use crate::credentials::{self, Held};
 
 /// How long to wait for the service to take a connection
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
@@ -35,6 +42,8 @@ pub struct Client {
     address: SocketAddr,
     /// Where that address came from, for a message that says what to change
     origin: String,
+    /// Where the token it signs in with comes from
+    held: Held,
 }
 
 impl Client {
@@ -63,7 +72,76 @@ impl Client {
             base: format!("http://{address}"),
             address,
             origin,
+            held: credentials::held(conf.credentials.as_deref()),
         })
+    }
+
+    /// The service's root, such as `http://127.0.0.1:12180`, which a login is kept by
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// The address the service is called at
+    pub fn address(&self) -> std::net::SocketAddr {
+        self.address
+    }
+
+    /// Where the token this client signs in with comes from
+    pub fn held(&self) -> &Held {
+        &self.held
+    }
+
+    /// The token this client signs in with now, if it has one for its service
+    ///
+    /// Read for each request, so a process started before `reef login` sends the token once
+    /// there is one.
+    pub fn token(&self) -> anyhow::Result<Option<String>> {
+        match &self.held {
+            Held::Token(token) => Ok(Some(token.clone())),
+            Held::File(path) => {
+                Ok(credentials::login_for(path, &self.base)?.map(|login| login.token))
+            }
+            Held::Nowhere => Ok(None),
+        }
+    }
+
+    /// Trades a user's name and password for a token, or fails `unauthorized` if they don't
+    /// match a user
+    ///
+    /// # Arguments
+    ///
+    /// * `sign_in` - The name, the password and what the token is for
+    pub async fn sign_in(&self, sign_in: &SignIn) -> anyhow::Result<IssuedToken> {
+        let request = self.http.post(self.url(paths::TOKENS)).json(sign_in);
+        self.send(request, paths::TOKENS).await
+    }
+
+    /// Revokes the token this client sends
+    pub async fn sign_out(&self) -> anyhow::Result<SignedOut> {
+        let request = self.http.delete(self.url(paths::CURRENT_TOKEN));
+        self.send(request, paths::CURRENT_TOKEN).await
+    }
+
+    /// Who the service takes this client for, and whether it asks callers to sign in
+    pub async fn me(&self) -> anyhow::Result<Me> {
+        self.send(self.http.get(self.url(paths::ME)), paths::ME)
+            .await
+    }
+
+    /// Lists every user, by name, which only an admin may
+    pub async fn users(&self) -> anyhow::Result<Vec<User>> {
+        self.send(self.http.get(self.url(paths::USERS)), paths::USERS)
+            .await
+    }
+
+    /// Adds a user, which an admin may, or anyone on the service's host while it has none
+    ///
+    /// # Arguments
+    ///
+    /// * `new` - The new user, with their password
+    pub async fn add_user(&self, new: &NewUser) -> anyhow::Result<UserAdded> {
+        let request = self.http.post(self.url(paths::USERS)).json(new);
+        self.send(request, paths::USERS).await
     }
 
     /// Lists every project, by name
@@ -652,6 +730,12 @@ impl Client {
         request: reqwest::RequestBuilder,
         path: &str,
     ) -> anyhow::Result<T> {
+        // the token kept for the service, if one is
+        let token = self.token()?;
+        let request = match &token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        };
         // a service that isn't there is said plainly, with how to start it
         let response = request
             .send()
@@ -663,6 +747,11 @@ impl Client {
             .text()
             .await
             .map_err(|error| anyhow::anyhow!("reading {path}'s answer: {error}"))?;
+        // a service asking to sign in says how, but a wrong name or password says that
+        if status == 401 && path != paths::TOKENS {
+            let held = token.is_some().then_some(&self.held);
+            return Err(signed_out(&self.address, held).into());
+        }
         decode(status, path, &text)
     }
 
@@ -715,6 +804,32 @@ pub fn decode<T: DeserializeOwned>(status: u16, path: &str, text: &str) -> anyho
     serde_json::from_str(text).map_err(|_| anyhow::anyhow!("{status} from {path}: {text}"))
 }
 
+/// The error a 401 comes back as: the service asks the caller to sign in, and how to
+///
+/// # Arguments
+///
+/// * `address` - The address the service is called at
+/// * `held` - Where the token sent came from, or `None` if none was sent
+pub fn signed_out(address: &std::net::SocketAddr, held: Option<&Held>) -> ApiError {
+    // no token is a login to make, and a refused one a login to make again
+    let message = match held {
+        None => format!(
+            "reef's service at {address} asks you to sign in, and this `reef` has no token for \
+             it: run `reef login`"
+        ),
+        Some(Held::Token(_)) => format!(
+            "reef's service at {address} refused the token in `${}`: set it to a token the \
+             service issued, or unset it and run `reef login`",
+            credentials::TOKEN_VAR
+        ),
+        Some(held) => format!(
+            "reef's service at {address} refused the token kept in {}: run `reef login` again",
+            held.describe()
+        ),
+    };
+    ApiError::new(ErrorCode::Unauthorized, message)
+}
+
 /// Whether an error is the API's error of one kind
 ///
 /// # Arguments
@@ -729,10 +844,47 @@ pub fn is_code(error: &anyhow::Error, code: ErrorCode) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, decode, is_code};
+    use super::{Client, decode, is_code, signed_out};
     use crate::conf::Conf;
+    use crate::credentials::Held;
     use reef_api::{AddedProject, ErrorCode, Project};
     use std::path::PathBuf;
+
+    /// A 401 says to log in, naming the address and where a refused token came from
+    #[test]
+    fn unauthorized_says_to_log_in() {
+        let address = "127.0.0.1:12180".parse().unwrap();
+        // no token sent: log in
+        let none = signed_out(&address, None);
+        assert_eq!(none.code, ErrorCode::Unauthorized);
+        assert!(none.message.contains("127.0.0.1:12180"), "{}", none.message);
+        assert!(
+            none.message.contains("run `reef login`"),
+            "{}",
+            none.message
+        );
+        // a kept token refused: log in again, naming the file
+        let file = Held::File(PathBuf::from("/home/ada/.config/reef/credentials.toml"));
+        let refused = signed_out(&address, Some(&file));
+        assert!(
+            refused.message.contains("credentials.toml"),
+            "{}",
+            refused.message
+        );
+        assert!(refused.message.contains("again"), "{}", refused.message);
+        // a token given outright: the variable, never the token
+        let outright = signed_out(&address, Some(&Held::Token("reef_secret".into())));
+        assert!(
+            outright.message.contains("$REEF_TOKEN"),
+            "{}",
+            outright.message
+        );
+        assert!(
+            !outright.message.contains("reef_secret"),
+            "{}",
+            outright.message
+        );
+    }
 
     /// A success reads as the route's answer
     #[test]

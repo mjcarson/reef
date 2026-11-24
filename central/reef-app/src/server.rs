@@ -2,12 +2,14 @@
 //!
 //! It listens on reef's `api.address`, where the CLI, the MCP server and the hooks look for the
 //! JSON API, so the app takes reef-serve's place. Under `dx serve`, dx names the address instead
-//! and proxies to it. Either way only a loopback address is taken, until users sign in.
+//! and proxies to it. Either way only a loopback address is taken, until reef serves over TLS
+//! (C51). Every route, the pages, the server functions and the JSON API alike, sits under the one
+//! layer that signs callers in, [`auth::guard`], which serves the sign-in page beside them.
 
 use axum::Router;
 use axum::http::header;
 use axum::routing::get;
-use reef_service::{Conf, Service, api};
+use reef_service::{Conf, Service, api, auth};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use tokio::net::TcpListener;
@@ -32,7 +34,7 @@ pub fn service() -> &'static Service {
 }
 
 /// Builds the app's router over a service: its pages and server functions, reef.css, and the
-/// JSON API
+/// JSON API, all under the layer that signs callers in
 ///
 /// The server functions call the service given to the first router built in this process.
 ///
@@ -43,12 +45,14 @@ pub fn router(service: &'static Service) -> Router {
     // the server functions reach the service through here, and a second router changes nothing
     let _ = SERVICE.set(service);
     // the app's pages and server functions, the stylesheet they link, and the JSON API's routes
-    dioxus::server::router(crate::App)
+    let app = dioxus::server::router(crate::App)
         .route(
             "/reef.css",
             get(|| async { ([(header::CONTENT_TYPE, "text/css")], REEF_CSS) }),
         )
-        .merge(api::router(service))
+        .merge(api::router(service));
+    // every one of them guarded by the same layer as reef-serve's
+    auth::guard(app, service)
 }
 
 /// Reads reef's config, listens, opens the service and serves the app until a signal
@@ -69,12 +73,18 @@ pub async fn serve() -> anyhow::Result<()> {
         listener.local_addr()?,
         service.mode().name()
     );
+    // that callers must sign in, if they must, and how to add the first user
+    if let Some(note) = service.sign_in_note().await? {
+        eprintln!("reef-app: {note}");
+    }
     // once told to stop, end the change stream, so its followers' requests finish
     let stopping = async move {
         stopped().await;
         service.end_changes();
     };
-    axum::serve(listener, router(service))
+    // each request knowing where it came from, so the first user is added only from this host
+    let app = router(service).into_make_service_with_connect_info::<SocketAddr>();
+    axum::serve(listener, app)
         .with_graceful_shutdown(stopping)
         .await?;
     Ok(())
@@ -91,10 +101,10 @@ async fn listen(conf: &Conf) -> anyhow::Result<TcpListener> {
         return api::bind(conf).await;
     };
     let address: SocketAddr = dioxus::cli_config::fullstack_address_or_localhost();
-    // only this host, until users sign in, whoever chose the address
+    // only this host, until reef serves over TLS, whoever chose the address
     anyhow::ensure!(
         address.ip().is_loopback(),
-        "reef-app serves localhost only until users sign in, and dx gave it {address}"
+        "reef-app serves localhost only until it serves over TLS (C51), and dx gave it {address}"
     );
     TcpListener::bind(address)
         .await

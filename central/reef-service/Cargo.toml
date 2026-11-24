@@ -30,6 +30,10 @@ tokio = { workspace = true, features = ["net", "signal", "fs"] }
 tracing.workspace = true
 # statfs and getrlimit, for the checks before an in-process pool starts
 libc = { workspace = true, optional = true }
+# users' passwords, kept as argon2id hashes, and tokens, random and kept by their SHA-256
+argon2.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 # a client of the JSON API that knows only reef-api's types

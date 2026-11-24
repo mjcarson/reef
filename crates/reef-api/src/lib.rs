@@ -28,13 +28,15 @@
 //! - **Sessions** ([`session`]): the sessions a runner the user started runs headless, as
 //!   central reef relays them: each one's transcript and prompts, what the app asks of it, and the
 //!   orders the runner takes.
+//! - **Users** ([`user`]): reef's users, the tokens they sign in with, and the requests that add
+//!   them and sign them in and out.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
 //! - **Config** ([`config`]): where reef's config file is, which the service and its clients read.
 //!
-//! The service serves localhost only until users sign in (M10), at [`DEFAULT_ADDRESS`] unless
-//! reef's config names another.
+//! The service serves localhost only until it serves over TLS (C51), at [`DEFAULT_ADDRESS`]
+//! unless reef's config names another.
 
 pub mod change;
 pub mod comment;
@@ -49,6 +51,7 @@ pub mod project;
 pub mod queue;
 pub mod revision;
 pub mod session;
+pub mod user;
 pub mod work;
 
 pub use change::{Change, FollowedThread, PutNode, PutPage};
@@ -79,6 +82,7 @@ pub use session::{
     Answer, Attach, Choice, Entry, EntryKind, Order, Ordered, Prompt, PromptKind, Question, Report,
     Session, SessionAct, SessionActed, SessionState, Transcript,
 };
+pub use user::{IssuedToken, Me, NewUser, SignIn, SignedOut, TokenKind, User, UserAdded};
 pub use work::{
     AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,
 };

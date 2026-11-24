@@ -44,7 +44,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 tracing = "0.1"
 toml = "1"
 libc = "0.2"
+# users' passwords as argon2id hashes, and tokens as random bytes kept by their SHA-256
+argon2 = "0.6"
+sha2 = "0.11"
+getrandom = "0.4"
 
 # No debuginfo: a debug build of shoal's engine with it runs to several gigabytes.
 [profile.dev]
 debug = false
+
+# argon2 unoptimised takes seconds a hash, which every test that signs a user in would wait on
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

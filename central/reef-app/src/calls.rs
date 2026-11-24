@@ -7,7 +7,7 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, Decision, FileDiff, Loop, Marked, PlanInfo, Project, QueueEdit, QueueListing,
+    Commented, Decision, FileDiff, Loop, Marked, Me, PlanInfo, Project, QueueEdit, QueueListing,
     Queued, Review, ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, Target,
     Thread, ThreadState, Transcript,
 };
@@ -25,6 +25,33 @@ pub struct ProjectPlans {
     pub project: Project,
     /// Its plans, by name
     pub plans: Vec<PlanInfo>,
+}
+
+/// Whom the server takes this browser for, and whether it asks callers to sign in
+#[get("/app/me")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::me", skip_all, err(Debug))
+)]
+pub async fn me() -> Result<Me, ServerFnError> {
+    // the caller the guard found for this request, or nobody outside one
+    let caller = dioxus::fullstack::FullstackContext::current()
+        .and_then(|context| context.extension::<reef_service::auth::Caller>())
+        .unwrap_or_default();
+    Ok(Me {
+        user: caller.user,
+        required: crate::server::service().sign_in_required(),
+    })
+}
+
+/// Whether a call failed because the server asks this browser to sign in, and it isn't
+///
+/// # Arguments
+///
+/// * `error` - What the call failed with
+pub fn signed_out(error: &ServerFnError) -> bool {
+    // the guard answers 401 before the call runs
+    matches!(error, ServerFnError::ServerError { code: 401, .. })
 }
 
 /// Every registered project, by name, with its plans

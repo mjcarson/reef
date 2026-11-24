@@ -23,6 +23,9 @@ const REFUSED: u8 = 2;
 
 /// Checks the node's config, then serves reef's schema until told to stop
 fn main() -> ExitCode {
+    // shoal's shards get the stack reef's schema needs, before any thread starts
+    // SAFETY: nothing has started a thread yet
+    unsafe { reef_service::pool::widen_stacks() };
     // check the config `serve` or `claim` would read, if it names one that exists
     if let Some(conf) = conf_path(std::env::args_os().skip(1)).filter(|conf| conf.is_file()) {
         match checks::check_file(&conf) {

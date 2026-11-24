@@ -1212,3 +1212,63 @@ pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Res
     assert_eq!(next.ready.len(), 2, "{next:?}");
     Ok(())
 }
+
+/// The first user is added only from the service's own host, and is an admin; after that, only
+/// an admin adds one
+///
+/// # Arguments
+///
+/// * `sx` - The service and its plan
+pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
+    use reef_api::{NewUser, UserAdded};
+    use reef_service::{Asker, NotAllowed, NotSignedIn};
+    let new = |name: &str| NewUser {
+        name: name.to_string(),
+        password: "correct horse battery".to_string(),
+        admin: false,
+    };
+    // from another host, nobody adds the first user
+    let remote = Asker {
+        user: None,
+        local: false,
+    };
+    let refused = sx
+        .service
+        .add_user(new("ada"), remote)
+        .await
+        .expect_err("added from afar");
+    assert!(
+        refused.downcast_ref::<NotAllowed>().is_some(),
+        "{refused:#}"
+    );
+    assert!(sx.service.store().users().await?.is_empty());
+    // from this host, the first is an admin
+    let local = Asker {
+        user: None,
+        local: true,
+    };
+    let UserAdded::Added(ada) = sx.service.add_user(new("ada"), local).await? else {
+        anyhow::bail!("ada wasn't added from this host");
+    };
+    assert!(ada.admin);
+    // and then this host alone adds nobody, but its admin does
+    let refused = sx
+        .service
+        .add_user(new("eve"), local)
+        .await
+        .expect_err("added by nobody");
+    assert!(
+        refused.downcast_ref::<NotSignedIn>().is_some(),
+        "{refused:#}"
+    );
+    let by_ada = Asker {
+        user: Some(&ada),
+        local: false,
+    };
+    let added = sx.service.add_user(new("bob"), by_ada).await?;
+    assert!(
+        matches!(&added, UserAdded::Added(bob) if !bob.admin),
+        "{added:?}"
+    );
+    Ok(())
+}

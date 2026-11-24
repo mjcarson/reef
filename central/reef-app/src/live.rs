@@ -253,7 +253,18 @@ fn follow(url: &str, counters: &[Counter]) -> Option<Follow> {
     // the browser reconnects a dropped stream itself, but what changed meanwhile isn't sent again
     let dropped = Rc::new(Cell::new(false));
     let on_error = dropped.clone();
-    follow.listen("error", move |_| on_error.set(true));
+    follow.listen("error", move |event| {
+        use wasm_bindgen::JsCast;
+        on_error.set(true);
+        // a stream closed for good, rather than reconnecting, was refused, as a lapsed sign-in is
+        let closed = event
+            .target()
+            .and_then(|target| target.dyn_into::<web_sys::EventSource>().ok())
+            .is_some_and(|source| source.ready_state() == web_sys::EventSource::CLOSED);
+        if closed {
+            *crate::sign_in::SIGN_IN_LOST.write() = true;
+        }
+    });
     let reconnected: Vec<Counter> = counters.to_vec();
     follow.listen("open", move |_| {
         if dropped.replace(false) {

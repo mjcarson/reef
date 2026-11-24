@@ -18,6 +18,8 @@ pub use super::page_cases::*;
 #[allow(unused_imports)]
 pub use super::queue_cases::*;
 #[allow(unused_imports)]
+pub use super::user_cases::*;
+#[allow(unused_imports)]
 pub use super::work_cases::*;
 
 /// A put of a new node is written at version 1, and a get reads back what was put

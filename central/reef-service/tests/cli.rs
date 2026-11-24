@@ -22,12 +22,14 @@ use std::path::{Path, PathBuf};
 use common::git;
 use common::http::Ax;
 
-/// A served twin, and a config naming its address
+/// A served twin, a config naming its address, and a credentials file of the case's own
 struct Cx {
     /// The served service, and the case's own directory
     ax: Ax<MemoryBackend>,
     /// The config file naming the server's address
     conf: PathBuf,
+    /// The credentials file every command is named, so no token of the developer's is sent
+    credentials: PathBuf,
 }
 
 impl Cx {
@@ -42,10 +44,40 @@ impl Cx {
             .await?
             .api()
             .await?;
+        Cx::over(ax)
+    }
+
+    /// Serves a fresh twin that asks every caller to sign in, and writes a config naming its
+    /// address
+    ///
+    /// # Arguments
+    ///
+    /// * `case` - The case's name, which names its directory
+    async fn signing_in(case: &str) -> anyhow::Result<Cx> {
+        // as `new`, with sign-in required
+        let ax = common::Fx::memory(&format!("cli-{case}"))
+            .await?
+            .api_signing_in()
+            .await?;
+        Cx::over(ax)
+    }
+
+    /// Writes a config naming a served twin's address, beside a credentials file of the case's
+    /// own
+    ///
+    /// # Arguments
+    ///
+    /// * `ax` - The served twin
+    fn over(ax: Ax<MemoryBackend>) -> anyhow::Result<Cx> {
         // the config the CLI reads its address from
         let conf = ax.dir.join("reef.toml");
         std::fs::write(&conf, format!("[api]\naddress = \"{}\"\n", ax.address))?;
-        Ok(Cx { ax, conf })
+        let credentials = ax.dir.join("home/reef/credentials.toml");
+        Ok(Cx {
+            ax,
+            conf,
+            credentials,
+        })
     }
 
     /// Runs one `reef` command from a directory, returning what it printed
@@ -53,11 +85,15 @@ impl Cx {
     /// # Arguments
     ///
     /// * `cwd` - The working directory to run it from
-    /// * `args` - The command line after `reef --conf <config>`
+    /// * `args` - The command line after `reef --conf <config> --credentials <file>`
     async fn reef(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-        // the command line as typed, with the case's config named
+        // the command line as typed, with the case's config and credentials named
         let conf = self.conf.to_str().expect("the config is a utf-8 path");
-        let line = ["reef", "--conf", conf]
+        let credentials = self
+            .credentials
+            .to_str()
+            .expect("the credentials are a utf-8 path");
+        let line = ["reef", "--conf", conf, "--credentials", credentials]
             .into_iter()
             .chain(args.iter().copied());
         let cli = reef::Cli::from_args(line)?;
@@ -73,11 +109,15 @@ impl Cx {
     /// # Arguments
     ///
     /// * `cwd` - The working directory to run it from
-    /// * `args` - The command line after `reef --conf <config>`
+    /// * `args` - The command line after `reef --conf <config> --credentials <file>`
     async fn failing(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<(String, String)> {
-        // the command line as typed, with the case's config named
+        // the command line as typed, with the case's config and credentials named
         let conf = self.conf.to_str().expect("the config is a utf-8 path");
-        let line = ["reef", "--conf", conf]
+        let credentials = self
+            .credentials
+            .to_str()
+            .expect("the credentials are a utf-8 path");
+        let line = ["reef", "--conf", conf, "--credentials", credentials]
             .into_iter()
             .chain(args.iter().copied());
         let cli = reef::Cli::from_args(line)?;
@@ -162,6 +202,91 @@ fn names(out: &str) -> Vec<&str> {
     out.lines()
         .filter_map(|line| line.split_whitespace().next())
         .collect()
+}
+
+/// A token from `reef login` lets the CLI write, until `reef logout` revokes it
+#[tokio::test]
+async fn login_lets_the_cli_write_until_logout() -> anyhow::Result<()> {
+    let cx = Cx::signing_in("login").await?;
+    let repo = cx.ax.repo.clone();
+    let password = cx.ax.dir.join("password");
+    std::fs::write(&password, "correct horse battery\n")?;
+    let password = password.to_str().expect("the case's dir is utf-8");
+    // the first user, from this host, is an admin
+    let added = cx
+        .reef(&repo, &["user", "add", "ada", "--password-file", password])
+        .await?;
+    assert!(added.contains("added `ada`, an admin"), "{added}");
+    // nobody logged in can't write, and is told how to
+    let node = cx.yaml("c1.yaml", &work("C1", &[]))?;
+    let (_, refused) = cx.failing(&repo, &["node", "put", &node]).await?;
+    assert!(refused.contains("asks you to sign in"), "{refused}");
+    assert!(refused.contains(&cx.ax.address.to_string()), "{refused}");
+    assert!(refused.contains("run `reef login`"), "{refused}");
+    // a wrong password logs nobody in, and keeps nothing
+    let wrong = cx.ax.dir.join("wrong");
+    std::fs::write(&wrong, "not the password\n")?;
+    let wrong = wrong.to_str().expect("the case's dir is utf-8");
+    let (_, failed) = cx
+        .failing(&repo, &["login", "--user", "ada", "--password-file", wrong])
+        .await?;
+    assert!(failed.contains("don't match"), "{failed}");
+    assert!(!cx.credentials.exists(), "a failed login kept a file");
+    // logged in, the token is kept privately and the password nowhere
+    let login = cx
+        .reef(
+            &repo,
+            &["login", "--user", "ada", "--password-file", password],
+        )
+        .await?;
+    assert!(login.contains("logged in to"), "{login}");
+    assert!(login.contains("as `ada`, an admin"), "{login}");
+    let kept = std::fs::read_to_string(&cx.credentials)?;
+    assert!(kept.contains("token = \"reef_"), "{kept}");
+    assert!(!kept.contains("correct horse"), "{kept}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&cx.credentials)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    // so the CLI writes, and says whom it is taken for
+    let put = cx.reef(&repo, &["node", "put", &node]).await?;
+    assert!(put.contains("C1"), "{put}");
+    let me = cx.reef(&repo, &["whoami"]).await?;
+    assert!(me.starts_with("`ada`, an admin"), "{me}");
+    // an admin adds another user, and lists both
+    let bob = cx
+        .reef(&repo, &["user", "add", "bob", "--password-file", password])
+        .await?;
+    assert!(bob.contains("added `bob` to"), "{bob}");
+    let users = cx.reef(&repo, &["user", "ls"]).await?;
+    assert_eq!(names(&users), ["ada", "bob"]);
+    // logged out, the token is revoked and forgotten, so writing is refused again
+    let out = cx.reef(&repo, &["logout"]).await?;
+    assert!(out.contains("logged out of"), "{out}");
+    assert!(!std::fs::read_to_string(&cx.credentials)?.contains("reef_"));
+    let other = cx.yaml("c2.yaml", &work("C2", &[]))?;
+    let (_, refused) = cx.failing(&repo, &["node", "put", &other]).await?;
+    assert!(refused.contains("run `reef login`"), "{refused}");
+    let again = cx.reef(&repo, &["logout"]).await?;
+    assert!(again.contains("not logged in"), "{again}");
+    Ok(())
+}
+
+/// With sign-in off, the CLI works with no login, and says nobody need sign in
+#[tokio::test]
+async fn the_cli_needs_no_login_with_sign_in_off() -> anyhow::Result<()> {
+    let cx = Cx::new("no-login").await?;
+    let repo = cx.ax.repo.clone();
+    // a put with no token kept
+    let node = cx.yaml("c1.yaml", &work("C1", &[]))?;
+    let put = cx.reef(&repo, &["node", "put", &node]).await?;
+    assert!(put.contains("C1"), "{put}");
+    // and nobody asked to sign in
+    let me = cx.reef(&repo, &["whoami"]).await?;
+    assert!(me.contains("asks no caller to sign in"), "{me}");
+    Ok(())
 }
 
 /// A project registered from its repo and a plan listed in it show in `reef plan ls`

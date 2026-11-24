@@ -50,6 +50,8 @@ The full key reference is in [reference.md](reference.md). Read it before writin
 
 - **If nothing answers**, the service isn't running. reef's error says where it looked: tell
   the user, rather than starting one.
+- **If reef asks you to sign in**, the service requires it and this `reef` has no token for it:
+  ask the user to run `! reef login`. Never ask for a password, nor pass one on a command line.
 - **Take work from `next`**: the user's queue first, then ready work in plan order, then each
   piece of work that waits and the needs it waits on.
 - **In a terminal loop, take work from `next_task`.** Once the user starts a loop in the

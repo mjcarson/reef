@@ -214,7 +214,9 @@ where
 ///
 /// * `order` - Where to type, and after which node
 /// * `conf` - The config this reef was named, passed on so the injector reaches the same service
-pub fn spawn(order: &Clear, conf: Option<&Path>) -> anyhow::Result<()> {
+/// * `credentials` - The credentials file this reef was named, passed on so the injector signs in
+///   as it does
+pub fn spawn(order: &Clear, conf: Option<&Path>, credentials: Option<&Path>) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     // what it says goes to the log, since nothing would show it, or nowhere if that can't open
     let log = log_file()
@@ -224,6 +226,10 @@ pub fn spawn(order: &Clear, conf: Option<&Path>) -> anyhow::Result<()> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     if let Some(conf) = conf {
         command.arg("--conf").arg(conf);
+    }
+    // signed in as this reef is
+    if let Some(credentials) = credentials {
+        command.arg("--credentials").arg(credentials);
     }
     command
         .args(order.args())

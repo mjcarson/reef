@@ -60,6 +60,8 @@ pub struct Runs {
     pub args: Vec<String>,
     /// The config this reef was named, handed to each session's MCP server and hooks
     pub conf: Option<PathBuf>,
+    /// The credentials file this reef was named, handed to each session's MCP server and hooks
+    pub credentials: Option<PathBuf>,
 }
 
 /// Where the runner's Claude stands
@@ -181,8 +183,8 @@ fn runner_id() -> String {
     format!("{time}-{}", std::process::id())
 }
 
-/// The host the runner runs on, as the app shows it
-fn host_name() -> String {
+/// The host the runner runs on, as the app shows it and a login's token is labelled with
+pub(crate) fn host_name() -> String {
     // the kernel's name for it, else the `hostname` command's, else this one
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
@@ -646,6 +648,7 @@ pub async fn run_until<W: Write>(
         cwd: root,
         pane: pane.clone(),
         conf: runs.conf.clone(),
+        credentials: runs.credentials.clone(),
     };
     let mut runner = Runner {
         client,

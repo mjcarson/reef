@@ -1,7 +1,8 @@
 //! Every route's path: the templates the router matches, and builders for clients
 //!
 //! Every route sits under [`PREFIX`], apart from the app's own pages and server functions, which
-//! share its port once reef-app mounts the router. A builder percent-encodes each segment it
+//! share its port once reef-app mounts the router, and the browser's sign-in page and sign-out,
+//! [`SIGN_IN`] and [`SIGN_OUT`], which both servers serve. A builder percent-encodes each segment it
 //! fills in, since an id may hold spaces or other characters a path can't.
 //!
 //! | Route | Template |
@@ -39,6 +40,12 @@
 //! | `GET ?after=&wait=`, `POST` | [`SESSION_ORDERS`] |
 //! | `GET` | [`PROJECT_SESSIONS`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
+//! | `POST` | [`TOKENS`] |
+//! | `DELETE` | [`CURRENT_TOKEN`] |
+//! | `GET` | [`ME`] |
+//! | `GET`, `POST` | [`USERS`] |
+//! | `GET ?next=`, `POST` | [`SIGN_IN`] |
+//! | `POST` | [`SIGN_OUT`] |
 
 use reef_model::{NodeName, PlanName};
 
@@ -168,6 +175,26 @@ pub const PROJECT_SESSIONS: &str = "/api/v1/projects/{project}/sessions";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
+
+/// Tokens: one issued by `POST` for a user's name and password
+pub const TOKENS: &str = "/api/v1/tokens";
+
+/// The token the caller sent, revoked by `DELETE`
+pub const CURRENT_TOKEN: &str = "/api/v1/tokens/current";
+
+/// Who the service takes the caller for, and whether it asks callers to sign in
+pub const ME: &str = "/api/v1/me";
+
+/// reef's users: listed by `GET` and added to by `POST`, by an admin, or the first from the
+/// service's own host
+pub const USERS: &str = "/api/v1/users";
+
+/// The browser's sign-in page by `GET`, and its form sent by `POST`, which sets the sign-in
+/// cookie
+pub const SIGN_IN: &str = "/sign-in";
+
+/// The browser's sign-out by `POST`, which revokes its cookie's token and clears it
+pub const SIGN_OUT: &str = "/sign-out";
 
 /// Percent-encodes one path segment or query value
 ///

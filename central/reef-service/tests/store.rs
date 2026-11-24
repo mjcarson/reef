@@ -115,4 +115,5 @@ suite!(
     a_loop_holds_its_group_as_one,
     a_pane_joins_a_member,
     decisions_are_kept_by_call,
+    users_and_tokens_are_kept_by_key,
 );

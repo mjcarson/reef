@@ -152,11 +152,20 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
 - **Live refresh from the change stream.** When Claude puts a node, the app reads the plan
   again and draws the new revision where the old one was.
 - **The app listens where the CLI looks.** Its server is its own `axum::serve` on `[api] address`,
-  loopback only, rather than `dioxus::serve`, which listens on `PORT` or 8080. It takes
+  loopback only until [C51](../milestones/m10.md), rather than `dioxus::serve`, which listens on `PORT` or 8080. It takes
   reef-serve's place: only one process can open shoal's data directory. Under `dx serve`, dx names
   the address and proxies its own port to it.
 - **Plans at `/plans/{project}/{plan}`, server functions under `/app/`,** so neither meets the
   JSON API's `/api/v1`. The server serves reef.css at `/reef.css` from mdbook-reef's assets.
+- **Signed in as reef-serve is** ([C48](../milestones/m10.md)). The whole router sits under the service's one
+  layer ([Users and sign-in](architecture.md#users-and-sign-in)), so a browser that isn't signed in
+  lands on the service's sign-in page and never loads the app. Once it is, the bar says whom the
+  server takes it for, beside a Sign out, read through `/app/me` as the page renders, and shows
+  nothing while sign-in is off.
+- **A lapsed sign-in offers the way back.** A browser whose token was revoked or expired finds its
+  change stream closed and its calls answered 401: the bar says live updates stopped, and a call
+  that failed says it needs signing in, each linking the sign-in page, which comes back to the
+  same route.
 
 ## Docs in central mode
 

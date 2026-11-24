@@ -3,3 +3,10 @@
 # never gets it.
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-Ctarget-cpu=native"]
+
+# shoal's shards run on threads glommio starts with std's default stack, which an unoptimised
+# build of reef's thirteen tables overflows. The servers widen it themselves in `main`
+# (`reef_service::pool::widen_stacks`); this does the same for the tests and `cargo run`, unless
+# the environment sets it already.
+[env]
+RUST_MIN_STACK = { value = "8388608", force = false }

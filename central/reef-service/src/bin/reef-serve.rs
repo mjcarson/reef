@@ -7,7 +7,8 @@
 //!
 //! It reads reef's config (`--conf`, else `$REEF_CONFIG`, else the default path), listens on
 //! `api.address`, which must be a loopback address, then opens the service: shoal in this
-//! process with `embedded`, or the external node `shoal.address` names. It listens before shoal
+//! process with `embedded`, or the external node `shoal.address` names. With `[auth] required`
+//! it says callers must sign in, and while reef has no user, how to add the first. It listens before shoal
 //! starts, so a port that is taken or an address that isn't local stops it before a pool locks
 //! the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
 //! still open, and closes the service, stopping an in-process pool cleanly.
@@ -27,8 +28,13 @@ use tracing::instrument;
 const RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 /// Serves the JSON API until told to stop
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // shoal's shards get the stack reef's schema needs, before any thread starts
+    #[cfg(feature = "embedded")]
+    // SAFETY: nothing has started a thread yet
+    unsafe {
+        reef_service::pool::widen_stacks()
+    };
     // `--conf PATH` alone; anything else is a mistake worth saying
     let conf = match conf_path(std::env::args_os().skip(1)) {
         Ok(conf) => conf,
@@ -37,7 +43,18 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(conf).await {
+    // every request, and the service, on one tokio runtime
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("reef-serve: starting tokio: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(conf)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("reef-serve: {error:#}");
@@ -63,6 +80,10 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
         listener.local_addr()?,
         service.mode().name()
     );
+    // that callers must sign in, if they must, and how to add the first user
+    if let Some(note) = service.sign_in_note().await? {
+        eprintln!("reef-serve: {note}");
+    }
     // serve until told to stop, then wait for the requests still open
     api::serve(listener, service.clone(), stopped()).await?;
     // the service is this task's alone once every request has let go of it

@@ -47,6 +47,11 @@
 //! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written or joined, 409 if the pane's loop is busy or another loop or pane holds the node, 422 if the pane has no loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than the loop |
 //! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
+//! | `POST /api/v1/tokens` | `sign_in` | [`IssuedToken`]: 201, or 401 if no user has that name and password |
+//! | `DELETE /api/v1/tokens/current` | `sign_out` | [`SignedOut`]: 200, or 401 if no token was sent |
+//! | `GET /api/v1/me` | `signed_in` | [`Me`]: the user the caller's token signs in, and whether sign-in is required |
+//! | `GET /api/v1/users` | `users` | every [`User`] to an admin, or none while there are none; 401 or 403 otherwise |
+//! | `POST /api/v1/users` | `add_user` | [`UserAdded`]: 201, 409 if the name is taken, 401 or 403 unless an admin, or the first from this host, asks |
 //!
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
 //!   status that says which, so a client reads one type whatever the status.
@@ -62,8 +67,11 @@
 //!   of 2 MiB.
 //! - **The change stream is server-sent events,** one a change, its event named by its kind and
 //!   its data the change as JSON. It is live only, and narrowed by `project` and `plan`.
-//! - **Localhost only.** [`bind`] refuses any address but a loopback one until users sign in
-//!   (M10).
+//! - **Signed in when reef asks it.** [`serve`] wraps the router in [`auth::guard`](crate::auth::guard),
+//!   which hands each route its [`Caller`] and, with sign-in required, answers 401 to a caller
+//!   whose token signs nobody in. A 401 says `WWW-Authenticate: Bearer`.
+//! - **Localhost only.** [`bind`] refuses any address but a loopback one until reef serves over
+//!   TLS (C51).
 
 use axum::extract::{
     DefaultBodyLimit, FromRequest, FromRequestParts, Path as Segment, Query, Request, State,
@@ -76,11 +84,12 @@ use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Change, Checked, Commented,
-    Decision, DecisionsRecorded, EditLoop, ErrorCode, FileDiff, Listing, Loop, LoopEdited,
-    MarkReview, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, Ordered, PageEdit,
-    PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued,
-    RecordDecisions, Report, ResolveThread, Resolved, Review, Reviewed, Revision, Rewrite, Session,
-    SessionAct, SessionActed, StartWork, Started, StoredNode, StoredPage, Thread, Transcript,
+    Decision, DecisionsRecorded, EditLoop, ErrorCode, FileDiff, IssuedToken, Listing, Loop,
+    LoopEdited, MarkReview, MarkThread, Marked, Me, NewPlan, NewProject, NewReply, NewThread,
+    NewUser, Ordered, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
+    QueueEdit, QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Review,
+    Reviewed, Revision, Rewrite, Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork,
+    Started, StoredNode, StoredPage, Thread, TokenKind, Transcript, User, UserAdded,
     WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
@@ -88,6 +97,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::convert::Infallible;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -96,9 +106,10 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{Stream, StreamExt};
 use tracing::instrument;
 
+use crate::auth::{self, Caller};
 use crate::backend::Backend;
 use crate::conf::Conf;
-use crate::service::{NoSession, Service};
+use crate::service::{Asker, NoSession, NotAllowed, NotSignedIn, Service};
 use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
 
 /// A handle on a service that a router holds and clones into every request
@@ -222,12 +233,20 @@ pub fn router<S: Serves>(serves: S) -> Router {
         )
         .route(paths::PROJECT_SESSIONS, get(project_sessions::<S>))
         .route(paths::CHANGES, get(changes::<S>))
+        .route(paths::TOKENS, axum::routing::post(issue_token::<S>))
+        .route(
+            paths::CURRENT_TOKEN,
+            axum::routing::delete(revoke_token::<S>),
+        )
+        .route(paths::ME, get(me::<S>))
+        .route(paths::USERS, get(users::<S>).post(add_user::<S>))
         .with_state(serves)
 }
 
 /// Listens where reef's config says the API is served, refusing any but a loopback address
 ///
-/// Nobody signs in until M10, so nothing but this host may reach the API.
+/// Nothing is served over TLS until C51, so nothing but this host may reach the API, signed in or
+/// not.
 ///
 /// # Arguments
 ///
@@ -235,11 +254,11 @@ pub fn router<S: Serves>(serves: S) -> Router {
 #[instrument(name = "api::bind", skip_all, err(Debug))]
 pub async fn bind(conf: &Conf) -> anyhow::Result<TcpListener> {
     let address = conf.api.address;
-    // only this host, until users sign in
+    // only this host, until reef serves over TLS
     anyhow::ensure!(
         address.ip().is_loopback(),
-        "reef's JSON API serves localhost only until users sign in, and {address} is not a \
-         loopback address: set {} to 127.0.0.1 or [::1]",
+        "reef's JSON API serves localhost only until it serves over TLS (C51), and {address} is \
+         not a loopback address: set {} to 127.0.0.1 or [::1]",
         conf.key("api.address")
     );
     // a port another program holds is named, with the key that chose it
@@ -253,8 +272,10 @@ pub async fn bind(conf: &Conf) -> anyhow::Result<TcpListener> {
 
 /// Serves the API on a listener until told to stop, then waits for the requests still open
 ///
-/// Stopping ends the service's change stream first, since a follower's stream never ends of
-/// its own accord and a graceful stop waits for every open request.
+/// The router is wrapped in [`auth::guard`], and each request knows the address it came from,
+/// so the first user can be added only from this host. Stopping ends the service's change stream
+/// first, since a follower's stream never ends of its own accord and a graceful stop waits for
+/// every open request.
 ///
 /// # Arguments
 ///
@@ -267,13 +288,15 @@ pub async fn serve<S: Serves>(
     serves: S,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let router = router(serves.clone());
+    // every route guarded, each request knowing where it came from
+    let router = auth::guard(router(serves.clone()), serves.clone());
+    let app = router.into_make_service_with_connect_info::<SocketAddr>();
     // once told to stop, end the change stream so its followers' requests finish
     let stopping = async move {
         stop.await;
         serves.service().end_changes();
     };
-    axum::serve(listener, router)
+    axum::serve(listener, app)
         .with_graceful_shutdown(stopping)
         .await?;
     Ok(())
@@ -313,6 +336,10 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::BadName
         } else if error.downcast_ref::<Unkeepable>().is_some() {
             ErrorCode::BadRequest
+        } else if error.downcast_ref::<NotSignedIn>().is_some() {
+            ErrorCode::Unauthorized
+        } else if error.downcast_ref::<NotAllowed>().is_some() {
+            ErrorCode::Forbidden
         } else {
             ErrorCode::Internal
         };
@@ -333,11 +360,20 @@ impl From<NameError> for Failure {
 }
 
 impl IntoResponse for Failure {
-    /// Answers with the error's status and the error as JSON
+    /// Answers with the error's status and the error as JSON, and how to sign in with a 401
     fn into_response(self) -> Response {
         let status =
             StatusCode::from_u16(self.0.code.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(self.0)).into_response()
+        let unauthorized = self.0.code == ErrorCode::Unauthorized;
+        let mut response = (status, Json(self.0)).into_response();
+        // a caller told to sign in is told with what
+        if unauthorized {
+            response.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer realm=\"reef\""),
+            );
+        }
+        response
     }
 }
 
@@ -1719,6 +1755,122 @@ fn event(change: &Change) -> Event {
         Ok(event) => event,
         Err(error) => Event::default().comment(format!("a change could not be sent: {error}")),
     }
+}
+
+/// Issues a token for a user's name and password: 201, or 401 if no user has that name and
+/// password
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `request` - The name, the password and what the token is for
+#[instrument(name = "api::issue_token", skip_all, err(Debug))]
+async fn issue_token<S: Serves>(
+    State(serves): State<S>,
+    Body(request): Body<SignIn>,
+) -> Result<(StatusCode, Json<IssuedToken>), Failure> {
+    // a terminal's token, labelled as it asked
+    let label = request.label.as_deref().unwrap_or("reef");
+    let issued = serves
+        .service()
+        .sign_in(
+            request.name.trim(),
+            &request.password,
+            TokenKind::Cli,
+            label,
+        )
+        .await?;
+    // the same words for a name no user has and a wrong password
+    match issued {
+        Some(issued) => Ok((StatusCode::CREATED, Json(issued))),
+        None => Err(Failure::new(
+            ErrorCode::Unauthorized,
+            "that name and password don't match a user of reef",
+        )),
+    }
+}
+
+/// Revokes the token the caller sent: 200, or 401 if it sent none
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, and the token it sent
+#[instrument(name = "api::revoke_token", skip_all, err(Debug))]
+async fn revoke_token<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+) -> Result<Json<SignedOut>, Failure> {
+    // a caller that sent no token has nothing to revoke
+    let Some(token) = caller.token else {
+        return Err(Failure::new(
+            ErrorCode::Unauthorized,
+            "no token was sent, so none was revoked",
+        ));
+    };
+    let revoked = serves.service().sign_out(&token).await?;
+    Ok(Json(SignedOut { revoked }))
+}
+
+/// Says who the service takes the caller for, and whether it asks callers to sign in
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling
+#[instrument(name = "api::me", skip_all, err(Debug))]
+async fn me<S: Serves>(State(serves): State<S>, caller: Caller) -> Result<Json<Me>, Failure> {
+    // the user the caller's token signs in, as the guard found
+    Ok(Json(Me {
+        user: caller.user,
+        required: serves.service().sign_in_required(),
+    }))
+}
+
+/// Lists every user, by name, to an admin: none while there are none, and 401 or 403 otherwise
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling
+#[instrument(name = "api::users", skip_all, err(Debug))]
+async fn users<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+) -> Result<Json<Vec<User>>, Failure> {
+    // judged by who is calling, from where
+    let asker = Asker {
+        user: caller.user.as_ref(),
+        local: caller.local,
+    };
+    Ok(Json(serves.service().users(asker).await?))
+}
+
+/// Adds a user: 201, 409 if the name is taken, and 401 or 403 unless an admin asks, or the
+/// first user is added from the service's own host
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling
+/// * `new` - The new user, with their password
+#[instrument(name = "api::add_user", skip_all, err(Debug))]
+async fn add_user<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Body(new): Body<NewUser>,
+) -> Result<(StatusCode, Json<UserAdded>), Failure> {
+    // judged by who is calling, from where
+    let asker = Asker {
+        user: caller.user.as_ref(),
+        local: caller.local,
+    };
+    let added = serves.service().add_user(new, asker).await?;
+    let status = match added {
+        UserAdded::Added(_) => StatusCode::CREATED,
+        UserAdded::NameTaken => StatusCode::CONFLICT,
+    };
+    Ok((status, Json(added)))
 }
 
 #[cfg(test)]

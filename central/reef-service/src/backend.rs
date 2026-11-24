@@ -10,7 +10,7 @@ use std::future::Future;
 
 use crate::schema::{
     CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RevisionFileRow, RevisionRow, WorkRow,
+    QueueRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -463,4 +463,52 @@ pub trait Backend: Send + Sync {
         row: DecisionRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads every user row, in name order, or the one of a name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The one user's name, or `None` for every user
+    fn users(
+        &self,
+        name: Option<&str>,
+    ) -> impl Future<Output = anyhow::Result<Vec<UserRow>>> + Send;
+
+    /// Writes one user row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_user(
+        &self,
+        row: UserRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads the token row kept under a token's hash, if one is
+    ///
+    /// # Arguments
+    ///
+    /// * `hash` - The token's SHA-256, as 64 lowercase hex digits
+    fn token(&self, hash: &str) -> impl Future<Output = anyhow::Result<Option<TokenRow>>> + Send;
+
+    /// Writes one token row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_token(
+        &self,
+        row: TokenRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Deletes one token row, if it is still at the version it was read at
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to delete, as it was read
+    fn delete_token(&self, row: &TokenRow) -> impl Future<Output = anyhow::Result<Written>> + Send;
 }

@@ -44,6 +44,11 @@
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
 //! reef [--conf PATH] import [BOOK] [--replace] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] export <DIR> [--replace] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] login [--user NAME] [--password-file PATH] [--label TEXT]
+//! reef [--conf PATH] logout
+//! reef [--conf PATH] whoami
+//! reef [--conf PATH] user add <NAME> [--admin] [--password-file PATH]
+//! reef [--conf PATH] user ls
 //! reef skill [DIR] [--print]
 //! reef claude install [DIR]
 //! ```
@@ -65,7 +70,9 @@
 //! nothing where there is none. `import` picks the project the book is in, and lists the plan
 //! `--plan` names if it isn't listed. `export` picks the project the new book's directory is in.
 //! `skill` writes into the repo that holds its directory, and `claude install` into the checkout
-//! that holds its directory, and neither needs reef's config or its service.
+//! that holds its directory, and neither needs reef's config or its service. Every command sends
+//! the token `login` kept for the service, from the file `--credentials` names, else `$REEF_TOKEN`,
+//! else the file `$REEF_CREDENTIALS` names, else `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::{AddedProject, Project, Writer};
@@ -83,6 +90,7 @@ use crate::conf::Conf;
 use crate::export;
 use crate::hook;
 use crate::import;
+use crate::login;
 use crate::loops;
 use crate::mcp::{self, Tools};
 use crate::node;
@@ -102,6 +110,10 @@ pub struct Cli {
     /// reef's config, else `$REEF_CONFIG`, else `$XDG_CONFIG_HOME/reef/config.toml`
     #[arg(long, global = true, value_name = "PATH")]
     pub conf: Option<PathBuf>,
+    /// reef's credentials file, else `$REEF_TOKEN`, else `$REEF_CREDENTIALS`, else
+    /// `$XDG_CONFIG_HOME/reef/credentials.toml`
+    #[arg(long, global = true, value_name = "PATH")]
+    pub credentials: Option<PathBuf>,
     /// What to do
     #[command(subcommand)]
     pub command: Command,
@@ -311,6 +323,47 @@ pub enum Command {
     /// Set a repo up for Claude Code and the loop
     #[command(subcommand)]
     Claude(ClaudeCommand),
+    /// Log in to the service: trade a user's name and password for a token, kept for every
+    /// `reef` this user runs here
+    ///
+    /// The password is asked for on the terminal, never taken as an argument.
+    Login {
+        /// The user's name, else this host's user's
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
+        /// Read the password from a file's first line, or `-` for standard input
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// What the token is for, else `reef on <host>`
+        #[arg(long, value_name = "TEXT")]
+        label: Option<String>,
+    },
+    /// Log out of the service: revoke the token kept for it, and forget it here
+    Logout,
+    /// Say who the service takes this `reef` for, and whether it asks callers to sign in
+    Whoami,
+    /// Add and list the service's users
+    #[command(subcommand)]
+    User(UserCommand),
+}
+
+/// What can be done with the service's users
+#[derive(Debug, Subcommand)]
+pub enum UserCommand {
+    /// Add a user: the first from the service's own host, who is an admin, and the rest as an
+    /// admin
+    Add {
+        /// The new user's name
+        name: String,
+        /// Let them add other users
+        #[arg(long)]
+        admin: bool,
+        /// Read their password from a file's first line, or `-` for standard input
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+    },
+    /// List every user, which only an admin may
+    Ls,
 }
 
 /// What can be set up for Claude Code
@@ -784,7 +837,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
     }
     // the config named, read from the working directory, else the one the service reads
     let named = cli.conf.map(|path| cwd.join(path));
-    let conf = Conf::load(named.as_deref())?;
+    let mut conf = Conf::load(named.as_deref())?;
+    // and the credentials file named, read from the working directory too
+    conf.credentials = cli.credentials.map(|path| cwd.join(path));
+    let credentials = conf.credentials.clone();
     let client = Client::new(&conf)?;
     match cli.command {
         Command::Project(ProjectCommand::Add { name, repo }) => {
@@ -944,7 +1000,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                 } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
                     // between nodes, the injector reaches the same service, as Stop's does
-                    let spawn = |order: &clear::Clear| clear::spawn(order, named.as_deref());
+                    let spawn = |order: &clear::Clear| {
+                        clear::spawn(order, named.as_deref(), credentials.as_deref())
+                    };
                     let starts = loops::Starts {
                         session,
                         width,
@@ -987,6 +1045,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                         mode: permission_mode,
                         args,
                         conf: conf.source.clone(),
+                        credentials: conf.credentials.clone(),
                     };
                     runner::run(&client, cwd, &runs, &pick, out).await
                 }
@@ -1030,7 +1089,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let pid = var("CLAUDE_PID").and_then(|pid| pid.trim().parse().ok());
             let input = stdin()?;
             // the injector reaches the same service, through the config this reef was named
-            let spawn = |order: &clear::Clear| clear::spawn(order, named.as_deref());
+            let spawn = |order: &clear::Clear| {
+                clear::spawn(order, named.as_deref(), credentials.as_deref())
+            };
             hook::stop(&client, cwd, &input, pane.as_ref(), pid, spawn, out).await
         }
         Command::Hook(HookCommand::Clear {
@@ -1071,6 +1132,32 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let tools = Tools::new(client, cwd.to_path_buf(), pick).in_pane(pane);
             mcp::serve(tools, tokio::io::stdin(), tokio::io::stdout()).await
         }
+        Command::Login {
+            user,
+            password_file,
+            label,
+        } => {
+            let file = password_file.map(|file| cwd.join(file));
+            login::login(
+                &client,
+                user.as_deref(),
+                file.as_deref(),
+                label.as_deref(),
+                out,
+            )
+            .await
+        }
+        Command::Logout => login::logout(&client, out).await,
+        Command::Whoami => login::whoami(&client, out).await,
+        Command::User(UserCommand::Add {
+            name,
+            admin,
+            password_file,
+        }) => {
+            let file = password_file.map(|file| cwd.join(file));
+            login::user_add(&client, &name, admin, file.as_deref(), out).await
+        }
+        Command::User(UserCommand::Ls) => login::user_ls(&client, out).await,
         // written above, before the config was read
         Command::Skill { .. } => unreachable!("the skill is written before the config is read"),
         Command::Claude(_) => unreachable!("a repo is set up before the config is read"),

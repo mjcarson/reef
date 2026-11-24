@@ -45,15 +45,20 @@
 //! - **Every terminal loop in one partition** ([`loops`]): each a row under the pane it feeds,
 //!   so a pane keeps one loop, and every change to one is judged against them all under one
 //!   lock, so two loops never hold one node.
+//! - **Every user and every token in a partition of its own** ([`users`]): a user under their
+//!   name with their password's hash, added under one lock and judged against every user, and a
+//!   token under its hash alone, so no token is ever stored.
 
 mod comment;
 mod decision;
 mod follow;
 mod loops;
 mod revision;
+mod users;
 mod work;
 
 pub use comment::{Followed, Pending};
+pub use users::{StoredToken, StoredUser, UserKept};
 
 pub use revision::FILE_ROW_MAX;
 
@@ -181,6 +186,8 @@ pub struct Store<B = ShoalBackend> {
     loop_lock: tokio::sync::Mutex<()>,
     /// Each project's decisions' lock, held alone by their writes
     decisions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The users' lock, held to add one, so two can't both be the first
+    user_lock: tokio::sync::Mutex<()>,
 }
 
 impl Store<ShoalBackend> {
@@ -235,6 +242,7 @@ impl<B: Backend> Store<B> {
             comments: Mutex::new(HashMap::new()),
             loop_lock: tokio::sync::Mutex::new(()),
             decisions: Mutex::new(HashMap::new()),
+            user_lock: tokio::sync::Mutex::new(()),
         }
     }
 

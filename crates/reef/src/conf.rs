@@ -2,7 +2,9 @@
 //!
 //! The CLI reads the service's own config file, found by `reef_api::config`, so the two meet at
 //! the address one file names. It reads `[api] address` alone and ignores every other key, since
-//! the service is what checks the rest of the file.
+//! the service is what checks the rest of the file. The token it signs in with is kept apart, in
+//! a credentials file of the user's own ([`credentials`](crate::credentials)), which
+//! `--credentials` can name.
 //!
 //! ```toml
 //! [api]
@@ -23,6 +25,10 @@ pub struct Conf {
     /// The file this was read from, if one was
     #[serde(skip)]
     pub source: Option<PathBuf>,
+    /// The credentials file `--credentials` named, if it named one, over the environment's and
+    /// the default
+    #[serde(skip)]
+    pub credentials: Option<PathBuf>,
 }
 
 /// Where the JSON API is served

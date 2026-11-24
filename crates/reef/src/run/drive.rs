@@ -33,6 +33,8 @@ pub struct Spawn {
     pub pane: Pane,
     /// The config the runner was named, which its MCP server and hooks read too
     pub conf: Option<PathBuf>,
+    /// The credentials file the runner was named, which its MCP server and hooks sign in with
+    pub credentials: Option<PathBuf>,
 }
 
 impl Spawn {
@@ -50,6 +52,7 @@ impl Spawn {
     ///     cwd: "/src/reef".into(),
     ///     pane: "reef:k3x9-4242".parse().unwrap(),
     ///     conf: None,
+    ///     credentials: None,
     /// };
     /// assert_eq!(
     ///     spawn.args().join(" "),
@@ -140,6 +143,10 @@ impl Claude {
         cmd.env("REEF_PANE", spawn.pane.to_string());
         if let Some(conf) = &spawn.conf {
             cmd.env("REEF_CONFIG", conf);
+        }
+        // and the credentials file it was named, which every `reef` the session runs signs in with
+        if let Some(credentials) = &spawn.credentials {
+            cmd.env(crate::credentials::CREDENTIALS_VAR, credentials);
         }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())

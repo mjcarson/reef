@@ -17,6 +17,7 @@
 //! this is shoal's client half alone and builds on stable.
 
 pub mod api;
+pub mod auth;
 pub mod backend;
 #[cfg(feature = "embedded")]
 pub mod checks;
@@ -33,13 +34,14 @@ pub mod store;
 
 pub use backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 pub use client::{Mode, ShoalBackend};
-pub use conf::{ApiSettings, Conf, ShoalSettings};
+pub use conf::{ApiSettings, AuthSettings, Conf, ShoalSettings};
 pub use memory::MemoryBackend;
-pub use service::Service;
+pub use service::{Asker, NotAllowed, NotSignedIn, Service};
 pub use store::{
     AddCapture, AddedProject, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX, FileDiff,
     FileSummary, Followed, Listing, Pending, NodePut, NodeRemove, NodeWrite, NotListed, NotRegistered,
     PageEdit, PageEdited, PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Proposal,
     Put, Puts, QueueEdit, Queued, Ranked, Revision, Rewrite, Rewritten, StalePut, StartWork,
-    Started, Store, StoredNode, StoredPage, Unkeepable, WorkRecord, WorkStart,
+    Started, Store, StoredNode, StoredPage, StoredToken, StoredUser, Unkeepable, UserKept,
+    WorkRecord, WorkStart,
 };

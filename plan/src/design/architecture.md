@@ -158,7 +158,74 @@ versions, validation, atomic writes and derived state would each be written seve
   stream, and one that falls behind is told how many changes it missed.
 - **Each new kind of data adds three things:** an operation on the service, a JSON route and a
   server function. This holds for the queue, work records, comments and the loop's state.
-- **Localhost only** until [M10](../milestones/m10.md).
+- **Signed in when reef's config asks, and localhost only.** One layer signs callers in for
+  both front doors ([Users and sign-in](#users-and-sign-in)), and the service listens on
+  loopback only until it serves over TLS ([C51](../milestones/m10.md)).
+
+## Users and sign-in
+
+Beyond one machine, reef can't tell who is editing, and anyone who reaches its port can read and
+write every plan ([C48](../milestones/m10.md)). Users sign in, and one axum layer guards both front doors. It
+comes first in [M10](../milestones/m10.md), since an author on every write ([C50](../milestones/m10.md)) and serving beyond
+localhost ([C51](../milestones/m10.md)) both build on it.
+
+### Design choices
+
+- **Off unless reef's config asks for it.** `[auth] required = true` turns sign-in on. Off, the
+  default, every caller is answered as before, so a single user's server on localhost, reef's own
+  among them, runs with no login at all.
+- **One layer for both front doors.** `auth::guard` in reef-service wraps the JSON API in
+  reef-serve, and reef-app's whole router: its pages, its server functions, the JSON API it
+  mounts and Dioxus's static files. It finds who is calling, from `Authorization: Bearer` or the
+  sign-in cookie, and hands every route a `Caller`, which the app's server functions read through
+  Dioxus's request context.
+- **Everything is guarded but signing in.** With sign-in on, a caller who isn't signed in reaches
+  only the sign-in page and its form, the token route, `/api/v1/me`, the users' routes, which
+  judge their callers themselves, and the app's stylesheet and static files. A page a browser
+  opens is sent to `/sign-in?next=…`. The app's server functions, the JSON API, a fetched doc
+  and the change stream are answered 401, with `WWW-Authenticate: Bearer`.
+- **Users in shoal, passwords as argon2id hashes.** A user is a row under their name, and a token
+  a row under its SHA-256 ([Users and tokens](store.md#users-and-tokens)). Hashing runs off the
+  async threads, two at a time, since each takes 19 MiB and a core.
+- **A password is traded for a token once.** `reef login` asks for the password on the terminal
+  with echo off, or reads `--password-file`, and keeps only the token the service issues, 32
+  random bytes shown once. The CLI, the MCP server, the hooks and a runner's sessions send it as
+  `Authorization: Bearer`, read again for each request, so a process started before the login
+  sends it too.
+- **Tokens kept a server each, in a file of the user's own.**
+  `$XDG_CONFIG_HOME/reef/credentials.toml`, readable by its owner alone, keyed by the server's
+  root. `--credentials` names another file, `$REEF_TOKEN` gives a token outright, and
+  `$REEF_CREDENTIALS` names a file, in that order, so a test or a script decides for itself.
+- **A browser signs in on the service's own page.** `/sign-in` is plain HTML reef-service
+  serves, so reef-serve has one too, under a policy that lets no script run. Its form sets an
+  HttpOnly, SameSite=Strict cookie for 30 days, without `Secure` until TLS, and goes on only to a
+  path of this origin.
+- **The first user comes from the service's own host,** and is an admin. After that only an admin
+  adds or lists users. This holds whether sign-in is on or off, so users can be added before it
+  is turned on, and nobody can plant an admin while it is off.
+- **A wrong name and a wrong password are told alike.** A name no user has is checked against a
+  hash made for the purpose, so it takes as long, and both get the same words.
+- **Tokens looked up are trusted for a minute,** in the service's memory, so a request costs no
+  read of shoal. reef-service is shoal's only writer, so a revoke drops its token at once.
+- **What sign-in leaves to later.** A cookie ignores ports, so a page on another loopback port is
+  same-site, and nothing checks a request's origin: [C51](../milestones/m10.md) adds origin and CSRF checks
+  with TLS. Changing a password, removing a user, listing and revoking tokens and slowing
+  repeated failures are [C77](../milestones/m10.md)'s, and every write's author is [C50](../milestones/m10.md)'s.
+
+### What C48 found
+
+- **Thirteen tables overflow a shard's stack in a debug build.** glommio starts each of shoal's
+  shards on a thread with std's default 2 MiB stack, and adding `UserRow` and `TokenRow` pushed an
+  unoptimised shard past it, so every embedded test aborted. The servers set `RUST_MIN_STACK` to
+  8 MiB first thing in `main`, before any thread starts, and `central/.cargo/config.toml` does
+  the same for `cargo test` and `cargo run`.
+- **No fresh data directory.** A data directory the binary before C48 wrote read back under
+  C48's, which added the two tables beside it.
+- **Server functions run while a page renders see the guard's caller,** since Dioxus's request
+  context carries the request's extensions, so the bar says whom the server takes the browser for
+  from the first paint.
+- **The sign-in page's policy blocks a script's fetch,** as `default-src 'none'` should, so
+  nothing injected into the page could call the API with its cookie.
 
 ## The CLI
 

@@ -2082,6 +2082,7 @@ dependencies = [
  "reef-render",
  "reqwest",
  "rmcp",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",
