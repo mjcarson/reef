@@ -41,3 +41,6 @@ hosts = ["github.com"]              # the only hosts a remote may be cloned from
   account's data directory is closed to other accounts, so copy `ca.pem` out once the server
   has made it, and name the copy as `ca`:
   `sudo install -m 0644 /var/lib/reef/certs/ca.pem /etc/reef/reef-ca.pem`.
+- **`[shoal] exclude_cores` keeps the shards off cores,** listed as physical cores, both threads of
+  each, such as `[0, 1, 2, 3]`; unset, they may take any cpu but cpu 0. A machine that also
+  runs shoal's benchmarks wants it, and a port off theirs: see [Beside a benchmark](benchmarks.md).

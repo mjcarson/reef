@@ -161,6 +161,8 @@ pub fn shoal_conf(settings: &ShoalSettings, dir: &Path) -> anyhow::Result<Conf> 
     // since with no `resources` it is 0 and eviction never stops
     let resources = Resources::default()
         .cores(settings.cores)
+        // kept off the physical cores something else on this machine owns, such as a benchmark
+        .exclude_cores(settings.exclude_cores.clone())
         .memory(settings.memory.as_str())
         .map_err(|error| {
             anyhow::anyhow!("shoal's memory budget `{}`: {error:?}", settings.memory)
@@ -179,4 +181,52 @@ pub fn shoal_conf(settings: &ShoalSettings, dir: &Path) -> anyhow::Result<Conf> 
         .resources(resources)
         .networking(networking)
         .storage(storage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shoal_conf;
+    use crate::conf::ShoalSettings;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// The pool's shards keep off every physical core the config excludes
+    #[test]
+    fn shards_keep_off_excluded_cores() {
+        // a pool asked for more shards than any machine has cpus takes every one it may
+        let settings = ShoalSettings {
+            cores: 4096,
+            ..ShoalSettings::default()
+        };
+        let every = shoal_conf(&settings, Path::new("/var/tmp"))
+            .expect("the config builds")
+            .resources
+            .cpus()
+            .expect("the cpus are read");
+        // the physical cores those cpus are on
+        let cores = every
+            .iter()
+            .map(|location| location.core)
+            .collect::<BTreeSet<_>>();
+        // keep the last core alone, excluding every other one
+        let kept = *cores
+            .last()
+            .expect("this machine has a core besides cpu 0's");
+        let settings = ShoalSettings {
+            cores: 1,
+            exclude_cores: cores.iter().copied().filter(|core| *core != kept).collect(),
+            ..ShoalSettings::default()
+        };
+        let chosen = shoal_conf(&settings, Path::new("/var/tmp"))
+            .expect("the config builds")
+            .resources
+            .cpus()
+            .expect("the cpus are read");
+        // the one shard is on the core that was kept
+        let chosen = chosen
+            .iter()
+            .map(|location| location.core)
+            .collect::<Vec<_>>();
+        assert_eq!(chosen, [kept]);
+    }
 }

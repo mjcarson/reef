@@ -13,6 +13,8 @@
 //! data = "/home/me/.local/share/reef/shoal"
 //! # how many shards the in-process pool runs, each on a core of its own
 //! cores = 2
+//! # the physical cores its shards keep off, both threads of each, such as a benchmark's
+//! exclude_cores = [0, 1, 2, 3]
 //! # each shard's memory budget
 //! memory = "256MiB"
 //!
@@ -85,17 +87,23 @@ pub struct ShoalSettings {
     pub data: Option<PathBuf>,
     /// How many shards the in-process pool runs
     pub cores: usize,
+    /// The physical cores the in-process pool's shards keep off, both threads of each
+    ///
+    /// shoal reads the machine's cpus from sysfs rather than the process's affinity mask, so
+    /// this, not `taskset` or a unit's `CPUAffinity=`, is what moves the shards.
+    pub exclude_cores: Vec<usize>,
     /// Each in-process shard's memory budget, such as `256MiB`
     pub memory: String,
 }
 
 impl Default for ShoalSettings {
-    /// In-process, with two shards of 256 MiB each, its data in the default directory
+    /// In-process, with two shards of 256 MiB each on any core, its data in the default directory
     fn default() -> Self {
         ShoalSettings {
             address: None,
             data: None,
             cores: 2,
+            exclude_cores: Vec::new(),
             memory: "256MiB".to_string(),
         }
     }
@@ -349,8 +357,24 @@ mod tests {
         assert_eq!(conf.shoal.cores, 4);
         assert_eq!(conf.shoal.memory, "256MiB");
         assert_eq!(conf.shoal.data, None);
+        assert!(conf.shoal.exclude_cores.is_empty());
         // the API listens on localhost unless told otherwise
         assert_eq!(conf.api.address.to_string(), reef_api::DEFAULT_ADDRESS);
+    }
+
+    /// The in-process pool keeps off no core unless the config lists some
+    #[test]
+    fn exclude_cores_lists_physical_cores() {
+        // nothing said is every core
+        let conf: Conf = toml::from_str("").expect("an empty config parses");
+        assert!(conf.shoal.exclude_cores.is_empty());
+        // and a list, those cores alone
+        let conf: Conf =
+            toml::from_str("[shoal]\ncores = 1\nexclude_cores = [0, 1, 2]\n").expect("it parses");
+        assert_eq!(conf.shoal.exclude_cores, [0, 1, 2]);
+        // a core is a count, so a negative one is refused
+        let parsed = toml::from_str::<Conf>("[shoal]\nexclude_cores = [-1]\n");
+        assert!(parsed.is_err(), "a negative core was read");
     }
 
     /// Sign-in is off unless the config says it is required, and a misspelt key is refused
