@@ -38,6 +38,7 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   | Find work | `mcp__reef__next` | `reef next` |
   | Take the loop's next node | `mcp__reef__next_task` | `reef loop take` |
   | Work a group's member here | | `reef loop attach <ID>` |
+  | Show this session in the app | | `! reef loop run`, then `! reef loop detach` |
   | Read a node's YAML | `mcp__reef__get` | `reef node get <ID>` |
   | Read its body too | | `reef node get <ID> --md` |
   | Check the plan | `mcp__reef__check` | `reef check` |

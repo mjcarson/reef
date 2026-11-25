@@ -1,5 +1,5 @@
-//! The sessions panel: the runners attached to a project, each one's session's transcript as it
-//! comes, and the prompts it waits on, answered here
+//! The sessions panel: the sessions attached to a project, a runner's or a terminal's, each
+//! one's transcript as it comes, and the prompts a runner's waits on, answered here
 //!
 //! - **Beside the canvas, opened from the bar.** The panel is a column of the plan's page, so
 //!   moving between a project's plans keeps it. The bar's button counts the live sessions and the
@@ -13,7 +13,11 @@
 //!   answer in the user's own words, sent as Claude Code's own dialog sends them. A plan shows
 //!   as the service rendered it, to approve, or to reject with feedback Claude plans again from.
 //! - **A runner's loop is started, paused and stopped here,** as `reef loop start`, `pause` and
-//!   `stop` do a terminal's. A terminal's loops are listed beside, to read.
+//!   `stop` do a terminal's.
+//! - **A terminal's own session is a row to read.** `! reef loop run` typed in a Claude Code
+//!   session attaches it, and its row shows its pane, its loop's node and its transcript live,
+//!   with no buttons, cards or reply box, since its terminal answers it. A terminal's loop with
+//!   no session attached is listed beside, to read.
 
 use crate::calls::{self, Runners as Listing};
 use crate::canvas::dom::{self, El};
@@ -75,6 +79,9 @@ impl Runners {
                 Ok(SessionActed::Gone { .. }) => {
                     Some("The runner is gone: run `reef loop run` again to attach one.".to_string())
                 }
+                Ok(SessionActed::InTerminal { .. }) => Some(
+                    "That session is a terminal's, so it is answered in its terminal.".to_string(),
+                ),
                 Err(error) => Some(format!("Asking the session failed: {error}")),
             };
             problem.set(said);
@@ -141,7 +148,7 @@ pub fn SessionsButton() -> Element {
         button {
             class,
             "aria-pressed": "{open}",
-            title: "The sessions reef's runners run, and what they wait on",
+            title: "The sessions attached to central reef, reef's runners' and terminals', and what the runners wait on",
             onclick: move |_| {
                 let shown = *open.peek();
                 open.set(!shown);
@@ -155,7 +162,51 @@ pub fn SessionsButton() -> Element {
     }
 }
 
-/// The sessions panel: each runner, a terminal's loops, and the picked session's transcript
+/// The sessions panel's rows, as a listing splits into them
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rows {
+    /// The live sessions, a runner's or a terminal's, each beside its pane's loop
+    pub live: Vec<(Session, Option<Loop>)>,
+    /// The sessions that let go or went silent, each beside its pane's loop
+    pub ended: Vec<(Session, Option<Loop>)>,
+    /// The loops in terminals that no live session is attached on
+    pub terminals: Vec<Loop>,
+}
+
+/// Splits a project's sessions and loops into the panel's rows: each session beside its pane's
+/// loop, live or ended, and each terminal's loop that no live session shows
+///
+/// # Arguments
+///
+/// * `listing` - The sessions and loops
+pub fn rows_of(listing: &Listing) -> Rows {
+    // each session beside the loop its pane keeps
+    let rows: Vec<(Session, Option<Loop>)> = listing
+        .sessions
+        .iter()
+        .map(|session| {
+            let feeding = listing.loops.iter().find(|l| l.pane == session.pane);
+            (session.clone(), feeding.cloned())
+        })
+        .collect();
+    let (live, ended): (Vec<_>, Vec<_>) = rows.into_iter().partition(|(session, _)| session.live());
+    // a terminal's loop is shown by its live session's row, else on its own
+    let terminals = listing
+        .loops
+        .iter()
+        .filter(|feeding| !feeding.pane.runs())
+        .filter(|feeding| !live.iter().any(|(session, _)| session.pane == feeding.pane))
+        .cloned()
+        .collect();
+    Rows {
+        live,
+        ended,
+        terminals,
+    }
+}
+
+/// The sessions panel: each session attached, a terminal's loops with none, and the picked
+/// session's transcript
 #[component]
 pub fn SessionPanel() -> Element {
     let runners = use_context::<Runners>();
@@ -186,39 +237,31 @@ pub fn SessionPanel() -> Element {
                         .find(|session| session.live())
                         .map(|session| session.id.clone())
                 });
-            let terminals: Vec<Loop> = listing
-                .loops
-                .iter()
-                .filter(|feeding| !feeding.pane.runs())
-                .cloned()
-                .collect();
-            // each runner beside its loop: the live ones, and those that let go or went silent
-            let rows: Vec<(Session, Option<Loop>)> = listing
-                .sessions
-                .iter()
-                .map(|session| {
-                    let feeding = listing.loops.iter().find(|l| l.pane == session.pane);
-                    (session.clone(), feeding.cloned())
-                })
-                .collect();
-            let (live, ended): (Vec<_>, Vec<_>) =
-                rows.into_iter().partition(|(session, _)| session.live());
+            // each session beside its loop, a runner's with its buttons and a terminal's to read
+            let Rows {
+                live,
+                ended,
+                terminals,
+            } = rows_of(&listing);
             let row = |(session, feeding): (Session, Option<Loop>)| {
-                rsx! {
-                    RunnerRow {
-                        key: "{session.id}",
-                        picked: picked.as_deref() == Some(session.id.as_str()),
-                        session,
-                        feeding,
-                    }
+                let picked = picked.as_deref() == Some(session.id.as_str());
+                match session.pane.runs() {
+                    true => rsx! {
+                        RunnerRow { key: "{session.id}", picked, session, feeding }
+                    },
+                    false => rsx! {
+                        AttachedRow { key: "{session.id}", picked, session, feeding }
+                    },
                 }
             };
             rsx! {
                 if live.is_empty() {
                     p { class: "reef-app-muted",
-                        "No runner is attached. Run "
+                        "Nothing is attached. Run "
                         code { "reef loop run" }
-                        " in the project's repo to attach one."
+                        " in the project's repo to attach a runner, or type "
+                        code { "! reef loop run" }
+                        " in a Claude Code session to show that session here."
                     }
                 }
                 ul { class: "reef-app-runners", {live.into_iter().map(row)} }
@@ -342,6 +385,60 @@ fn RunnerRow(session: Session, feeding: Option<Loop>, picked: bool) -> Element {
     }
 }
 
+/// A terminal's own session, attached by `! reef loop run`: its pane, host, checkout, where it
+/// stands and its loop's node, to read and pick, with no buttons, since its terminal answers it
+///
+/// # Arguments
+///
+/// * `session` - The session
+/// * `feeding` - Its pane's loop, if one is started
+/// * `picked` - Whether its transcript is the one shown
+#[component]
+pub fn AttachedRow(session: Session, feeding: Option<Loop>, picked: bool) -> Element {
+    // picked through the panel's context, which a row drawn alone has none of
+    let runners = try_use_context::<Runners>();
+    let state = session.state;
+    // its checkout's last part, and its loop's node
+    let place = session
+        .cwd
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let node = feeding
+        .as_ref()
+        .and_then(|feeding| feeding.node.as_ref())
+        .map(|node| node.id.clone());
+    let paused = feeding
+        .as_ref()
+        .is_some_and(|feeding| feeding.state == LoopState::Paused);
+    let id = session.id.clone();
+    rsx! {
+        li {
+            class: if picked { "reef-app-runner attached picked" } else { "reef-app-runner attached" },
+            "data-session": "{session.id}",
+            onclick: move |_| {
+                if let Some(runners) = runners {
+                    let mut selected = runners.selected;
+                    selected.set(Some(id.clone()));
+                }
+            },
+            div { class: "reef-app-runner-top",
+                strong { "{session.host}" }
+                span { class: "reef-app-runner-where", "{place}" }
+                span { class: "reef-app-session-state s-{state_class(state)}", "{state.describe()}" }
+            }
+            div { class: "reef-app-runner-where", "In {session.pane.describe()}" }
+            div { class: "reef-app-runner-loop",
+                match (&feeding, &node) {
+                    (None, _) => rsx! { span { class: "reef-app-muted", "No loop started, answered in its terminal" } },
+                    (Some(_), None) => rsx! { span { class: "reef-app-muted", if paused { "Paused, holding nothing" } else { "Running, holding nothing" } } },
+                    (Some(_), Some(node)) => rsx! { span { if paused { "Paused on " } else { "On " } code { "{node}" } } },
+                }
+            }
+        }
+    }
+}
+
 /// A session's state as a class name
 ///
 /// # Arguments
@@ -431,13 +528,16 @@ pub fn SessionView(id: String) -> Element {
         section { class: "reef-app-session", "data-session": "{id}",
             if let Some(shown) = &shown {
                 p { class: "reef-app-session-sum",
-                    "Session on "
+                    if shown.pane.runs() { "Session on " } else { "Terminal session on " }
                     strong { "{shown.host}" }
                     if let Some(claude) = &shown.claude {
                         ", Claude "
                         code { "{claude}" }
                     }
                     ": {shown.state.describe()}"
+                    if !shown.pane.runs() {
+                        ", answered in its terminal"
+                    }
                 }
             }
             ol {
@@ -448,7 +548,7 @@ pub fn SessionView(id: String) -> Element {
                 }
             }
             if let Some(shown) = &shown {
-                if shown.live() {
+                if shown.live() && shown.pane.runs() {
                     for prompt in shown.prompts.iter().cloned() {
                         PromptCard {
                             key: "{prompt.id}",
@@ -960,8 +1060,88 @@ fn ReplyBox(session: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::unchanged;
-    use reef_api::{Answer, Entry, EntryKind, Prompt, PromptKind};
+    use super::{Rows, rows_of, unchanged};
+    use crate::calls::Runners as Listing;
+    use reef_api::{
+        Answer, Entry, EntryKind, Loop, LoopState, Pane, Prompt, PromptKind, Session, SessionState,
+    };
+
+    /// A session on a pane, standing as said
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `pane` - Its pane's key
+    /// * `state` - Where it stands
+    fn session(id: &str, pane: &str, state: SessionState) -> Session {
+        Session {
+            id: id.to_string(),
+            pane: pane.parse().unwrap(),
+            project: "reef".to_string(),
+            plan: None,
+            host: "box".to_string(),
+            cwd: "/src/reef".into(),
+            attached_at: 0,
+            seen_at: u64::MAX,
+            state,
+            claude: None,
+            entries: 0,
+            prompts: Vec::new(),
+        }
+    }
+
+    /// A running loop on a pane, holding a node of `reef/central`
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - Its pane's key
+    /// * `node` - The node it holds
+    fn looped(pane: &str, node: &str) -> Loop {
+        Loop {
+            pane: pane.parse::<Pane>().unwrap(),
+            project: "reef".to_string(),
+            plan: None,
+            session: None,
+            acted: None,
+            node: Some(format!("reef/central/{node}").parse().unwrap()),
+            state: LoopState::Running,
+            version: 1,
+            started_at: 0,
+            width: 1,
+            opens: false,
+            pid: None,
+            members: Vec::new(),
+        }
+    }
+
+    /// A runner and a terminal's session are live rows beside their loops, a session replaced on
+    /// its pane is ended, and only a terminal's loop no live session shows is listed on its own
+    #[test]
+    fn a_listing_splits_into_the_panels_rows() {
+        let runner = session("r1", "reef:r1", SessionState::Idle);
+        let attached = session("t2", "claude:7", SessionState::Working);
+        let replaced = session("t1", "claude:7", SessionState::Detached);
+        let (on_runner, on_terminal, alone) = (
+            looped("reef:r1", "C45"),
+            looped("claude:7", "C84"),
+            looped("tmux:/tmp/t:%3", "C85"),
+        );
+        let listing = Listing {
+            sessions: vec![runner.clone(), replaced.clone(), attached.clone()],
+            loops: vec![on_runner.clone(), on_terminal.clone(), alone.clone()],
+        };
+        assert_eq!(
+            rows_of(&listing),
+            Rows {
+                live: vec![
+                    (runner, Some(on_runner)),
+                    (attached, Some(on_terminal.clone()))
+                ],
+                ended: vec![(replaced, Some(on_terminal))],
+                terminals: vec![alone],
+            }
+        );
+    }
 
     /// A plan prompt, by its id and text
     ///

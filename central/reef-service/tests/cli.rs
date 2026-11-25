@@ -3532,7 +3532,7 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
     let client = reef::Client::new(&conf)?;
     let cleared = r#"{"session_id":"s2","source":"clear","hook_event_name":"SessionStart"}"#;
     let mut printed = Vec::new();
-    reef::loops::session_start(&client, cleared, &pane.parse()?, None, &mut printed).await?;
+    reef::loops::session_start(&client, cleared, &pane.parse()?, None, None, &mut printed).await?;
     assert!(printed.is_empty());
     let listed = cx.reef(&repo, &["loop", "ls"]).await?;
     assert_eq!(
@@ -3587,7 +3587,7 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
         "{gone}"
     );
     let mut printed = Vec::new();
-    reef::loops::session_start(&client, cleared, &pane.parse()?, None, &mut printed).await?;
+    reef::loops::session_start(&client, cleared, &pane.parse()?, None, None, &mut printed).await?;
     assert!(printed.is_empty());
     // and a pane's key that names none says what one is
     let (_, bad) = cx

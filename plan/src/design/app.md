@@ -334,7 +334,8 @@ and comments ([C76](../milestones/m9.md)).
 A runner the user started, `reef loop run`, runs a loop's sessions headless, and central reef
 relays them ([The loop in the app](feed-loop.md#later-the-loop-in-the-app)). The app shows each
 session's transcript as it comes, starts, pauses and stops the runner's loop, and answers what
-the session waits on ([C45](../milestones/m9.md)).
+the session waits on ([C45](../milestones/m9.md)). A Claude Code session the user is in shows there too,
+once `! reef loop run` typed in it attaches it ([C84](../milestones/m8.md)).
 
 ### Design choices
 
@@ -348,9 +349,12 @@ the session waits on ([C45](../milestones/m9.md)).
 - **A transcript is read after what it holds.** Each read asks for the entries after the last
   one held, and the list follows its end as they come. A session keeps its last 2,000 entries,
   so a read that finds its entries let go starts again from the oldest kept.
-- **Each runner a row, a terminal's loops beside.** A runner shows its host, its checkout, where
+- **Each session a row, a terminal's own to read.** A runner shows its host, its checkout, where
   its session stands and its loop's node, with *Start a loop*, *Resume*, *Pause* and *Stop* as
-  its loop allows. A terminal's loops are listed to read, since only their own pane drives them.
+  its loop allows. A terminal's session attached with `! reef loop run` shows the same, and its
+  pane, with no buttons: its picked transcript shows no cards and no reply box, and says it is
+  answered in its terminal, since only its terminal drives it ([C84](../milestones/m8.md)). A terminal's
+  loop with no session attached on its pane is listed beside, to read.
 - **Each prompt a card.** A tool's permission shows its input, to allow or to deny with what
   Claude is told. A reply box shows while Claude's turn has ended mid-node.
 - **A question as Claude asked it** ([C46](../milestones/m9.md)). Each of Claude's questions shows with

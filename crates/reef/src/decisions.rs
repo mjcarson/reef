@@ -221,7 +221,7 @@ pub fn read(text: &str, via: Via) -> Vec<Read> {
 ///
 /// * `tool` - The tool called
 /// * `input` - Its input
-fn asked(tool: &str, input: &Value) -> Option<DecisionKind> {
+pub(crate) fn asked(tool: &str, input: &Value) -> Option<DecisionKind> {
     match tool {
         EXIT_PLAN => Some(DecisionKind::Plan {
             plan: input["plan"].as_str()?.to_string(),
@@ -241,7 +241,7 @@ fn asked(tool: &str, input: &Value) -> Option<DecisionKind> {
 /// * `refused` - Whether its result was an error, as a refusal's is
 /// * `said` - Its result's text
 /// * `record` - Claude Code's own record of its result
-fn outcome(tool: &str, refused: bool, said: &str, record: &Value) -> Outcome {
+pub(crate) fn outcome(tool: &str, refused: bool, said: &str, record: &Value) -> Outcome {
     match (tool, refused) {
         (EXIT_PLAN, false) => Outcome::Approved,
         (EXIT_PLAN, true) => Outcome::Rejected {
@@ -327,7 +327,7 @@ fn answers_said(said: &str) -> BTreeMap<String, String> {
 /// # Arguments
 ///
 /// * `content` - The result's `content`
-fn content_text(content: &Value) -> String {
+pub(crate) fn content_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
         Value::Array(blocks) => blocks

@@ -21,11 +21,13 @@
 pub mod drive;
 pub mod transcript;
 
+use reef_api::session::KEPT_ENTRIES;
 use reef_api::{
     Attach, EditLoop, Entry, EntryKind, Loop, LoopEdit, LoopState, Order, Ordered, Pane, Prompt,
-    Report, SessionState,
+    Report, Session, SessionState,
 };
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -39,19 +41,19 @@ use drive::{Claude, Line, Spawn};
 use transcript::Read;
 
 /// How long one ask for orders may wait for one
-const ORDERS_WAIT: Duration = Duration::from_secs(25);
+pub(crate) const ORDERS_WAIT: Duration = Duration::from_secs(25);
 
 /// How long a session is given to end once its stdin is closed, before it is killed
 const END_WAIT: Duration = Duration::from_secs(10);
 
 /// How long to wait before asking again after central reef didn't answer
-const RETRY: Duration = Duration::from_secs(2);
+pub(crate) const RETRY: Duration = Duration::from_secs(2);
 
 /// What `reef loop run` was asked
 #[derive(Debug, Clone, Default)]
 pub struct Runs {
-    /// The Claude Code to run
-    pub claude: String,
+    /// The Claude Code to run, else `claude`
+    pub claude: Option<String>,
     /// Whether to start the loop at once, rather than wait for the app to
     pub start: bool,
     /// The permission mode each session starts in, if not Claude Code's default
@@ -162,15 +164,15 @@ pub fn decide(feeding: Option<&Loop>, proc: Proc, why: Why, coming: bool) -> Ste
 }
 
 /// The current time in milliseconds since the epoch
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
         .unwrap_or(0)
 }
 
-/// A runner's id: when it started, in base 36, and its process's id
-fn runner_id() -> String {
+/// A runner's id, or a terminal's session's: when it started, in base 36, and its process's id
+pub(crate) fn runner_id() -> String {
     // the time in base 36, short and sorted by when it started
     let mut ms = now_ms();
     let mut digits = Vec::new();
@@ -245,16 +247,166 @@ fn prompt_line(prompt: &Prompt) -> String {
     }
 }
 
+/// A session's side of central reef, the runner's and the follower's alike: what it attaches
+/// with, the transcript it holds, what it hasn't reported yet, and where it stands
+///
+/// - **One writer, each report awaited.** A report is sent only once the last was answered, and
+///   a failed one keeps its entries for the next, so they arrive once and in order.
+/// - **Attached again whole.** A service that restarted forgets the session, so the next report
+///   or ask for orders attaches again with the latest [`KEPT_ENTRIES`] entries held, as many as
+///   central reef keeps.
+pub(crate) struct Relay<'a> {
+    /// Central reef's client
+    client: &'a Client,
+    /// What it attaches with: its pane, its own id if it names one, project, plan, host and
+    /// checkout
+    attach: Attach,
+    /// Its session's id
+    pub(crate) id: String,
+    /// Where it stands, as last said
+    pub(crate) state: SessionState,
+    /// Claude Code's id for the session running, if one is
+    pub(crate) claude: Option<String>,
+    /// The transcript's latest entries, which it sends again if central reef forgets it
+    held: VecDeque<Entry>,
+    /// The entries not reported yet
+    unsent: Vec<Entry>,
+    /// Whether its state, prompts or Claude changed since its last report
+    pub(crate) dirty: bool,
+}
+
+impl<'a> Relay<'a> {
+    /// A relay for a session that isn't attached yet, standing as said
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - Central reef's client
+    /// * `attach` - What it attaches with, its state, entries and prompts set as it attaches
+    /// * `id` - Its session's id
+    pub(crate) fn new(client: &'a Client, attach: Attach, id: String) -> Relay<'a> {
+        // standing as the attach says, holding nothing yet
+        Relay {
+            client,
+            state: attach.state,
+            claude: attach.claude.clone(),
+            attach,
+            id,
+            held: VecDeque::new(),
+            unsent: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    /// Adds an entry to the transcript, letting go of the oldest held past [`KEPT_ENTRIES`]
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The entry
+    pub(crate) fn push(&mut self, entry: Entry) {
+        // held to attach again with, and kept for the next report
+        self.held.push_back(entry.clone());
+        while self.held.len() > KEPT_ENTRIES {
+            self.held.pop_front();
+        }
+        self.unsent.push(entry);
+    }
+
+    /// Stands as said, reporting it if it changed
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Where it now stands
+    pub(crate) fn stand(&mut self, state: SessionState) {
+        // only a change is worth reporting
+        if self.state != state {
+            self.state = state;
+            self.dirty = true;
+        }
+    }
+
+    /// Names the Claude Code session running, reporting it if it changed
+    ///
+    /// # Arguments
+    ///
+    /// * `claude` - Claude Code's id for it, if one runs
+    pub(crate) fn run_claude(&mut self, claude: Option<String>) {
+        // only a change is worth reporting
+        if self.claude != claude {
+            self.claude = claude;
+            self.dirty = true;
+        }
+    }
+
+    /// Attaches to central reef, again with everything it holds if it attached before
+    ///
+    /// # Arguments
+    ///
+    /// * `prompts` - The prompts waiting for an answer
+    pub(crate) async fn attach(&mut self, prompts: Vec<Prompt>) -> anyhow::Result<Session> {
+        // the transcript held, and where it stands now
+        let attach = Attach {
+            state: self.state,
+            entries: self.held.iter().cloned().collect(),
+            prompts,
+            claude: self.claude.clone(),
+            ..self.attach.clone()
+        };
+        let session = self.client.attach_session(&attach).await?;
+        self.unsent.clear();
+        self.dirty = false;
+        Ok(session)
+    }
+
+    /// Reports the entries since the last report and where it stands, attaching again if
+    /// central reef forgot it; a service that doesn't answer is told on the next report
+    ///
+    /// It returns the session as central reef now keeps it, or `None` if nothing was new or
+    /// the service didn't answer.
+    ///
+    /// # Arguments
+    ///
+    /// * `prompts` - The prompts waiting for an answer
+    /// * `out` - Where a failed report is said
+    pub(crate) async fn report<W: Write>(
+        &mut self,
+        prompts: Vec<Prompt>,
+        out: &mut W,
+    ) -> anyhow::Result<Option<Session>> {
+        // nothing new is nothing to say
+        if self.unsent.is_empty() && !self.dirty {
+            return Ok(None);
+        }
+        let report = Report {
+            entries: self.unsent.clone(),
+            state: self.state,
+            claude: self.claude.clone(),
+            prompts: prompts.clone(),
+        };
+        match self.client.report_session(&self.id, &report).await {
+            Ok(Some(session)) => {
+                self.unsent.clear();
+                self.dirty = false;
+                Ok(Some(session))
+            }
+            // a service that restarted forgot the session, so it is attached again whole
+            Ok(None) => self.attach(prompts).await.map(Some),
+            // kept for the next report
+            Err(error) => {
+                let _ = writeln!(out, "reef: reporting to central reef failed: {error:#}");
+                Ok(None)
+            }
+        }
+    }
+}
+
 /// A runner: its session's state, what it has reported and what it holds back
 struct Runner<'a, W: Write> {
     /// Central reef's client
     client: &'a Client,
     /// How it starts each session
     spawn: Spawn,
-    /// What it attaches with: its pane, project, plan, host and checkout
-    attach: Attach,
-    /// Its session's id, its pane's
-    id: String,
+    /// Its side of central reef: its transcript, where it stands and what it hasn't reported
+    relay: Relay<'a>,
     /// Where it prints the transcript as it goes
     out: &'a mut W,
     /// The session running, if one is
@@ -263,16 +415,6 @@ struct Runner<'a, W: Write> {
     proc: Proc,
     /// Each prompt waiting for an answer, with the tool's input as Claude asked it
     raised: Vec<(Prompt, Value)>,
-    /// Where it stands, as it last decided
-    state: SessionState,
-    /// Claude Code's id for the session running
-    session: Option<String>,
-    /// The whole transcript, which it sends again if central reef forgets it
-    held: Vec<Entry>,
-    /// The entries not reported yet
-    unsent: Vec<Entry>,
-    /// Whether its state or prompts changed since its last report
-    dirty: bool,
 }
 
 impl<W: Write> Runner<'_, W> {
@@ -284,9 +426,7 @@ impl<W: Write> Runner<'_, W> {
     fn note(&mut self, kind: EntryKind) {
         // printed as a line, kept whole
         let _ = writeln!(self.out, "{}", line_of(&kind));
-        let entry = Entry { at: now_ms(), kind };
-        self.held.push(entry.clone());
-        self.unsent.push(entry);
+        self.relay.push(Entry { at: now_ms(), kind });
     }
 
     /// The prompts waiting for an answer
@@ -299,47 +439,18 @@ impl<W: Write> Runner<'_, W> {
 
     /// Attaches to central reef, again with everything it holds if it attached before
     async fn attach(&mut self) -> anyhow::Result<()> {
-        // the transcript held, and where it stands now
-        let attach = Attach {
-            state: self.state,
-            entries: self.held.clone(),
-            prompts: self.prompts(),
-            ..self.attach.clone()
-        };
-        self.client.attach_session(&attach).await?;
-        self.unsent.clear();
-        self.dirty = false;
+        // the transcript held, and the prompts waiting
+        let prompts = self.prompts();
+        self.relay.attach(prompts).await?;
         Ok(())
     }
 
     /// Reports the entries since the last report and where it stands, attaching again if
     /// central reef forgot it; a service that doesn't answer is told on the next report
     async fn report(&mut self) -> anyhow::Result<()> {
-        // nothing new is nothing to say
-        if self.unsent.is_empty() && !self.dirty {
-            return Ok(());
-        }
-        let report = Report {
-            entries: self.unsent.clone(),
-            state: self.state,
-            claude: self.session.clone(),
-            prompts: self.prompts(),
-        };
-        match self.client.report_session(&self.id, &report).await {
-            Ok(Some(_)) => {
-                self.unsent.clear();
-                self.dirty = false;
-            }
-            // a service that restarted forgot the session, so it is attached again whole
-            Ok(None) => self.attach().await?,
-            // kept for the next report
-            Err(error) => {
-                let _ = writeln!(
-                    self.out,
-                    "reef: reporting to central reef failed: {error:#}"
-                );
-            }
-        }
+        // the prompts waiting, beside what the relay holds
+        let prompts = self.prompts();
+        self.relay.report(prompts, &mut *self.out).await?;
         Ok(())
     }
 
@@ -350,10 +461,7 @@ impl<W: Write> Runner<'_, W> {
     /// * `state` - Where it now stands
     fn stand(&mut self, state: SessionState) {
         // only a change is worth reporting
-        if self.state != state {
-            self.state = state;
-            self.dirty = true;
-        }
+        self.relay.stand(state);
     }
 
     /// Reads its loop, and does what [`decide`] says
@@ -448,10 +556,10 @@ impl<W: Write> Runner<'_, W> {
         }
         // nothing it raised waits any more
         self.proc = Proc::None;
-        self.session = None;
+        self.relay.run_claude(None);
         if !self.raised.is_empty() {
             self.raised.clear();
-            self.dirty = true;
+            self.relay.dirty = true;
         }
     }
 
@@ -469,14 +577,14 @@ impl<W: Write> Runner<'_, W> {
                     prompt: prompt.clone(),
                 });
                 self.raised.push((prompt, input));
-                self.dirty = true;
+                self.relay.dirty = true;
             }
             Read::Withdrawn { id } => {
                 self.raised.retain(|(prompt, _)| prompt.id != id);
                 self.note(EntryKind::Note {
                     text: "Claude no longer waits on a prompt".to_string(),
                 });
-                self.dirty = true;
+                self.relay.dirty = true;
             }
             // anything else asked of a host is refused, so the session waits on nothing
             Read::Other { id, subtype } => {
@@ -485,8 +593,8 @@ impl<W: Write> Runner<'_, W> {
                 }
             }
             Read::Began { id, mode } => {
-                if self.session.as_deref() != Some(id.as_str()) {
-                    self.session = Some(id.clone());
+                if self.relay.claude.as_deref() != Some(id.as_str()) {
+                    self.relay.run_claude(Some(id.clone()));
                     self.note(EntryKind::Session { id, mode });
                 }
             }
@@ -496,7 +604,7 @@ impl<W: Write> Runner<'_, W> {
                 self.proc = Proc::Idle;
                 if !self.raised.is_empty() {
                     self.raised.clear();
-                    self.dirty = true;
+                    self.relay.dirty = true;
                 }
                 self.reconcile(Why::TurnEnded).await?;
             }
@@ -514,10 +622,10 @@ impl<W: Write> Runner<'_, W> {
         // an exit nobody asked for is said, and the loop asked what now
         self.claude = None;
         self.proc = Proc::None;
-        self.session = None;
+        self.relay.run_claude(None);
         if !self.raised.is_empty() {
             self.raised.clear();
-            self.dirty = true;
+            self.relay.dirty = true;
         }
         let how = code.map_or("with no code".to_string(), |code| {
             format!("with code {code}")
@@ -555,7 +663,7 @@ impl<W: Write> Runner<'_, W> {
                         .await?;
                 }
                 self.note(EntryKind::Answered { prompt, answer });
-                self.dirty = true;
+                self.relay.dirty = true;
             }
             // a reply, to a session whose turn ended mid-node
             Order::Say { text } => match (self.proc, self.claude.as_mut()) {
@@ -632,6 +740,7 @@ pub async fn run_until<W: Write>(
     let id = runner_id();
     let pane = Pane::Reef { id: id.clone() };
     let attach = Attach {
+        id: None,
         pane: pane.clone(),
         project: project.name.clone(),
         plan: pick.plan.clone(),
@@ -640,9 +749,10 @@ pub async fn run_until<W: Write>(
         state: SessionState::Idle,
         entries: Vec::new(),
         prompts: Vec::new(),
+        claude: None,
     };
     let spawn = Spawn {
-        claude: runs.claude.clone(),
+        claude: runs.claude.clone().unwrap_or_else(|| "claude".to_string()),
         args: runs.args.clone(),
         mode: runs.mode.clone(),
         cwd: root,
@@ -653,17 +763,11 @@ pub async fn run_until<W: Write>(
     let mut runner = Runner {
         client,
         spawn,
-        attach,
-        id: id.clone(),
+        relay: Relay::new(client, attach, id.clone()),
         out,
         claude: None,
         proc: Proc::None,
         raised: Vec::new(),
-        state: SessionState::Idle,
-        session: None,
-        held: Vec::new(),
-        unsent: Vec::new(),
-        dirty: false,
     };
     runner.attach().await?;
     writeln!(
@@ -722,7 +826,7 @@ async fn follow<W: Write>(
 ) -> anyhow::Result<()> {
     tokio::pin!(stop);
     let client = runner.client;
-    let id = runner.id.clone();
+    let id = runner.relay.id.clone();
     // the ask for orders, kept across lines so a line never cancels it
     let mut after = 0;
     let mut asking = Box::pin(client.session_orders(&id, after, ORDERS_WAIT));

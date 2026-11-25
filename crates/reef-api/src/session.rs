@@ -10,6 +10,10 @@
 //!   the transcript it holds.
 //! - **Prompts wait for the app.** Each prompt the session raises is pending until the app answers
 //!   it, and several can be pending at once.
+//! - **A terminal's session attaches itself.** `reef loop run` typed in a Claude Code session
+//!   attaches that session under an id of its own, on its terminal's pane, and a follower streams
+//!   its transcript. It raises no prompts, since its terminal answers them, and the app's acts on
+//!   it are refused as [`SessionActed::InTerminal`].
 
 use crate::loops::Pane;
 use serde::{Deserialize, Serialize};
@@ -21,6 +25,10 @@ pub const GONE_AFTER_MS: u64 = 60_000;
 
 /// The most characters one entry's text keeps, past which it is cut
 pub const ENTRY_TEXT_MAX: usize = 4_000;
+
+/// The most entries central reef keeps of a session, the oldest let go past it, and so the most
+/// a runner or a follower holds to attach again with
+pub const KEPT_ENTRIES: usize = 2_000;
 
 /// Where a runner's session stands, as the runner last said, or gone if it stopped saying
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,10 +304,15 @@ impl Session {
     }
 }
 
-/// A runner attaching to central reef, or attaching again after its service restarted
+/// A runner attaching to central reef, or attaching again after its service restarted, or a
+/// Claude Code session in a terminal attaching itself
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attach {
-    /// The runner's pane
+    /// The session's own id, which a terminal's session names since its pane isn't a runner's;
+    /// a runner's is its pane's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The runner's pane, or the terminal's the session runs in
     pub pane: Pane,
     /// The project it takes nodes from
     pub project: String,
@@ -318,6 +331,9 @@ pub struct Attach {
     /// The prompts waiting for an answer
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompts: Vec<Prompt>,
+    /// Claude Code's id for the session running as it attaches, if one is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<String>,
 }
 
 /// What a runner reports: its entries since its last report, and where it stands now
@@ -431,6 +447,11 @@ pub enum SessionActed {
     },
     /// The runner let go of the session, or stopped asking for orders, so nothing was sent
     Gone {
+        /// The session as it now stands
+        session: Session,
+    },
+    /// The session is a terminal's, which only its terminal answers, so nothing was sent
+    InTerminal {
         /// The session as it now stands
         session: Session,
     },

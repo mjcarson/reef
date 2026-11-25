@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -1374,6 +1375,83 @@ def c47_a_rejected_plan_comes_back_revised(page):
         stop_runner(process)
 
 
+def api(method, path, body=None):
+    """Calls the JSON API as reef's own clients do, returning its status and its answer."""
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(f"{URL}{path}", data=data, method=method,
+                                     headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as answer:
+            return answer.status, json.load(answer)
+    except urllib.error.HTTPError as error:
+        return error.code, json.load(error)
+
+
+def c84_an_attached_session_streams_its_transcript(page):
+    """C84: a terminal's own Claude Code session, attached through the API as `! reef loop run`
+    attaches it, shows beside the runners with its pane and its loop's node, its transcript
+    growing as its follower reports in steps, with no reload, and no buttons, prompt cards or
+    reply box, since its terminal answers it; once detached it shows ended."""
+    reef("plan", "new", "terminal")
+    put("terminal", node_yaml("T1", "T1 Worked in a terminal"))
+    pane = "claude:4242"
+    # the terminal's loop, holding T1, as `! reef loop start` and next_task leave it
+    reef("loop", "start", "--pane", pane, "--plan", "terminal", "--no-open")
+    reef("loop", "take", "--pane", pane)
+    session = "c84-check"
+    attach = {"id": session, "pane": pane, "project": "check", "plan": "terminal",
+              "host": "check-host", "cwd": str(WORK / "repo"), "state": "working", "claude": "s1"}
+    attached, _ = api("POST", "/api/v1/sessions", attach)
+    row = f".reef-app-runner.attached[data-session={session}]"
+    try:
+        page.goto(URL + "/plans/check/terminal")
+        wait_drawn(page)
+        page.evaluate("() => { window.__kept = 'same page'; }")
+        page.click(".reef-app-sessions-toggle")
+        page.wait_for_selector(row, timeout=20000)
+        page.click(row)
+        shown = page.inner_text(row)
+        # entries reported in steps, each shown as it comes
+        question = {"question": "Which greeting?", "header": "Greeting", "multiSelect": False,
+                    "options": [{"label": "Hello"}, {"label": "Hi"}]}
+        steps = [
+            [{"at": 1, "kind": "user", "text": "Add a greeting"}],
+            [{"at": 2, "kind": "text", "text": "step one"},
+             {"at": 3, "kind": "asked", "prompt": {"id": "toolu_q1", "kind": "question", "questions": [question]}}],
+            [{"at": 4, "kind": "answered", "prompt": "toolu_q1",
+              "answer": {"answer": "answers", "answers": {"Which greeting?": "Hi"}}},
+             {"at": 5, "kind": "text", "text": "step two"}],
+        ]
+        counts = []
+        for k, entries_now in enumerate(steps):
+            api("POST", f"/api/v1/sessions/{session}", {"entries": entries_now, "state": "working", "claude": "s1"})
+            total = sum(len(step) for step in steps[:k + 1])
+            page.wait_for_function(
+                f"() => document.querySelectorAll('.reef-app-transcript .reef-app-entry').length === {total}",
+                timeout=10000)
+            counts.append(entries(page))
+        said = page.inner_text(".reef-app-transcript")
+        summary = page.inner_text(".reef-app-session-sum")
+        acts = page.locator(f"{row} button").count()
+        cards = page.locator(".reef-app-prompt").count() + page.locator(".reef-app-reply").count()
+        # the app's act is refused, since its terminal answers it
+        refused, acted = api("POST", f"/api/v1/sessions/{session}/orders", {"act": "start"})
+        page.screenshot(path=str(SHOTS / "reef-app-attached-session.png"))
+        # detached, it shows ended
+        api("DELETE", f"/api/v1/sessions/{session}")
+        page.wait_for_selector(f".reef-app-ended {row}", state="attached", timeout=10000)
+        check("C84 an attached session's transcript shows live, to read",
+              attached == 200 and "On T1" in shown and "Claude Code process 4242" in shown
+              and counts == [1, 3, 5] and "Asked:" in said and "Which greeting? → Hi" in said
+              and "Terminal session on" in summary and "answered in its terminal" in summary
+              and acts == 0 and cards == 0 and refused == 409 and "in-terminal" in acted
+              and page.evaluate("() => window.__kept") == "same page",
+              {"row": shown, "counts": counts, "summary": summary, "buttons": acts, "cards": cards,
+               "refused": refused, "said": said[-400:]})
+    finally:
+        reef("loop", "stop", "--pane", pane)
+
+
 def keep_decisions(plan, node, decisions):
     """Keeps a node's decisions through the JSON API, as reef's hooks do."""
     body = json.dumps({"decisions": decisions}).encode()
@@ -1814,6 +1892,7 @@ def main():
                 c45_a_loop_started_from_the_app_streams_its_transcript,
                 c46_a_question_is_answered_in_the_app,
                 c47_a_rejected_plan_comes_back_revised,
+                c84_an_attached_session_streams_its_transcript,
                 c76_a_nodes_decisions_show_in_its_sidebar,
             ]
             for step in checks:

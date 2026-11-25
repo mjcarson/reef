@@ -243,6 +243,10 @@ fn written<T>(sent: Result<T, Errors>) -> anyhow::Result<Written> {
             ConditionRefusal::Placement => {
                 anyhow::bail!("a row write was refused for a stripe's placement")
             }
+            // nor does it declare an order on its tables, so an order index's refusal is too
+            ConditionRefusal::KeyCollision | ConditionRefusal::OrderEntry => {
+                anyhow::bail!("a row write was refused by an order index: {reason:?}")
+            }
         })),
         // anything else is a failure
         Err(error) => Err(error.into()),

@@ -219,7 +219,7 @@ where
 pub fn spawn(order: &Clear, conf: Option<&Path>, credentials: Option<&Path>) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     // what it says goes to the log, since nothing would show it, or nowhere if that can't open
-    let log = log_file()
+    let log = open_log("clear.log")
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
     // this same binary, on the same service
@@ -243,24 +243,50 @@ pub fn spawn(order: &Clear, conf: Option<&Path>, credentials: Option<&Path>) -> 
     Ok(())
 }
 
-/// Opens the injector's log for appending, under `$XDG_STATE_HOME`, else `~/.local/state`
-fn log_file() -> anyhow::Result<std::fs::File> {
-    // the state directory, as the XDG spec places it
-    let state = match std::env::var_os("XDG_STATE_HOME").filter(|dir| !dir.is_empty()) {
+/// reef's own state directory, `reef` under `$XDG_STATE_HOME`, else under `~/.local/state`, as
+/// the XDG spec places it
+///
+/// # Arguments
+///
+/// * `var` - Reads one environment variable, `XDG_STATE_HOME` or `HOME`
+///
+/// # Examples
+///
+/// ```
+/// use reef::clear::state_dir;
+///
+/// let home = |name: &str| (name == "HOME").then(|| "/home/me".to_string());
+/// assert_eq!(state_dir(home).unwrap().display().to_string(), "/home/me/.local/state/reef");
+/// assert!(state_dir(|_| None).is_err());
+/// ```
+pub fn state_dir<F: Fn(&str) -> Option<String>>(var: F) -> anyhow::Result<PathBuf> {
+    // a variable set to nothing is as good as unset
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    let state = match set("XDG_STATE_HOME") {
         Some(dir) => PathBuf::from(dir),
         None => {
-            let home = std::env::var_os("HOME")
+            let home = set("HOME")
                 .ok_or_else(|| anyhow::anyhow!("neither XDG_STATE_HOME nor HOME is set"))?;
             PathBuf::from(home).join(".local/state")
         }
     };
-    // reef's own directory in it
-    let dir = state.join("reef");
+    Ok(state.join("reef"))
+}
+
+/// Opens one of reef's logs for appending, in its state directory, which is made if it isn't
+/// there
+///
+/// # Arguments
+///
+/// * `name` - The log's file name, such as `clear.log`
+pub(crate) fn open_log(name: &str) -> anyhow::Result<std::fs::File> {
+    // this process's own state directory
+    let dir = state_dir(|name| std::env::var(name).ok())?;
     std::fs::create_dir_all(&dir)?;
     Ok(OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("clear.log"))?)
+        .open(dir.join(name))?)
 }
 
 /// Types into a zellij or tmux pane and reads its screen back

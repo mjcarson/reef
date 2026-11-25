@@ -400,7 +400,7 @@ impl Sx {
             // as `reef loop run --claude <script>` runs it, with the case's config
             let client = reef::Client::new(&reef::Conf::load(Some(&conf))?)?;
             let runs = reef::run::Runs {
-                claude: claude.display().to_string(),
+                claude: Some(claude.display().to_string()),
                 start: false,
                 mode: None,
                 args: Vec::new(),
@@ -803,5 +803,557 @@ async fn a_rejected_plan_comes_back_revised() -> anyhow::Result<()> {
     );
     let _ = stop.send(());
     runner.await??;
+    Ok(())
+}
+
+/// A Claude Code session in a terminal, as these cases play it: the variables Claude Code hands
+/// its `!` commands, with the case's own state and config directories, and its transcript's file
+struct Terminal {
+    /// Claude Code's id for the session
+    claude: String,
+    /// The Claude Code process it runs in, `CLAUDE_PID`
+    pid: u32,
+    /// The case's `XDG_STATE_HOME`, where the follower's inbox lives
+    state: PathBuf,
+    /// The case's `CLAUDE_CONFIG_DIR`, where Claude Code writes transcripts
+    config: PathBuf,
+}
+
+impl Terminal {
+    /// A session in a terminal of a case, its project's transcript directory made
+    ///
+    /// # Arguments
+    ///
+    /// * `sx` - The case
+    /// * `claude` - Claude Code's id for the session
+    /// * `pid` - The process it runs in, which must run while the case follows it
+    fn new(sx: &Sx, claude: &str, pid: u32) -> anyhow::Result<Terminal> {
+        let terminal = Terminal {
+            claude: claude.to_string(),
+            pid,
+            state: sx.ax.dir.join("state"),
+            config: sx.ax.dir.join("claude"),
+        };
+        std::fs::create_dir_all(terminal.config.join("projects").join("-runs"))?;
+        Ok(terminal)
+    }
+
+    /// The variables Claude Code hands a `!` command typed in the session, with no multiplexer
+    fn env(&self) -> impl Fn(&str) -> Option<String> + Clone + use<> {
+        let (claude, pid) = (self.claude.clone(), self.pid.to_string());
+        let (state, config) = (
+            self.state.display().to_string(),
+            self.config.display().to_string(),
+        );
+        move |name: &str| match name {
+            "CLAUDE_CODE_SESSION_ID" => Some(claude.clone()),
+            "CLAUDE_PID" => Some(pid.clone()),
+            "XDG_STATE_HOME" => Some(state.clone()),
+            "CLAUDE_CONFIG_DIR" => Some(config.clone()),
+            _ => None,
+        }
+    }
+
+    /// The transcript Claude Code writes for a session of this terminal
+    ///
+    /// # Arguments
+    ///
+    /// * `claude` - Claude Code's id for the session
+    fn transcript(&self, claude: &str) -> PathBuf {
+        self.config
+            .join("projects")
+            .join("-runs")
+            .join(format!("{claude}.jsonl"))
+    }
+
+    /// The session as `reef::follow` finds it from the variables
+    fn here(&self) -> anyhow::Result<reef::follow::Here> {
+        reef::follow::in_claude(self.env())?.ok_or_else(|| anyhow::anyhow!("no session found"))
+    }
+}
+
+/// One line of Claude saying something, as Claude Code writes it on disk
+///
+/// # Arguments
+///
+/// * `uuid` - The record's id
+/// * `text` - What Claude said
+fn said(uuid: &str, text: &str) -> String {
+    let record = json!({
+        "type": "assistant",
+        "uuid": uuid,
+        "isSidechain": false,
+        "timestamp": "2026-11-25T10:00:00.000Z",
+        "message": { "role": "assistant", "content": [{ "type": "text", "text": text }] },
+    });
+    format!("{record}\n")
+}
+
+/// Appends text to a file, making it if it isn't there
+///
+/// # Arguments
+///
+/// * `path` - The file
+/// * `text` - What to append
+fn append(path: &Path, text: &str) -> anyhow::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+impl Sx {
+    /// A client of the case's served twin, as the CLI makes one from its config
+    fn client(&self) -> anyhow::Result<reef::Client> {
+        reef::Client::new(&reef::Conf::load(Some(&self.conf))?)
+    }
+
+    /// Attaches a terminal's session as `! reef loop run` does, its follower's start recorded
+    /// rather than spawned, returning what it would follow
+    ///
+    /// # Arguments
+    ///
+    /// * `terminal` - The session
+    async fn attach_terminal(&self, terminal: &Terminal) -> anyhow::Result<reef::follow::Follow> {
+        // a follower that reads as alive, since this process holds its inbox's start
+        let spawn = |_: &reef::follow::Follow| Ok(std::process::id());
+        let mut out = Vec::new();
+        let follow = reef::follow::attach(
+            &self.client()?,
+            &self.repo,
+            &terminal.here()?,
+            &reef::cli::PlanPick::default(),
+            spawn,
+            &mut out,
+        )
+        .await?;
+        follow.ok_or_else(|| anyhow::anyhow!("not attached: {}", String::from_utf8_lossy(&out)))
+    }
+
+    /// Runs a follower in-process, on a task of its own, until it ends or the sender is sent to
+    ///
+    /// # Arguments
+    ///
+    /// * `follow` - What it follows
+    fn follower(
+        &self,
+        follow: reef::follow::Follow,
+    ) -> (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<anyhow::Result<reef::follow::Ended>>,
+    ) {
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let conf = self.conf.clone();
+        let task = tokio::spawn(async move {
+            // as `reef hook follow` runs it, with the case's config
+            let client = reef::Client::new(&reef::Conf::load(Some(&conf))?)?;
+            let mut out = Vec::new();
+            let stop = async {
+                let _ = stopped.await;
+            };
+            reef::follow::run_until(&client, &follow, &mut out, stop).await
+        });
+        (stop, task)
+    }
+
+    /// Waits until a session's transcript passes a test, returning it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session's id
+    /// * `what` - What is waited for, for the failure's message
+    /// * `test` - Whether the transcript is as waited for
+    async fn transcript_when(
+        &self,
+        id: &str,
+        what: &str,
+        test: impl Fn(&Transcript) -> bool,
+    ) -> anyhow::Result<Transcript> {
+        let start = tokio::time::Instant::now();
+        loop {
+            // the transcript as the app reads it
+            let transcript = self.ax.service.session_transcript(id, 0).await?;
+            if test(&transcript) {
+                return Ok(transcript);
+            }
+            if start.elapsed() > PATIENCE {
+                anyhow::bail!("waited {PATIENCE:?} for {what}: {transcript:#?}");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// Each entry of a transcript in a line: what Claude said, a session started, or a note
+///
+/// # Arguments
+///
+/// * `transcript` - The transcript
+fn lines_of(transcript: &Transcript) -> Vec<String> {
+    transcript
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::Text { text } => Some(text.clone()),
+            EntryKind::Session { id, mode } => Some(format!("session {id} in {mode}")),
+            EntryKind::Note { text } => Some(format!("note: {text}")),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `reef loop run` typed in a Claude Code session attaches that session, on its terminal's pane,
+/// and returns at once, starting its follower and no Claude of its own; typed again it says it
+/// is attached already, and a runner's flags or a runner's own session are refused
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_typed_in_claude_code_attaches_that_session() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let sx = Sx::new("terminal", &["A"], "permission").await?;
+    let terminal = Terminal::new(&sx, "s1", std::process::id())?;
+    // a Claude that leaves a mark if anything runs it
+    let ran = sx.ax.dir.join("claude-ran");
+    let marker = sx.ax.dir.join("marker.sh");
+    std::fs::write(&marker, format!("#!/bin/sh\ntouch '{}'\n", ran.display()))?;
+    std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o755))?;
+    // `! reef loop run`, as the CLI runs it, each follower's start recorded
+    let client = sx.client()?;
+    let runs = reef::run::Runs {
+        conf: Some(sx.conf.clone()),
+        ..Default::default()
+    };
+    let pick = reef::cli::PlanPick::default();
+    let mut started = Vec::new();
+    let spawn = |follow: &reef::follow::Follow| {
+        started.push(follow.args());
+        Ok(std::process::id())
+    };
+    let mut out = Vec::new();
+    let run = reef::cli::loop_run(
+        &client,
+        &sx.repo,
+        terminal.env(),
+        &runs,
+        &pick,
+        spawn,
+        &mut out,
+    );
+    tokio::time::timeout(Duration::from_secs(10), run).await??;
+    let printed = String::from_utf8(out)?;
+    assert!(
+        printed.contains("attached this Claude Code session to `runs`"),
+        "{printed}"
+    );
+    // the follower started, and nothing else
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0][..2], ["hook", "follow"]);
+    assert!(started[0].contains(&"s1".to_string()), "{:?}", started[0]);
+    // the session, on the terminal's pane, working, Claude Code's id beside it
+    let sessions = sx.ax.service.project_sessions("runs").await?;
+    assert_eq!(sessions.len(), 1, "{sessions:#?}");
+    let session = &sessions[0];
+    assert_eq!(session.pane, reef_api::Pane::Claude { pid: terminal.pid });
+    assert!(!session.pane.runs());
+    assert_eq!(session.claude.as_deref(), Some("s1"));
+    assert_eq!(session.state, SessionState::Working);
+    assert!(printed.contains(&session.id), "{printed}");
+    // its inbox, held by the follower started
+    let here = terminal.here()?;
+    let held = reef::follow::holder(&here.inbox);
+    assert_eq!(held, Some((std::process::id(), session.id.clone())));
+    // typed again, it is attached already, and no second follower starts
+    let mut again = Vec::new();
+    let no_spawn = |_: &reef::follow::Follow| -> anyhow::Result<u32> {
+        anyhow::bail!("no second follower starts")
+    };
+    reef::cli::loop_run(
+        &client,
+        &sx.repo,
+        terminal.env(),
+        &runs,
+        &pick,
+        no_spawn,
+        &mut again,
+    )
+    .await?;
+    assert!(
+        String::from_utf8(again)?.contains("attached to central reef already"),
+        "a session is attached once"
+    );
+    // a runner's flags are refused in a Claude Code session, and its Claude never runs
+    let flagged = reef::run::Runs {
+        claude: Some(marker.display().to_string()),
+        ..runs.clone()
+    };
+    let refused = reef::cli::loop_run(
+        &client,
+        &sx.repo,
+        terminal.env(),
+        &flagged,
+        &pick,
+        |_: &reef::follow::Follow| Ok(0),
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("a runner's flags are refused");
+    assert!(
+        format!("{refused:#}").contains("outside Claude Code"),
+        "{refused:#}"
+    );
+    assert!(!ran.exists(), "the --claude given never ran");
+    // and a runner's own session is shown already
+    let env = terminal.env();
+    let runners = move |name: &str| match name {
+        "REEF_PANE" => Some("reef:k3x9-7".to_string()),
+        other => env(other),
+    };
+    let refused = reef::cli::loop_run(
+        &client,
+        &sx.repo,
+        runners,
+        &runs,
+        &pick,
+        |_: &reef::follow::Follow| Ok(0),
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("a runner's session is refused");
+    assert!(format!("{refused:#}").contains("runner's"), "{refused:#}");
+    assert_eq!(sx.ax.service.project_sessions("runs").await?.len(), 1);
+    Ok(())
+}
+
+/// An attached session's follower streams its transcript as it is written, each entry once and
+/// in order, partial lines waited out; follows a clear to the new session's file once the old is
+/// read to its end, noting the new session in the mode its file names; and once detached in its
+/// terminal, the session reads as detached
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attached_sessions_transcript_streams_once_and_in_order() -> anyhow::Result<()> {
+    let sx = Sx::new("follow", &["A"], "permission").await?;
+    let terminal = Terminal::new(&sx, "s1", std::process::id())?;
+    let first = terminal.transcript("s1");
+    append(&first, &said("c0", "line 0"))?;
+    let follow = sx.attach_terminal(&terminal).await?;
+    let id = follow.id().to_string();
+    let (_stop, follower) = sx.follower(follow);
+    // ten more lines, written in chunks that split lines across them
+    let written: String = (1..10)
+        .map(|k| said(&format!("c{k}"), &format!("line {k}")))
+        .collect();
+    for chunk in written.as_bytes().chunks(37) {
+        append(&first, std::str::from_utf8(chunk)?)?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    sx.transcript_when(&id, "the first ten lines", |transcript| {
+        lines_of(transcript).len() == 10
+    })
+    .await?;
+    // two more, and at once a clear's new session, which is followed once they are read
+    append(&first, &said("c10", "line 10"))?;
+    append(&first, &said("c11", "line 11"))?;
+    // the new session's file names its mode first, as Claude Code writes it
+    let second = terminal.transcript("s2");
+    let more: String = (0..3)
+        .map(|k| said(&format!("d{k}"), &format!("more {k}")))
+        .collect();
+    let mode = json!({ "type": "permission-mode", "permissionMode": "plan", "sessionId": "s2" });
+    append(&second, &format!("{mode}\n{more}"))?;
+    let here = terminal.here()?;
+    let moved = reef::follow::Event::Moved {
+        claude: "s2".to_string(),
+        transcript: second.clone(),
+    };
+    reef::follow::post(&here.inbox, &moved)?;
+    sx.transcript_when(&id, "the new session's lines", |transcript| {
+        lines_of(transcript).iter().any(|line| line == "more 2")
+    })
+    .await?;
+    // detached as `! reef loop detach` detaches it
+    let mut out = Vec::new();
+    reef::follow::detach(&here, &mut out).await?;
+    let printed = String::from_utf8(out)?;
+    assert!(printed.contains("detached this session"), "{printed}");
+    let ended = tokio::time::timeout(PATIENCE, follower).await???;
+    assert_eq!(ended, reef::follow::Ended::Detached);
+    assert!(!here.inbox.exists(), "the inbox is let go of");
+    // every entry once, in the order written, the new session between the two files
+    let transcript = sx.ax.service.session_transcript(&id, 0).await?;
+    let mut expected: Vec<String> = (0..12).map(|k| format!("line {k}")).collect();
+    expected.push("session s2 in plan".to_string());
+    expected.extend((0..3).map(|k| format!("more {k}")));
+    expected.push("note: the session was detached in its terminal".to_string());
+    assert_eq!(lines_of(&transcript), expected);
+    assert_eq!(transcript.session.state, SessionState::Detached);
+    assert_eq!(transcript.session.claude.as_deref(), Some("s2"));
+    Ok(())
+}
+
+/// A session whose Claude Code exits reads as detached within moments, its follower ending of
+/// its own accord
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attached_session_ends_with_its_claude() -> anyhow::Result<()> {
+    let sx = Sx::new("exits", &["A"], "permission").await?;
+    // Claude Code, played by a process that runs until it is killed
+    let mut claude = std::process::Command::new("sleep").arg("600").spawn()?;
+    let terminal = Terminal::new(&sx, "s1", claude.id())?;
+    append(&terminal.transcript("s1"), &said("c0", "working"))?;
+    let follow = sx.attach_terminal(&terminal).await?;
+    let id = follow.id().to_string();
+    let (_stop, follower) = sx.follower(follow);
+    sx.transcript_when(&id, "the first line", |transcript| {
+        lines_of(transcript).contains(&"working".to_string())
+    })
+    .await?;
+    // killed and not yet reaped, which still reads as gone
+    claude.kill()?;
+    let ended = tokio::time::timeout(Duration::from_secs(10), follower).await???;
+    claude.wait()?;
+    assert_eq!(ended, reef::follow::Ended::Exited);
+    let transcript = sx.ax.service.session_transcript(&id, 0).await?;
+    assert_eq!(transcript.session.state, SessionState::Detached);
+    assert_eq!(
+        lines_of(&transcript).last().map(String::as_str),
+        Some("note: the session's Claude Code exited")
+    );
+    Ok(())
+}
+
+/// A terminal's session takes no orders from the app: every act is refused with a 409 saying
+/// it is answered in its terminal, and a question it asked shows in its transcript without
+/// waiting on the app
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminals_session_is_answered_in_its_terminal() -> anyhow::Result<()> {
+    let sx = Sx::new("answers", &["A"], "permission").await?;
+    let terminal = Terminal::new(&sx, "s1", std::process::id())?;
+    // Claude asks a question, which the terminal hasn't answered yet
+    let question = json!({
+        "type": "assistant",
+        "uuid": "q1",
+        "timestamp": "2026-11-25T10:00:00.000Z",
+        "message": { "role": "assistant", "content": [{
+            "type": "tool_use",
+            "id": "toolu_q1",
+            "name": "AskUserQuestion",
+            "input": { "questions": [{
+                "question": "Which greeting?",
+                "header": "Greeting",
+                "options": [{ "label": "Hello" }, { "label": "Hi" }],
+                "multiSelect": false,
+            }] },
+        }] },
+    });
+    append(&terminal.transcript("s1"), &format!("{question}\n"))?;
+    let follow = sx.attach_terminal(&terminal).await?;
+    let id = follow.id().to_string();
+    let (stop, follower) = sx.follower(follow);
+    let transcript = sx
+        .transcript_when(&id, "the question", |transcript| {
+            transcript
+                .entries
+                .iter()
+                .any(|entry| matches!(entry.kind, EntryKind::Asked { .. }))
+        })
+        .await?;
+    // shown as asked, with nothing waiting on the app
+    assert!(transcript.session.prompts.is_empty(), "{transcript:#?}");
+    // and every act refused, over the API as the app's server sends it
+    let acts = [
+        SessionAct::Start,
+        SessionAct::Pause,
+        SessionAct::Stop,
+        SessionAct::Answer {
+            prompt: "toolu_q1".to_string(),
+            answer: Answer::Allow,
+        },
+        SessionAct::Say {
+            text: "go on".to_string(),
+        },
+    ];
+    for act in acts {
+        let path = reef_api::paths::session_orders(&id);
+        let (status, acted): (_, SessionActed) = sx.ax.client.post(&path, &act).await?;
+        assert_eq!(status.as_u16(), 409, "{act:?}: {acted:?}");
+        assert!(
+            matches!(acted, SessionActed::InTerminal { .. }),
+            "{act:?}: {acted:?}"
+        );
+    }
+    // no loop was started for its pane, and it still waits on nothing
+    let loops = sx.client()?.loops().await?;
+    let pane = terminal.here()?.pane;
+    assert!(loops.iter().all(|feeding| feeding.pane != pane));
+    let transcript = sx.ax.service.session_transcript(&id, 0).await?;
+    assert!(transcript.session.prompts.is_empty());
+    assert!(transcript.session.live());
+    let _ = stop.send(());
+    let ended = tokio::time::timeout(PATIENCE, follower).await???;
+    assert_eq!(ended, reef::follow::Ended::Stopped);
+    Ok(())
+}
+
+/// A pane shows one terminal session: attaching another on it detaches the one before, which
+/// its follower's last report doesn't bring back, while a runner on its own pane is untouched;
+/// and a terminal's session must name a safe id of its own
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_session_on_a_pane_detaches_the_first() -> anyhow::Result<()> {
+    let sx = Sx::new("replaced", &["A"], "permission").await?;
+    let service = &sx.ax.service;
+    // what a terminal's session on a pane attaches with
+    let attach = |id: Option<&str>, pane: reef_api::Pane| reef_api::Attach {
+        id: id.map(str::to_string),
+        pane,
+        project: "runs".to_string(),
+        plan: None,
+        host: "box".to_string(),
+        cwd: sx.repo.clone(),
+        state: SessionState::Working,
+        entries: Vec::new(),
+        prompts: Vec::new(),
+        claude: Some("s1".to_string()),
+    };
+    let pane: reef_api::Pane = "tmux:/tmp/tmux-1000/default:%3".parse()?;
+    let runner: reef_api::Pane = "reef:k3x9-7".parse()?;
+    service.attach_session(attach(None, runner.clone())).await?;
+    let first = service
+        .attach_session(attach(Some("t1-1"), pane.clone()))
+        .await?;
+    assert_eq!(first.claude.as_deref(), Some("s1"));
+    let second = service
+        .attach_session(attach(Some("t2-2"), pane.clone()))
+        .await?;
+    // the first let go, the second shown, the runner as it was
+    let sessions = service.project_sessions("runs").await?;
+    let state = |id: &str| {
+        sessions
+            .iter()
+            .find(|session| session.id == id)
+            .map(|session| session.state)
+    };
+    assert_eq!(state("t1-1"), Some(SessionState::Detached));
+    assert_eq!(state(&second.id), Some(SessionState::Working));
+    assert_eq!(state("k3x9-7"), Some(SessionState::Working));
+    // a report from the first's follower keeps it let go, which it reads as replaced
+    let report = reef_api::Report {
+        entries: Vec::new(),
+        state: SessionState::Working,
+        claude: Some("s1".to_string()),
+        prompts: Vec::new(),
+    };
+    let reported = service.report_session("t1-1", report).await?;
+    assert_eq!(reported.state, SessionState::Detached);
+    // an id that isn't safe in a path, or none, is refused on a terminal's pane
+    for id in [Some("Bad/Id"), Some(""), None] {
+        let refused = service
+            .attach_session(attach(id, pane.clone()))
+            .await
+            .expect_err("an unsafe id is refused");
+        assert!(
+            refused
+                .downcast_ref::<reef_service::store::Unkeepable>()
+                .is_some(),
+            "{refused:#}"
+        );
+    }
     Ok(())
 }

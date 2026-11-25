@@ -354,6 +354,7 @@ impl Hx {
             &input.to_string(),
             &pane.parse()?,
             None,
+            None,
             &mut out,
         )
         .await?;
@@ -1029,6 +1030,60 @@ async fn a_loop_in_zellij_clears_between_nodes() -> anyhow::Result<()> {
     hx.reef(&a, &["status", "C", "done"]).await?;
     let said = told(&hx.stopped_in(&a, Some(pane), false).await?);
     assert!(said.contains("nothing else is ready"), "{said}");
+    Ok(())
+}
+
+/// SessionStart tells the follower of the session's Claude Code process where a clear moved it,
+/// whether or not a loop runs in its pane, and writes nothing where no follower's inbox is
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clear_tells_the_sessions_follower_where_it_moved() -> anyhow::Result<()> {
+    let hx = Hx::new("follow-moves", &["A"]).await?;
+    // the inbox of a follower of process 4242, under the case's own state directory
+    let state = hx.ax.dir.join("state").display().to_string();
+    let env = |name: &str| (name == "XDG_STATE_HOME").then(|| state.clone());
+    let inbox = reef::follow::inbox_of(env, 4242)?;
+    assert!(inbox.starts_with(hx.ax.dir.join("state").join("reef").join("follow")));
+    // what Claude Code hands SessionStart after a clear
+    let transcript = hx.ax.dir.join("claude").join("s2.jsonl");
+    let input = serde_json::json!({
+        "session_id": "s2",
+        "transcript_path": transcript,
+        "cwd": hx.repo,
+        "hook_event_name": "SessionStart",
+        "source": "clear",
+    })
+    .to_string();
+    let pane: reef_api::Pane = "claude:4242".parse()?;
+    let start = |inbox: Option<std::path::PathBuf>| {
+        let (hx, input, pane) = (&hx, input.clone(), pane.clone());
+        async move {
+            let mut out = Vec::new();
+            reef::loops::session_start(
+                &hx.client()?,
+                &input,
+                &pane,
+                Some(4242),
+                inbox.as_deref(),
+                &mut out,
+            )
+            .await?;
+            anyhow::Ok(String::from_utf8(out)?)
+        }
+    };
+    // with no follower, no inbox is made
+    assert_eq!(start(Some(inbox.clone())).await?, "");
+    assert!(!inbox.exists());
+    // with one, it is told the new session and its file, though no loop runs in the pane
+    std::fs::create_dir_all(inbox.parent().expect("the inbox is in a directory"))?;
+    std::fs::write(&inbox, "")?;
+    assert_eq!(start(Some(inbox.clone())).await?, "");
+    assert_eq!(
+        reef::follow::events(&inbox),
+        [reef::follow::Event::Moved {
+            claude: "s2".to_string(),
+            transcript,
+        }]
+    );
     Ok(())
 }
 

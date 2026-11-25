@@ -28,6 +28,9 @@
 //!   idle and its input box empty.
 //! - **The runner** ([`run`]): `reef loop run` runs a loop's sessions headless here, a fresh one
 //!   a node, and relays each one's transcript and prompts through central reef to the app.
+//! - **The follower** ([`follow`]): `reef loop run` typed in a Claude Code session attaches that
+//!   session instead, and a follower in the background streams its on-disk transcript to the
+//!   app, until `reef loop detach` or the session's end.
 //! - **Decisions** ([`decisions`]): each plan a session asked approval for and its verdict, and
 //!   each question and the answer picked, read from its transcript, which Stop and SessionEnd
 //!   keep with the nodes they were made on.
@@ -83,6 +86,7 @@ pub mod conf;
 pub mod credentials;
 pub mod decisions;
 pub mod export;
+pub mod follow;
 pub mod git;
 pub mod hook;
 pub mod import;

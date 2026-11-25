@@ -13,6 +13,11 @@
 //!   and stays out of them however the runner reports it, until the runner no longer does.
 //! - **Orders are read by number.** The runner asks for those after the last it read, which also
 //!   lets go of every one it read, so a dropped connection misses none.
+//! - **A terminal's session attaches too.** `reef loop run` typed in a Claude Code session
+//!   attaches it on its terminal's pane under an id it names, and a follower reports its
+//!   transcript and asks for orders to stay live. A pane shows one such session, so attaching
+//!   another detaches the one before. The app's acts on it are refused as
+//!   [`SessionActed::InTerminal`], since only its terminal answers it.
 
 use reef_api::{
     Attach, Change, EditLoop, Entry, EntryKind, LoopEdit, LoopEdited, Order, Ordered, Pane, Prompt,
@@ -30,21 +35,25 @@ use crate::backend::Backend;
 use crate::store::{NotRegistered, Unkeepable};
 
 /// The most entries a session keeps, the oldest let go past it
-pub const KEPT_ENTRIES: usize = 2_000;
+pub use reef_api::session::KEPT_ENTRIES;
 
 /// The longest a runner's ask for orders is held open while none comes
 pub const ORDERS_WAIT_MAX: Duration = Duration::from_secs(30);
 
-/// A session no runner attached, or that this process has never heard of since it started
+/// The most characters a terminal's session's own id holds
+pub const SESSION_ID_MAX: usize = 64;
+
+/// A session nothing attached, or that this process has never heard of since it started
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoSession(pub String);
 
 impl std::fmt::Display for NoSession {
-    /// Says no runner's session goes by the id, and how one attaches
+    /// Says no session goes by the id, and how one attaches
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "no runner's session `{}` is attached: a runner attaches with `reef loop run`",
+            "no session `{}` is attached: `reef loop run` attaches a runner, or, typed in a \
+             Claude Code session, that session",
             self.0
         )
     }
@@ -148,6 +157,36 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The id a session attaches under: a runner's pane's, else the one a terminal's session names,
+/// which must be safe in a URL
+///
+/// # Arguments
+///
+/// * `attach` - What attaches
+fn attached_id(attach: &Attach) -> Result<String, Unkeepable> {
+    // a runner's pane names its session, whatever else the attach says
+    if let Pane::Reef { id } = &attach.pane {
+        return Ok(id.clone());
+    }
+    let Some(id) = &attach.id else {
+        return Err(Unkeepable(format!(
+            "`{}` is no runner's pane, so a session attached on it names its own id",
+            attach.pane
+        )));
+    };
+    // lowercase letters, digits and dashes alone, so the id is a path segment as it is
+    let safe = id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if id.is_empty() || id.len() > SESSION_ID_MAX || !safe {
+        return Err(Unkeepable(format!(
+            "`{id}` can't name a session: use 1 to {SESSION_ID_MAX} lowercase letters, digits \
+             and dashes"
+        )));
+    }
+    Ok(id.clone())
+}
+
 /// Renders each plan a prompt holds as HTML, raw HTML in it escaped, as a comment's body is
 ///
 /// # Arguments
@@ -177,22 +216,19 @@ fn rendered_entry(mut entry: Entry) -> Entry {
 }
 
 impl<B: Backend> Service<B> {
-    /// Attaches a runner's session, or attaches it again with the transcript it holds after
-    /// this service restarted
+    /// Attaches a runner's session, or a terminal's Claude Code session, or attaches either again
+    /// with the transcript it holds after this service restarted
+    ///
+    /// A terminal's session attached on a pane detaches any other live one on it, so a pane
+    /// shows one.
     ///
     /// # Arguments
     ///
-    /// * `attach` - The runner's pane, project, host and checkout, and what it holds already
+    /// * `attach` - The pane, project, host and checkout, and what it holds already
     #[instrument(name = "Service::attach_session", skip_all, err(Debug))]
     pub async fn attach_session(&self, attach: Attach) -> anyhow::Result<Session> {
-        // only a runner's pane is a session's
-        let Pane::Reef { id } = &attach.pane else {
-            return Err(Unkeepable(format!(
-                "`{}` is no runner's pane: a runner attaches with a `reef:<id>` pane",
-                attach.pane
-            ))
-            .into());
-        };
+        // a runner's pane's id, else the id a terminal's session names
+        let id = attached_id(&attach)?;
         // a registered project, and a plan it lists if one is named
         match &attach.plan {
             Some(plan) => self.listed(&PlanName::new(&attach.project, plan)?).await?,
@@ -212,11 +248,11 @@ impl<B: Backend> Service<B> {
             attached_at: now,
             seen_at: now,
             state: attach.state,
-            claude: None,
+            claude: attach.claude,
             entries: 0,
             prompts: attach.prompts.into_iter().map(rendered).collect(),
         };
-        // kept afresh, whatever was kept under its id before
+        // what is kept of it
         let mut kept = Kept {
             session,
             entries: VecDeque::new(),
@@ -228,8 +264,30 @@ impl<B: Backend> Service<B> {
         };
         kept.add(attach.entries.into_iter().map(rendered_entry).collect());
         let session = kept.session.clone();
-        self.sessions
-            .with(|sessions| sessions.insert(id.clone(), kept));
+        let replaced = self.sessions.with(|sessions| {
+            // any other live session a terminal's pane showed lets go, so it shows this one
+            let mut replaced = Vec::new();
+            if !session.pane.runs() {
+                let others = sessions.values_mut().filter(|other| {
+                    other.session.id != id
+                        && other.session.pane == session.pane
+                        && other.session.clone().at(now).live()
+                });
+                for other in others {
+                    other.session.state = SessionState::Detached;
+                    other.session.prompts.clear();
+                    other.orders.clear();
+                    replaced.push((other.session.project.clone(), other.session.id.clone()));
+                }
+            }
+            // kept afresh, whatever was kept under its id before
+            sessions.insert(id.clone(), kept);
+            replaced
+        });
+        // each session that changed told to the change stream, the one replaced first
+        for (project, session) in replaced {
+            self.publish(Change::SessionChanged { project, session });
+        }
         self.publish(Change::SessionChanged {
             project: session.project.clone(),
             session: session.id.clone(),
@@ -238,6 +296,9 @@ impl<B: Backend> Service<B> {
     }
 
     /// Takes a runner's report: the entries since its last, and where it stands now
+    ///
+    /// A session let go of stays let go, so a terminal's session another replaced on its pane
+    /// isn't brought back by its follower's last report, which reads it detached.
     ///
     /// # Arguments
     ///
@@ -252,7 +313,9 @@ impl<B: Backend> Service<B> {
                 .ok_or_else(|| NoSession(id.to_string()))?;
             kept.add(report.entries.into_iter().map(rendered_entry).collect());
             kept.waiting(report.prompts.into_iter().map(rendered).collect());
-            kept.session.state = report.state;
+            if kept.session.state != SessionState::Detached {
+                kept.session.state = report.state;
+            }
             kept.session.claude = report.claude;
             kept.session.seen_at = now_ms();
             Ok::<_, NoSession>(kept.session.clone())
@@ -382,6 +445,8 @@ impl<B: Backend> Service<B> {
     /// Does what the app asks of a runner's session: changes its loop and wakes it, or orders it
     /// to answer a prompt or to say something to Claude
     ///
+    /// A terminal's session takes none of it, since only its terminal answers it.
+    ///
     /// # Arguments
     ///
     /// * `id` - The session's id
@@ -396,6 +461,10 @@ impl<B: Backend> Service<B> {
                 .map(|kept| kept.session.clone().at(now))
                 .ok_or_else(|| NoSession(id.to_string()))
         })?;
+        // a terminal's session is answered in its terminal alone
+        if !session.pane.runs() {
+            return Ok(SessionActed::InTerminal { session });
+        }
         let acted = match act {
             // a pause is read at the node's end, and needs no runner to be there
             SessionAct::Pause => {

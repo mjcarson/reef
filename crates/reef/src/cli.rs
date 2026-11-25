@@ -33,12 +33,15 @@
 //! reef [--conf PATH] loop ls [--project NAME]
 //! reef [--conf PATH] loop take [--pane KEY] [--project NAME]
 //! reef [--conf PATH] loop attach [ID] [--pane KEY] [--project NAME]
+//! reef [--conf PATH] loop run [--start] [--claude PATH] [--permission-mode MODE] [--plan NAME] [--project NAME] [-- ARGS...]
+//! reef [--conf PATH] loop detach
 //! reef [--conf PATH] hook session-start [--pane KEY]
 //! reef [--conf PATH] hook post-commit
 //! reef [--conf PATH] hook post-rewrite <KIND>
 //! reef [--conf PATH] hook post-tool-use
 //! reef [--conf PATH] hook stop [--pane KEY]
 //! reef [--conf PATH] hook clear --pane KEY --session ID --pid PID --after NODE
+//! reef [--conf PATH] hook follow --session ID --pid PID --claude ID --pane KEY --project NAME --cwd DIR --inbox PATH [--plan NAME] [--transcript PATH]
 //! reef [--conf PATH] hook worktree-create
 //! reef [--conf PATH] hook worktree-remove
 //! reef [--conf PATH] mcp [--project NAME] [--plan NAME]
@@ -70,7 +73,9 @@
 //! the MCP tool next_task, takes the loop's next node and starts it in the working directory's
 //! checkout, or the next group for a loop `--width` made wider than one. `loop attach` has the
 //! session it runs in work a group's member, in a worktree of its own, and `hook
-//! worktree-create` makes that worktree for `claude -w <id>`. The capture hooks work on the node the working directory's worktree is on, and do
+//! worktree-create` makes that worktree for `claude -w <id>`. `loop run` runs a loop's sessions
+//! headless, unless it is typed in a Claude Code session, which it attaches to central reef
+//! instead, as `loop detach` lets go of it. The capture hooks work on the node the working directory's worktree is on, and do
 //! nothing where there is none. `import` picks the project the book is in, and lists the plan
 //! `--plan` names if it isn't listed. `export` picks the project the new book's directory is in.
 //! `skill` writes into the repo that holds its directory, and `claude install` into the checkout
@@ -79,7 +84,7 @@
 //! else the file `$REEF_CREDENTIALS` names, else `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
 use clap::{Args, Parser, Subcommand};
-use reef_api::{AddedProject, Fetched, Project, Writer};
+use reef_api::{AddedProject, Attach, Fetched, Pane, Project, SessionState, Writer};
 use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
 use std::io::Write;
@@ -92,6 +97,7 @@ use crate::client::Client;
 use crate::comment;
 use crate::conf::Conf;
 use crate::export;
+use crate::follow;
 use crate::hook;
 use crate::import;
 use crate::login;
@@ -593,13 +599,16 @@ pub enum LoopCommand {
     /// reef so its app starts the loop, shows each session's transcript and answers its prompts
     ///
     /// It runs until Ctrl-C, which ends any session, lets go of the loop's node and detaches.
+    /// Typed in a Claude Code session, as `! reef loop run`, it attaches that session instead and
+    /// returns at once: the app shows its transcript as it works, and it is answered in its
+    /// terminal as ever.
     Run {
         /// Start the loop at once, rather than wait for the app to
         #[arg(long)]
         start: bool,
-        /// The Claude Code to run
-        #[arg(long, value_name = "PATH", default_value = "claude")]
-        claude: String,
+        /// The Claude Code to run, else `claude`
+        #[arg(long, value_name = "PATH")]
+        claude: Option<String>,
         /// The permission mode each session starts in, else Claude Code's default for a headless
         /// session
         #[arg(long, value_name = "MODE")]
@@ -611,6 +620,9 @@ pub enum LoopCommand {
         #[arg(last = true, value_name = "ARGS")]
         args: Vec<String>,
     },
+    /// Detach the Claude Code session this runs in from central reef, typed as `! reef loop
+    /// detach` in the session `! reef loop run` attached
+    Detach,
     /// Work a member of a loop's group in the session this runs in, typed as `! reef loop
     /// attach`: its worktree made from this checkout, the node started there and this pane
     /// joined to it
@@ -679,6 +691,38 @@ pub enum HookCommand {
         /// The node whose end the loop acted on, which it must still hold
         #[arg(long, value_name = "NODE")]
         after: String,
+    },
+    /// The follower, which `reef loop run` typed in a Claude Code session starts in the
+    /// background: it streams the session's transcript to central reef until the session is
+    /// detached or ends
+    Follow {
+        /// The id central reef keeps the session under
+        #[arg(long, value_name = "ID")]
+        session: String,
+        /// The Claude Code process the session runs in, `CLAUDE_PID`
+        #[arg(long, value_name = "PID")]
+        pid: u32,
+        /// Claude Code's id for the session, `CLAUDE_CODE_SESSION_ID`
+        #[arg(long, value_name = "ID")]
+        claude: String,
+        /// The pane the session runs in, as `reef loop ls` prints it
+        #[arg(long, value_name = "KEY")]
+        pane: String,
+        /// The project the session is shown with
+        #[arg(long, value_name = "NAME")]
+        project: String,
+        /// The one plan of it the session narrows to, if one
+        #[arg(long, value_name = "NAME")]
+        plan: Option<String>,
+        /// The checkout the session runs in
+        #[arg(long, value_name = "DIR")]
+        cwd: PathBuf,
+        /// The follower's inbox, which SessionStart and `reef loop detach` write to
+        #[arg(long, value_name = "PATH")]
+        inbox: PathBuf,
+        /// The transcript Claude Code writes for the session, else found once it is written
+        #[arg(long, value_name = "PATH")]
+        transcript: Option<PathBuf>,
     },
     /// WorktreeCreate, for `claude -w <name>`: a node's worktree, `.claude/worktrees/<id>` on
     /// `reef/<id>`, with the node started there, or a plain one for a name that is no node, its
@@ -1117,7 +1161,22 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                         conf: conf.source.clone(),
                         credentials: conf.credentials.clone(),
                     };
-                    runner::run(&client, cwd, &runs, &pick, out).await
+                    // and so does an attached session's follower
+                    let spawn = |follow: &follow::Follow| {
+                        follow::spawn(follow, conf.source.as_deref(), conf.credentials.as_deref())
+                    };
+                    loop_run(&client, cwd, var, &runs, &pick, spawn, out).await
+                }
+                LoopCommand::Detach => {
+                    // only the session it is typed in can be let go of
+                    let Some(here) = follow::in_claude(var)? else {
+                        anyhow::bail!(
+                            "`reef loop detach` detaches the Claude Code session it is typed in: \
+                             type it in the session `! reef loop run` attached, as `! reef loop \
+                             detach`"
+                        );
+                    };
+                    follow::detach(&here, out).await
                 }
             }
         }
@@ -1125,8 +1184,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             // the session's pane, then the event Claude Code handed the hook
             let var = |name: &str| std::env::var(name).ok();
             let here = loops::Here::find(pane.as_deref(), var)?;
+            // and the inbox of a follower of its Claude Code process, if one follows it
+            let inbox = here.pid.and_then(|pid| follow::inbox_of(var, pid).ok());
             let input = stdin()?;
-            loops::session_start(&client, &input, &here.pane, here.pid, out).await
+            loops::session_start(&client, &input, &here.pane, here.pid, inbox.as_deref(), out).await
         }
         Command::Hook(HookCommand::PostCommit) => hook::post_commit(&client, cwd, out).await,
         Command::Hook(HookCommand::PostRewrite { kind }) => {
@@ -1180,6 +1241,40 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                     .map_err(|error| anyhow::anyhow!("`{after}` names no node: {error}"))?,
             };
             clear::run(&client, &order, &mut std::io::stderr()).await
+        }
+        Command::Hook(HookCommand::Follow {
+            session,
+            pid,
+            claude,
+            pane,
+            project,
+            plan,
+            cwd: dir,
+            inbox,
+            transcript,
+        }) => {
+            // the session as it attached, which the follower attaches again if it is forgotten
+            let follow = follow::Follow {
+                attach: Attach {
+                    id: Some(session),
+                    pane: pane.parse()?,
+                    project,
+                    plan,
+                    host: runner::host_name(),
+                    cwd: dir,
+                    state: SessionState::Working,
+                    entries: Vec::new(),
+                    prompts: Vec::new(),
+                    claude: Some(claude),
+                },
+                pid,
+                inbox,
+                transcript,
+            };
+            // its log is its standard error, which `reef loop run` pointed at follow.log
+            follow::run(&client, &follow, &mut std::io::stderr())
+                .await
+                .map(|_| ())
         }
         Command::Hook(HookCommand::WorktreeCreate) => {
             // the session's pane, which joins the node's member if it is one
@@ -1490,6 +1585,59 @@ async fn plan_ls<W: Write>(
     columns(out, rows)
 }
 
+/// What `reef loop run` does: typed in a Claude Code session, it attaches that session and starts
+/// its follower, and returns; anywhere else, it runs a loop's sessions headless here until
+/// Ctrl-C
+///
+/// A runner's own session is shown already, so it is refused there.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, whose checkout and project it runs in
+/// * `var` - Reads one of this process's environment variables
+/// * `runs` - How to run a runner's sessions, none of which an attached session takes
+/// * `pick` - The project and plan named, if they were
+/// * `spawn` - Starts an attached session's follower in the background, as [`follow::spawn`]
+///   does, returning its process
+/// * `out` - Where to print what came of it
+pub async fn loop_run<W, F, S>(
+    client: &Client,
+    cwd: &Path,
+    var: F,
+    runs: &runner::Runs,
+    pick: &PlanPick,
+    spawn: S,
+    out: &mut W,
+) -> anyhow::Result<()>
+where
+    W: Write,
+    F: Fn(&str) -> Option<String>,
+    S: FnOnce(&follow::Follow) -> anyhow::Result<u32>,
+{
+    // a runner's own session is in the app already
+    let in_session = var("CLAUDE_CODE_SESSION_ID").is_some_and(|id| !id.trim().is_empty());
+    if in_session && Pane::from_env(&var).is_some_and(|pane| pane.runs()) {
+        anyhow::bail!("this session is a runner's, which reef's app shows already");
+    }
+    // typed in a Claude Code session, that session attaches, as it runs
+    if let Some(here) = follow::in_claude(&var)? {
+        let asked = runs.start || runs.claude.is_some() || runs.mode.is_some();
+        if asked || !runs.args.is_empty() {
+            anyhow::bail!(
+                "typed in a Claude Code session, `reef loop run` attaches that session as it \
+                 runs, so it takes no `--start`, `--claude`, `--permission-mode` or arguments \
+                 for Claude: run `reef loop run` outside Claude Code for a headless runner"
+            );
+        }
+        return follow::attach(client, cwd, &here, pick, spawn, out)
+            .await
+            .map(|_| ());
+    }
+    // else a runner, headless, until Ctrl-C
+    runner::run(client, cwd, runs, pick, out).await
+}
+
 /// The project a command works in: the one named, else the working directory's
 ///
 /// # Arguments
@@ -1774,6 +1922,103 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--project", "reef"]).is_ok());
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central"]).is_err());
+    }
+
+    /// `loop run` takes no Claude of its own unless one is named, `loop detach` takes nothing,
+    /// and the follower's command line parses as its follow writes it
+    #[test]
+    fn attaching_a_terminals_session_parses() {
+        // a run with nothing named, as it is typed in a Claude Code session
+        let run = Cli::try_parse_from(["reef", "loop", "run"]).unwrap();
+        match run.command {
+            Command::Loop(LoopCommand::Run {
+                start,
+                claude,
+                permission_mode,
+                args,
+                ..
+            }) => {
+                assert!(!start && claude.is_none() && permission_mode.is_none() && args.is_empty());
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // and a runner's, its Claude and that Claude's arguments named
+        let line = [
+            "reef", "loop", "run", "--claude", "./c", "--", "--model", "sonnet",
+        ];
+        match Cli::try_parse_from(line).unwrap().command {
+            Command::Loop(LoopCommand::Run { claude, args, .. }) => {
+                assert_eq!(claude.as_deref(), Some("./c"));
+                assert_eq!(args, ["--model", "sonnet"]);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // a detach takes nothing, since it is the session it is typed in that is let go of
+        let detach = Cli::try_parse_from(["reef", "loop", "detach"]).unwrap();
+        assert!(matches!(detach.command, Command::Loop(LoopCommand::Detach)));
+        assert!(Cli::try_parse_from(["reef", "loop", "detach", "--pane", "claude:7"]).is_err());
+        // the follower's command line, as a follow writes it
+        let follow = crate::follow::Follow {
+            attach: reef_api::Attach {
+                id: Some("k3x9-7".to_string()),
+                pane: reef_api::Pane::Claude { pid: 4242 },
+                project: "reef".to_string(),
+                plan: Some("central".to_string()),
+                host: "box".to_string(),
+                cwd: "/src/reef".into(),
+                state: reef_api::SessionState::Working,
+                entries: Vec::new(),
+                prompts: Vec::new(),
+                claude: Some("s1".to_string()),
+            },
+            pid: 4242,
+            inbox: "/state/reef/follow/4242.jsonl".into(),
+            transcript: Some("/home/me/.claude/projects/-src-reef/s1.jsonl".into()),
+        };
+        let line = std::iter::once("reef".to_string()).chain(follow.args());
+        match Cli::try_parse_from(line).unwrap().command {
+            Command::Hook(HookCommand::Follow {
+                session,
+                pid,
+                claude,
+                pane,
+                project,
+                plan,
+                cwd,
+                inbox,
+                transcript,
+            }) => {
+                assert_eq!(
+                    (session.as_str(), pid, claude.as_str()),
+                    ("k3x9-7", 4242, "s1")
+                );
+                assert_eq!((pane.as_str(), project.as_str()), ("claude:4242", "reef"));
+                assert_eq!(plan.as_deref(), Some("central"));
+                assert_eq!(cwd, std::path::Path::new("/src/reef"));
+                assert_eq!(inbox, follow.inbox);
+                assert_eq!(transcript, follow.transcript);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // with its inbox left out, it is refused
+        let short = [
+            "reef",
+            "hook",
+            "follow",
+            "--session",
+            "k3x9-7",
+            "--pid",
+            "4242",
+            "--claude",
+            "s1",
+            "--pane",
+            "claude:4242",
+            "--project",
+            "reef",
+            "--cwd",
+            "/src/reef",
+        ];
+        assert!(Cli::try_parse_from(short).is_err());
     }
 
     /// A start takes its node, a base and whether to start again, and `work` its node or none

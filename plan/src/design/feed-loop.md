@@ -527,6 +527,21 @@ the app, and the app's answers back ([M9](../milestones/m9.md)).
     approved, and an approval stands against any later read.
   - **Only decisions, in shoal.** A row a decision, partitioned by node. Transcripts stay in
     memory and on disk, as Claude Code keeps them.
+- **A terminal's own session attaches as itself** ([C84](../milestones/m8.md)). Typed in a Claude Code
+  session, `reef loop run` sees `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` outside a runner's
+  pane. It attaches that session, on its terminal's pane under an id of its own, and returns.
+  Nothing is spawned but a follower, and nothing changes in the terminal.
+  - **A follower streams the transcript on disk.** It reads the file Claude Code writes, each
+    complete line once, as the hooks read decisions: questions and plans as asked and answered,
+    nothing raised as a prompt. It reports through the runner's own relay, one report at a time,
+    so each entry arrives once and in order, and long-polls for orders to stay live.
+  - **Its terminal answers it.** The app shows its row and transcript with no buttons, cards or
+    reply box, and refuses every act on it as `in-terminal`. Answering from the app as well
+    would be a node of its own.
+  - **An inbox for each Claude Code process.** The attach writes who follows it, SessionStart
+    each session the process starts, so a `/clear` is followed into its new file, and `! reef
+    loop detach` asks the follower to let go. The follower also ends once the process is gone,
+    or once another session attaches on its pane, which shows one.
 - **Answering is approving.** Whoever can answer a session's prompts can let its tools run on the
   runner's machine, so sign-in ([C48](../milestones/m10.md)) guards these routes as it guards every other,
   once reef's config requires it, and refuses a write from a page of another origin. The
@@ -633,3 +648,32 @@ own SessionEnd.
   as not answered, with no words.
 - **They outlast the service.** Read back after the server restarted, over the data directory
   an older binary wrote, with no fresh data directory, since the table was only added.
+
+### What C84 found
+
+Tried with Claude Code 2.1.332 and Sonnet 5.5 at low effort, in a private tmux pane in a scratch
+repo `reef claude install` set up, against the service's in-memory twin. The session was used
+as without reef: a question answered in its dialog, a plan rejected with *write the greeting in
+capital letters instead, and say so in the plan*, its revision approved, then `/clear`, a
+detach, an attach again and `/exit`.
+
+- **Attached at once, nothing nested.** `! reef loop run` returned with the session's id, and
+  `pgrep` showed no `claude -p`, only the follower.
+- **A `!` command finds `reef` on the user's own `PATH`.** Claude Code runs it through the
+  user's shell startup, which put `~/.cargo/bin` first. So the first try ran the installed
+  `reef`, from before C84, which attached a runner and nested its session, as on 2026-11-25. The
+  `reef` installed there has to be the one that attaches the session.
+- **Answered in the terminal, shown as history.** The transcript grew from 3 to 21 entries as
+  Claude worked: *Hi* picked, the first plan rejected with the feedback as typed, the revision
+  approved, each plan rendered by the service. `prompts` stayed empty throughout.
+- **A question shows once it is answered.** While Claude Code's dialog was open, the transcript
+  on disk held the message that asked for it but not the call. Claude Code writes an
+  AskUserQuestion call with its answer, so the app shows the question once the terminal has
+  answered it.
+- **A clear is followed.** `/clear` wrote `moved` to the inbox, and the entries carried on in the
+  new session. Its `session` entry first named the old session's last mode, `plan`, so the
+  follower now notes the new session at its file's first lines, which name its own, `auto`.
+- **It ends with the session.** `! reef loop detach` read `detached` at once, and after attaching
+  again, `/exit` read `detached` 0.6 s later.
+- **The sandbox doesn't stand in the way.** With `sandbox.enabled` in the repo's settings,
+  `! reef loop run` attached, and the follower reported as before.

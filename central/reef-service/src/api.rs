@@ -1905,7 +1905,8 @@ async fn session_orders<S: Serves>(
 }
 
 /// Does what the app asks of a runner's session: 200 if the runner was told or its loop
-/// changed, 409 if no such prompt waits, Claude isn't waiting for a reply, or the runner is gone
+/// changed, 409 if no such prompt waits, Claude isn't waiting for a reply, the runner is gone, or
+/// the session is a terminal's
 ///
 /// # Arguments
 ///
@@ -1927,7 +1928,8 @@ async fn act_on_session<S: Serves>(
         SessionActed::Ordered { .. } | SessionActed::Looped { .. } => StatusCode::OK,
         SessionActed::NoPrompt { .. }
         | SessionActed::NotWaiting { .. }
-        | SessionActed::Gone { .. } => StatusCode::CONFLICT,
+        | SessionActed::Gone { .. }
+        | SessionActed::InTerminal { .. } => StatusCode::CONFLICT,
     };
     Ok((status, Json(acted)))
 }

@@ -36,11 +36,12 @@ use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane};
 use reef_model::NodeName;
 use serde::Deserialize;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::clear::{self, Clear};
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
+use crate::follow;
 use crate::task::{self, Ending};
 use crate::worktree;
 
@@ -152,6 +153,9 @@ struct SessionStarted {
     /// Why it started: `startup`, `resume`, `clear` or `compact`
     #[serde(default)]
     source: String,
+    /// The transcript Claude Code writes for it
+    #[serde(default)]
+    transcript_path: Option<PathBuf>,
 }
 
 /// Starts a loop in a pane feeding the picked project, or one plan of it, or sets the pane's
@@ -456,18 +460,34 @@ pub async fn ls<W: Write>(
 /// * `input` - What the hook was handed on standard input
 /// * `pane` - The pane the session runs in
 /// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
+/// * `inbox` - The inbox of a follower of that process, which is told of the session if it
+///   exists
 /// * `out` - Where the hook's output goes
 pub async fn session_start<W: Write>(
     client: &Client,
     input: &str,
     pane: &Pane,
     pid: Option<u32>,
+    inbox: Option<&Path>,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the session that started
     let started: SessionStarted = serde_json::from_str(input).map_err(|error| {
         anyhow::anyhow!("the SessionStart hook's input doesn't read as Claude Code's: {error}")
     })?;
+    // a follower of this process follows the session to its file, whether or not a loop runs
+    if let (Some(inbox), Some(transcript)) = (inbox, &started.transcript_path)
+        && inbox.exists()
+    {
+        let moved = follow::Event::Moved {
+            claude: started.session_id.clone(),
+            transcript: transcript.clone(),
+        };
+        // best effort: a follower that misses it is no reason for the session not to start
+        if let Err(error) = follow::post(inbox, &moved) {
+            eprintln!("reef: telling the session's follower it moved failed: {error:#}");
+        }
+    }
     let edit = LoopEdit::Session {
         session: started.session_id,
         pid,
