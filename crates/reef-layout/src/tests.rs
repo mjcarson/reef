@@ -144,3 +144,45 @@ fn scale() {
     check(&input, &out);
     eprintln!("400 nodes, {} edges: {:?}", input.edges.len(), t.elapsed());
 }
+
+/// A box with no arrows sits one gap past the rest on its layer, rather than wherever the first
+/// packing left it while the boxes with arrows drifted away
+#[test]
+fn an_unlinked_box_sits_beside_the_rest() {
+    // a chain with a long edge beside it, wide boxes on alternate layers, and a box tied to nothing
+    let nodes = [100.0, 600.0, 100.0, 600.0, 100.0]
+        .into_iter()
+        .map(|w| LNode { parent: None, w, h: 40.0, container: false })
+        .collect();
+    let edges = vec![
+        LEdge { from: 0, to: 1 },
+        LEdge { from: 0, to: 3 },
+        LEdge { from: 1, to: 2 },
+        LEdge { from: 2, to: 3 },
+    ];
+    let input = Input { dir: Dir::TB, nodes, edges, spacing: Spacing::default() };
+    let out = layout(&input);
+    check(&input, &out);
+    // the lone box shares the first layer and sits just past the chain's head
+    let (head, lone) = (out.rects[0], out.rects[4]);
+    assert_eq!(lone.y, head.y, "{lone:?} is not on {head:?}'s layer");
+    let gap = lone.x - head.right();
+    assert!((gap - input.spacing.node_gap).abs() < 1e-6, "{gap} from the chain's head: {:?}", out.rects);
+}
+
+/// Two chains with nothing between them are set side by side, one gap apart on every layer
+#[test]
+fn separate_chains_sit_side_by_side() {
+    // a -> b and c -> d, all the same size
+    let nodes = vec![LNode { parent: None, w: 100.0, h: 40.0, container: false }; 4];
+    let edges = vec![LEdge { from: 0, to: 1 }, LEdge { from: 2, to: 3 }];
+    let input = Input { dir: Dir::TB, nodes, edges, spacing: Spacing::default() };
+    let out = layout(&input);
+    check(&input, &out);
+    // each layer holds one box of each chain, one gap apart
+    let sp = &input.spacing;
+    assert!((out.rects[2].x - out.rects[0].right() - sp.node_gap).abs() < 1e-6, "{:?}", out.rects);
+    assert!((out.rects[3].x - out.rects[1].right() - sp.node_gap).abs() < 1e-6, "{:?}", out.rects);
+    // and the drawing is just the two columns, the gap and the margins
+    assert!((out.width - (200.0 + sp.node_gap + 2.0 * sp.margin)).abs() < 1e-6, "{}", out.width);
+}

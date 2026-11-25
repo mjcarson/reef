@@ -141,7 +141,8 @@ pub(crate) fn layout_level(dir: Dir, ext: &[(f64, f64)], edges: &[(usize, usize)
         }
     }
 
-    // 3. Dummy boxes along long edges.
+    // 3. Dummy boxes along long edges, each in the same connected part as its edge.
+    let mut part = parts(n, edges);
     let mut vlayer = layer.clone();
     let mut vcext = cext.clone();
     let mut dummy = vec![false; n];
@@ -152,6 +153,7 @@ pub(crate) fn layout_level(dir: Dir, ext: &[(f64, f64)], edges: &[(usize, usize)
             vlayer.push(l);
             vcext.push(0.0);
             dummy.push(true);
+            part.push(part[a]);
             ch.push(vlayer.len() - 1);
         }
         ch.push(b);
@@ -243,7 +245,12 @@ pub(crate) fn layout_level(dir: Dir, ext: &[(f64, f64)], edges: &[(usize, usize)
             best = layers.clone();
         }
     }
-    let layers = best;
+    // Keep each connected part together on every layer. The sort is stable, so the order
+    // within a part, and so its crossings, stay as the sweeps left them.
+    let mut layers = best;
+    for l in &mut layers {
+        l.sort_by_key(|&v| part[v]);
+    }
     set_pos(&layers, &mut pos);
 
     // 5. Place boxes along each layer.
@@ -266,8 +273,8 @@ pub(crate) fn layout_level(dir: Dir, ext: &[(f64, f64)], edges: &[(usize, usize)
         }
         for (use_up, use_down) in this_round {
             let order: Vec<usize> = if use_up && !use_down { (0..nlayers).collect() } else { (0..nlayers).rev().collect() };
-            for l in order {
-                let ids = &layers[l];
+            // each part of each layer is placed on its own, since no arrow ties it to the others
+            for ids in order.into_iter().flat_map(|l| layers[l].chunk_by(|&a, &b| part[a] == part[b])) {
                 let mut desired = Vec::with_capacity(ids.len());
                 let mut weights = Vec::with_capacity(ids.len());
                 for &v in ids {
@@ -303,6 +310,8 @@ pub(crate) fn layout_level(dir: Dir, ext: &[(f64, f64)], edges: &[(usize, usize)
             }
         }
     }
+    // set the parts side by side, each just past the ones before it
+    pack_parts(&mut center, &vcext, &vlayer, &part, nlayers, sp.node_gap);
     let min_c = (0..vn).map(|v| center[v] - vcext[v] / 2.0).fold(f64::INFINITY, f64::min);
     let max_c = (0..vn).map(|v| center[v] + vcext[v] / 2.0).fold(f64::NEG_INFINITY, f64::max);
     for c in &mut center {
@@ -407,6 +416,101 @@ fn place_in_order(desired: &[f64], weights: &[f64], seps: &[f64]) -> Vec<f64> {
         }
     }
     out
+}
+
+/// Which connected part of a level each box is in, ignoring which way the edges point
+///
+/// A part is named by the smallest index of a box in it, so parts sort in the order their first
+/// boxes come in.
+///
+/// # Arguments
+///
+/// * `n` - How many boxes the level has
+/// * `edges` - The edges `(a, b)` between them
+fn parts(n: usize, edges: &[(usize, usize)]) -> Vec<usize> {
+    /// Follows a box's links up to the box that names its part
+    ///
+    /// # Arguments
+    ///
+    /// * `link` - Each box's link toward the box naming its part
+    /// * `v` - The box to find the part of
+    fn find(link: &mut [usize], mut v: usize) -> usize {
+        while link[v] != v {
+            // halve the path on the way, so later finds are short
+            link[v] = link[link[v]];
+            v = link[v];
+        }
+        v
+    }
+    // every box starts as a part of its own
+    let mut link: Vec<usize> = (0..n).collect();
+    // join the two parts each edge spans under the smaller of their names
+    for &(a, b) in edges {
+        let (ra, rb) = (find(&mut link, a), find(&mut link, b));
+        if ra != rb {
+            link[ra.max(rb)] = ra.min(rb);
+        }
+    }
+    // name each box by its part
+    (0..n).map(|v| find(&mut link, v)).collect()
+}
+
+/// Set a level's connected parts side by side across its layers
+///
+/// Each part was placed on its own, so nothing ties where one part sits to where another does.
+/// In the order of their names, each part moves the least it can to sit `gap` past the parts
+/// before it on every layer they share, so a part fits beside the others' shape rather than
+/// past their widest layer.
+///
+/// # Arguments
+///
+/// * `center` - Each box's centre across the layers, dummies included, moved in place
+/// * `cext` - Each box's extent across the layers
+/// * `vlayer` - Each box's layer
+/// * `part` - The connected part each box is in
+/// * `nlayers` - How many layers the level has
+/// * `gap` - The room to keep between two parts
+fn pack_parts(center: &mut [f64], cext: &[f64], vlayer: &[usize], part: &[usize], nlayers: usize, gap: f64) {
+    // the boxes of each part, the parts in the order of their names
+    let mut members: Vec<(usize, usize)> = part.iter().copied().zip(0..).collect();
+    members.sort_unstable();
+    let groups: Vec<&[(usize, usize)]> = members.chunk_by(|a, b| a.0 == b.0).collect();
+    // one part has nothing to sit beside
+    if groups.len() < 2 {
+        return;
+    }
+    // how far the parts already set reach on each layer
+    let mut reach = vec![f64::NEG_INFINITY; nlayers];
+    for group in groups {
+        // this part's extent on each layer
+        let mut lo = vec![f64::INFINITY; nlayers];
+        let mut hi = vec![f64::NEG_INFINITY; nlayers];
+        for &(_, v) in group {
+            let l = vlayer[v];
+            lo[l] = lo[l].min(center[v] - cext[v] / 2.0);
+            hi[l] = hi[l].max(center[v] + cext[v] / 2.0);
+        }
+        // the least shift that clears the parts before it on every layer they share
+        let shared = (0..nlayers)
+            .filter(|&l| lo[l].is_finite() && reach[l].is_finite())
+            .map(|l| reach[l] + gap - lo[l])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let shift = if shared.is_finite() {
+            shared
+        } else {
+            // a part that shares no layer with them goes past all of them, or stays if it is first
+            let furthest = reach.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let nearest = lo.iter().copied().fold(f64::INFINITY, f64::min);
+            if furthest.is_finite() { furthest + gap - nearest } else { 0.0 }
+        };
+        // move it there, and add it to what the next part must clear
+        for &(_, v) in group {
+            center[v] += shift;
+        }
+        for l in 0..nlayers {
+            reach[l] = reach[l].max(hi[l] + shift);
+        }
+    }
 }
 
 /// Boxes with no edges among them, packed in rows.

@@ -10,7 +10,8 @@
 //! layer); long edges get one dummy box a layer; layers are ordered by barycenter sweeps, keeping
 //! the order with fewest crossings; and boxes are placed along each layer by weighted isotonic
 //! regression toward their neighbours, which keeps the order and the gaps and straightens long
-//! edges.
+//! edges. Parts of a level that no edge joins are placed apart, then set side by side, each
+//! just past the parts before it on every layer they share.
 
 mod level;
 

@@ -9,6 +9,9 @@ is laid out at the innermost level that holds both ends. On each level:
 - long edges get dummy boxes;
 - barycenter sweeps order each layer, keeping the order with the fewest crossings;
 - weighted isotonic regression places the boxes along each layer, which keeps their order and
-  gaps and straightens long edges.
+  gaps and straightens long edges;
+- boxes no arrow joins are laid out apart: each connected part is placed on its own, then set
+  just past the parts before it on every layer they share, so a box with no arrows sits beside
+  the rest rather than where it first fell.
 
 A group with no arrows among its members is packed in a grid.
