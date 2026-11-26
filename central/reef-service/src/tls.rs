@@ -11,7 +11,10 @@
 //! - **Handshakes run beside each other.** [`TlsListener`] hands axum a connection once its
 //!   handshake is done, and runs each handshake as a task of its own, under [`HANDSHAKE_WAIT`],
 //!   so a client that opens a connection and says nothing never holds up the next.
-//! - **HTTP/1.1 alone,** offered by ALPN, as the plain listener serves it.
+//! - **HTTP/2 first, then HTTP/1.1,** offered by ALPN. Over HTTP/2 a browser carries every
+//!   tab's change streams and calls on one connection, where HTTP/1.1 gives it six to a host
+//!   across all its tabs, which a few plan pages' streams take up. The plain listener speaks
+//!   HTTP/1.1, since browsers speak HTTP/2 only over TLS.
 
 use axum::extract::connect_info::Connected;
 use axum::serve::{IncomingStream, Listener};
@@ -200,7 +203,7 @@ pub async fn bind(conf: &Conf) -> anyhow::Result<Option<TlsListener>> {
     Ok(Some(TlsListener::new(tcp, config)))
 }
 
-/// The TLS config that serves a certificate chain with its key, over HTTP/1.1
+/// The TLS config that serves a certificate chain with its key, over HTTP/2 or HTTP/1.1
 ///
 /// # Arguments
 ///
@@ -239,7 +242,8 @@ pub fn server_config(cert: &Path, key: &Path) -> anyhow::Result<ServerConfig> {
                 key.display()
             )
         })?;
+    // HTTP/2 for a client that speaks it, so a browser's streams share one connection, else
     // HTTP/1.1, as the plain listener serves
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(config)
 }

@@ -52,6 +52,7 @@ suite!(
     cross_origin_writes_are_refused,
     cross_origin_writes_are_refused_with_sign_in_off,
     signing_in_over_tls_sets_a_secure_cookie,
+    tls_serves_http2_to_a_client_that_offers_it,
     only_an_admin_registers_what_is_on_the_host,
     a_revoked_token_signs_nothing_in,
     repeated_wrong_passwords_are_slowed,

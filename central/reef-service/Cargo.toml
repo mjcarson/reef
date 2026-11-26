@@ -21,7 +21,8 @@ reef-model.workspace = true
 reef-render.workspace = true
 # with its prompt, which `reef-serve recover` asks a lost admin's new password with
 reef-api = { workspace = true, features = ["prompt"] }
-axum.workspace = true
+# with HTTP/2, which a browser speaks over TLS, carrying all its tabs' streams on one connection
+axum = { workspace = true, features = ["http2"] }
 tokio-stream.workspace = true
 # a change stream cut short once its token signs nobody in, at the version axum's tree holds
 futures-util = "0.3"
@@ -43,8 +44,8 @@ gix = { version = "=0.90.0", default-features = false, features = ["sha1"] }
 tokio-rustls.workspace = true
 
 [dev-dependencies]
-# a client of the JSON API that knows only reef-api's types
-reqwest.workspace = true
+# a client of the JSON API that knows only reef-api's types, and offers HTTP/2 over TLS
+reqwest = { workspace = true, features = ["http2"] }
 # a certificate for each test that serves over TLS
 rcgen.workspace = true
 # the CLI and the MCP server, driven in-process against a served service

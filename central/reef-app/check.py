@@ -4,8 +4,9 @@ Each step checks one of M4's to M10's criteria, or how the app shows a node's wo
 it saw; the script exits 1 if any failed. C48's sign-in runs last, on a server of its own that asks
 every caller to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`), then
 C51's, on another that serves over TLS beside it (127.0.0.1:12192 and 12193, under `origin`), with
-a page of another origin served from 127.0.0.1:12194, then C77's account page, on a third
-(127.0.0.1:12196, under `account`).
+a page of another origin served from 127.0.0.1:12194, then C85's eight tabs over TLS, on a third
+(127.0.0.1:12197 and 12198, under `tabs`), then C77's account page, on a fourth (127.0.0.1:12196,
+under `account`).
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -71,6 +72,10 @@ ELSEWHERE = "http://127.0.0.1:12194"
 # C77's server, whose users and tokens the account page manages
 ACCOUNT_WORK = WORK / "account"
 ACCOUNT_URL = "http://127.0.0.1:12196"
+# C85's server, over plain HTTP for its runner and TLS for the browser's tabs
+TABS_WORK = WORK / "tabs"
+TABS_URL = "http://127.0.0.1:12197"
+TABS_TLS = "https://127.0.0.1:12198"
 
 
 def check(label, ok, seen):
@@ -1215,9 +1220,10 @@ for message in INPUT:
 '''
 
 
-def runner(plan, play):
-    """Starts `reef loop run` in the check's repo, narrowed to a plan, with Claude played by the
-    stub, in a process group of its own."""
+def runner(plan, play, conf=None, repo=None, credentials=None):
+    """Starts `reef loop run` in the check's repo, or another, narrowed to a plan, with Claude played by the
+    stub, in a process group of its own. A server that asks callers to sign in is given the credentials file a
+    login wrote, which the stub's own reef finds through `REEF_CREDENTIALS`."""
     stub = WORK / "claude-stub.py"
     stub.write_text(STUB)
     stub.chmod(0o755)
@@ -1228,9 +1234,11 @@ def runner(plan, play):
     for name in list(env):
         if name.startswith(("CLAUDE", "ZELLIJ", "TMUX")) or name == "REEF_PANE":
             env.pop(name)
+    if credentials:
+        env["REEF_CREDENTIALS"] = str(credentials)
     log = open(WORK / f"runner-{plan}.log", "w")
-    return subprocess.Popen([REEF / "target/debug/reef", "--conf", WORK / "reef.toml", "loop", "run",
-                             "--plan", plan, "--claude", claude], cwd=WORK / "repo", env=env, stdout=log,
+    return subprocess.Popen([REEF / "target/debug/reef", "--conf", conf or WORK / "reef.toml", "loop", "run",
+                             "--plan", plan, "--claude", claude], cwd=repo or WORK / "repo", env=env, stdout=log,
                             stderr=subprocess.STDOUT, start_new_session=True)
 
 
@@ -1733,6 +1741,115 @@ def c51_a_cross_origin_write_is_refused(browser):
         stop(server)
 
 
+def tabs_reef(*args):
+    """Runs the reef CLI against C85's server, over its loopback port, with credentials of its own."""
+    return run(REEF / "target/debug/reef", "--conf", TABS_WORK / "reef.toml",
+               "--credentials", TABS_WORK / "credentials.toml", *args, cwd=TABS_WORK / "repo")
+
+
+def c85_many_tabs_over_tls_each_read_a_session(browser):
+    """C85: with eight tabs of a plan's page open over TLS, where the browser speaks HTTP/2 and every tab's change
+    streams share one connection, a runner's waiting question shows in a picked session's transcript and card in
+    any of them, and an answer from one shows in another. Over HTTP/1.1 a browser has six connections to a host,
+    which two plan pages' streams take up."""
+    # a server of its own, over plain HTTP for its runner and TLS for the browser, asking every caller to sign in
+    if TABS_WORK.exists():
+        shutil.rmtree(TABS_WORK)
+    repo = TABS_WORK / "repo"
+    repo.mkdir(parents=True)
+    run("git", "-C", repo, "-c", "user.name=reef", "-c", "user.email=reef@example.invalid",
+        "-c", "init.defaultBranch=main", "init", "-q")
+    run("git", "-C", repo, "-c", "user.name=reef", "-c", "user.email=reef@example.invalid",
+        "commit", "-q", "--allow-empty", "-m", "start")
+    run("openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+        "-keyout", TABS_WORK / "key.pem", "-out", TABS_WORK / "cert.pem", "-days", "1", "-subj", "/CN=localhost",
+        "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
+    (TABS_WORK / "reef.toml").write_text(
+        f'[api]\naddress = "{TABS_URL.removeprefix("http://")}"\n\n'
+        f'[api.tls]\naddress = "{TABS_TLS.removeprefix("https://")}"\n'
+        f'cert = "{TABS_WORK / "cert.pem"}"\nkey = "{TABS_WORK / "key.pem"}"\n\n'
+        f'[shoal]\ndata = "{TABS_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
+    )
+    server = start(TABS_WORK / "reef.toml", TABS_URL, TABS_WORK / "server.log")
+    process = None
+    context = browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
+    seen = {}
+    try:
+        # a user, the project and a plan of one node, and a runner whose Claude asks which greeting
+        password = TABS_WORK / "password"
+        password.write_text(PASSWORD + "\n")
+        tabs_reef("user", "add", "ada", "--password-file", password)
+        tabs_reef("login", "--user", "ada", "--password-file", password)
+        tabs_reef("project", "add", "check", "--repo", repo)
+        tabs_reef("plan", "new", "tabs")
+        node = TABS_WORK / "t1.yaml"
+        node.write_text(node_yaml("T1", "T1 The greeting"))
+        tabs_reef("node", "put", node, "--plan", "tabs")
+        process = runner("tabs", "question", TABS_WORK / "reef.toml", repo, TABS_WORK / "credentials.toml")
+        plan = TABS_TLS + "/plans/check/tabs"
+        card = ".reef-app-question[data-prompt=ask-T1]"
+
+        def tab():
+            """Opens another tab of the plan's page, and waits for its plan to draw."""
+            page = context.new_page()
+            page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+            page.goto(plan)
+            wait_drawn(page)
+            return page
+
+        # signed in over TLS, the loop started from the first tab, and its question waiting in a card
+        first = context.new_page()
+        first.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+        first.goto(plan)
+        first.fill("#name", "ada")
+        first.fill("#password", PASSWORD)
+        first.click("button[type=submit]")
+        first.wait_for_selector(".reef-app-plan-name", timeout=20000)
+        wait_drawn(first)
+        first.click(".reef-app-sessions-toggle")
+        first.wait_for_selector(".reef-app-runner.picked button[data-act=start]", timeout=20000)
+        first.click(".reef-app-runner.picked button[data-act=start]")
+        first.wait_for_selector(card, timeout=20000)
+        # seven more tabs of the plan's page, each holding its three change streams open
+        tabs = []
+        for _ in range(7):
+            tabs.append(tab())
+            seen["tabs drawn"] = 1 + len(tabs)
+        last = tabs[-1]
+        seen["protocol"] = last.evaluate("() => performance.getEntriesByType('navigation')[0].nextHopProtocol")
+        # the last tab's panel shows the session's transcript and its question's card
+        last.click(".reef-app-sessions-toggle")
+        last.wait_for_selector(card, timeout=10000)
+        last.wait_for_function("() => document.querySelectorAll('.reef-app-transcript .reef-app-entry').length > 0",
+                               timeout=10000)
+        seen["last tab's entries"] = entries(last)
+        # the first tab reads the transcript afresh, its panel shut and opened again
+        first.click(".reef-app-sessions-toggle")
+        first.wait_for_selector(".reef-app-sessions", state="detached", timeout=5000)
+        first.click(".reef-app-sessions-toggle")
+        first.wait_for_selector(card, timeout=10000)
+        first.wait_for_function("() => document.querySelectorAll('.reef-app-transcript .reef-app-entry').length > 0",
+                                timeout=10000)
+        seen["first tab's entries"] = entries(first)
+        last.screenshot(path=str(SHOTS / "reef-app-tabs.png"))
+        # answered from the last tab, and the first shows Claude carrying on with it, live
+        last.click(f"{card} [data-choice=Hello]")
+        last.click(f"{card} button[data-act=answer]")
+        first.wait_for_function("() => document.querySelector('.reef-app-transcript').innerText"
+                                ".includes('You picked Hello.')", timeout=20000)
+        seen["said"] = first.inner_text(".reef-app-transcript")[-400:]
+    except Exception as error:
+        seen["error"] = str(error).splitlines()[0]
+    finally:
+        context.close()
+        if process:
+            stop_runner(process)
+        stop(server)
+    check("C85 with eight tabs open over TLS, a picked session shows its transcript and prompt in any of them",
+          "error" not in seen and seen.get("protocol") == "h2" and seen["last tab's entries"] > 0
+          and seen["first tab's entries"] > 0 and "You picked Hello." in seen["said"], seen)
+
+
 def account_reef(who, *args, check_ok=True):
     """Runs the reef CLI against C77's server as one user, each with a credentials file of their own."""
     line = [REEF / "target/debug/reef", "--conf", ACCOUNT_WORK / "reef.toml",
@@ -1905,6 +2022,8 @@ def main():
                 c48_a_browser_signs_in_and_reaches_its_plan(browser)
             if not ONLY or any("c51_a_cross_origin_write_is_refused".startswith(name) for name in ONLY):
                 c51_a_cross_origin_write_is_refused(browser)
+            if not ONLY or any("c85_many_tabs_over_tls_each_read_a_session".startswith(name) for name in ONLY):
+                c85_many_tabs_over_tls_each_read_a_session(browser)
             if not ONLY or any("c77_the_account_page_manages_passwords_and_tokens".startswith(name) for name in ONLY):
                 c77_the_account_page_manages_passwords_and_tokens(browser)
             browser.close()

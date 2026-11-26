@@ -16,7 +16,7 @@ use reef_service::{Asker, Backend, Recovered, Unkeepable};
 use reqwest::header::{
     ACCEPT, CONTENT_SECURITY_POLICY, COOKIE, LOCATION, RETRY_AFTER, SET_COOKIE, WWW_AUTHENTICATE,
 };
-use reqwest::{Method, StatusCode};
+use reqwest::{Method, StatusCode, Version};
 use std::time::Duration;
 
 use super::Fx;
@@ -765,6 +765,80 @@ pub async fn signing_in_over_tls_sets_a_secure_cookie<B: Backend + 'static>(
         .request(Method::POST, paths::SIGN_OUT)
         .header("origin", tls.base.replace("https://", "http://"));
     assert_eq!(tls.raw(request).await?.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
+/// Over TLS, a client that offers HTTP/2 is answered over it, eight change streams held open
+/// and a read beside them, as a browser's tabs share one connection; plain HTTP, and a client
+/// that offers only HTTP/1.1, are answered over HTTP/1.1
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served over TLS beside loopback, asking callers to sign in
+pub async fn tls_serves_http2_to_a_client_that_offers_it<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_over_tls().await?;
+    first_admin(&ax, "ada").await?;
+    let (_, token) = try_sign_in(&ax, "ada", PASSWORD).await?;
+    let token = token.expect("ada signs in");
+    let over = ax.tls.as_ref().expect("the fixture serves over TLS");
+    // a client that offers HTTP/2 by ALPN, as a browser does over TLS
+    let tls = over.client.signed(&token);
+    // eight of the project's change streams held open, as a few plan pages hold theirs
+    let path = paths::changes(Some(&ax.plan.project), None);
+    let mut streams = Vec::new();
+    for _ in 0..8 {
+        streams.push(tls.open(&path).await?);
+    }
+    for stream in &streams {
+        assert_eq!(
+            (stream.status(), stream.version()),
+            (StatusCode::OK, Version::HTTP_2)
+        );
+    }
+    // a read beside them is answered at once, over HTTP/2 too
+    let read = tls.raw(tls.request(Method::GET, paths::PROJECTS)).await?;
+    assert_eq!(
+        (read.status(), read.version()),
+        (StatusCode::OK, Version::HTTP_2)
+    );
+    // and a change made now reaches every stream
+    let plain = ax.client.signed(&token);
+    let (status, _): (_, Checked) = plain.post(&paths::nodes(&ax.plan), &work("C2")).await?;
+    assert_eq!(status, StatusCode::OK);
+    for stream in &mut streams {
+        let chunk = tokio::time::timeout(Duration::from_secs(5), stream.chunk()).await??;
+        let chunk = chunk.map(|bytes| String::from_utf8_lossy(&bytes).to_string());
+        assert!(
+            chunk.as_deref().is_some_and(|text| text.contains("C2")),
+            "{chunk:?}"
+        );
+    }
+    // a client that offers only HTTP/1.1 over TLS is answered over it
+    let pem = std::fs::read(&over.minted.ca)?;
+    let http1 = reqwest::Client::builder()
+        .no_proxy()
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(reqwest::Certificate::from_pem(&pem)?)
+        .http1_only()
+        .build()?;
+    let request = http1
+        .get(format!("{}{}", over.client.base, paths::PROJECTS))
+        .bearer_auth(&token);
+    let read = tokio::time::timeout(Duration::from_secs(10), request.send()).await??;
+    assert_eq!(
+        (read.status(), read.version()),
+        (StatusCode::OK, Version::HTTP_11)
+    );
+    // and plain HTTP stays HTTP/1.1, since browsers speak HTTP/2 only over TLS
+    let read = plain
+        .raw(plain.request(Method::GET, paths::PROJECTS))
+        .await?;
+    assert_eq!(
+        (read.status(), read.version()),
+        (StatusCode::OK, Version::HTTP_11)
+    );
     Ok(())
 }
 

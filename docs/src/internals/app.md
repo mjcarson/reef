@@ -43,6 +43,12 @@ the pages and the JSON API alike.
   directory, so run one or the other. Under
   `dx serve`, dx names the server's address and proxies its own port to it; point `[api] address`
   at dx's port to reach it from the CLI.
+- **Over TLS it speaks HTTP/2, else HTTP/1.1.** A plan's page holds three change streams open,
+  the plan's, its queue's and its runners', and over HTTP/1.1 a browser keeps six connections
+  to a host across all its tabs, so two tabs leave every other call waiting. Over TLS, ALPN
+  offers `h2` first, and a browser carries every tab's streams and calls on one connection, up
+  to hyper's 200 streams at once. Browsers speak HTTP/2 only over TLS, so the plain loopback
+  port stays HTTP/1.1, for the CLI, its hooks and one tab.
 - **It is served by `api::serve_router`, not `dioxus::serve`,** which would listen on `PORT`
   or 8080. It stops on SIGINT or SIGTERM, ending the change stream first.
 - **`embedded` goes to the server build alone,** since dx keeps default features on in the wasm
