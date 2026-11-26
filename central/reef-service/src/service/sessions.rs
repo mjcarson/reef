@@ -18,10 +18,15 @@
 //!   transcript and asks for orders to stay live. A pane shows one such session, so attaching
 //!   another detaches the one before. The app's acts on it are refused as
 //!   [`SessionActed::InTerminal`], since only its terminal answers it.
+//! - **Who acted is kept, though the session isn't** (C89). A session says who attached it and
+//!   each order who gave it, and its project's loops' history keeps who attached it, let go of it,
+//!   answered a prompt of it or replied in it, which outlives this process. Reports keep nothing,
+//!   since a runner sends one a turn.
 
 use reef_api::{
-    Attach, Change, EditLoop, Entry, EntryKind, LoopEdit, LoopEdited, Order, Ordered, Pane, Prompt,
-    PromptKind, Report, Session, SessionAct, SessionActed, SessionState, Transcript,
+    Attach, Author, Change, EditLoop, Entry, EntryKind, LoopAct, LoopEdit, LoopEdited, Order,
+    Ordered, Pane, Prompt, PromptKind, Report, Session, SessionAct, SessionActed, SessionState,
+    Transcript,
 };
 use reef_model::PlanName;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -101,12 +106,14 @@ impl Kept {
     /// # Arguments
     ///
     /// * `order` - The order
-    fn give(&mut self, order: Order) {
+    /// * `by` - Who gave it
+    fn give(&mut self, order: Order, by: &Author) {
         // numbered after the last, then the waiting ask woken, or the next one let through
         self.last_order += 1;
         self.orders.push(Ordered {
             n: self.last_order,
             order,
+            by: by.clone(),
         });
         self.notify.notify_one();
     }
@@ -225,8 +232,9 @@ impl<B: Backend> Service<B> {
     /// # Arguments
     ///
     /// * `attach` - The pane, project, host and checkout, and what it holds already
+    /// * `author` - Who attaches it, from the caller's token
     #[instrument(name = "Service::attach_session", skip_all, err(Debug))]
-    pub async fn attach_session(&self, attach: Attach) -> anyhow::Result<Session> {
+    pub async fn attach_session(&self, attach: Attach, author: &Author) -> anyhow::Result<Session> {
         // a runner's pane's id, else the id a terminal's session names
         let id = attached_id(&attach)?;
         // a registered project, and a plan it lists if one is named
@@ -251,6 +259,7 @@ impl<B: Backend> Service<B> {
             claude: attach.claude,
             entries: 0,
             prompts: attach.prompts.into_iter().map(rendered).collect(),
+            attached_by: author.clone(),
         };
         // what is kept of it
         let mut kept = Kept {
@@ -284,6 +293,13 @@ impl<B: Backend> Service<B> {
             sessions.insert(id.clone(), kept);
             replaced
         });
+        // kept in its project's loops' history, before the change stream hears of it
+        let attached = LoopAct::Attached {
+            session: session.id.clone(),
+        };
+        self.store
+            .keep_loop_act(&session.project, author, &session.pane, attached)
+            .await;
         // each session that changed told to the change stream, the one replaced first
         for (project, session) in replaced {
             self.publish(Change::SessionChanged { project, session });
@@ -333,18 +349,29 @@ impl<B: Backend> Service<B> {
     /// # Arguments
     ///
     /// * `id` - The session's id
+    /// * `author` - Who lets go of it, from the caller's token
     #[instrument(name = "Service::detach_session", skip_all, err(Debug))]
-    pub async fn detach_session(&self, id: &str) -> anyhow::Result<Session> {
+    pub async fn detach_session(&self, id: &str, author: &Author) -> anyhow::Result<Session> {
         // no prompt waits on a runner that let go
-        let session = self.sessions.with(|sessions| {
+        let (session, was) = self.sessions.with(|sessions| {
             let kept = sessions
                 .get_mut(id)
                 .ok_or_else(|| NoSession(id.to_string()))?;
+            let was = kept.session.state;
             kept.session.state = SessionState::Detached;
             kept.session.prompts.clear();
             kept.orders.clear();
-            Ok::<_, NoSession>(kept.session.clone())
+            Ok::<_, NoSession>((kept.session.clone(), was))
         })?;
+        // kept in its project's loops' history, unless it had let go already
+        if was != SessionState::Detached {
+            let detached = LoopAct::Detached {
+                session: session.id.clone(),
+            };
+            self.store
+                .keep_loop_act(&session.project, author, &session.pane, detached)
+                .await;
+        }
         self.publish(Change::SessionChanged {
             project: session.project.clone(),
             session: session.id.clone(),
@@ -451,8 +478,14 @@ impl<B: Backend> Service<B> {
     ///
     /// * `id` - The session's id
     /// * `act` - What the app asks
+    /// * `author` - Who asks it, from the caller's token or cookie
     #[instrument(name = "Service::act_on_session", skip_all, err(Debug))]
-    pub async fn act_on_session(&self, id: &str, act: SessionAct) -> anyhow::Result<SessionActed> {
+    pub async fn act_on_session(
+        &self,
+        id: &str,
+        act: SessionAct,
+        author: &Author,
+    ) -> anyhow::Result<SessionActed> {
         // the session as it stands, gone if its runner went silent
         let now = now_ms();
         let session = self.sessions.with(|sessions| {
@@ -468,7 +501,7 @@ impl<B: Backend> Service<B> {
         let acted = match act {
             // a pause is read at the node's end, and needs no runner to be there
             SessionAct::Pause => {
-                let edited = self.session_loop(&session, LoopEdit::Pause).await?;
+                let edited = self.session_loop(&session, LoopEdit::Pause, author).await?;
                 SessionActed::Looped {
                     session,
                     edited: Box::new(edited),
@@ -476,8 +509,10 @@ impl<B: Backend> Service<B> {
             }
             // a stop lets go of the node whether or not the runner is there to end its Claude
             SessionAct::Stop => {
-                let edited = self.session_loop(&session, LoopEdit::Stop).await?;
-                let session = self.order(id, Order::Wake, |_| true)?.unwrap_or(session);
+                let edited = self.session_loop(&session, LoopEdit::Stop, author).await?;
+                let session = self
+                    .order(id, Order::Wake, author, |_| true)?
+                    .unwrap_or(session);
                 SessionActed::Looped {
                     session,
                     edited: Box::new(edited),
@@ -495,11 +530,11 @@ impl<B: Backend> Service<B> {
                     opens: Some(false),
                     pid: None,
                 };
-                let edited = self.session_loop(&session, start).await?;
+                let edited = self.session_loop(&session, start, author).await?;
                 let session = match &edited {
-                    LoopEdited::Started { .. } | LoopEdited::Resumed { .. } => {
-                        self.order(id, Order::Wake, |_| true)?.unwrap_or(session)
-                    }
+                    LoopEdited::Started { .. } | LoopEdited::Resumed { .. } => self
+                        .order(id, Order::Wake, author, |_| true)?
+                        .unwrap_or(session),
                     _ => session,
                 };
                 SessionActed::Looped {
@@ -521,8 +556,18 @@ impl<B: Backend> Service<B> {
                     prompt: prompt.clone(),
                     answer,
                 };
-                match self.order(id, order, waiting)? {
-                    Some(session) => SessionActed::Ordered { session },
+                match self.order(id, order, author, waiting)? {
+                    Some(session) => {
+                        // kept in its project's loops' history once it is given
+                        let answered = LoopAct::Answered {
+                            session: session.id.clone(),
+                            prompt,
+                        };
+                        self.store
+                            .keep_loop_act(&session.project, author, &session.pane, answered)
+                            .await;
+                        SessionActed::Ordered { session }
+                    }
                     None => SessionActed::NoPrompt { prompt, session },
                 }
             }
@@ -535,8 +580,18 @@ impl<B: Backend> Service<B> {
                     }
                     waits
                 };
-                match self.order(id, Order::Say { text }, waiting)? {
-                    Some(session) => SessionActed::Ordered { session },
+                match self.order(id, Order::Say { text }, author, waiting)? {
+                    Some(session) => {
+                        // kept in its project's loops' history once it is given, its words left
+                        // to the transcript
+                        let said = LoopAct::Said {
+                            session: session.id.clone(),
+                        };
+                        self.store
+                            .keep_loop_act(&session.project, author, &session.pane, said)
+                            .await;
+                        SessionActed::Ordered { session }
+                    }
                     None => SessionActed::NotWaiting { session },
                 }
             }
@@ -550,13 +605,19 @@ impl<B: Backend> Service<B> {
     ///
     /// * `session` - The session
     /// * `edit` - The change to its loop
-    async fn session_loop(&self, session: &Session, edit: LoopEdit) -> anyhow::Result<LoopEdited> {
+    /// * `author` - Who asks it
+    async fn session_loop(
+        &self,
+        session: &Session,
+        edit: LoopEdit,
+        author: &Author,
+    ) -> anyhow::Result<LoopEdited> {
         // the loop is the runner's pane's, edited and told as any pane's is
         let edit = EditLoop {
             pane: session.pane.clone(),
             edit,
         };
-        self.edit_loop(edit).await
+        self.edit_loop(edit, author).await
     }
 
     /// Gives a session's runner an order if the session takes it, and tells the change stream
@@ -565,11 +626,13 @@ impl<B: Backend> Service<B> {
     ///
     /// * `id` - The session's id
     /// * `order` - The order
+    /// * `by` - Who gives it
     /// * `takes` - Whether the session takes it, changing what it keeps if it does
     fn order(
         &self,
         id: &str,
         order: Order,
+        by: &Author,
         takes: impl FnOnce(&mut Kept) -> bool,
     ) -> anyhow::Result<Option<Session>> {
         // given under the lock, so a take and its order can't be split
@@ -580,7 +643,7 @@ impl<B: Backend> Service<B> {
             if !takes(kept) {
                 return Ok::<_, NoSession>(None);
             }
-            kept.give(order);
+            kept.give(order, by);
             Ok(Some(kept.session.clone()))
         })?;
         if let Some(session) = &session {

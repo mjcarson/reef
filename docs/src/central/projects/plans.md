@@ -2,7 +2,7 @@
 
 ```sh
 reef plan new launch               # an empty plan in the working directory's project
-reef plan ls                       # each plan and the revision it is at
+reef plan ls                       # each plan, the revision it is at, and who listed it
 ```
 
 - **A project with one plan needs no `--plan`.** Once it has several, commands that read or

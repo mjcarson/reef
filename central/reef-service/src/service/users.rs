@@ -24,6 +24,10 @@
 //!   their tokens with them, and never the last admin.
 //! - **A lost admin is recovered from the store itself** ([`Service::recover_admin`]), by
 //!   whoever can open it, as `reef-serve recover` does, never over the API.
+//! - **Every act on a user names who made it** (C89), in a log only admins read: adding and
+//!   removing users, setting a password, revoking a token and a recovery, which names nobody.
+//!   Signing in and out, and an expired token let go, keep nothing. A user also says who added
+//!   them, which a password set later leaves as it was.
 //! - **A revoke is told to the change streams.** Each revoke, removal or reset bumps a counter
 //!   [`Service::signed_out`] watches, so a stream whose token stops signing anyone in ends.
 
@@ -34,8 +38,8 @@ use reef_api::user::{
     PASSWORD_MAX, TOKEN_ID_LEN, check_password, check_user_name, is_token_id, is_token_shaped,
 };
 use reef_api::{
-    IssuedToken, NewUser, PasswordChange, PasswordChanged, TokenInfo, TokenKind, User, UserAdded,
-    UserRemoved,
+    Author, HistoryPage, HistoryQuery, IssuedToken, NOBODY, NewUser, PasswordChange,
+    PasswordChanged, TokenInfo, TokenKind, User, UserAct, UserAdded, UserRemoved, Writer,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -105,12 +109,30 @@ impl std::error::Error for NoUser {}
 pub struct Asker<'a> {
     /// The user the caller's token signs in, if it signs one in
     pub user: Option<&'a User>,
+    /// Who wrote for that user: the user, or Claude with their token
+    pub writer: Writer,
     /// Whether the caller reached the service from its own host
     pub local: bool,
     /// The token the caller sent, if it sent one
     pub token: Option<&'a str>,
     /// The address the caller called from, if it is known
     pub address: Option<IpAddr>,
+}
+
+impl Asker<'_> {
+    /// Who the asker is as an author: the user their token signs in, and whether Claude wrote
+    /// for them, or nobody known
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_service::Asker;
+    ///
+    /// assert!(Asker::default().author().is_unknown());
+    /// ```
+    pub fn author(&self) -> Author {
+        Author::signed(self.user, self.writer)
+    }
 }
 
 impl std::fmt::Debug for Asker<'_> {
@@ -122,6 +144,7 @@ impl std::fmt::Debug for Asker<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Asker")
             .field("user", &self.user)
+            .field("writer", &self.writer)
             .field("local", &self.local)
             .field("token", &self.token.map(|_| "…"))
             .field("address", &self.address)
@@ -410,6 +433,28 @@ impl<B: Backend> Service<B> {
         Ok(Some(note))
     }
 
+    /// Reads a page of the log of acts on reef's users, newest first, to an admin, or nothing
+    /// while there are no users
+    ///
+    /// # Arguments
+    ///
+    /// * `asker` - Who asks
+    /// * `query` - Which page to read
+    #[instrument(name = "Service::user_history", skip_all, err(Debug))]
+    pub async fn user_history(
+        &self,
+        asker: Asker<'_>,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        // with no users yet, there is nobody to hide it from, and nothing to show
+        let users = self.store.users().await?;
+        if users.is_empty() {
+            return Ok(HistoryPage::default());
+        }
+        is_admin(&users, asker, "read the users' log")?;
+        self.store.user_history(query).await
+    }
+
     /// Lists every user, by name, to an admin, or nobody while there are none
     ///
     /// # Arguments
@@ -441,14 +486,20 @@ impl<B: Backend> Service<B> {
         judge_add(&self.store.users().await?, asker, new.admin)?;
         let password = self.hash_password(new.password).await?;
         // and again under the lock, against the users as they stand then
+        let author = asker.author();
         let kept = self
             .store
-            .add_user(&new.name, &password, |users| {
+            .add_user(&new.name, &password, &author, |users| {
                 judge_add(users, asker, new.admin)
             })
             .await?;
         Ok(match kept {
-            UserKept::Added(user) => UserAdded::Added(user),
+            UserKept::Added(user) => {
+                // kept in the users' log once they are
+                let added = UserAct::Added { admin: user.admin };
+                self.store.keep_user_act(&author, &user.name, added).await;
+                UserAdded::Added(user)
+            }
             UserKept::NameTaken => UserAdded::NameTaken,
         })
     }
@@ -654,6 +705,17 @@ impl<B: Backend> Service<B> {
         let dropped = self.store.drop_token(&token).await?;
         self.tokens.forget(&token.hash);
         self.revoked();
+        // kept in the users' log, if there was one to drop
+        if dropped {
+            let revoked = UserAct::TokenRevoked {
+                id: token_id(&token.hash),
+                kind: token.kind,
+                label: token.label.clone(),
+            };
+            self.store
+                .keep_user_act(&asker.author(), &token.user, revoked)
+                .await;
+        }
         Ok(dropped)
     }
 
@@ -726,6 +788,14 @@ impl<B: Backend> Service<B> {
             "the password of `{name}` changed while this change was checked, so it wasn't \
              written: try again"
         );
+        // kept in the users' log
+        let changed = UserAct::Password {
+            own: true,
+            revoked: 0,
+        };
+        self.store
+            .keep_user_act(&asker.author(), name, changed)
+            .await;
         Ok(PasswordChanged { revoked: 0 })
     }
 
@@ -759,6 +829,12 @@ impl<B: Backend> Service<B> {
         );
         // set by someone else, so whoever held the old one signs in no more
         let revoked = self.revoke_all(name).await?;
+        // kept in the users' log
+        let set = UserAct::Password {
+            own: false,
+            revoked,
+        };
+        self.store.keep_user_act(&asker.author(), name, set).await;
         Ok(PasswordChanged { revoked })
     }
 
@@ -781,6 +857,11 @@ impl<B: Backend> Service<B> {
                 // no lookup trusts a token of theirs from now on
                 self.tokens.forget_user(name);
                 self.revoked();
+                // kept in the users' log, which outlives their row
+                let removed = UserAct::Removed { revoked };
+                self.store
+                    .keep_user_act(&asker.author(), name, removed)
+                    .await;
                 UserRemoved::Removed { revoked }
             }
             UserDropped::NoSuchUser => UserRemoved::NoSuchUser,
@@ -805,9 +886,20 @@ impl<B: Backend> Service<B> {
         check_password(&password).map_err(Unkeepable)?;
         let password = self.hash_password(password).await?;
         let Some(stored) = self.store.user(name).await? else {
-            // nobody of the name, so a new admin, judged by nobody
-            return match self.store.add_user(name, &password, |_| Ok(true)).await? {
-                UserKept::Added(_) => Ok(Recovered::Added),
+            // nobody of the name, so a new admin, judged and added by nobody
+            return match self
+                .store
+                .add_user(name, &password, &NOBODY, |_| Ok(true))
+                .await?
+            {
+                UserKept::Added(_) => {
+                    let recovered = UserAct::Recovered {
+                        added: true,
+                        revoked: 0,
+                    };
+                    self.store.keep_user_act(&NOBODY, name, recovered).await;
+                    Ok(Recovered::Added)
+                }
                 UserKept::NameTaken => {
                     anyhow::bail!("`{name}` was added while it was recovered: run it again")
                 }
@@ -820,6 +912,12 @@ impl<B: Backend> Service<B> {
             "`{name}` changed while it was recovered, so it wasn't: run it again"
         );
         let revoked = self.revoke_all(name).await?;
+        // kept in the users' log, naming nobody, since nobody signed in did it
+        let recovered = UserAct::Recovered {
+            added: false,
+            revoked,
+        };
+        self.store.keep_user_act(&NOBODY, name, recovered).await;
         Ok(Recovered::Reset {
             revoked,
             was_admin: stored.user.admin,

@@ -390,7 +390,11 @@ pub async fn refused_and_unkeepable_starts_write_nothing<B: Reopen>(
 pub async fn each_project_has_its_own_work<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a second project, of a repo of its own, with a node of the same plan and id started
     let repo = git::repo(&fx.dir.join("app"))?;
-    let AddedProject::Added(_) = fx.store.add_project("app", &repo).await? else {
+    let AddedProject::Added(_) = fx
+        .store
+        .add_project("app", &repo, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a project for a fresh repo was refused");
     };
     let theirs: NodeName = "app/central/A".parse()?;

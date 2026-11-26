@@ -8,8 +8,11 @@
 //!
 //! A history is read a page of 200 entries at a time. A page with older entries kept ends by
 //! naming the cursor onto them, which `--older` hands back; `--all` reads every page.
+//!
+//! `reef loop log` and `reef user log` print the acts on a project's loops and sessions, and on
+//! reef's users, the same way, but with no version, since an act leaves none (C89).
 
-use reef_api::{HistoryPage, Logged};
+use reef_api::{Author, HistoryPage, Logged};
 use reef_model::{NodeName, PlanName};
 use std::future::Future;
 use std::io::Write;
@@ -38,6 +41,58 @@ pub fn show<W: Write>(page: &HistoryPage, none: &str, out: &mut W) -> anyhow::Re
         writeln!(out, "older edits are kept: pass --older {older}")?;
     }
     Ok(())
+}
+
+/// Prints a page of acts, newest first, a line an act with no version, or says there is none,
+/// then the cursor onto its older acts if any are kept
+///
+/// # Arguments
+///
+/// * `page` - The page, its acts newest first
+/// * `none` - What to say of a log with no act
+/// * `out` - Where to print it
+pub fn show_acts<W: Write>(page: &HistoryPage, none: &str, out: &mut W) -> anyhow::Result<()> {
+    // nothing kept is said plainly
+    if page.edits.is_empty() {
+        writeln!(out, "{none}")?;
+    }
+    for logged in &page.edits {
+        // when, who if anyone is known, then what was done
+        let mut line = when(logged.at);
+        if let Some(who) = logged.author.describe() {
+            line.push_str("  ");
+            line.push_str(&who);
+        }
+        line.push_str(": ");
+        line.push_str(&logged.describe());
+        writeln!(out, "{line}")?;
+    }
+    // and older acts, if any are kept, are a cursor away
+    if let Some(older) = &page.older {
+        writeln!(out, "older acts are kept: pass --older {older}")?;
+    }
+    Ok(())
+}
+
+/// What a listing says of who did something, if anyone known did, such as `registered by ada`
+///
+/// # Arguments
+///
+/// * `done` - What was done, such as `registered`
+/// * `author` - Who did it
+///
+/// # Examples
+///
+/// ```
+/// use reef::history::by_whom;
+/// use reef_api::{Author, Writer};
+///
+/// let ada = Author { user: Some("ada".to_string()), since: Some(1), by: Writer::Claude };
+/// assert_eq!(by_whom("added", &ada).as_deref(), Some("added by Claude, for ada"));
+/// assert_eq!(by_whom("added", &Author::default()), None);
+/// ```
+pub fn by_whom(done: &str, author: &Author) -> Option<String> {
+    author.describe().map(|who| format!("{done} by {who}"))
 }
 
 /// One entry as a line: the version it left, when, who if known, and what it changed
@@ -163,9 +218,57 @@ pub async fn queue<W: Write>(
     )
 }
 
+/// Prints a project's loops' and sessions' history, newest first
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `project` - The project's name
+/// * `older` - The cursor a page named, to print the page older than it, or `None` for the newest
+/// * `all` - Whether to print every page from there on
+/// * `out` - Where to print it
+pub async fn loops<W: Write>(
+    client: &Client,
+    project: &str,
+    older: Option<&str>,
+    all: bool,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let page = pages(older, all, |older| async move {
+        client.loop_history(project, older.as_deref()).await
+    })
+    .await?;
+    show_acts(
+        &page,
+        &format!("no act on `{project}`'s loops is kept"),
+        out,
+    )
+}
+
+/// Prints the log of acts on reef's users, newest first, which only an admin may read
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `older` - The cursor a page named, to print the page older than it, or `None` for the newest
+/// * `all` - Whether to print every page from there on
+/// * `out` - Where to print it
+pub async fn users<W: Write>(
+    client: &Client,
+    older: Option<&str>,
+    all: bool,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    let page = pages(older, all, |older| async move {
+        client.user_history(older.as_deref()).await
+    })
+    .await?;
+    show_acts(&page, "no act on a user is kept", out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pages, show};
+    use super::{pages, show, show_acts};
     use reef_api::{Author, Edited, HistoryPage, Logged, Place, Writer};
     use reef_model::Status;
 
@@ -284,5 +387,35 @@ mod tests {
         // and all of it reads to the end, naming no cursor
         let page = pages(None, true, read).await.unwrap();
         assert_eq!((times(&page), page.older), (vec![6, 5, 4, 3, 2], None));
+    }
+
+    /// An act is a line with no version: when, who if known, and what was done, then the cursor
+    /// onto older acts
+    #[test]
+    fn acts_print_a_line_each() {
+        let ada = Author {
+            user: Some("ada".to_string()),
+            since: Some(1),
+            by: Writer::User,
+        };
+        let page = HistoryPage {
+            edits: vec![Logged {
+                at: 1_795_000_000_123,
+                author: ada,
+                version: None,
+                whole_plan: false,
+                edits: vec![Edited::User {
+                    name: "bob".to_string(),
+                    act: reef_api::UserAct::Added { admin: false },
+                }],
+            }],
+            older: Some("cursor".to_string()),
+        };
+        let mut out = Vec::new();
+        show_acts(&page, "none", &mut out).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "2026-11-18 11:06:40 +0000  ada: added bob\nolder acts are kept: pass --older cursor\n"
+        );
     }
 }

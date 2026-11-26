@@ -63,9 +63,13 @@ pub struct Account {
     pub tokens: Vec<TokenInfo>,
     /// Every user, if they are an admin, else none
     pub users: Vec<User>,
+    /// The newest page of the log of acts on users, if they are an admin, else empty
+    #[serde(default)]
+    pub log: HistoryPage,
 }
 
-/// Who this browser is signed in as, their tokens, and every user if they are an admin
+/// Who this browser is signed in as, their tokens, and every user and the log of acts on them if
+/// they are an admin
 #[get("/app/account")]
 #[cfg_attr(
     feature = "server",
@@ -84,15 +88,28 @@ pub async fn account() -> Result<Account, ServerFnError> {
             me,
             tokens: Vec::new(),
             users: Vec::new(),
+            log: HistoryPage::default(),
         });
     };
     let tokens = service.tokens(caller.asker(), None).await.map_err(failed)?;
-    // every user only to an admin
-    let users = match user.admin {
-        true => service.users(caller.asker()).await.map_err(failed)?,
-        false => Vec::new(),
+    // every user, and the log of acts on them, only to an admin
+    let (users, log) = match user.admin {
+        true => {
+            let users = service.users(caller.asker()).await.map_err(failed)?;
+            let log = service
+                .user_history(caller.asker(), &HistoryQuery::default())
+                .await
+                .map_err(failed)?;
+            (users, log)
+        }
+        false => (Vec::new(), HistoryPage::default()),
     };
-    Ok(Account { me, tokens, users })
+    Ok(Account {
+        me,
+        tokens,
+        users,
+        log,
+    })
 }
 
 /// Changes a password: this browser's user's own with their current one, or another user's by
@@ -162,7 +179,7 @@ pub fn signed_out(error: &ServerFnError) -> bool {
     matches!(error, ServerFnError::ServerError { code: 401, .. })
 }
 
-/// Every registered project, by name, with its plans
+/// Every registered project, by name, with its plans, each saying who registered or listed it
 #[get("/app/projects")]
 #[cfg_attr(
     feature = "server",
@@ -174,7 +191,7 @@ pub async fn projects() -> Result<Vec<ProjectPlans>, ServerFnError> {
     let projects = service.projects().await.map_err(failed)?;
     let mut listed = Vec::with_capacity(projects.len());
     for project in projects {
-        let plans = service.plans(&project.name).await.map_err(failed)?;
+        let plans = service.plan_listing(&project.name).await.map_err(failed)?;
         listed.push(ProjectPlans { project, plans });
     }
     Ok(listed)
@@ -454,9 +471,10 @@ pub async fn session_transcript(id: String, after: u64) -> Result<Transcript, Se
     tracing::instrument(name = "calls::act_on_session", skip_all, err(Debug))
 )]
 pub async fn act_on_session(id: String, act: SessionAct) -> Result<SessionActed, ServerFnError> {
-    // a loop changed as its pane's would be, or an order queued for the runner
+    // a loop changed as its pane's would be, or an order queued for the runner, in the name of
+    // whoever the browser signs in
     crate::server::service()
-        .act_on_session(&id, act)
+        .act_on_session(&id, act, &caller().author())
         .await
         .map_err(failed)
 }

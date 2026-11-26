@@ -9,6 +9,18 @@ use reef_model::PlanName;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::user::Author;
+
+/// When a project or a plan was registered, and by whom, as its history keeps it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registered {
+    /// When, in milliseconds since the epoch
+    pub at: u64,
+    /// Who registered it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
+}
+
 /// A project: a name, and the repo its plans describe
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {
@@ -20,6 +32,9 @@ pub struct Project {
     /// The git remote it was registered by, if it was, and the commit its docs are read at
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<Remote>,
+    /// When it was registered and by whom, where its history says, and a listing reads it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered: Option<Registered>,
 }
 
 impl Project {
@@ -76,6 +91,9 @@ pub struct PlanInfo {
     pub name: PlanName,
     /// The revision readers load
     pub revision: u64,
+    /// When it was listed and by whom, where its history says, and a listing reads it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registered: Option<Registered>,
 }
 
 /// A request to register a project, for a repo on the service's host or by its git URL
@@ -186,6 +204,7 @@ mod tests {
     fn added_project_is_externally_tagged_in_kebab_case() {
         // a project registered names where its repo was found
         let added = AddedProject::Added(Project {
+            registered: None,
             name: "reef".to_string(),
             repo: "/src/reef".into(),
             remote: None,
@@ -213,6 +232,7 @@ mod tests {
     fn plan_info_names_its_plan_in_full() {
         // a plan and the revision readers load
         let info = PlanInfo {
+            registered: None,
             name: PlanName::new("reef", "central").unwrap(),
             revision: 3,
         };
@@ -227,6 +247,7 @@ mod tests {
     fn a_remote_project_names_its_url_branch_and_commit() {
         // a project registered by its URL, and the commit its docs are read at
         let project = Project {
+            registered: None,
             name: "reef".to_string(),
             repo: "/data/clones/reef.1.git".into(),
             remote: Some(Remote {

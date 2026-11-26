@@ -366,6 +366,9 @@ fn RunnerRow(session: Session, feeding: Option<Loop>, picked: bool) -> Element {
                     (Some(_), Some(node)) => rsx! { span { if paused { "Paused on " } else { "On " } code { "{node}" } } },
                 }
             }
+            if let Some(who) = who_line(Some(&session), feeding.as_ref()) {
+                div { class: "reef-app-muted reef-app-runner-who", "{who}" }
+            }
             if start || pause || stop {
                 div { class: "reef-app-actions",
                     if start {
@@ -435,8 +438,43 @@ pub fn AttachedRow(session: Session, feeding: Option<Loop>, picked: bool) -> Ele
                     (Some(_), Some(node)) => rsx! { span { if paused { "Paused on " } else { "On " } code { "{node}" } } },
                 }
             }
+            if let Some(who) = who_line(Some(&session), feeding.as_ref()) {
+                div { class: "reef-app-muted reef-app-runner-who", "{who}" }
+            }
         }
     }
+}
+
+/// Who attached a session and who started and last changed its loop, as a row says it, or
+/// `None` where nobody known did any of it
+///
+/// # Arguments
+///
+/// * `session` - The session, if the row is one's
+/// * `feeding` - Its pane's loop, if one is started
+pub fn who_line(session: Option<&Session>, feeding: Option<&Loop>) -> Option<String> {
+    let mut said: Vec<String> = Vec::new();
+    // who attached the session
+    if let Some(who) = session.and_then(|session| session.attached_by.describe()) {
+        said.push(format!("Attached by {who}"));
+    }
+    // who started its loop, then who changed it last if that was someone else
+    if let Some(feeding) = feeding {
+        if let Some(who) = feeding.started_by.describe() {
+            said.push(format!("loop started by {who}"));
+        }
+        if feeding.changed_by != feeding.started_by
+            && let Some(who) = feeding.changed_by.describe()
+        {
+            said.push(format!("last changed by {who}"));
+        }
+    }
+    // the first part's word opens the line
+    let mut line = said.join(" · ");
+    if let Some(first) = line.get(..1) {
+        line = format!("{}{}", first.to_uppercase(), &line[1..]);
+    }
+    (!line.is_empty()).then_some(line)
 }
 
 /// A session's state as a class name
@@ -471,6 +509,9 @@ fn TerminalRow(feeding: Loop) -> Element {
             }
             if let Some(node) = &feeding.node {
                 div { class: "reef-app-runner-loop", "On " code { "{node.id}" } }
+            }
+            if let Some(who) = who_line(None, Some(&feeding)) {
+                div { class: "reef-app-muted reef-app-runner-who", "{who}" }
             }
         }
     }
@@ -1075,6 +1116,7 @@ mod tests {
     /// * `state` - Where it stands
     fn session(id: &str, pane: &str, state: SessionState) -> Session {
         Session {
+            attached_by: reef_api::Author::default(),
             id: id.to_string(),
             pane: pane.parse().unwrap(),
             project: "reef".to_string(),
@@ -1098,6 +1140,8 @@ mod tests {
     /// * `node` - The node it holds
     fn looped(pane: &str, node: &str) -> Loop {
         Loop {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             pane: pane.parse::<Pane>().unwrap(),
             project: "reef".to_string(),
             plan: None,

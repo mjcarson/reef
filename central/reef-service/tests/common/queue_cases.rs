@@ -308,7 +308,11 @@ pub async fn concurrent_edits_both_land<B: Reopen>(fx: Fx<B>) -> anyhow::Result<
 pub async fn each_project_has_its_own_queue<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a second project, of a repo of its own
     let repo = git::repo(&fx.dir.join("app"))?;
-    let AddedProject::Added(_) = fx.store.add_project("app", &repo).await? else {
+    let AddedProject::Added(_) = fx
+        .store
+        .add_project("app", &repo, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a project for a fresh repo was refused");
     };
     let app: NodeName = "app/main/A".parse()?;

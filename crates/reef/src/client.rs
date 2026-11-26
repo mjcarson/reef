@@ -183,6 +183,31 @@ impl Client {
             .await
     }
 
+    /// Reads a page of the log of acts on reef's users, newest first, which only an admin may
+    ///
+    /// # Arguments
+    ///
+    /// * `older` - The cursor a page named, to read the one older than it, or `None` for the newest
+    pub async fn user_history(&self, older: Option<&str>) -> anyhow::Result<HistoryPage> {
+        let path = paths::history_page(paths::USER_HISTORY, older);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Reads a page of a project's loops' and sessions' history, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `older` - The cursor a page named, to read the one older than it, or `None` for the newest
+    pub async fn loop_history(
+        &self,
+        project: &str,
+        older: Option<&str>,
+    ) -> anyhow::Result<HistoryPage> {
+        let path = paths::history_page(&paths::loop_history(project), older);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
     /// Adds a user, which an admin may, or anyone on the service's host while it has none
     ///
     /// # Arguments

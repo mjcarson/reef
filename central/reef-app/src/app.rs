@@ -326,7 +326,8 @@ pub fn Picker() -> Element {
     }
 }
 
-/// One project in the picker: its name, its repo, and a link to each of its plans
+/// One project in the picker: its name, its repo, who registered it, and a link to each of its
+/// plans, titled with who listed it
 ///
 /// # Arguments
 ///
@@ -338,7 +339,13 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
         Some(remote) => format!("{} · {} @ {}", remote.url, remote.branch, remote.short()),
         None => listing.project.repo.display().to_string(),
     };
-    let plans: Vec<(String, Route)> = listing
+    // who registered it, if anyone known did
+    let registered = listing
+        .project
+        .registered
+        .as_ref()
+        .and_then(|registered| registered.author.describe());
+    let plans: Vec<(String, Route, String)> = listing
         .plans
         .iter()
         .map(|info| {
@@ -346,13 +353,26 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
                 project: info.name.project.clone(),
                 plan: info.name.plan.clone(),
             };
-            (info.name.plan.clone(), route)
+            // who listed it, as the link's title
+            let listed = info
+                .registered
+                .as_ref()
+                .and_then(|registered| registered.author.describe())
+                .map(|who| format!("Listed by {who}"))
+                .unwrap_or_default();
+            (info.name.plan.clone(), route, listed)
         })
         .collect();
     rsx! {
         li { class: "reef-app-project",
             h2 { "{listing.project.name}" }
             p { class: "reef-app-repo", "{repo}" }
+            if let Some(who) = registered {
+                p { class: "reef-app-muted reef-app-registered",
+                    "Registered by "
+                    span { class: "reef-app-author", "{who}" }
+                }
+            }
             if plans.is_empty() {
                 p { class: "reef-app-muted",
                     "No plans yet. Make one with "
@@ -361,8 +381,8 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
                 }
             } else {
                 ul { class: "reef-app-plans",
-                    for (name, route) in plans {
-                        li { key: "{name}",
+                    for (name, route, listed) in plans {
+                        li { key: "{name}", title: "{listed}",
                             Link { to: route, "{name}" }
                         }
                     }

@@ -845,7 +845,7 @@ async fn follow<W: Write>(
             asked = &mut asking => {
                 match asked {
                     Ok(Some(orders)) => {
-                        for Ordered { n, order } in orders {
+                        for Ordered { n, order, .. } in orders {
                             after = n;
                             runner.on_order(order).await?;
                         }
@@ -881,6 +881,8 @@ mod tests {
     fn looped(state: LoopState, node: Option<&str>, acted: bool) -> Loop {
         let node = node.map(|id| format!("reef/central/{id}").parse().unwrap());
         Loop {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             pane: Pane::Reef {
                 id: "k3x9-4242".to_string(),
             },

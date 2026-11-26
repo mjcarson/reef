@@ -166,7 +166,7 @@ impl<B: Backend> Fx<B> {
         let store = Store::new(Faulty::new(backend, faults.clone()));
         // a project for a repo of the case's own
         let repo = git::repo(&dir.join("reef"))?;
-        let added = store.add_project("reef", &repo).await?;
+        let added = store.add_project("reef", &repo, &reef_api::NOBODY).await?;
         anyhow::ensure!(
             matches!(added, AddedProject::Added(_)),
             "registering reef: {added:?}"
@@ -174,7 +174,7 @@ impl<B: Backend> Fx<B> {
         // and a plan of it
         let plan = PlanName::new("reef", "central")?;
         anyhow::ensure!(
-            store.add_plan(&plan).await?,
+            store.add_plan(&plan, &reef_api::NOBODY).await?,
             "a fresh store already listed the plan"
         );
         Ok(Fx {

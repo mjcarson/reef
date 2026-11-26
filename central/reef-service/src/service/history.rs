@@ -73,4 +73,23 @@ impl<B: Backend> Service<B> {
         }
         self.store.queue_history(project, query).await
     }
+
+    /// Reads a page of a project's loops' and sessions' history, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `query` - Which page to read
+    #[instrument(name = "Service::loop_history", skip_all, err(Debug))]
+    pub async fn loop_history(
+        &self,
+        project: &str,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        // a project that isn't registered has no loops
+        if self.store.project(project).await?.is_none() {
+            return Err(NotRegistered(project.to_string()).into());
+        }
+        self.store.loop_history(project, query).await
+    }
 }

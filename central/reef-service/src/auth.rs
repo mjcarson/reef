@@ -110,6 +110,7 @@ impl Caller {
     pub fn asker(&self) -> Asker<'_> {
         Asker {
             user: self.user.as_ref(),
+            writer: self.writer,
             local: self.local,
             token: self.token.as_deref(),
             address: self.address,
@@ -734,6 +735,7 @@ mod tests {
         assert_eq!(writer(&headers), Writer::Claude);
         // and a caller's author is its user, Claude's for them, and nobody with no user
         let ada = User {
+            added_by: reef_api::Author::default(),
             name: "ada".to_string(),
             admin: false,
             created_at: 3,

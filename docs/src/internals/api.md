@@ -7,11 +7,11 @@ that `Service::shared` opens. Every route is one service call, and every body an
 
 | Route | Answer |
 |---|---|
-| `GET /api/v1/projects` | every `Project` |
+| `GET /api/v1/projects` | every `Project`, each with its `registered`: when, and by whom, where its history says |
 | `POST /api/v1/projects` `NewProject` | `AddedProject`: 201, 409 if the name or repo is taken, or 502 if its `remote` can't be fetched |
 | `GET /api/v1/find-project?dir=&remote=` | the `Project` a directory belongs to, or one of its checkout's remotes was registered by, or 404 |
 | `POST /api/v1/projects/{project}/fetch` | `Fetched`: 200 whether its branch moved or not, 422 for a local project, or 502 if its remote can't be fetched |
-| `GET /api/v1/projects/{project}/plans` | every `PlanInfo` |
+| `GET /api/v1/projects/{project}/plans` | every `PlanInfo`, each with its `registered`, as a project |
 | `POST /api/v1/projects/{project}/plans` `NewPlan` | `AddedPlan`: 201, or 200 if it was listed |
 | `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load |
 | `GET …/plans/{plan}/nodes` | its `Listing` |
@@ -43,14 +43,16 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST …/plans/{plan}/comments/{n}/resolution` `ResolveThread` | `Resolved`: 200, 409 if stale, 422 if no thread starts at `n` or the project has no such revision |
 | `GET /api/v1/loops` | every `Loop`, by pane |
 | `POST /api/v1/loops` `EditLoop` | `LoopEdited`: 200 if written, 409 if the pane's loop feeds another project or plan or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or in its plan |
-| `GET /api/v1/projects/{project}/loops` | every `Loop` feeding the project, by pane |
+| `GET /api/v1/projects/{project}/loops` | every `Loop` feeding the project, by pane, each naming who started it and changed it last |
+| `GET /api/v1/projects/{project}/loops/history?older=&limit=` | a `HistoryPage` of the acts on its loops and sessions, newest first |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 | `POST /api/v1/tokens` `SignIn` | `IssuedToken`: 201, 401 if no user has that name and password, the same words for either, or 429 with `Retry-After` if too many failed lately |
 | `GET /api/v1/tokens?user=` | every `TokenInfo` of the caller's, the one it sent marked `current`, or of the user an admin names; 401 or 403 otherwise |
 | `DELETE /api/v1/tokens/current` | `SignedOut`: the token the caller sent revoked, or 401 if it sent none |
 | `DELETE /api/v1/tokens/{id}` | `SignedOut`: the token revoked, or 404 unless it is the caller's, or any to an admin |
 | `GET /api/v1/me` | `Me`: the user the caller's token signs in, and whether sign-in is required |
-| `GET /api/v1/users` | every `User` to an admin, none while there are none, 401 or 403 to anyone else |
+| `GET /api/v1/users` | every `User` to an admin, each naming who added them, none while there are none, 401 or 403 to anyone else |
+| `GET /api/v1/user-history?older=&limit=` | a `HistoryPage` of the acts on users, newest first, to an admin, 401 or 403 to anyone else; it isn't under `/users`, where a user named `history` would lose a route |
 | `POST /api/v1/users` `NewUser` | `UserAdded`: 201, 409 if the name is taken, 401 or 403 unless an admin asks, or the first user is added from the service's own host |
 | `DELETE /api/v1/users/{name}` | `UserRemoved`: 200 with how many tokens were revoked, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
 | `PUT /api/v1/users/{name}/password` `PasswordChange` | `PasswordChanged`: 200, the caller's own with its `current`, or another's by an admin, which revokes their tokens; 403 if `current` doesn't match, 404 if no user has the name, 429 if too many failed lately |

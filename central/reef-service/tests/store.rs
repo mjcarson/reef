@@ -125,4 +125,6 @@ suite!(
     an_unkept_history_leaves_its_edit,
     a_history_pages_past_its_newest,
     a_start_is_kept_in_its_nodes_history,
+    loop_acts_keep_a_history,
+    rows_kept_before_c89_name_nobody,
 );

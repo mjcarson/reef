@@ -51,7 +51,7 @@ async fn authored_by_the_browser(
     };
     service.add_project("reef", &repo, admin).await?;
     let plan = reef_model::PlanName::new("reef", "central")?;
-    service.add_plan(&plan).await?;
+    service.add_plan(&plan, &reef_api::NOBODY).await?;
     let spec = reef_model::NodeSpec::from_yaml(
         "id: C1\ntitle: C1 Some work\ndescription:\n  why: Missing.\n  what: There.\n",
     )

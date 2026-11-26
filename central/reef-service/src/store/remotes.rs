@@ -15,7 +15,7 @@
 //! - **Every row is checked against its full key on read**, so a hash collision is caught rather
 //!   than read as another project's remote.
 
-use reef_api::{AddedProject, Project, Remote};
+use reef_api::{AddedProject, Author, Project, Remote};
 use reef_model::PlanName;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ use tracing::instrument;
 use super::Store;
 use crate::backend::{Backend, Expect, Written};
 use crate::remote;
-use crate::schema::{PROJECTS, ProjectRow, REMOTES, RemoteRow};
+use crate::schema::{PROJECT_SUBJECT, PROJECTS, ProjectRow, REMOTES, RemoteRow};
 
 /// A remote's record, as its row keeps it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,11 +130,13 @@ impl<B: Backend> Store<B> {
     ///
     /// * `name` - The project's name
     /// * `kept` - The remote, its clone and the commit fetched
+    /// * `author` - Who registers it, which its history keeps once it is
     #[instrument(name = "Store::add_remote_project", skip_all, err(Debug))]
     pub async fn add_remote_project(
         &self,
         name: &str,
         kept: KeptRemote,
+        author: &Author,
     ) -> anyhow::Result<AddedProject> {
         // a project's name keeps the rule every plan's full name holds it to
         PlanName::new(name, "plan")?;
@@ -181,11 +183,18 @@ impl<B: Backend> Store<B> {
             repo: clone,
         };
         Ok(match self.backend.insert_project(row).await? {
-            Written::Applied => AddedProject::Added(Project {
-                name: name.to_string(),
-                repo: kept.clone.clone(),
-                remote: Some(kept.remote()),
-            }),
+            Written::Applied => {
+                // who registered it, kept in its history now that it is
+                let registered = self
+                    .keep_registered(name, PROJECT_SUBJECT.to_string(), author)
+                    .await;
+                AddedProject::Added(Project {
+                    name: name.to_string(),
+                    repo: kept.clone.clone(),
+                    remote: Some(kept.remote()),
+                    registered,
+                })
+            }
             Written::Refused(_) => AddedProject::NameTaken,
         })
     }

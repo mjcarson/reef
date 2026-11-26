@@ -394,14 +394,34 @@ With several users, edits, comments and work records said nothing of whose they 
   it, the Changes tab who captured a revision, a decision who asked it, a queue entry who placed
   it, and a node's History tab every edit of it. The CLI prints the same with `reef node log`,
   `reef page log`, `reef queue log`, `reef comment ls` and `reef queue ls`.
+- **Every act names its author** ([C89](../milestones/m10.md)), as an edit does. A project's registration and
+  a plan's listing are entries of their own subjects, joined into the listings a person reads
+  (`project ls`, `plan ls`, the projects' page), never the service's own reads, which want no
+  extra read. A loop keeps who started it and who changed it last, and each act that changed it
+  keeps an entry in its project's loops' history (`reef loop log`): a start, a resume, a pause, a
+  stop, a hand-off, a take, a letting go, a join. A node's end acted on, a hand-off to the session
+  the loop had, and a join from the pane that joined already keep none. A session, kept only in
+  memory, says who attached it, an order from the app who gave it, and its attach, its letting
+  go and the app's answers and replies join the loops' history, which outlives the process.
+- **Acts on users are logged for admins.** Adding and removing users, setting a password, revoking
+  a token, and a recovery on the server, which names nobody, keep entries under the empty
+  project, which no project's name can be: `reef user log`, `GET /api/v1/user-history` and the
+  account page. It isn't under `/users`, where a user named `history` would lose a route. Signing
+  in and out keeps nothing. A user says who added them, which a password set later keeps.
+- **Who did it travels with the asker.** User admin and project registration were judged by an
+  `Asker`, which now carries its writer, so `Asker::author` names who asked without a new
+  argument; every other act takes the author from the caller, as an edit does.
 
-### What C50 found
+### What C50 and C89 found
 
 - **No fresh data directory.** `EditRow` joined the schema last, and every other table's
   fingerprint stayed as it was.
 - **A store opened again starts its clock over,** so an edit within the millisecond of the last
   one before a restart could take its key. Each store's keys end with a number it draws when it
   opens, so it can't.
+- **Still no fresh data directory** (C89). Every author it adds sits in a row's JSON, serde
+  defaulted, or in the edits' table under a subject of its own, so old rows read back naming
+  nobody and the schema's pin is as it was.
 
 ## The CLI
 

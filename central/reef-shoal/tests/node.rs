@@ -118,11 +118,15 @@ async fn round_trip(store: &Store) -> anyhow::Result<()> {
     use reef_service::{NodeWrite, Put};
     // a project, for the repo these tests are in, and a plan of it to put into
     store
-        .add_project("reef", std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .add_project(
+            "reef",
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &reef_api::NOBODY,
+        )
         .await?;
     let plan = reef_model::PlanName::new("reef", "round-trip")?;
     anyhow::ensure!(
-        store.add_plan(&plan).await?,
+        store.add_plan(&plan, &reef_api::NOBODY).await?,
         "a fresh store already listed the plan"
     );
     // a new node goes in at version 1

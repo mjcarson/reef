@@ -78,19 +78,23 @@ pub fn OlderButton(on_older: EventHandler<()>) -> Element {
     }
 }
 
+/// What a node's history with no edit kept says
+const NO_EDIT: &str =
+    "No edit of this node is kept yet. Each one from now on is, with who made it.";
+
 /// A history as a list, newest first, a line an edit, or a word that none is kept
 ///
 /// # Arguments
 ///
 /// * `entries` - The edits, newest first
+/// * `none` - What to say of a history with none, else what a node's says
 #[component]
-pub fn HistoryList(entries: Vec<Logged>) -> Element {
+pub fn HistoryList(entries: Vec<Logged>, none: Option<String>) -> Element {
     // nothing kept is said plainly
     if entries.is_empty() {
+        let none = none.unwrap_or_else(|| NO_EDIT.to_string());
         return rsx! {
-            p { class: "reef-app-muted reef-app-history-none",
-                "No edit of this node is kept yet. Each one from now on is, with who made it."
-            }
+            p { class: "reef-app-muted reef-app-history-none", "{none}" }
         };
     }
     rsx! {

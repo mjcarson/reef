@@ -9,9 +9,13 @@ use reef_api::{
     Author, Edited, HISTORY_MAX, HistoryQuery, NodePut, NodeRemove, PageEdit, PageWrite, Place,
     PlanWrite, Puts, QueueEdit, Writer,
 };
+use reef_api::{LoopEdit, LoopEdited, Pane};
 use reef_model::accept::{Criterion, Kind};
 use reef_model::{Diagnostic, Met, Status};
-use reef_service::{Checked, NodeWrite, PageEdited, Proposal, Queued, Rewrite, StartWork, Started};
+use reef_service::schema::{LOOPS, LoopRow, PROJECTS, ProjectRow, USERS, UserRow};
+use reef_service::{
+    Backend, Checked, Expect, NodeWrite, PageEdited, Proposal, Queued, Rewrite, StartWork, Started,
+};
 
 use super::{Fx, Reopen, work};
 
@@ -676,5 +680,161 @@ pub async fn a_start_is_kept_in_its_nodes_history<B: Reopen>(fx: Fx<B>) -> anyho
         .await?
         .edits;
     assert_eq!(after, history);
+    Ok(())
+}
+
+/// A loop's acts each keep an entry in its project's loops' history, naming who did them: a
+/// start, a take, a join, a hand-off to another session, a pause and a stop, which says what it
+/// let go of; a node's end acted on, a hand-off to the session it had and a join again keep none,
+/// and the loop says who started it and who changed it last
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn loop_acts_keep_a_history<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    let (ada, claude) = (by("ada", Writer::User), by("ada", Writer::Claude));
+    let (c1, c2) = (fx.plan.node("C1")?, fx.plan.node("C2")?);
+    let (pane, other) = (Pane::Claude { pid: 1 }, Pane::Claude { pid: 2 });
+    // ada starts a loop two wide, fed by session s1
+    let start = LoopEdit::Start {
+        project: "reef".to_string(),
+        plan: Some("central".to_string()),
+        session: Some("s1".to_string()),
+        width: Some(2),
+        opens: None,
+        pid: None,
+    };
+    fx.store.edit_loop(&pane, start, &ada).await?;
+    // Claude, for her, takes C1 with C2 beside it
+    let hold = LoopEdit::Hold {
+        node: Some(c1.clone()),
+        members: vec![c2.clone()],
+    };
+    fx.store.edit_loop(&pane, hold, &claude).await?;
+    // another pane joins C2, then joins it again, which changes nothing
+    for _ in 0..2 {
+        let join = LoopEdit::Join { node: c2.clone() };
+        let joined = fx.store.edit_loop(&other, join, &ada).await?;
+        assert!(matches!(joined, LoopEdited::Joined { .. }), "{joined:?}");
+    }
+    // the join changed the loop too, so it names ada, who joined, as changing it last
+    let joined = fx.store.loop_in(&pane).await?.expect("the loop is there");
+    assert_eq!(joined.started_by.describe().as_deref(), Some("ada"));
+    assert_eq!(joined.changed_by.describe().as_deref(), Some("ada"));
+    // the Stop hook acts on C1's end, as Claude, which leaves who changed it last
+    let acted = LoopEdit::Acted { node: c1.clone() };
+    fx.store.edit_loop(&pane, acted, &claude).await?;
+    let held = fx.store.loop_in(&pane).await?.expect("the loop is there");
+    assert_eq!(held.changed_by.describe().as_deref(), Some("ada"));
+    assert_eq!(held.acted, Some(c1.clone()));
+    // handed to the session it has, which keeps nothing, then to another
+    for session in ["s1", "s2"] {
+        let handed = LoopEdit::Session {
+            session: session.to_string(),
+            pid: None,
+        };
+        fx.store.edit_loop(&pane, handed, &ada).await?;
+    }
+    // ada pauses it, which it keeps saying, then stops it
+    fx.store.edit_loop(&pane, LoopEdit::Pause, &ada).await?;
+    let paused = fx.store.loop_in(&pane).await?.expect("the loop is there");
+    assert_eq!(paused.changed_by.describe().as_deref(), Some("ada"));
+    assert_eq!(paused.started_by.describe().as_deref(), Some("ada"));
+    fx.store.edit_loop(&pane, LoopEdit::Stop, &ada).await?;
+    assert!(fx.store.loop_in(&pane).await?.is_none());
+    // newest first, each with who did it, none with a version
+    let history = fx
+        .store
+        .loop_history("reef", &HistoryQuery::default())
+        .await?
+        .edits;
+    let told: Vec<(Option<String>, String)> = history
+        .iter()
+        .map(|logged| (logged.author.describe(), logged.describe()))
+        .collect();
+    let (one, two) = ("Claude Code process 1", "Claude Code process 2");
+    let ada_said = |what: String| (Some("ada".to_string()), what);
+    assert_eq!(
+        told,
+        vec![
+            ada_said(format!(
+                "stopped the loop in {one}, letting go of `reef/central/C1`, `reef/central/C2`"
+            )),
+            ada_said(format!("paused the loop in {one}")),
+            ada_said(format!("handed the loop in {one} to session `s2`")),
+            ada_said(format!(
+                "{two} joined `reef/central/C2` of the loop in {one}"
+            )),
+            (
+                Some("Claude, for ada".to_string()),
+                format!("the loop in {one} took `reef/central/C1`, with `reef/central/C2`")
+            ),
+            ada_said(format!(
+                "started a loop in {one}, feeding plan `central`, 2 nodes at once"
+            )),
+        ]
+    );
+    assert!(history.iter().all(|logged| logged.version.is_none()));
+    // and the same once the store is reopened
+    let fx = fx.reopen().await?;
+    let reread = fx
+        .store
+        .loop_history("reef", &HistoryQuery::default())
+        .await?
+        .edits;
+    assert_eq!(reread, history);
+    Ok(())
+}
+
+/// Users and loops a reef before C89 kept read back naming nobody, and keep naming nobody
+/// through later writes, which name only who made them; and a project and a plan registered
+/// before say no registration
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn rows_kept_before_c89_name_nobody<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    let ada = by("ada", Writer::User);
+    // a user's row as a reef before C89 wrote it, with no adder
+    let user = UserRow {
+        list: USERS.to_string(),
+        name: "old".to_string(),
+        version: 1,
+        record: r#"{"password":"$argon2id$x","admin":false,"created_at":5}"#.to_string(),
+    };
+    fx.store.backend().write_user(user, Expect::Absent).await?;
+    let old = fx.store.user("old").await?.expect("the user reads back");
+    assert!(old.user.added_by.is_unknown());
+    // a password set over it leaves its adder as it was
+    assert!(fx.store.rewrite_user(&old, "$argon2id$y", false).await?);
+    let rewritten = fx.store.user("old").await?.expect("the user reads back");
+    assert!(rewritten.user.added_by.is_unknown());
+    // a loop's row as a reef before C89 wrote it, with no starter
+    let pane = Pane::Claude { pid: 9 };
+    let row = LoopRow {
+        list: LOOPS.to_string(),
+        pane: pane.to_string(),
+        version: 1,
+        record: r#"{"project":"reef","state":"running","started_at":5}"#.to_string(),
+    };
+    fx.store.backend().write_loop(row, Expect::Absent).await?;
+    let read = fx.store.loop_in(&pane).await?.expect("the loop reads back");
+    assert!(read.started_by.is_unknown() && read.changed_by.is_unknown());
+    // a pause names who paused it, and leaves who started it unknown
+    fx.store.edit_loop(&pane, LoopEdit::Pause, &ada).await?;
+    let paused = fx.store.loop_in(&pane).await?.expect("the loop reads back");
+    assert!(paused.started_by.is_unknown());
+    assert_eq!(paused.changed_by.describe().as_deref(), Some("ada"));
+    // and a project registered before, its row with no history beside it, says no registration
+    let project = ProjectRow {
+        list: PROJECTS.to_string(),
+        name: "older".to_string(),
+        repo: "/srv/older".to_string(),
+    };
+    fx.store.backend().insert_project(project).await?;
+    assert!(fx.store.project("older").await?.is_some());
+    assert!(fx.store.registered("older").await.is_none());
+    let plan = reef_model::PlanName::new("older", "main")?;
+    assert!(fx.store.plan_registered(&plan).await.is_none());
     Ok(())
 }

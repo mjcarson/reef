@@ -7,6 +7,11 @@
 //! token signs in, whatever its body says.
 
 use reef_api::{
+    AddedPlan, AddedProject, Attach, EditLoop, IssuedToken, Loop, LoopEdit, LoopEdited, NewPlan,
+    NewProject, Ordered, Pane, PasswordChange, PlanInfo, Project, Registered, Session, SessionAct,
+    SessionActed, SessionState, SignIn, TokenInfo,
+};
+use reef_api::{
     Author, Checked, Commented, Decided, DecisionKind, DecisionsRecorded, Edited, HistoryPage,
     Logged, MarkReview, MarkThread, Marked, NewReply, NewThread, NodePut, NodeWrite, PageEdit,
     PageEdited, PageWrite, Place, Puts, QueueEdit, QueueListing, Queued, RecordDecisions,
@@ -16,7 +21,7 @@ use reef_api::{
 };
 use reef_model::{Description, NodeSpec, PlanName, Status};
 use reef_service::{Asker, Backend};
-use reqwest::StatusCode;
+use reqwest::{Method, StatusCode};
 use serde_json::json;
 
 use super::Fx;
@@ -435,5 +440,315 @@ pub async fn marks_starts_and_captures_name_their_authors<B: Backend + 'static>(
     assert_eq!(review.author.describe().as_deref(), Some("ada"));
     assert_eq!(review.marked_by.describe().as_deref(), Some("bob"));
     assert!(review.marked_at.is_some());
+    Ok(())
+}
+
+/// Who said each entry of a history, and what it says, newest first
+///
+/// # Arguments
+///
+/// * `page` - The history's page
+fn told(page: &HistoryPage) -> Vec<(Option<String>, String)> {
+    page.edits
+        .iter()
+        .map(|logged| (logged.author.describe(), logged.describe()))
+        .collect()
+}
+
+/// Who a registration names, if anyone known
+///
+/// # Arguments
+///
+/// * `registered` - The registration, if one is kept
+fn registrant(registered: &Option<Registered>) -> Option<String> {
+    registered
+        .as_ref()
+        .and_then(|registered| registered.author.describe())
+}
+
+/// Registering a project names the admin who did, and listing a plan the user who did, or
+/// Claude for them, in the listings a person reads; a project registered before names nobody
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn registrations_name_their_authors<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    let admin = first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    let (_, bob) = added(&ax, &admin, "bob").await?;
+    // ada registers a repo on the service's host, which is an admin's to name
+    let repo = super::git::repo(&ax.dir.join("other"))?;
+    let new = NewProject::dir("other", repo.clone());
+    let (status, registered): (_, AddedProject) = ada.post(paths::PROJECTS, &new).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let AddedProject::Added(project) = registered else {
+        anyhow::bail!("the project wasn't registered: {registered:?}");
+    };
+    assert_eq!(registrant(&project.registered).as_deref(), Some("ada"));
+    // bob lists a plan in it, and Claude, for bob, another
+    for (client, name) in [(&bob, "main"), (&bob.as_claude(), "side")] {
+        let new = NewPlan {
+            name: name.to_string(),
+        };
+        let (status, _): (_, AddedPlan) = client.post(&paths::plans("other"), &new).await?;
+        assert_eq!(status, StatusCode::CREATED, "{name}");
+    }
+    // the projects' listing names who registered each, the fixture's own nobody
+    let (_, projects): (_, Vec<Project>) = bob.get(paths::PROJECTS).await?;
+    let named: Vec<(String, Option<String>)> = projects
+        .iter()
+        .map(|project| (project.name.clone(), registrant(&project.registered)))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("other".to_string(), Some("ada".to_string())),
+            ("reef".to_string(), None)
+        ]
+    );
+    // the project a directory finds says so too
+    let dir = repo.to_str().expect("the repo is a utf-8 path");
+    let (_, found): (_, Project) = bob.get(&paths::find_project(dir, &[])).await?;
+    assert_eq!(registrant(&found.registered).as_deref(), Some("ada"));
+    // and the plans' listing names who listed each
+    let (_, plans): (_, Vec<PlanInfo>) = ada.get(&paths::plans("other")).await?;
+    let listed: Vec<(String, Option<String>)> = plans
+        .iter()
+        .map(|plan| (plan.name.plan.clone(), registrant(&plan.registered)))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("main".to_string(), Some("bob".to_string())),
+            ("side".to_string(), Some("Claude, for bob".to_string()))
+        ]
+    );
+    Ok(())
+}
+
+/// A loop's acts name the user each token signs in, and Claude for them: the loop says who
+/// started it and who changed it last, and its project's loops' history who did each act
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn loop_acts_name_their_authors<B: Backend + 'static>(fx: Fx<B>) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    let admin = first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    let (_, bob) = added(&ax, &admin, "bob").await?;
+    put(&ada, &ax.plan, work("C1", None), None).await?;
+    // bob starts a loop in a pane, and Claude, for bob, takes C1 for it
+    let pane = Pane::Claude { pid: 7 };
+    let start = EditLoop {
+        pane: pane.clone(),
+        edit: LoopEdit::Start {
+            project: "reef".to_string(),
+            plan: Some("central".to_string()),
+            session: Some("s1".to_string()),
+            width: None,
+            opens: None,
+            pid: None,
+        },
+    };
+    let (status, _): (_, LoopEdited) = bob.post(paths::LOOPS, &start).await?;
+    assert_eq!(status, StatusCode::OK);
+    let take = EditLoop {
+        pane: pane.clone(),
+        edit: LoopEdit::Hold {
+            node: Some(ax.plan.node("C1")?),
+            members: Vec::new(),
+        },
+    };
+    let (status, _): (_, LoopEdited) = bob.as_claude().post(paths::LOOPS, &take).await?;
+    assert_eq!(status, StatusCode::OK);
+    // the loop says who started it and who changed it last
+    let (_, loops): (_, Vec<Loop>) = ada.get(&paths::project_loops("reef")).await?;
+    let [feeding] = &loops[..] else {
+        anyhow::bail!("{} loops feed the project", loops.len());
+    };
+    assert_eq!(feeding.started_by.describe().as_deref(), Some("bob"));
+    assert_eq!(
+        feeding.changed_by.describe().as_deref(),
+        Some("Claude, for bob")
+    );
+    // and the history who did each
+    let (status, history): (_, HistoryPage) = ada.get(&paths::loop_history("reef")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        told(&history),
+        [
+            (
+                Some("Claude, for bob".to_string()),
+                "the loop in Claude Code process 7 took `reef/central/C1`".to_string()
+            ),
+            (
+                Some("bob".to_string()),
+                "started a loop in Claude Code process 7, feeding plan `central`".to_string()
+            ),
+        ]
+    );
+    Ok(())
+}
+
+/// A session names who attached it, and an order from the app who gave it, and its project's
+/// loops' history keeps who attached it, replied in it and let go of it
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn sessions_name_who_attached_them<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    let admin = first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    let (_, bob) = added(&ax, &admin, "bob").await?;
+    // bob's runner attaches its session, its Claude waiting for a reply
+    let attach = Attach {
+        id: None,
+        pane: "reef:k3x9-7".parse()?,
+        project: "reef".to_string(),
+        plan: None,
+        host: "box".to_string(),
+        cwd: ax.repo.clone(),
+        state: SessionState::Waiting,
+        entries: Vec::new(),
+        prompts: Vec::new(),
+        claude: Some("c1".to_string()),
+    };
+    let (status, session): (_, Session) = bob.post(paths::SESSIONS, &attach).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(session.attached_by.describe().as_deref(), Some("bob"));
+    // ada replies to its Claude from the app, an order naming her
+    let say = SessionAct::Say {
+        text: "Go on".to_string(),
+    };
+    let (status, acted): (_, SessionActed) =
+        ada.post(&paths::session_orders(&session.id), &say).await?;
+    assert_eq!(status, StatusCode::OK, "{acted:?}");
+    let asked = format!("{}?after=0&wait=0", paths::session_orders(&session.id));
+    let (_, orders): (_, Vec<Ordered>) = bob.get(&asked).await?;
+    let [ordered] = &orders[..] else {
+        anyhow::bail!("{} orders were given", orders.len());
+    };
+    assert_eq!(ordered.by.describe().as_deref(), Some("ada"));
+    // bob's runner lets go of it
+    let (status, _): (_, Session) = bob
+        .send::<(), _>(Method::DELETE, &paths::session(&session.id), None)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    // newest first: the letting go, the reply and the attach, each naming who
+    let (_, history): (_, HistoryPage) = ada.get(&paths::loop_history("reef")).await?;
+    let pane = "reef's runner `k3x9-7`";
+    assert_eq!(
+        told(&history),
+        [
+            (
+                Some("bob".to_string()),
+                format!("detached session `{}` in {pane}", session.id)
+            ),
+            (
+                Some("ada".to_string()),
+                format!("replied to Claude in session `{}` in {pane}", session.id)
+            ),
+            (
+                Some("bob".to_string()),
+                format!("attached session `{}` in {pane}", session.id)
+            ),
+        ]
+    );
+    Ok(())
+}
+
+/// Adding and removing users, setting a password and revoking a token each keep an entry in a
+/// log only an admin reads; signing in and out keep none, and a password set leaves who added
+/// its user
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn admin_acts_are_logged_for_admins<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_signing_in().await?;
+    first_admin(&ax, "ada").await?;
+    let ada = signed_in(&ax, "ada").await?;
+    // ada adds bob through the API, who signs in and out and in again
+    let (status, _): (_, UserAdded) = ada.post(paths::USERS, &new_user("bob", false)).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let bob = signed_in(&ax, "bob").await?;
+    let (status, _): (_, serde_json::Value) = bob
+        .send::<(), _>(Method::DELETE, paths::CURRENT_TOKEN, None)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let bob = signed_in(&ax, "bob").await?;
+    // only an admin reads the log
+    let (status, _): (_, serde_json::Value) = bob.get(paths::USER_HISTORY).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _): (_, serde_json::Value) = ax.client.get(paths::USER_HISTORY).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // ada sets bob's password, which revokes his token, and bob says who added him still
+    let change = PasswordChange {
+        current: None,
+        password: "battery horse staple".to_string(),
+    };
+    let (status, _): (_, serde_json::Value) =
+        ada.put(&paths::user_password("bob"), &change).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (_, users): (_, Vec<User>) = ada.get(paths::USERS).await?;
+    let added_by: Vec<(String, Option<String>)> = users
+        .iter()
+        .map(|user| (user.name.clone(), user.added_by.describe()))
+        .collect();
+    assert_eq!(
+        added_by,
+        [
+            ("ada".to_string(), None),
+            ("bob".to_string(), Some("ada".to_string()))
+        ]
+    );
+    // bob signs in again, and ada revokes that token, then removes him
+    let request = SignIn {
+        name: "bob".to_string(),
+        password: "battery horse staple".to_string(),
+        label: Some("a laptop".to_string()),
+    };
+    let (status, _): (_, IssuedToken) = ax.client.post(paths::TOKENS, &request).await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, tokens): (_, Vec<TokenInfo>) = ada.get(&paths::tokens_of("bob")).await?;
+    let [token] = &tokens[..] else {
+        anyhow::bail!("bob holds {} tokens", tokens.len());
+    };
+    let (status, _): (_, serde_json::Value) = ada
+        .send::<(), _>(Method::DELETE, &paths::token(&token.id), None)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _): (_, serde_json::Value) = ada
+        .send::<(), _>(Method::DELETE, &paths::user("bob"), None)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    // the log, newest first, ada's first add naming nobody, since nobody was signed in
+    let (status, log): (_, HistoryPage) = ada.get(paths::USER_HISTORY).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        told(&log),
+        [
+            (Some("ada".to_string()), "removed bob".to_string()),
+            (
+                Some("ada".to_string()),
+                format!("revoked bob's terminal token {} (a laptop)", token.id)
+            ),
+            (
+                Some("ada".to_string()),
+                "set bob's password, revoking 1 token".to_string()
+            ),
+            (Some("ada".to_string()), "added bob".to_string()),
+            (None, "added ada, an admin".to_string()),
+        ]
+    );
     Ok(())
 }

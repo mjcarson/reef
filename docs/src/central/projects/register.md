@@ -8,7 +8,7 @@ and reads docs from the commit it last fetched, so it needs nobody's disk:
 ```sh
 reef project add shop --url git@github.com:acme/shop.git              # its default branch
 reef project add shop --url https://github.com/acme/shop --branch dev # or a branch of your choice
-reef project ls                    # shop  git@github.com:acme/shop.git (`main` at 6376987)
+reef project ls                    # shop  git@github.com:acme/shop.git (`main` at 6376987), registered by ada
 reef project show                  # from a checkout: the project it belongs to
 ```
 

@@ -19,7 +19,7 @@
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another user's or another token's.
 
-use reef_api::{TokenKind, User};
+use reef_api::{Author, TokenKind, User};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -101,6 +101,9 @@ struct KeptUser {
     admin: bool,
     /// When the user was added, in milliseconds since the Unix epoch
     created_at: u64,
+    /// Who added them, nobody known for one added before reef kept it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    added_by: Author,
 }
 
 /// A token's record, as its row keeps it
@@ -141,6 +144,7 @@ fn read_user(row: UserRow) -> anyhow::Result<StoredUser> {
             name: row.name,
             admin: kept.admin,
             created_at: kept.created_at,
+            added_by: kept.added_by,
         },
         password: kept.password,
         version: row.version,
@@ -227,12 +231,14 @@ impl<B: Backend> Store<B> {
     ///
     /// * `name` - The new user's name
     /// * `password` - Their password as an argon2id PHC string
+    /// * `added_by` - Who adds them
     /// * `judge` - Refuses the add, or says whether the new user is an admin
     #[instrument(name = "Store::add_user", skip_all, err(Debug))]
     pub async fn add_user<J>(
         &self,
         name: &str,
         password: &str,
+        added_by: &Author,
         judge: J,
     ) -> anyhow::Result<UserKept>
     where
@@ -250,11 +256,13 @@ impl<B: Backend> Store<B> {
             name: name.to_string(),
             admin,
             created_at: now_ms(),
+            added_by: added_by.clone(),
         };
         let kept = KeptUser {
             password: password.to_string(),
             admin,
             created_at: user.created_at,
+            added_by: added_by.clone(),
         };
         let row = user_row(name, &kept, 1)?;
         // where no user of the name is, so a user is never written over
@@ -331,10 +339,12 @@ impl<B: Backend> Store<B> {
     ) -> anyhow::Result<bool> {
         // under the lock, so a removal reads the user as written
         let _held = self.user_lock.lock().await;
+        // who added them stays as it was, whoever sets the password
         let kept = KeptUser {
             password: password.to_string(),
             admin,
             created_at: stored.user.created_at,
+            added_by: stored.user.added_by.clone(),
         };
         let row = user_row(&stored.user.name, &kept, stored.version + 1)?;
         // only over the version read, so a change since is never written over

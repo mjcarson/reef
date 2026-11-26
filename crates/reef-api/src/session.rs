@@ -16,6 +16,7 @@
 //!   it are refused as [`SessionActed::InTerminal`].
 
 use crate::loops::Pane;
+use crate::user::Author;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -280,6 +281,9 @@ pub struct Session {
     /// The prompts waiting for an answer, oldest first
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prompts: Vec<Prompt>,
+    /// Who attached it: the user its runner's or its follower's token signs in
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub attached_by: Author,
 }
 
 impl Session {
@@ -391,6 +395,9 @@ pub struct Ordered {
     /// The order
     #[serde(flatten)]
     pub order: Order,
+    /// Who gave it, from the app: nobody known for one the service gave of itself
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub by: Author,
 }
 
 /// What the app asks of a runner's session
@@ -498,6 +505,7 @@ mod tests {
     /// * `state` - Where it stands
     fn seen(seen_at: u64, state: SessionState) -> Session {
         Session {
+            attached_by: crate::user::Author::default(),
             id: "k3x9-4242".to_string(),
             pane: Pane::Reef {
                 id: "k3x9-4242".to_string(),
@@ -575,6 +583,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<Entry>(wire).unwrap(), entry);
         // and an order its number
         let ordered = Ordered {
+            by: crate::user::Author::default(),
             n: 3,
             order: Order::Say {
                 text: "go on".to_string(),

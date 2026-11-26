@@ -11,12 +11,12 @@
 | `RevisionRow` | (project, `plan/id`) | number, padded | a `version`, and the revision as JSON: its SHAs, conflicts, files without their hunks, and who sent its capture |
 | `RevisionFileRow` | (project, `plan/id`, number) | path | the file's diff as JSON, its hunks and lines |
 | `CommentRow` | (project, plan) | number, padded | a `version`, and the comment as JSON: its node, time, author and body, and a thread's target, trail, state, resolutions and marks, a reply's thread, or a review's state and who marked it |
-| `LoopRow` | the constant `"loops"` | the pane's key | a `version`, and the loop as JSON: its project, plan, session, node, the node it acted on, its state and when it started |
+| `LoopRow` | the constant `"loops"` | the pane's key | a `version`, and the loop as JSON: its project, plan, session, node, the node it acted on, its state, when it started, and who started it and changed it last |
 | `DecisionRow` | (project, `plan/id`) | number, padded | a `version`, and the decision as JSON: its call, session, where and when it was asked and answered, what it asked, what came of it, and whose session asked it |
-| `UserRow` | the constant `"users"` | name | a `version`, and the user as JSON: their password's argon2id hash, whether they are an admin, and when they were added |
+| `UserRow` | the constant `"users"` | name | a `version`, and the user as JSON: their password's argon2id hash, whether they are an admin, when they were added and by whom |
 | `TokenRow` | the constant `"tokens"` | the token's SHA-256 | a `version`, and what it signs in as JSON: its user, kind, label, and when it was issued and expires |
 | `RemoteRow` | the constant `"remotes"` | the project's name | a `version`, and the remote as JSON: its URL, branch, clone's path and the commit last fetched |
-| `EditRow` | (project, subject: `node/<plan>/<id>`, `page/<plan>/<path>` or `queue`) | `u64::MAX` less the edit's stamp, padded, then the store's random number | the edit as JSON: who made it, when, the version it left and what it changed |
+| `EditRow` | (project, subject: `node/<plan>/<id>`, `page/<plan>/<path>`, `plan/<plan>`, `queue`, `project` or `loops`; or the empty project's `users`) | `u64::MAX` less the edit's stamp, padded, then the store's random number | the edit or act as JSON: who made it, when, the version it left and what it changed |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

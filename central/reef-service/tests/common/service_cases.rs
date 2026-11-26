@@ -890,7 +890,7 @@ async fn queue_last<B: Backend>(sx: &Sx<B>, plan: &PlanName, id: &str) -> anyhow
 pub async fn next_follows_the_queue_across_plans<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // two plans, each with work of its own
     let other = PlanName::new("reef", "other")?;
-    sx.service.add_plan(&other).await?;
+    sx.service.add_plan(&other, &reef_api::NOBODY).await?;
     sx.service
         .put(
             &sx.plan,
@@ -1275,7 +1275,7 @@ pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()>
 pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // two plans, each with a page at the same path under a heading of its own
     let other = PlanName::new("reef", "other")?;
-    sx.service.add_plan(&other).await?;
+    sx.service.add_plan(&other, &reef_api::NOBODY).await?;
     put_page(&sx, "design.md", PAGE, None).await?;
     let columns = PAGE.replace("## Rows", "## Columns");
     let edit = PageEdit::Put {
@@ -1401,7 +1401,7 @@ pub async fn remotes_are_fetched_on_their_interval<B: Backend>(sx: Sx<B>) -> any
         .await?;
     assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
     let plan = PlanName::new("up", "main")?;
-    assert!(service.add_plan(&plan).await?);
+    assert!(service.add_plan(&plan, &reef_api::NOBODY).await?);
     // a change pushed, and no fetch asked for
     git::write(&checkout, "docs/design.md", "# Design\n\nThe new words.\n")?;
     git::run(&checkout, &["commit", "-qam", "revised"])?;

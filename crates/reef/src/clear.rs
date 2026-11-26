@@ -895,6 +895,8 @@ mod tests {
     /// * `node` - The id of the node it holds and acted on
     fn between(node: &str) -> Loop {
         Loop {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             pane: "zellij:work:3".parse::<Pane>().unwrap(),
             project: "reef".to_string(),
             plan: None,

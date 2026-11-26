@@ -45,6 +45,19 @@ pub const REMOTES: &str = "remotes";
 /// The subject a project's queue's edits are kept under
 pub const QUEUE_SUBJECT: &str = "queue";
 
+/// The subject a project's registration is kept under, in its own partition of the edits
+pub const PROJECT_SUBJECT: &str = "project";
+
+/// The subject the acts on a project's loops and sessions are kept under
+pub const LOOPS_SUBJECT: &str = "loops";
+
+/// The project the edits of what belongs to no project are kept under: no project's name is
+/// empty, so none shares it
+pub const SERVER_PROJECT: &str = "";
+
+/// The subject the acts on reef's users are kept under, in [`SERVER_PROJECT`]'s partition
+pub const USERS_SUBJECT: &str = "users";
+
 /// A project: a name and the repo its plans describe
 #[derive(
     Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
@@ -508,7 +521,9 @@ pub struct EditRow {
     /// The project the subject belongs to
     #[shoal(partition)]
     pub project: String,
-    /// What was edited: `node/<plan>/<id>`, `page/<plan>/<path>` or [`QUEUE_SUBJECT`]
+    /// What was edited: `node/<plan>/<id>`, `page/<plan>/<path>`, `plan/<plan>`,
+    /// [`QUEUE_SUBJECT`], [`PROJECT_SUBJECT`], [`LOOPS_SUBJECT`] or, under [`SERVER_PROJECT`],
+    /// [`USERS_SUBJECT`]
     #[shoal(partition)]
     pub subject: String,
     /// `u64::MAX` less the edit's stamp, padded to twenty digits so the newest sorts first, then

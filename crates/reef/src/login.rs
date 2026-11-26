@@ -219,8 +219,18 @@ pub async fn user_ls<W: Write>(client: &Client, out: &mut W) -> anyhow::Result<(
         writeln!(out, "{} has no users", client.base())?;
     }
     for user in users {
-        let admin = if user.admin { "  admin" } else { "" };
-        writeln!(out, "{}{admin}", user.name)?;
+        // whether they are an admin, then who added them, if anyone known did
+        let mut said: Vec<String> = Vec::new();
+        if user.admin {
+            said.push("admin".to_string());
+        }
+        if let Some(added) = crate::history::by_whom("added", &user.added_by) {
+            said.push(added);
+        }
+        match said.is_empty() {
+            true => writeln!(out, "{}", user.name)?,
+            false => writeln!(out, "{}  {}", user.name, said.join(", "))?,
+        }
     }
     Ok(())
 }

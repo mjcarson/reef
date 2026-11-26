@@ -7,7 +7,8 @@ that certificate unchecked. C48's sign-in runs last, on a server of its own that
 to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`), then C51's, on another
 that serves other hosts beside it (127.0.0.1:12192 and 12193, under `origin`), with a page of
 another origin served from 127.0.0.1:12194, then C85's eight tabs, on a third (127.0.0.1:12197 and
-12198, under `tabs`), then C77's account page, on a fourth (127.0.0.1:12196, under `account`).
+12198, under `tabs`), then C77's account page, on a fourth (127.0.0.1:12196, under `account`),
+then C50's authors (127.0.0.1:12199, under `authors`) and C89's (127.0.0.1:12189, under `acts`).
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -80,6 +81,8 @@ TABS_WORK = WORK / "tabs"
 TABS_URL = "https://127.0.0.1:12197"
 TABS_TLS = "https://127.0.0.1:12198"
 # C50's server, where two users each write and the app says who did what
+ACTS_WORK = WORK / "acts"
+ACTS_URL = "https://127.0.0.1:12189"
 AUTHOR_WORK = WORK / "authors"
 AUTHOR_URL = "https://127.0.0.1:12199"
 
@@ -2294,6 +2297,86 @@ def c50_the_app_says_who_did_what(browser):
         stop(server)
 
 
+def acts_reef(who, *args):
+    """Runs the reef CLI against C89's server as one user, each with a credentials file of their own."""
+    line = [REEF / "target/debug/reef", "--conf", ACTS_WORK / "reef.toml",
+            "--credentials", ACTS_WORK / f"{who}.toml", *args]
+    done = subprocess.run(line, cwd=ACTS_WORK / "repo", capture_output=True, text=True)
+    if done.returncode != 0:
+        raise RuntimeError(f"{' '.join(map(str, line))} failed: {done.stderr}")
+    return done.stdout + done.stderr
+
+
+def c89_every_act_names_its_author(browser):
+    """C89: the account page shows who added each user and the log of acts on users, a terminal's
+    loop says who started it, and the projects' page who registered each project."""
+    # a server of its own that asks every caller to sign in, with ada and bob each logged in at a terminal
+    if ACTS_WORK.exists():
+        shutil.rmtree(ACTS_WORK)
+    repo = ACTS_WORK / "repo"
+    repo.mkdir(parents=True)
+    run("git", "-C", repo, "-c", "init.defaultBranch=main", "init", "-q")
+    run("git", "-C", repo, "-c", "user.name=reef", "-c", "user.email=reef@example.invalid",
+        "commit", "-q", "--allow-empty", "-m", "start")
+    (ACTS_WORK / "reef.toml").write_text(
+        f'{api_section(ACTS_URL, ACTS_WORK)}'
+        f'[shoal]\ndata = "{ACTS_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
+    )
+    server = start(ACTS_WORK / "reef.toml", ACTS_URL, ACTS_WORK / "server.log")
+    try:
+        password = ACTS_WORK / "password"
+        password.write_text(PASSWORD + "\n")
+        acts_reef("ada", "user", "add", "ada", "--password-file", password)
+        acts_reef("ada", "login", "--user", "ada", "--password-file", password)
+        acts_reef("ada", "user", "add", "bob", "--password-file", password)
+        acts_reef("bob", "login", "--user", "bob", "--password-file", password)
+        # ada registers the project and lists its plan, and bob starts a loop in his terminal
+        acts_reef("ada", "project", "add", "acts")
+        acts_reef("ada", "plan", "new", "central")
+        node = ACTS_WORK / "t1.yaml"
+        node.write_text(node_yaml("T1", "T1 Watched"))
+        acts_reef("ada", "node", "put", node)
+        acts_reef("bob", "loop", "start", "--pane", "claude:4242")
+        # ada signs in in a browser, and comes to her account page
+        context = browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
+        page = context.new_page()
+        page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+        page.goto(ACTS_URL + "/account")
+        page.fill("#name", "ada")
+        page.fill("#password", PASSWORD)
+        page.click("button[type=submit]")
+        page.wait_for_selector(".reef-app-admin-log", timeout=20000)
+        added_by = page.eval_on_selector_all(
+            ".reef-app-account tr[data-user]", "rows => rows.map(r => [r.dataset.user,"
+            " r.querySelector('.reef-app-added-by').innerText])")
+        log = page.locator(".reef-app-admin-log .reef-app-history-entry").evaluate_all(
+            "es => es.map(e => [e.querySelector('.reef-app-author')?.textContent ?? null, "
+            "e.querySelector('.reef-app-history-what').textContent])")
+        page.locator(".reef-app-account").screenshot(path=str(SHOTS / "reef-app-admin-log.png"))
+        # the projects' page names who registered the project
+        page.goto(ACTS_URL + "/")
+        page.wait_for_selector(".reef-app-project", timeout=20000)
+        registered = page.inner_text(".reef-app-project .reef-app-registered")
+        listed = page.get_attribute(".reef-app-project .reef-app-plans li", "title")
+        # the plan's sessions panel says who started bob's loop
+        page.goto(ACTS_URL + "/plans/acts/central")
+        wait_drawn(page)
+        page.click(".reef-app-sessions-toggle")
+        page.wait_for_selector(".reef-app-runner.terminal .reef-app-runner-who", timeout=20000)
+        started = page.inner_text(".reef-app-runner.terminal .reef-app-runner-who")
+        page.screenshot(path=str(SHOTS / "reef-app-loop-started-by.png"))
+        context.close()
+        check("C89 the account page shows the admin log and who added each user, and a loop who started it",
+              added_by == [["ada", "—"], ["bob", "ada"]]
+              and log == [["ada", "added bob"], [None, "added ada, an admin"]]
+              and registered == "Registered by ada" and listed == "Listed by ada"
+              and started == "Loop started by bob",
+              {"added by": added_by, "log": log, "registered": registered, "listed": listed,
+               "started": started})
+    finally:
+        stop(server)
+
+
 def main():
     setup()
     server = start()
@@ -2354,6 +2437,8 @@ def main():
                 c77_the_account_page_manages_passwords_and_tokens(browser)
             if not ONLY or any("c50_the_app_says_who_did_what".startswith(name) for name in ONLY):
                 c50_the_app_says_who_did_what(browser)
+            if not ONLY or any("c89_every_act_names_its_author".startswith(name) for name in ONLY):
+                c89_every_act_names_its_author(browser)
             browser.close()
     finally:
         stop(server)

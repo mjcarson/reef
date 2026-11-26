@@ -13,6 +13,8 @@ shoal = { workspace = true, features = ["server"] }
 
 [dev-dependencies]
 reef-model.workspace = true
+# the author a test's own writes name: nobody
+reef-api.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 # stops the node the way a supervisor does, with SIGTERM

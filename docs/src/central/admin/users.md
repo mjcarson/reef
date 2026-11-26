@@ -8,9 +8,10 @@ users, from any host, and only once they have signed in.
 ```sh
 reef user add bob                  # asks for bob's first password twice; --password-file PATH to read it
 reef user add carol --admin        # an admin, who can add and remove users
-reef user ls                       # every user, admins marked
+reef user ls                       # every user, admins marked, and who added each
 reef user passwd bob               # set bob's password, which revokes his tokens
 reef user rm bob                   # remove bob and revoke his tokens; never the last admin
+reef user log                      # who added or removed each user, set a password or revoked a token
 ```
 
 - **A user's admin flag is set when they are added.** Otherwise, only `reef-serve recover`
@@ -18,7 +19,11 @@ reef user rm bob                   # remove bob and revoke his tokens; never the
 - **Users change their own passwords** with `reef user passwd`, giving their current one, which
   keeps their tokens.
 - **The account page** in the app, opened from your name in the bar, does the same for an
-  admin: every user, whose password you set or whom you remove.
+  admin: every user, who added them, and whose password you set or whom you remove.
+- **Every act on a user is logged,** for admins alone: adding and removing users, setting a
+  password, revoking a token, and a recovery on the server, which names nobody. `reef user log`
+  prints it, newest first, 200 at a time (`--older`, `--all`), and the account page shows its
+  newest 200. Signing in and out isn't logged.
 - **Users can be added before sign-in is required,** so they are ready when `[auth] required`
   is turned on.
 

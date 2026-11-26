@@ -291,8 +291,8 @@ impl<B: Backend> Service<B> {
         // a directory on this host is an admin's to name, once callers sign in
         self.judge_on_host(asker, "register a project by a directory on its host")
             .await?;
-        // register it, and tell the change stream if it was
-        let added = self.store.add_project(name, repo).await?;
+        // register it, naming who did, and tell the change stream if it was
+        let added = self.store.add_project(name, repo, &asker.author()).await?;
         if let AddedProject::Added(project) = &added {
             self.publish(Change::ProjectAdded {
                 project: project.clone(),
@@ -301,10 +301,17 @@ impl<B: Backend> Service<B> {
         Ok(added)
     }
 
-    /// Lists every project, by name
+    /// Lists every project, by name, each saying when it was registered and by whom
+    ///
+    /// Each project's registration is a read of its history, so only listings shown to a
+    /// person join it, never the reads the service makes of its own.
     #[instrument(name = "Service::projects", skip_all, err(Debug))]
     pub async fn projects(&self) -> anyhow::Result<Vec<Project>> {
-        self.store.projects().await
+        let mut projects = self.store.projects().await?;
+        for project in &mut projects {
+            project.registered = self.store.registered(&project.name).await;
+        }
+        Ok(projects)
     }
 
     /// Finds the project a directory belongs to, a linked worktree's main repo's for one in it,
@@ -320,7 +327,12 @@ impl<B: Backend> Service<B> {
         dir: &Path,
         remotes: &[String],
     ) -> anyhow::Result<Option<Project>> {
-        self.store.find_project(dir, remotes).await
+        // the project found, saying when it was registered and by whom
+        let mut found = self.store.find_project(dir, remotes).await?;
+        if let Some(project) = &mut found {
+            project.registered = self.store.registered(&project.name).await;
+        }
+        Ok(found)
     }
 
     /// Lists a plan in its project, and returns whether it was added
@@ -328,10 +340,11 @@ impl<B: Backend> Service<B> {
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
+    /// * `author` - Who lists it, from the caller's token
     #[instrument(name = "Service::add_plan", skip_all, err(Debug))]
-    pub async fn add_plan(&self, plan: &PlanName) -> anyhow::Result<bool> {
-        // list it, and tell the change stream if it wasn't listed already
-        let added = self.store.add_plan(plan).await?;
+    pub async fn add_plan(&self, plan: &PlanName, author: &Author) -> anyhow::Result<bool> {
+        // list it, naming who did, and tell the change stream if it wasn't listed already
+        let added = self.store.add_plan(plan, author).await?;
         if added {
             self.publish(Change::PlanAdded { plan: plan.clone() });
         }
@@ -350,6 +363,21 @@ impl<B: Backend> Service<B> {
             return Err(NotRegistered(project.to_string()).into());
         }
         self.store.plans(project).await
+    }
+
+    /// Lists a project's plans, by name, each saying when it was listed and by whom, as a
+    /// person is shown them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Service::plan_listing", skip_all, err(Debug))]
+    pub async fn plan_listing(&self, project: &str) -> anyhow::Result<Vec<PlanInfo>> {
+        let mut plans = self.plans(project).await?;
+        for plan in &mut plans {
+            plan.registered = self.store.plan_registered(&plan.name).await;
+        }
+        Ok(plans)
     }
 
     /// Gets one node of a plan, at the version a put of it names
@@ -1103,7 +1131,7 @@ mod tests {
             )
             .await?;
         let plan = PlanName::new("reef", "central")?;
-        service.add_plan(&plan).await?;
+        service.add_plan(&plan, &reef_api::NOBODY).await?;
         // a node needing one that isn't there is refused, with check's message, and not written
         let put = NodePut::new(work("C11", &["X"]), None);
         let refused = service.put(&plan, vec![put], &reef_api::NOBODY).await?;
@@ -1134,7 +1162,7 @@ mod tests {
             )
             .await?;
         let plan = PlanName::new("reef", "central")?;
-        service.add_plan(&plan).await?;
+        service.add_plan(&plan, &reef_api::NOBODY).await?;
         // registering the project and listing the plan are changes of their own
         assert!(
             matches!(changes.try_recv()?, Change::ProjectAdded { project } if project.name == "reef")

@@ -602,6 +602,8 @@ async fn member_started<W: Write>(client: &Client, pane: &Pane, out: &mut W) -> 
 ///     opens: true,
 ///     pid: None,
 ///     members: Vec::new(),
+///     started_by: reef_api::Author::default(),
+///     changed_by: reef_api::Author::default(),
 /// };
 /// assert_eq!(between(&feeding), node);
 /// // mid-node, its node's end not acted on yet, it isn't
@@ -685,8 +687,8 @@ fn holding(feeding: &Loop) -> String {
     }
 }
 
-/// One loop as `ls` lists it: whether it runs, what it feeds, its node, the node it acted on
-/// and its session
+/// One loop as `ls` lists it: whether it runs, what it feeds, its node, the node it acted on,
+/// its session, and who started it and changed it last
 ///
 /// # Arguments
 ///
@@ -724,6 +726,15 @@ fn listed(feeding: &Loop) -> String {
     // a paused loop says what pausing means
     if feeding.state == LoopState::Paused && feeding.node.is_some() {
         parts.push("stops once its node is done".to_string());
+    }
+    // who started it, and who changed it last if that was someone else
+    if let Some(started) = crate::history::by_whom("started", &feeding.started_by) {
+        parts.push(started);
+    }
+    if feeding.changed_by != feeding.started_by
+        && let Some(changed) = crate::history::by_whom("last changed", &feeding.changed_by)
+    {
+        parts.push(changed);
     }
     parts.join(", ")
 }
@@ -839,6 +850,8 @@ mod tests {
     fn loops_list_where_they_are() {
         // a paused loop of one plan, on a node, having acted on another
         let paused = Loop {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             pane: Pane::Claude { pid: 1 },
             project: "reef".to_string(),
             plan: Some("central".to_string()),

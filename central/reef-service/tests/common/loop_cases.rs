@@ -51,7 +51,7 @@ fn start<B>(fx: &Fx<B>, session: &str) -> LoopEdit {
 /// * `pane` - The pane
 /// * `edit` - The change
 async fn edited<B: Backend>(fx: &Fx<B>, pane: &Pane, edit: LoopEdit) -> anyhow::Result<Loop> {
-    match fx.store.edit_loop(pane, edit).await? {
+    match fx.store.edit_loop(pane, edit, &reef_api::NOBODY).await? {
         LoopEdited::Started { r#loop }
         | LoopEdited::Resumed { r#loop }
         | LoopEdited::Edited { r#loop }
@@ -73,8 +73,10 @@ pub async fn a_pane_keeps_one_loop<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     assert!(fx.store.loops().await?.is_empty());
     assert_eq!(fx.store.loop_in(&here).await?, None);
     // started, running and holding nothing, at version 1
-    let LoopEdited::Started { r#loop: started } =
-        fx.store.edit_loop(&here, start(&fx, "s1")).await?
+    let LoopEdited::Started { r#loop: started } = fx
+        .store
+        .edit_loop(&here, start(&fx, "s1"), &reef_api::NOBODY)
+        .await?
     else {
         panic!("no loop was started");
     };
@@ -93,7 +95,7 @@ pub async fn a_pane_keeps_one_loop<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
         opens: None,
         pid: None,
     };
-    let busy = fx.store.edit_loop(&here, other).await?;
+    let busy = fx.store.edit_loop(&here, other, &reef_api::NOBODY).await?;
     assert_eq!(
         busy,
         LoopEdited::Busy {
@@ -111,7 +113,9 @@ pub async fn a_pane_keeps_one_loop<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
         opens: None,
         pid: None,
     };
-    let LoopEdited::Resumed { r#loop: resumed } = fx.store.edit_loop(&here, again).await? else {
+    let LoopEdited::Resumed { r#loop: resumed } =
+        fx.store.edit_loop(&here, again, &reef_api::NOBODY).await?
+    else {
         panic!("the paused loop wasn't resumed");
     };
     assert_eq!((resumed.state, resumed.version), (LoopState::Running, 3));
@@ -137,7 +141,7 @@ pub async fn a_pane_keeps_one_loop<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     assert_eq!(stopped, resumed);
     assert_eq!(fx.store.loop_in(&here).await?, None);
     for edit in [LoopEdit::Pause, LoopEdit::Stop] {
-        let none = fx.store.edit_loop(&here, edit).await?;
+        let none = fx.store.edit_loop(&here, edit, &reef_api::NOBODY).await?;
         assert_eq!(none, LoopEdited::NoLoop { pane: here.clone() });
     }
     assert_eq!(fx.store.loops().await?.len(), 1);
@@ -163,7 +167,10 @@ pub async fn two_loops_never_hold_one_node<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
     // the first takes C39, and the second is refused it, naming the first
     let held = edited(&fx, &one, hold("C39")).await?;
     assert_eq!(held.node, Some(node_of(&fx, "C39")));
-    let refused = fx.store.edit_loop(&two, hold("C39")).await?;
+    let refused = fx
+        .store
+        .edit_loop(&two, hold("C39"), &reef_api::NOBODY)
+        .await?;
     assert_eq!(
         refused,
         LoopEdited::Held {
@@ -175,8 +182,8 @@ pub async fn two_loops_never_hold_one_node<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
     assert_eq!(edited(&fx, &one, hold("C39")).await?.node, held.node);
     // both taking C40 at once: one takes it, and the other is refused
     let (first, second) = tokio::join!(
-        fx.store.edit_loop(&one, hold("C40")),
-        fx.store.edit_loop(&two, hold("C40")),
+        fx.store.edit_loop(&one, hold("C40"), &reef_api::NOBODY),
+        fx.store.edit_loop(&two, hold("C40"), &reef_api::NOBODY),
     );
     let outcomes = [first?, second?];
     let took = outcomes
@@ -204,7 +211,7 @@ pub async fn two_loops_never_hold_one_node<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
         members: Vec::new(),
     };
     assert!(matches!(
-        fx.store.edit_loop(&one, outside).await?,
+        fx.store.edit_loop(&one, outside, &reef_api::NOBODY).await?,
         LoopEdited::NotInLoop { node, .. } if node == elsewhere
     ));
     // the holder of C40 lets go of it, and the other takes it
@@ -279,7 +286,9 @@ pub async fn a_clears_session_takes_its_panes_loop<B: Reopen>(fx: Fx<B>) -> anyh
     // and a session starting where no loop is takes none
     let elsewhere = pane(2);
     assert_eq!(
-        fx.store.edit_loop(&elsewhere, session).await?,
+        fx.store
+            .edit_loop(&elsewhere, session, &reef_api::NOBODY)
+            .await?,
         LoopEdited::NoLoop { pane: elsewhere }
     );
     Ok(())
@@ -297,7 +306,7 @@ pub async fn a_beaten_loop_write_is_an_error<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     fx.faults.refuse_next_loop_write();
     let error = fx
         .store
-        .edit_loop(&here, LoopEdit::Pause)
+        .edit_loop(&here, LoopEdit::Pause, &reef_api::NOBODY)
         .await
         .expect_err("a beaten write was taken as written");
     assert!(format!("{error:#}").contains("another writer"), "{error:#}");
@@ -323,7 +332,7 @@ pub async fn a_loop_acts_on_a_nodes_end_once<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     assert_eq!(once.acted, Some(node_of(&fx, "C39")));
     // acting on it again writes nothing, and says so with the loop as it stands
     assert_eq!(
-        fx.store.edit_loop(&here, acted).await?,
+        fx.store.edit_loop(&here, acted, &reef_api::NOBODY).await?,
         LoopEdited::ActedAlready {
             node: node_of(&fx, "C39"),
             r#loop: once.clone()
@@ -373,7 +382,7 @@ pub async fn holding_the_acted_node_again_clears_its_end<B: Reopen>(
     let ended = edited(&fx, &here, acted.clone()).await?;
     assert_eq!(ended.acted, Some(node_of(&fx, "C39")));
     assert!(matches!(
-        fx.store.edit_loop(&here, acted).await?,
+        fx.store.edit_loop(&here, acted, &reef_api::NOBODY).await?,
         LoopEdited::ActedAlready { .. }
     ));
     Ok(())
@@ -437,14 +446,16 @@ pub async fn a_loop_holds_its_group_as_one<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
     // a group wider than the loop is refused, and writes nothing
     assert!(matches!(
         fx.store
-            .edit_loop(&two, group(&fx, &["C41", "C42", "C43"]))
+            .edit_loop(&two, group(&fx, &["C41", "C42", "C43"]), &reef_api::NOBODY)
             .await?,
         LoopEdited::TooWide { named: 3, .. }
     ));
     assert_eq!(fx.store.loop_in(&two).await?, Some(held.clone()));
     // its member is refused to another loop, naming the loop that holds it
     assert_eq!(
-        fx.store.edit_loop(&one, group(&fx, &["C40"])).await?,
+        fx.store
+            .edit_loop(&one, group(&fx, &["C40"]), &reef_api::NOBODY)
+            .await?,
         LoopEdited::Held {
             node: node_of(&fx, "C40"),
             by: held.clone()
@@ -453,7 +464,7 @@ pub async fn a_loop_holds_its_group_as_one<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
     // and a group with a member another loop holds is refused whole
     edited(&fx, &one, group(&fx, &["C41"])).await?;
     assert!(matches!(
-        fx.store.edit_loop(&two, group(&fx, &["C42", "C41"])).await?,
+        fx.store.edit_loop(&two, group(&fx, &["C42", "C41"]), &reef_api::NOBODY).await?,
         LoopEdited::Held { node, .. } if node == node_of(&fx, "C41")
     ));
     assert_eq!(fx.store.loop_in(&two).await?, Some(held));
@@ -492,27 +503,34 @@ pub async fn a_pane_joins_a_member<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
             .and_then(|member| member.pane.clone())
     };
     // a pane with no loop joins C40, and joining it again changes nothing
-    let LoopEdited::Joined { r#loop: joined } = fx.store.edit_loop(&member, join("C40")).await?
+    let LoopEdited::Joined { r#loop: joined } = fx
+        .store
+        .edit_loop(&member, join("C40"), &reef_api::NOBODY)
+        .await?
     else {
         panic!("the pane didn't join C40");
     };
     assert_eq!(joined.pane, lead);
     assert_eq!(joined_by(&joined, "C40"), Some(member.clone()));
     assert_eq!(
-        fx.store.edit_loop(&member, join("C40")).await?,
+        fx.store
+            .edit_loop(&member, join("C40"), &reef_api::NOBODY)
+            .await?,
         LoopEdited::Joined {
             r#loop: joined.clone()
         }
     );
     // another pane is refused it, naming the loop that holds it
     assert!(matches!(
-        fx.store.edit_loop(&other, join("C40")).await?,
+        fx.store.edit_loop(&other, join("C40"), &reef_api::NOBODY).await?,
         LoopEdited::Held { node, .. } if node == node_of(&fx, "C40")
     ));
     // the loop's own node, or one no loop holds, is no member to join
     for id in ["C39", "C42"] {
         assert_eq!(
-            fx.store.edit_loop(&other, join(id)).await?,
+            fx.store
+                .edit_loop(&other, join(id), &reef_api::NOBODY)
+                .await?,
             LoopEdited::NotMember {
                 node: node_of(&fx, id)
             }
@@ -520,24 +538,29 @@ pub async fn a_pane_joins_a_member<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     }
     // the loop's own pane works its own node, not a member
     assert!(matches!(
-        fx.store.edit_loop(&lead, join("C41")).await?,
+        fx.store.edit_loop(&lead, join("C41"), &reef_api::NOBODY).await?,
         LoopEdited::Busy { r#loop } if r#loop.pane == lead
     ));
     // a pane working a member starts no loop of its own
     assert!(matches!(
-        fx.store.edit_loop(&member, start(&fx, "s9")).await?,
+        fx.store.edit_loop(&member, start(&fx, "s9"), &reef_api::NOBODY).await?,
         LoopEdited::Busy { r#loop } if r#loop.pane == lead
     ));
     assert_eq!(fx.store.loop_in(&member).await?, None);
     // joining C41, it leaves C40 for another session
-    let LoopEdited::Joined { r#loop: moved } = fx.store.edit_loop(&member, join("C41")).await?
+    let LoopEdited::Joined { r#loop: moved } = fx
+        .store
+        .edit_loop(&member, join("C41"), &reef_api::NOBODY)
+        .await?
     else {
         panic!("the pane didn't join C41");
     };
     assert_eq!(joined_by(&moved, "C41"), Some(member.clone()));
     assert_eq!(joined_by(&moved, "C40"), None);
     assert!(matches!(
-        fx.store.edit_loop(&other, join("C40")).await?,
+        fx.store
+            .edit_loop(&other, join("C40"), &reef_api::NOBODY)
+            .await?,
         LoopEdited::Joined { .. }
     ));
     // and who joined what reads back once the store is reopened

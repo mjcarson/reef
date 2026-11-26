@@ -6,8 +6,10 @@ What central reef can't do yet, and the plan's node for each where there is one.
   without saying who it is.
 - **An author is shown by name.** A name reused after its user was removed reads as the same
   user, though the history keeps when each was added.
-- **Not every act names its author.** Registering a project or a plan, a loop's or a session's
-  acts, and managing users don't say who did them (C89).
+- **A fetch names nobody.** A remote project's fetch, by hand or on its interval, says when, not
+  who asked.
+- **Sign-ins aren't logged.** The users' log keeps adds, removals, passwords and revokes, but not
+  who signed in or out, or when.
 - **One disk.** Shoal keeps one copy of the data, so a lost disk is a restore from backup
   (C52).
 - **No push webhook.** A pushed doc is seen at the next fetch, or after `reef project fetch`

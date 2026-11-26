@@ -33,6 +33,11 @@ reef loop run --permission-mode auto -- --model sonnet --effort low
 - **Ctrl-C ends it:** its session ends, its loop lets go of its node, and the app shows it
   detached. A runner unheard from for a minute shows as gone. One whose service restarted
   attaches again with the transcript it holds.
+- **Who did each act is kept,** though the session is only in memory (C89). A session says who
+  attached it, and each order who gave it from the app. Its project's loops' history, read at
+  `GET …/projects/{project}/loops/history` and by `reef loop log`, keeps who attached it, let go
+  of it, answered its prompts and replied in it, beside each loop's acts. A report, sent each
+  turn, keeps nothing.
 
 ## A terminal's own session
 

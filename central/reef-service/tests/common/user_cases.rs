@@ -19,7 +19,9 @@ pub async fn users_and_tokens_are_kept_by_key<B: Reopen>(fx: Fx<B>) -> anyhow::R
     // the judge sees every user, and says the first is an admin
     let added = fx
         .store
-        .add_user("ada", "$argon2id$ada", |users| Ok(users.is_empty()))
+        .add_user("ada", "$argon2id$ada", &reef_api::NOBODY, |users| {
+            Ok(users.is_empty())
+        })
         .await?;
     let UserKept::Added(ada) = added else {
         anyhow::bail!("ada wasn't added: {added:?}");
@@ -27,7 +29,9 @@ pub async fn users_and_tokens_are_kept_by_key<B: Reopen>(fx: Fx<B>) -> anyhow::R
     assert!(ada.admin);
     let added = fx
         .store
-        .add_user("bob", "$argon2id$bob", |users| Ok(users.is_empty()))
+        .add_user("bob", "$argon2id$bob", &reef_api::NOBODY, |users| {
+            Ok(users.is_empty())
+        })
         .await?;
     assert!(
         matches!(&added, UserKept::Added(user) if !user.admin),
@@ -36,12 +40,14 @@ pub async fn users_and_tokens_are_kept_by_key<B: Reopen>(fx: Fx<B>) -> anyhow::R
     // a name taken is said so, and a judge's refusal writes nothing
     let taken = fx
         .store
-        .add_user("bob", "$argon2id$x", |_| Ok(false))
+        .add_user("bob", "$argon2id$x", &reef_api::NOBODY, |_| Ok(false))
         .await?;
     assert_eq!(taken, UserKept::NameTaken);
     let refused = fx
         .store
-        .add_user("carol", "$argon2id$c", |_| anyhow::bail!("not allowed"))
+        .add_user("carol", "$argon2id$c", &reef_api::NOBODY, |_| {
+            anyhow::bail!("not allowed")
+        })
         .await;
     assert!(refused.is_err());
     // each read by name, with its password's hash
@@ -88,10 +94,10 @@ pub async fn users_and_tokens_are_kept_by_key<B: Reopen>(fx: Fx<B>) -> anyhow::R
 pub async fn users_are_removed_with_their_tokens<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // an admin and a user, with two tokens of bob's and one of ada's
     fx.store
-        .add_user("ada", "$argon2id$ada", |_| Ok(true))
+        .add_user("ada", "$argon2id$ada", &reef_api::NOBODY, |_| Ok(true))
         .await?;
     fx.store
-        .add_user("bob", "$argon2id$bob", |_| Ok(false))
+        .add_user("bob", "$argon2id$bob", &reef_api::NOBODY, |_| Ok(false))
         .await?;
     for (hash, user) in [("c", "bob"), ("a", "bob"), ("b", "ada")] {
         let hash = hash.repeat(64);
@@ -146,7 +152,7 @@ pub async fn users_are_removed_with_their_tokens<B: Reopen>(fx: Fx<B>) -> anyhow
     assert_eq!(hashes(fx.store.tokens(None).await?), ["b"]);
     // a second admin lets the first go
     fx.store
-        .add_user("dan", "$argon2id$dan", |_| Ok(true))
+        .add_user("dan", "$argon2id$dan", &reef_api::NOBODY, |_| Ok(true))
         .await?;
     let removed = fx.store.remove_user("ada", |_| Ok(())).await?;
     assert_eq!(removed, UserDropped::Removed { revoked: 1 });

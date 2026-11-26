@@ -320,6 +320,7 @@ mod tests {
         let changes = [
             Change::ProjectAdded {
                 project: crate::Project {
+                    registered: None,
                     name: "reef".to_string(),
                     repo: "/src/reef".into(),
                     remote: None,

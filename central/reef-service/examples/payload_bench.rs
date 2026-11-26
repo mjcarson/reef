@@ -129,7 +129,7 @@ async fn bench<B: Backend + 'static>(
     service
         .add_project("example", book.docs, Asker::default())
         .await?;
-    service.add_plan(&plan).await?;
+    service.add_plan(&plan, &reef_api::NOBODY).await?;
     service
         .store()
         .write_plan(&plan, book.nodes.to_vec().into())
@@ -139,7 +139,7 @@ async fn bench<B: Backend + 'static>(
     service
         .add_project("paged", book.empty, Asker::default())
         .await?;
-    service.add_plan(&paged).await?;
+    service.add_plan(&paged, &reef_api::NOBODY).await?;
     let write = PlanWrite {
         nodes: book.nodes.to_vec(),
         pages: Some(book.pages.to_vec()),

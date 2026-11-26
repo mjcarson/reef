@@ -5091,6 +5091,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "reef-api",
  "reef-model",
  "reef-service",
  "shoal",

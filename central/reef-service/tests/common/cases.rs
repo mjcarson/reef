@@ -271,7 +271,7 @@ pub async fn duplicate_plan_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<(
     fx.store.put(&fx.plan, node("C7", 0), None).await?;
     let before = fx.store.list(&fx.plan).await?;
     // listing it again is refused
-    assert!(!fx.store.add_plan(&fx.plan).await?);
+    assert!(!fx.store.add_plan(&fx.plan, &reef_api::NOBODY).await?);
     // and its revision and nodes are untouched
     assert_eq!(fx.store.list(&fx.plan).await?, before);
     Ok(())
@@ -566,10 +566,20 @@ pub async fn deleting_a_missing_row_deletes_nothing<B: Reopen>(fx: Fx<B>) -> any
 pub async fn linked_worktree_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a project for a repo of its own
     let main = git::repo(&fx.dir.join("app"))?;
-    let AddedProject::Added(app) = fx.store.add_project("app", &main).await? else {
+    let AddedProject::Added(app) = fx
+        .store
+        .add_project("app", &main, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a project for a fresh repo was refused");
     };
     assert_eq!(app.repo, main);
+    // the store's own reads leave who registered it to the service's listings
+    assert!(app.registered.is_some());
+    let app = reef_api::Project {
+        registered: None,
+        ..app
+    };
     // a linked worktree of it beside it, and a directory inside that
     let linked = git::worktree(&main, &fx.dir.join("app-linked"))?;
     let inside = linked.join("src").join("deep");
@@ -581,7 +591,10 @@ pub async fn linked_worktree_finds_its_project<B: Reopen>(fx: Fx<B>) -> anyhow::
     );
     assert_eq!(fx.store.find_project(&inside, &[]).await?, Some(app));
     // and registering the worktree is registering its main repo, which is taken
-    let again = fx.store.add_project("app-linked", &linked).await?;
+    let again = fx
+        .store
+        .add_project("app-linked", &linked, &reef_api::NOBODY)
+        .await?;
     assert_eq!(
         again,
         AddedProject::RepoTaken {
@@ -650,10 +663,20 @@ fn kept<B>(fx: &Fx<B>, url: &str, clone: &str) -> KeptRemote {
 pub async fn a_clone_finds_its_remote_project<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // a remote project, kept as a registration that cloned it keeps it
     let up = kept(&fx, "git@example.com:org/up.git", "up.1.git");
-    let AddedProject::Added(project) = fx.store.add_remote_project("up", up.clone()).await? else {
+    let AddedProject::Added(project) = fx
+        .store
+        .add_remote_project("up", up.clone(), &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a remote project for a fresh repo was refused");
     };
     assert_eq!(project.remote, Some(up.remote()));
+    // the store's own reads leave who registered it to the service's listings
+    assert!(project.registered.is_some());
+    let project = reef_api::Project {
+        registered: None,
+        ..project
+    };
     assert_eq!(project.repo, up.clone);
     // listed with its remote, beside the local project
     let listed: Vec<(String, bool)> = fx
@@ -709,9 +732,17 @@ pub async fn a_clone_finds_its_remote_project<B: Reopen>(fx: Fx<B>) -> anyhow::R
     let expected = AddedProject::RepoTaken {
         project: "up".to_string(),
     };
-    assert_eq!(fx.store.add_remote_project("again", again).await?, expected);
+    assert_eq!(
+        fx.store
+            .add_remote_project("again", again, &reef_api::NOBODY)
+            .await?,
+        expected
+    );
     let named = kept(&fx, "https://example.com/org/elsewhere", "reef.3.git");
-    let taken = fx.store.add_remote_project("reef", named).await?;
+    let taken = fx
+        .store
+        .add_remote_project("reef", named, &reef_api::NOBODY)
+        .await?;
     assert_eq!(taken, AddedProject::NameTaken);
     Ok(())
 }
@@ -728,7 +759,10 @@ pub async fn a_registration_killed_after_its_remote_leaves_no_project<B: Reopen>
     // a registration killed once its remote's row is written
     let first = kept(&fx, "https://example.com/org/up", "up.1.git");
     fx.faults.fail_next_project_insert();
-    let killed = fx.store.add_remote_project("up", first.clone()).await;
+    let killed = fx
+        .store
+        .add_remote_project("up", first.clone(), &reef_api::NOBODY)
+        .await;
     assert!(
         killed.is_err(),
         "the killed registration was kept: {killed:?}"
@@ -750,7 +784,11 @@ pub async fn a_registration_killed_after_its_remote_leaves_no_project<B: Reopen>
     assert_eq!(found, None);
     // a retry, with a clone of its own, is registered over the row it left
     let retry = kept(&fx, "https://example.com/org/up", "up.2.git");
-    let AddedProject::Added(up) = fx.store.add_remote_project("up", retry.clone()).await? else {
+    let AddedProject::Added(up) = fx
+        .store
+        .add_remote_project("up", retry.clone(), &reef_api::NOBODY)
+        .await?
+    else {
         panic!("the retry was refused");
     };
     assert_eq!(
@@ -760,9 +798,18 @@ pub async fn a_registration_killed_after_its_remote_leaves_no_project<B: Reopen>
     // and a remote left by a registration killed under another name never joins a local project
     let left = kept(&fx, "https://example.com/org/down", "down.1.git");
     fx.faults.fail_next_project_insert();
-    assert!(fx.store.add_remote_project("down", left).await.is_err());
+    assert!(
+        fx.store
+            .add_remote_project("down", left, &reef_api::NOBODY)
+            .await
+            .is_err()
+    );
     let local = git::repo(&fx.dir.join("down"))?;
-    let AddedProject::Added(down) = fx.store.add_project("down", &local).await? else {
+    let AddedProject::Added(down) = fx
+        .store
+        .add_project("down", &local, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a local project under the killed one's name was refused");
     };
     assert_eq!(down.remote, None);
@@ -786,7 +833,7 @@ pub async fn projects_list_by_name<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // two more projects, registered out of name order
     for name in ["zeta", "alpha"] {
         let repo = git::repo(&fx.dir.join(name))?;
-        let added = fx.store.add_project(name, &repo).await?;
+        let added = fx.store.add_project(name, &repo, &reef_api::NOBODY).await?;
         assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
     }
     // list in name order, each with the repo it was registered for
@@ -808,7 +855,11 @@ pub async fn projects_list_by_name<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
 pub async fn plans_list_by_name<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
     // two more plans, listed out of name order
     for name in ["zz", "aa"] {
-        assert!(fx.store.add_plan(&PlanName::new("reef", name)?).await?);
+        assert!(
+            fx.store
+                .add_plan(&PlanName::new("reef", name)?, &reef_api::NOBODY)
+                .await?
+        );
     }
     // list in name order, each named in its project and holding a current revision
     let plans = fx.store.plans("reef").await?;
@@ -830,7 +881,7 @@ pub async fn plan_of_unknown_project_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow:
     let orphan = PlanName::new("nobody", "central")?;
     let error = fx
         .store
-        .add_plan(&orphan)
+        .add_plan(&orphan, &reef_api::NOBODY)
         .await
         .expect_err("an orphan plan was listed");
     let not_registered = error

@@ -46,6 +46,10 @@ pub struct User {
     pub admin: bool,
     /// When the user was added, in milliseconds since the Unix epoch
     pub created_at: u64,
+    /// Who added them: nobody known for the first, added on the service's host, or one added
+    /// before reef kept it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub added_by: Author,
 }
 
 /// A request to add a user
@@ -277,7 +281,12 @@ impl Author {
     /// ```
     /// use reef_api::{Author, User, Writer};
     ///
-    /// let ada = User { name: "ada".to_string(), admin: false, created_at: 7 };
+    /// let ada = User {
+    ///     name: "ada".to_string(),
+    ///     admin: false,
+    ///     created_at: 7,
+    ///     added_by: Author::default(),
+    /// };
     /// let author = Author::signed(Some(&ada), Writer::Claude);
     /// assert_eq!(author.describe().as_deref(), Some("Claude, for ada"));
     /// assert_eq!(author.since, Some(7));
@@ -466,6 +475,7 @@ mod tests {
     #[test]
     fn authors_say_only_what_they_know() {
         let ada = User {
+            added_by: crate::user::Author::default(),
             name: "ada".to_string(),
             admin: false,
             created_at: 7,
@@ -500,6 +510,7 @@ mod tests {
     /// A user named in a request
     fn ada() -> User {
         User {
+            added_by: crate::user::Author::default(),
             name: "ada".into(),
             admin: true,
             created_at: 7,

@@ -670,6 +670,70 @@ async fn the_cli_needs_no_login_with_sign_in_off() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `reef user log` and `reef loop log` print who did what, and `user ls`, `loop ls`, `project
+/// ls` and `plan ls` name who added, started, registered or listed each
+#[tokio::test]
+async fn acts_name_their_authors() -> anyhow::Result<()> {
+    let cx = Cx::signing_in("acts").await?;
+    let password = cx.ax.dir.join("password");
+    std::fs::write(&password, "correct horse battery\n")?;
+    let password = password.to_str().expect("the case's dir is utf-8");
+    let repo = cx.repo("cli")?;
+    // ada, the first user, added from this host by nobody signed in, then signed in
+    cx.reef(&repo, &["user", "add", "ada", "--password-file", password])
+        .await?;
+    cx.reef(
+        &repo,
+        &["login", "--user", "ada", "--password-file", password],
+    )
+    .await?;
+    // ada adds bob, registers a project and lists a plan in it
+    cx.reef(&repo, &["user", "add", "bob", "--password-file", password])
+        .await?;
+    cx.reef(&repo, &["project", "add", "cli"]).await?;
+    cx.reef(&repo, &["plan", "new", "docs"]).await?;
+    // `user ls` names who added bob, and `user log` who did each act, newest first
+    let users = cx.reef(&repo, &["user", "ls"]).await?;
+    assert_eq!(users, "ada  admin\nbob  added by ada\n");
+    let log = cx.reef(&repo, &["user", "log"]).await?;
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].ends_with(" +0000  ada: added bob"), "{log}");
+    assert!(lines[1].ends_with(" +0000: added ada, an admin"), "{log}");
+    // `project ls` and `plan ls` name who registered and listed them, the fixture's nobody
+    let projects = cx.reef(&repo, &["project", "ls"]).await?;
+    let lines: Vec<&str> = projects.lines().collect();
+    assert!(
+        lines[0].starts_with("cli ") && lines[0].ends_with(", registered by ada"),
+        "{projects}"
+    );
+    assert!(
+        lines[1].starts_with("reef ") && !lines[1].contains("registered by"),
+        "{projects}"
+    );
+    let plans = cx.reef(&repo, &["plan", "ls"]).await?;
+    assert!(plans.ends_with(", listed by ada\n"), "{plans}");
+    // ada starts a loop in a pane and pauses it; `loop ls` and `loop log` say who
+    cx.reef(&repo, &["loop", "start", "--pane", "claude:4242"])
+        .await?;
+    cx.reef(&repo, &["loop", "pause", "--pane", "claude:4242"])
+        .await?;
+    let listed = cx.reef(&repo, &["loop", "ls"]).await?;
+    assert!(listed.trim_end().ends_with(", started by ada"), "{listed}");
+    let log = cx.reef(&repo, &["loop", "log"]).await?;
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(
+        lines[0].ends_with("  ada: paused the loop in Claude Code process 4242"),
+        "{log}"
+    );
+    assert!(
+        lines[1].ends_with("  ada: started a loop in Claude Code process 4242, feeding every plan"),
+        "{log}"
+    );
+    Ok(())
+}
+
 /// A project registered from its repo and a plan listed in it show in `reef plan ls`
 #[tokio::test]
 async fn project_add_and_plan_new_show_in_plan_ls() -> anyhow::Result<()> {

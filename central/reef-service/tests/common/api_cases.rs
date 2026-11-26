@@ -74,13 +74,25 @@ pub async fn client_puts_a_node_and_lists_plans<B: Backend + 'static>(
     let repo = git::repo(&ax.dir.join("api"))?;
     let new = NewProject::dir("api", repo.clone());
     let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
-    let project = Project {
-        name: "api".to_string(),
-        repo: repo.clone(),
-        remote: None,
-    };
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(added, AddedProject::Added(project.clone()));
+    // its registration names nobody, since no token was sent, and its listing says the same
+    let AddedProject::Added(project) = added else {
+        panic!("a project for a fresh repo was refused: {added:?}");
+    };
+    let registered = project
+        .registered
+        .clone()
+        .expect("its registration is kept");
+    assert!(registered.author.is_unknown());
+    assert_eq!(
+        project,
+        Project {
+            registered: Some(registered),
+            name: "api".to_string(),
+            repo: repo.clone(),
+            remote: None,
+        }
+    );
     // the name again, for another repo, is a conflict
     let other = NewProject::dir("api", git::repo(&ax.dir.join("other"))?);
     let (status, taken): (_, AddedProject) = ax.client.post(paths::PROJECTS, &other).await?;

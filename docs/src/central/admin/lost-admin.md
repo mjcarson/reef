@@ -10,7 +10,8 @@ sudo systemctl start reef
 ```
 
 - **What it does:** it sets ada's password, makes ada an admin and revokes ada's tokens. If no
-  user has the name, it adds ada as an admin.
+  user has the name, it adds ada as an admin. The users' log keeps it, naming nobody, since
+  nobody signed in did it.
 - **`--password-file PATH`** reads the password from a file instead.
 - **It runs as `reef`,** the account that owns the data.
 - **A running service refuses it,** saying the store is locked.

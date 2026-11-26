@@ -23,9 +23,14 @@
 //!   between the read and the write is caught.
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as a loop.
+//! - **Each act names who made it** (C89). A loop keeps who started it and who changed it last,
+//!   and every act that changed something keeps an entry in its project's loops' history, under
+//!   the loops' lock: a start, a resume, a pause, a stop, a hand-off to another session, a take,
+//!   a letting go and a join. A node's end acted on keeps none, since the next take says it, and
+//!   nor does a hand-off to the session the loop had already, which every resume and clear sends.
 
 use reef_api::loops::{holder, member_of};
-use reef_api::{Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
+use reef_api::{Author, Loop, LoopAct, LoopEdit, LoopEdited, LoopState, Member, Pane};
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -67,6 +72,12 @@ struct Kept {
     /// The group's nodes past its own, and the panes that joined them
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     members: Vec<Member>,
+    /// Who started it, nobody known for a loop started before reef kept it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    started_by: Author,
+    /// Who made its latest change, a node's end it acted on aside
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    changed_by: Author,
 }
 
 /// A loop's width in a row written before groups: one node at a time
@@ -135,15 +146,50 @@ impl<B: Backend> Store<B> {
     ///
     /// * `pane` - The pane whose loop it changes
     /// * `edit` - The change
+    /// * `author` - Who makes it
     #[instrument(name = "Store::edit_loop", skip_all, err(Debug))]
-    pub async fn edit_loop(&self, pane: &Pane, edit: LoopEdit) -> anyhow::Result<LoopEdited> {
+    pub async fn edit_loop(
+        &self,
+        pane: &Pane,
+        edit: LoopEdit,
+        author: &Author,
+    ) -> anyhow::Result<LoopEdited> {
         // one change to the loops at a time, so no two take one node between a read and a write
         let _held = self.loop_lock.lock().await;
         let loops = self.loops().await?;
         let current = loops.iter().find(|read| read.pane == *pane).cloned();
+        // what was asked, to say in the history once it lands
+        let asked = edit.clone();
+        let edited = self
+            .edit_held(pane, current.clone(), &loops, edit, author)
+            .await?;
+        // kept in the history of the project whose loop it is, under the same lock
+        if let Some((project, act)) = loop_act(&asked, current.as_ref(), &loops, &edited) {
+            self.keep_loop_act(&project, author, pane, act).await;
+        }
+        Ok(edited)
+    }
+
+    /// Changes a pane's loop, the loops' lock held and every loop read
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The pane whose loop it changes
+    /// * `current` - The pane's own loop, if it has one
+    /// * `loops` - Every loop as read
+    /// * `edit` - The change
+    /// * `author` - Who makes it
+    async fn edit_held(
+        &self,
+        pane: &Pane,
+        current: Option<Loop>,
+        loops: &[Loop],
+        edit: LoopEdit,
+        author: &Author,
+    ) -> anyhow::Result<LoopEdited> {
         // a join is taken by a pane with no loop of its own, to another loop's member
         if let LoopEdit::Join { node } = edit {
-            return self.join(pane, current, &loops, node).await;
+            return self.join(pane, current, loops, node, author).await;
         }
         // a start is the one change a pane without a loop can take
         let LoopEdit::Start {
@@ -158,11 +204,11 @@ impl<B: Backend> Store<B> {
             let Some(current) = current else {
                 return Ok(LoopEdited::NoLoop { pane: pane.clone() });
             };
-            return self.change(current, &loops, edit).await;
+            return self.change(current, loops, edit, author).await;
         };
         // a pane working another loop's member starts no loop of its own
         if current.is_none()
-            && let Some((by, _)) = member_of(&loops, pane)
+            && let Some((by, _)) = member_of(loops, pane)
         {
             return Ok(LoopEdited::Busy { r#loop: by.clone() });
         }
@@ -183,6 +229,8 @@ impl<B: Backend> Store<B> {
                     opens: opens.unwrap_or(true),
                     pid,
                     members: Vec::new(),
+                    started_by: author.clone(),
+                    changed_by: author.clone(),
                 };
                 self.keep_loop(&started, Expect::Absent).await?;
                 Ok(LoopEdited::Started { r#loop: started })
@@ -198,6 +246,7 @@ impl<B: Backend> Store<B> {
                     width: width.map_or(current.width, |width| width.max(1)),
                     opens: opens.unwrap_or(current.opens),
                     pid: pid.or(current.pid),
+                    changed_by: author.clone(),
                     ..current
                 };
                 self.keep_loop(&resumed, Expect::Version(read)).await?;
@@ -216,12 +265,14 @@ impl<B: Backend> Store<B> {
     /// * `current` - The pane's own loop, if it has one
     /// * `loops` - Every loop as read
     /// * `node` - The member's node
+    /// * `author` - Who joins it
     async fn join(
         &self,
         pane: &Pane,
         current: Option<Loop>,
         loops: &[Loop],
         node: reef_model::NodeName,
+        author: &Author,
     ) -> anyhow::Result<LoopEdited> {
         // a pane running a loop of its own works that loop's node, not another's member
         if let Some(current) = current {
@@ -252,6 +303,7 @@ impl<B: Backend> Store<B> {
             let left = Loop {
                 members: unjoined(&before.members, pane),
                 version: before.version + 1,
+                changed_by: author.clone(),
                 ..before.clone()
             };
             self.keep_loop(&left, Expect::Version(before.version))
@@ -267,6 +319,7 @@ impl<B: Backend> Store<B> {
         let joined = Loop {
             members,
             version: by.version + 1,
+            changed_by: author.clone(),
             ..by.clone()
         };
         self.keep_loop(&joined, Expect::Version(by.version)).await?;
@@ -280,13 +333,20 @@ impl<B: Backend> Store<B> {
     /// * `current` - The pane's loop as read
     /// * `loops` - Every loop as read, the pane's included
     /// * `edit` - The change, which is not a start
+    /// * `author` - Who makes it
     async fn change(
         &self,
         current: Loop,
         loops: &[Loop],
         edit: LoopEdit,
+        author: &Author,
     ) -> anyhow::Result<LoopEdited> {
         let read = current.version;
+        // a node's end acted on is the loop's own doing, so it leaves who changed it last
+        let changed_by = match edit {
+            LoopEdit::Acted { .. } => current.changed_by.clone(),
+            _ => author.clone(),
+        };
         let changed = match edit {
             // a start is taken by the caller
             LoopEdit::Start { .. } => anyhow::bail!("a start was handed to a loop's change"),
@@ -387,9 +447,10 @@ impl<B: Backend> Store<B> {
                 ..current
             },
         };
-        // written over the version read
+        // written over the version read, saying who changed it
         let changed = Loop {
             version: read + 1,
+            changed_by,
             ..changed
         };
         self.keep_loop(&changed, Expect::Version(read)).await?;
@@ -435,6 +496,8 @@ fn loop_row(kept: &Loop) -> anyhow::Result<LoopRow> {
         opens: kept.opens,
         pid: kept.pid,
         members: kept.members.clone(),
+        started_by: kept.started_by.clone(),
+        changed_by: kept.changed_by.clone(),
     };
     Ok(LoopRow {
         list: LOOPS.to_string(),
@@ -478,7 +541,92 @@ fn read_loop(row: LoopRow) -> anyhow::Result<Loop> {
         opens: kept.opens,
         pid: kept.pid,
         members: kept.members,
+        started_by: kept.started_by,
+        changed_by: kept.changed_by,
     })
+}
+
+/// What an edit of a pane's loop did, as its project's loops' history keeps it, and the
+/// project it was done in, or `None` for one that changed nothing worth keeping
+///
+/// A node's end acted on keeps none, since the next take says it, and nor does a hand-off to
+/// the session the loop had already, which every resume and clear sends, nor a join from the
+/// pane that joined already. Every outcome that wrote nothing keeps none.
+///
+/// # Arguments
+///
+/// * `asked` - The edit asked for
+/// * `current` - The pane's own loop as it was read, if it had one
+/// * `loops` - Every loop as it was read
+/// * `edited` - What came of it
+fn loop_act(
+    asked: &LoopEdit,
+    current: Option<&Loop>,
+    loops: &[Loop],
+    edited: &LoopEdited,
+) -> Option<(String, LoopAct)> {
+    // the nodes a loop held, its own first
+    let held = |held: &Loop| -> Vec<NodeName> { held.group().cloned().collect() };
+    let act = match (asked, edited) {
+        // a new loop, and a paused one set running again
+        (_, LoopEdited::Started { r#loop }) => LoopAct::Started {
+            plan: r#loop.plan.clone(),
+            width: r#loop.width,
+        },
+        (_, LoopEdited::Resumed { .. }) => LoopAct::Resumed,
+        // a stop, saying what it let go of, since its row is gone
+        (_, LoopEdited::Stopped { r#loop }) => LoopAct::Stopped { held: held(r#loop) },
+        // a join from a pane not joined already
+        (LoopEdit::Join { node }, LoopEdited::Joined { r#loop }) => {
+            let read = loops.iter().find(|read| read.pane == r#loop.pane)?;
+            if read.version == r#loop.version {
+                return None;
+            }
+            LoopAct::Joined {
+                node: node.clone(),
+                of: r#loop.pane.clone(),
+            }
+        }
+        // and each change a pane's own loop took
+        (LoopEdit::Pause, LoopEdited::Edited { .. }) => LoopAct::Paused,
+        (LoopEdit::Session { session, .. }, LoopEdited::Edited { .. }) => {
+            if current?.session.as_ref() == Some(session) {
+                return None;
+            }
+            LoopAct::HandedOff {
+                session: session.clone(),
+            }
+        }
+        (
+            LoopEdit::Hold {
+                node: Some(node),
+                members,
+            },
+            LoopEdited::Edited { .. },
+        ) => LoopAct::Took {
+            node: node.clone(),
+            members: members.clone(),
+        },
+        (LoopEdit::Hold { node: None, .. }, LoopEdited::Edited { .. }) => {
+            let held = held(current?);
+            if held.is_empty() {
+                return None;
+            }
+            LoopAct::LetGo { held }
+        }
+        // a node's end acted on, and every outcome that wrote nothing
+        _ => return None,
+    };
+    // the project of the loop it was done to: a join's is the loop it joined
+    let project = match edited {
+        LoopEdited::Started { r#loop }
+        | LoopEdited::Resumed { r#loop }
+        | LoopEdited::Stopped { r#loop }
+        | LoopEdited::Joined { r#loop }
+        | LoopEdited::Edited { r#loop } => r#loop.project.clone(),
+        _ => return None,
+    };
+    Some((project, act))
 }
 
 /// A group's members with a pane's join taken off whichever it was on
@@ -511,6 +659,8 @@ mod tests {
     fn loops_read_back_from_their_rows() -> anyhow::Result<()> {
         // a paused loop in a tmux pane, holding a node and having acted on another
         let kept = Loop {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             pane: Pane::Tmux {
                 server: "/tmp/tmux-1000/default".to_string(),
                 pane: "%3".to_string(),
@@ -564,6 +714,8 @@ mod tests {
     fn stray_loop_rows_are_errors() -> anyhow::Result<()> {
         // a row whose partition key hashed as the loops' does
         let record = serde_json::to_string(&Kept {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             project: "reef".to_string(),
             plan: None,
             session: None,

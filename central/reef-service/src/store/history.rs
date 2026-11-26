@@ -25,8 +25,8 @@
 //!   left a node as it was keeps none, and nor does a whole-plan write for the nodes it left so.
 
 use reef_api::{
-    Author, Edited, HistoryPage, HistoryQuery, Logged, NodePut, NodeRemove, NodeWrite, PageEdit,
-    PageWrite,
+    Author, Edited, HistoryPage, HistoryQuery, Logged, LoopAct, NodePut, NodeRemove, NodeWrite,
+    PageEdit, PageWrite, Pane, Registered, UserAct,
 };
 use reef_model::accept::Criterion;
 use reef_model::{Description, NodeName, NodeSpec, PlanName};
@@ -35,7 +35,9 @@ use tracing::instrument;
 
 use super::{Store, bundles, work::now_ms};
 use crate::backend::Backend;
-use crate::schema::{EditRow, QUEUE_SUBJECT};
+use crate::schema::{
+    EditRow, LOOPS_SUBJECT, PROJECT_SUBJECT, QUEUE_SUBJECT, SERVER_PROJECT, USERS_SUBJECT,
+};
 
 /// The keys of a node's spec in the order a spec writes them, which an entry names its edited
 /// keys in; a key a newer spec adds comes after them
@@ -84,6 +86,15 @@ pub fn node_subject(node: &NodeName) -> String {
 /// * `path` - The page's path
 pub fn page_subject(plan: &PlanName, path: &str) -> String {
     format!("page/{}/{path}", plan.plan)
+}
+
+/// The subject a plan's listing is kept under
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn plan_subject(plan: &PlanName) -> String {
+    format!("plan/{}", plan.plan)
 }
 
 /// An edit row's sort key: `u64::MAX` less its stamp, padded so the partition sorts by it,
@@ -459,7 +470,7 @@ impl<B: Backend> Store<B> {
     /// Keeps a write's entries in their subjects' histories, once the write has landed
     ///
     /// A history that fails to keep is warned of and leaves the write standing, so this never
-    /// fails the write it records.
+    /// fails the write it records. It answers the stamp the entries were kept at, if any were.
     ///
     /// # Arguments
     ///
@@ -474,10 +485,10 @@ impl<B: Backend> Store<B> {
         author: &Author,
         whole_plan: bool,
         pending: Vec<Pending>,
-    ) {
+    ) -> Option<u64> {
         // a write that changed nothing keeps nothing
         if pending.is_empty() {
-            return;
+            return None;
         }
         // one stamp for the whole write, each subject in a partition of its own
         let at = self.stamp();
@@ -516,9 +527,89 @@ impl<B: Backend> Store<B> {
                     error = %format!("{error:#}"),
                     "keeping a write's history failed, so it stands with a gap in its history"
                 );
-                return;
+                return None;
             }
         }
+        Some(at)
+    }
+
+    /// Keeps an act on a project's loops or sessions in its loops' history, once it has landed
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project whose loop or session it was
+    /// * `author` - Who did it
+    /// * `pane` - The pane whose loop or session it was
+    /// * `act` - What was done
+    #[instrument(name = "Store::keep_loop_act", skip_all)]
+    pub(crate) async fn keep_loop_act(
+        &self,
+        project: &str,
+        author: &Author,
+        pane: &Pane,
+        act: LoopAct,
+    ) {
+        // one entry in the project's loops' subject, with no version to leave
+        let pending = Pending {
+            subject: LOOPS_SUBJECT.to_string(),
+            version: None,
+            edits: vec![Edited::Loop {
+                pane: pane.clone(),
+                act,
+            }],
+        };
+        self.keep_edits(project, author, false, vec![pending]).await;
+    }
+
+    /// Keeps an act on one of reef's users in the users' log, once it has landed
+    ///
+    /// # Arguments
+    ///
+    /// * `author` - Who did it, nobody known for a recovery on the service's host
+    /// * `name` - The user's name
+    /// * `act` - What was done
+    #[instrument(name = "Store::keep_user_act", skip_all)]
+    pub(crate) async fn keep_user_act(&self, author: &Author, name: &str, act: UserAct) {
+        // one entry in the users' subject, under the partition no project has
+        let pending = Pending {
+            subject: USERS_SUBJECT.to_string(),
+            version: None,
+            edits: vec![Edited::User {
+                name: name.to_string(),
+                act,
+            }],
+        };
+        self.keep_edits(SERVER_PROJECT, author, false, vec![pending])
+            .await;
+    }
+
+    /// Keeps a project's registration, or a plan's listing, in its history, answering when and
+    /// by whom it was kept
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project
+    /// * `subject` - The project's subject, or the plan's
+    /// * `author` - Who registered it
+    pub(super) async fn keep_registered(
+        &self,
+        project: &str,
+        subject: String,
+        author: &Author,
+    ) -> Option<Registered> {
+        let pending = Pending {
+            subject,
+            version: None,
+            edits: vec![Edited::Added],
+        };
+        // when it was kept, if it was
+        let at = self
+            .keep_edits(project, author, false, vec![pending])
+            .await?;
+        Some(Registered {
+            at,
+            author: author.clone(),
+        })
     }
 
     /// Reads a page of a subject's history, newest first: the newest, or the one older than a
@@ -623,6 +714,81 @@ impl<B: Backend> Store<B> {
         query: &HistoryQuery,
     ) -> anyhow::Result<HistoryPage> {
         self.history(project, QUEUE_SUBJECT, query).await
+    }
+
+    /// Reads a page of a project's loops' and sessions' history, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `query` - Which page to read
+    #[instrument(name = "Store::loop_history", skip_all, err(Debug))]
+    pub async fn loop_history(
+        &self,
+        project: &str,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        self.history(project, LOOPS_SUBJECT, query).await
+    }
+
+    /// Reads a page of the log of acts on reef's users, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - Which page to read
+    #[instrument(name = "Store::user_history", skip_all, err(Debug))]
+    pub async fn user_history(&self, query: &HistoryQuery) -> anyhow::Result<HistoryPage> {
+        self.history(SERVER_PROJECT, USERS_SUBJECT, query).await
+    }
+
+    /// When a subject was registered, and by whom: its newest `added` entry on its newest page
+    ///
+    /// A history that can't be read is warned of, and reads as none, so a listing never fails
+    /// for it.
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project
+    /// * `subject` - The project's subject, or a plan's
+    async fn registration(&self, project: &str, subject: &str) -> Option<Registered> {
+        let page = match self
+            .history(project, subject, &HistoryQuery::default())
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(project, subject, error = %format!("{error:#}"), "a registration's history wasn't read");
+                return None;
+            }
+        };
+        // the newest that registered it, since it may have been registered again
+        page.edits
+            .into_iter()
+            .find(|logged| logged.edits.contains(&Edited::Added))
+            .map(|logged| Registered {
+                at: logged.at,
+                author: logged.author,
+            })
+    }
+
+    /// When a project was registered, and by whom, if its history says
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Store::registered", skip_all)]
+    pub async fn registered(&self, project: &str) -> Option<Registered> {
+        self.registration(project, PROJECT_SUBJECT).await
+    }
+
+    /// When a plan was listed, and by whom, if its history says
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Store::plan_registered", skip_all)]
+    pub async fn plan_registered(&self, plan: &PlanName) -> Option<Registered> {
+        self.registration(&plan.project, &plan_subject(plan)).await
     }
 }
 

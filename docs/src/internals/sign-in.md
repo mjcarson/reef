@@ -20,7 +20,13 @@ in](../central/using/sign-in.md) and [Users](../central/admin/users.md#users).
 - **A browser signs in at `/sign-in`,** which sets an HttpOnly, SameSite=Strict cookie for 30
   days, `Secure` when it signs in over TLS. The app's bar names whom it is signed in as, beside a
   Sign out, and the name opens `/account`: your password, your tokens, each revoked from there,
-  and, for an admin, every user, whose password they set or whom they remove.
+  and, for an admin, every user, who added each, whose password they set or whom they remove,
+  and the log of acts on users.
+- **Every act on a user is logged** (C89) in the edits' table, under the empty project no
+  project's name can be: adding, removing, a password set and a token revoked, each naming who
+  did it through `Asker::author`, and a recovery naming nobody. `GET /api/v1/user-history` reads
+  it, guarded as `GET /api/v1/users` is. A user keeps who added them, which a password set later
+  leaves as it was.
 - **Repeated wrong passwords are slowed** (`service/throttle.rs`), in memory, by name and by
   address, each try counted as it is let through and a success taking it back. The limits are in
   [Failed sign-ins](../central/admin/users.md#failed-sign-ins).

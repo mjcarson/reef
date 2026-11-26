@@ -53,6 +53,11 @@ is the twin's oracle.
   last row's key as the cursor onto the next page, which reads past that key in the partition;
   keys are unique, so no page skips or repeats an edit. A start keeps an entry in its node's
   history too, under the project's work lock, since its work record keeps only the latest.
+  So do acts with no history of their own (C89): a project's registration (`project`) and a
+  plan's listing (`plan/<plan>`), joined into the listings a person reads, never the service's
+  own reads; each loop act that changed something (`loops`), under the loops' lock, a stop's
+  entry naming what it let go of, since its row is gone; and each act on a user (`users`, under
+  the empty project).
   A write's entries are kept once it has landed, under its lock, with one stamp from the store's
   clock, always past the last it took; its key ends with a number the store drew when it opened,
   so a store opened again never takes a key the last one wrote. A history that fails to keep is

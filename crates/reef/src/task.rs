@@ -128,6 +128,8 @@ pub enum Choice {
 ///     opens: true,
 ///     pid: None,
 ///     members: Vec::new(),
+///     started_by: reef_api::Author::default(),
+///     changed_by: reef_api::Author::default(),
 /// };
 /// let again = choose(&feeding, Some(Status::InProgress), &[], &[], &Next::default(), &[]);
 /// assert_eq!(again, Choice::Again("reef/central/C40".parse().unwrap()));
@@ -383,6 +385,8 @@ pub enum GroupEnd {
 ///     opens: true,
 ///     pid: None,
 ///     members: Vec::new(),
+///     started_by: reef_api::Author::default(),
+///     changed_by: reef_api::Author::default(),
 /// };
 /// let own = feeding.node.clone().unwrap();
 /// assert_eq!(group_end(&feeding, &own, |_| Some(Status::Done)), GroupEnd::Done(own.clone()));
@@ -1944,6 +1948,8 @@ mod tests {
     /// * `node` - The id of the node it holds
     fn looped(pid: u32, node: Option<&str>) -> Loop {
         Loop {
+            changed_by: reef_api::Author::default(),
+            started_by: reef_api::Author::default(),
             pane: Pane::Claude { pid },
             project: "reef".to_string(),
             plan: Some("central".to_string()),

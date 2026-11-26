@@ -97,7 +97,7 @@ use crate::memory::MemoryBackend;
 use crate::rank;
 use crate::remote;
 use crate::repo::{self, Located};
-use crate::schema::{NodeRow, PROJECTS, PageRow, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{NodeRow, PROJECT_SUBJECT, PROJECTS, PageRow, PlanRow, ProjectRow, QueueRow};
 
 /// How many rows a bulk write sends in one bundle, at most
 const BUNDLE_ROWS: usize = 256;
@@ -350,8 +350,14 @@ impl<B: Backend> Store<B> {
     ///
     /// * `name` - The project's name
     /// * `repo` - A directory in the repo its plans describe
+    /// * `author` - Who registers it, which its history keeps once it is
     #[instrument(name = "Store::add_project", skip_all, err(Debug))]
-    pub async fn add_project(&self, name: &str, repo: &Path) -> anyhow::Result<AddedProject> {
+    pub async fn add_project(
+        &self,
+        name: &str,
+        repo: &Path,
+        author: &Author,
+    ) -> anyhow::Result<AddedProject> {
         // a project's name keeps the rule every plan's full name holds it to
         PlanName::new(name, "plan")?;
         // find the repo's root, which asks git, off the async threads
@@ -377,11 +383,18 @@ impl<B: Backend> Store<B> {
             repo: repo_text,
         };
         Ok(match self.backend.insert_project(row).await? {
-            Written::Applied => AddedProject::Added(Project {
-                name: name.to_string(),
-                repo,
-                remote: None,
-            }),
+            Written::Applied => {
+                // who registered it, kept in its history now that it is
+                let registered = self
+                    .keep_registered(name, PROJECT_SUBJECT.to_string(), author)
+                    .await;
+                AddedProject::Added(Project {
+                    name: name.to_string(),
+                    repo,
+                    remote: None,
+                    registered,
+                })
+            }
             Written::Refused(_) => AddedProject::NameTaken,
         })
     }
@@ -415,6 +428,7 @@ impl<B: Backend> Store<B> {
                     name: row.name,
                     repo,
                     remote,
+                    registered: None,
                 })
             })
             .collect()
@@ -454,6 +468,7 @@ impl<B: Backend> Store<B> {
                 Ok(PlanInfo {
                     name: PlanName::new(row.project, row.name)?,
                     revision: row.current,
+                    registered: None,
                 })
             })
             .collect()
@@ -526,8 +541,9 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
+    /// * `author` - Who lists it, which its history keeps once it is
     #[instrument(name = "Store::add_plan", skip_all, err(Debug))]
-    pub async fn add_plan(&self, plan: &PlanName) -> anyhow::Result<bool> {
+    pub async fn add_plan(&self, plan: &PlanName, author: &Author) -> anyhow::Result<bool> {
         // a plan belongs to a project that is registered
         let projects = self.projects().await?;
         if !projects.iter().any(|project| project.name == plan.project) {
@@ -548,7 +564,13 @@ impl<B: Backend> Store<B> {
         };
         // written only if its project lists no plan of that name
         let _write = self.writing(plan).await;
-        Ok(self.backend.insert_plan(row).await? == Written::Applied)
+        let added = self.backend.insert_plan(row).await? == Written::Applied;
+        // who listed it, kept in its history under the same lock, if it was added
+        if added {
+            self.keep_registered(&plan.project, history::plan_subject(plan), author)
+                .await;
+        }
+        Ok(added)
     }
 
     /// Gets one node of a plan's current revision
@@ -2344,7 +2366,8 @@ mod tests {
         // a project for the repo this crate is in, located at its root
         let store = Store::memory();
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let AddedProject::Added(reef) = store.add_project("reef", here).await? else {
+        let AddedProject::Added(reef) = store.add_project("reef", here, &reef_api::NOBODY).await?
+        else {
             panic!("the first project for a repo was refused");
         };
         assert!(
@@ -2357,21 +2380,33 @@ mod tests {
         let taken = AddedProject::RepoTaken {
             project: "reef".to_string(),
         };
-        assert_eq!(store.add_project("again", &respelled).await?, taken);
+        assert_eq!(
+            store
+                .add_project("again", &respelled, &reef_api::NOBODY)
+                .await?,
+            taken
+        );
         // and so is the name, for another directory
         assert_eq!(
-            store.add_project("reef", Path::new("/")).await?,
+            store
+                .add_project("reef", Path::new("/"), &reef_api::NOBODY)
+                .await?,
             AddedProject::NameTaken
         );
         // a name that breaks the rule names keep is an error
         assert!(
             store
-                .add_project("no spaces", Path::new("/"))
+                .add_project("no spaces", Path::new("/"), &reef_api::NOBODY)
                 .await
                 .is_err()
         );
-        // and only the first is registered
-        assert_eq!(store.projects().await?, vec![reef]);
+        // and only the first is registered, whose registration its listing leaves to the service
+        assert!(reef.registered.is_some());
+        let unjoined = reef_api::Project {
+            registered: None,
+            ..reef
+        };
+        assert_eq!(store.projects().await?, vec![unjoined]);
         Ok(())
     }
 
@@ -2381,10 +2416,14 @@ mod tests {
         // a plan with one node of its own
         let store = Store::memory();
         store
-            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")))
+            .add_project(
+                "reef",
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                &reef_api::NOBODY,
+            )
             .await?;
         let plan = PlanName::new("reef", "central")?;
-        store.add_plan(&plan).await?;
+        store.add_plan(&plan, &reef_api::NOBODY).await?;
         store.put(&plan, NodeWrite::new("C7", 0), None).await?;
         // and a row of another project's, landing in its partition as a hash collision would
         let current = store.plan_row(&plan).await?.current;
@@ -2442,10 +2481,14 @@ mod tests {
         // a plan with one page of its own
         let store = Store::memory();
         store
-            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")))
+            .add_project(
+                "reef",
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                &reef_api::NOBODY,
+            )
             .await?;
         let plan = PlanName::new("reef", "central")?;
-        store.add_plan(&plan).await?;
+        store.add_plan(&plan, &reef_api::NOBODY).await?;
         let pages = store.plan_row(&plan).await?.pages_current;
         let own = PageRow {
             project: "reef".to_string(),

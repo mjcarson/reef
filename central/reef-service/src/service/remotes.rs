@@ -156,7 +156,11 @@ impl<B: Backend> Service<B> {
             commit,
             fetched_at: now_ms(),
         };
-        let added = match self.store.add_remote_project(name, kept).await {
+        let added = match self
+            .store
+            .add_remote_project(name, kept, &asker.author())
+            .await
+        {
             Ok(added) => added,
             Err(error) => {
                 remove(&clone).await;

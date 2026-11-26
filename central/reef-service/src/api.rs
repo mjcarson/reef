@@ -50,6 +50,7 @@
 //! | `GET /api/v1/loops` | `loops` | every [`Loop`], by pane |
 //! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written or joined, 409 if the pane's loop is busy or another loop or pane holds the node, 422 if the pane has no loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than the loop |
 //! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
+//! | `GET /api/v1/projects/{project}/loops/history?older=&limit=` | `loop_history` | a page of the acts on its loops and sessions, newest first: a [`HistoryPage`] |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //! | `POST /api/v1/tokens` | `sign_in` | [`IssuedToken`]: 201, 401 if no user has that name and password, or 429 if too many failed lately |
 //! | `GET /api/v1/tokens?user=` | `tokens` | every [`TokenInfo`] of the caller's, or of the user an admin names; 401 or 403 otherwise |
@@ -57,6 +58,7 @@
 //! | `DELETE /api/v1/tokens/{id}` | `revoke_token` | [`SignedOut`]: 200, or 404 unless it is the caller's, or an admin's to revoke |
 //! | `GET /api/v1/me` | `signed_in` | [`Me`]: the user the caller's token signs in, and whether sign-in is required |
 //! | `GET /api/v1/users` | `users` | every [`User`] to an admin, or none while there are none; 401 or 403 otherwise |
+//! | `GET /api/v1/user-history?older=&limit=` | `user_history` | a page of the acts on users, newest first, to an admin: a [`HistoryPage`]; 401 or 403 otherwise |
 //! | `POST /api/v1/users` | `add_user` | [`UserAdded`]: 201, 409 if the name is taken, 401 or 403 unless an admin, or the first from this host, asks |
 //! | `DELETE /api/v1/users/{name}` | `remove_user` | [`UserRemoved`]: 200, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
 //! | `PUT /api/v1/users/{name}/password` | `change_password` | [`PasswordChanged`]: 200, 403 if the current password doesn't match or another's is set by no admin, 404 if no user has the name, 429 if too many failed lately |
@@ -246,6 +248,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         )
         .route(paths::LOOPS, get(loops::<S>).post(edit_loop::<S>))
         .route(paths::PROJECT_LOOPS, get(project_loops::<S>))
+        .route(paths::LOOP_HISTORY, get(loop_history::<S>))
         .route(
             paths::SESSIONS,
             axum::routing::post(attach_session::<S>).layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
@@ -271,6 +274,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::TOKEN, axum::routing::delete(revoke_token::<S>))
         .route(paths::ME, get(me::<S>))
         .route(paths::USERS, get(users::<S>).post(add_user::<S>))
+        .route(paths::USER_HISTORY, get(user_history::<S>))
         .route(paths::USER, axum::routing::delete(remove_user::<S>))
         .route(
             paths::USER_PASSWORD,
@@ -1070,8 +1074,8 @@ async fn plans<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<ProjectSegments>,
 ) -> Result<Json<Vec<PlanInfo>>, Failure> {
-    // every plan the project lists, refused if it isn't registered
-    let plans = serves.service().plans(&segments.project).await?;
+    // every plan the project lists, with who listed it, refused if it isn't registered
+    let plans = serves.service().plan_listing(&segments.project).await?;
     Ok(Json(plans))
 }
 
@@ -1141,18 +1145,20 @@ async fn project_next<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom its history names as listing it
 /// * `segments` - The project's name
 /// * `new` - The plan's name within it
 #[instrument(name = "api::add_plan", skip_all, err(Debug))]
 async fn add_plan<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<ProjectSegments>,
     Body(new): Body<NewPlan>,
 ) -> Result<(StatusCode, Json<AddedPlan>), Failure> {
     // a plan's full name keeps the rule names share
     let plan = PlanName::new(segments.project, new.name)?;
     // list it, leaving one already listed as it is
-    let added = serves.service().add_plan(&plan).await?;
+    let added = serves.service().add_plan(&plan, &caller.author()).await?;
     let status = match added {
         true => StatusCode::CREATED,
         false => StatusCode::OK,
@@ -1958,6 +1964,29 @@ async fn project_loops<S: Serves>(
     Ok(Json(loops))
 }
 
+/// Reads a page of one project's loops' and sessions' history: who started, stopped or handed
+/// off each loop, what each took and let go of, and who attached each session and acted on it,
+/// newest first
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+/// * `query` - Which page of the history to read: the newest, or the one older than a cursor
+#[instrument(name = "api::loop_history", skip_all, err(Debug))]
+async fn loop_history<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+    Params(query): Params<HistoryQuery>,
+) -> Result<Json<HistoryPage>, Failure> {
+    // refused if the project isn't registered
+    let history = serves
+        .service()
+        .loop_history(&segments.project, &query)
+        .await?;
+    Ok(Json(history))
+}
+
 /// Changes a pane's loop: 200 if written or joined, 409 if the pane's loop is busy, another loop
 /// or pane holds the node or the loop acted on the node's end already, 422 if the pane has no
 /// loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than
@@ -1966,14 +1995,16 @@ async fn project_loops<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the loop and its history name as making the change
 /// * `edit` - The pane, and the change to its loop
 #[instrument(name = "api::edit_loop", skip_all, err(Debug))]
 async fn edit_loop<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Body(edit): Body<EditLoop>,
 ) -> Result<(StatusCode, Json<LoopEdited>), Failure> {
     // one row written, under the loops' lock
-    let edited = serves.service().edit_loop(edit).await?;
+    let edited = serves.service().edit_loop(edit, &caller.author()).await?;
     let status = match edited {
         LoopEdited::Started { .. }
         | LoopEdited::Resumed { .. }
@@ -2011,14 +2042,19 @@ fn commented_status(commented: &Commented) -> StatusCode {
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the session names as attaching it
 /// * `attach` - The runner's pane, project, host and checkout, and what it holds already
 #[instrument(name = "api::attach_session", skip_all, err(Debug))]
 async fn attach_session<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Body(attach): Body<Attach>,
 ) -> Result<Json<Session>, Failure> {
     // refused for a pane that isn't a runner's, or a project or plan that isn't there
-    let session = serves.service().attach_session(attach).await?;
+    let session = serves
+        .service()
+        .attach_session(attach, &caller.author())
+        .await?;
     Ok(Json(session))
 }
 
@@ -2069,14 +2105,19 @@ async fn report_session<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the session's history names as letting go of it
 /// * `segments` - The session's id
 #[instrument(name = "api::detach_session", skip_all, err(Debug))]
 async fn detach_session<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<SessionSegments>,
 ) -> Result<Json<Session>, Failure> {
     // kept to read, given no more orders
-    let session = serves.service().detach_session(&segments.session).await?;
+    let session = serves
+        .service()
+        .detach_session(&segments.session, &caller.author())
+        .await?;
     Ok(Json(session))
 }
 
@@ -2109,18 +2150,20 @@ async fn session_orders<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom an order and the session's history name as asking
 /// * `segments` - The session's id
 /// * `act` - What is asked of it
 #[instrument(name = "api::act_on_session", skip_all, err(Debug))]
 async fn act_on_session<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<SessionSegments>,
     Body(act): Body<SessionAct>,
 ) -> Result<(StatusCode, Json<SessionActed>), Failure> {
     // a loop changed as its pane's would be, or an order queued for the runner
     let acted = serves
         .service()
-        .act_on_session(&segments.session, act)
+        .act_on_session(&segments.session, act, &caller.author())
         .await?;
     let status = match acted {
         SessionActed::Ordered { .. } | SessionActed::Looped { .. } => StatusCode::OK,
@@ -2297,6 +2340,25 @@ async fn users<S: Serves>(
     Ok(Json(serves.service().users(asker).await?))
 }
 
+/// Reads a page of the log of acts on reef's users, newest first: 401 or 403 unless an admin
+/// asks
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, from where
+/// * `query` - Which page of the log to read: the newest, or the one older than a cursor
+#[instrument(name = "api::user_history", skip_all, err(Debug))]
+async fn user_history<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Params(query): Params<HistoryQuery>,
+) -> Result<Json<HistoryPage>, Failure> {
+    // judged by who is calling, as listing the users is
+    let asker = caller.asker();
+    Ok(Json(serves.service().user_history(asker, &query).await?))
+}
+
 /// Adds a user: 201, 409 if the name is taken, and 401 or 403 unless an admin asks, or the
 /// first user is added from the service's own host
 ///
@@ -2467,6 +2529,7 @@ mod tests {
         };
         let project = Change::ProjectAdded {
             project: Project {
+                registered: None,
                 name: "reef".to_string(),
                 repo: "/src/reef".into(),
                 remote: None,

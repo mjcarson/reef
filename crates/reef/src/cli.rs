@@ -376,8 +376,15 @@ pub enum UserCommand {
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
     },
-    /// List every user, which only an admin may
+    /// List every user, which only an admin may, each with who added them
     Ls,
+    /// Print the log of acts on users, which only an admin may: who added or removed each, set
+    /// a password or revoked a token, newest first, 200 acts at a time
+    Log {
+        /// How far back to print
+        #[command(flatten)]
+        paging: Paging,
+    },
     /// Change a password: your own with your current one, or another user's as an admin, which
     /// revokes their tokens
     ///
@@ -591,12 +598,23 @@ pub enum LoopCommand {
         #[arg(long, value_name = "KEY")]
         pane: Option<String>,
     },
-    /// List the loops feeding the project: each pane, whether it runs, its plan, its node and
-    /// its session
+    /// List the loops feeding the project: each pane, whether it runs, its plan, its node, its
+    /// session, and who started it
     Ls {
         /// The project whose loops to list, if not the working directory's
         #[command(flatten)]
         pick: Pick,
+    },
+    /// Print the project's loops' and sessions' history: who started, paused, stopped or handed
+    /// off each loop, what each took and let go of, and who attached each session, newest first,
+    /// 200 acts at a time
+    Log {
+        /// The project whose loops' history to print, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+        /// How far back to print
+        #[command(flatten)]
+        paging: Paging,
     },
     /// Take this pane's loop's next node and start it here, as the MCP tool next_task does: the
     /// same node again until it is done, else the queue's first ready one no other loop holds
@@ -1197,6 +1215,11 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
                     let here = reef_api::Pane::from_env(var);
                     loops::ls(&client, cwd, here.as_ref(), &pick, out).await
                 }
+                LoopCommand::Log { pick, paging } => {
+                    let project = picked(&client, cwd, &pick).await?;
+                    let older = paging.older.as_deref();
+                    history::loops(&client, &project.name, older, paging.all, out).await
+                }
                 LoopCommand::Take { pane, pick } => {
                     let here = loops::Here::find(pane.as_deref(), var)?;
                     task::next_task(&client, cwd, Some(&here.pane), &pick, open::open, out).await
@@ -1384,6 +1407,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             login::user_add(&client, &name, admin, file.as_deref(), out).await
         }
         Command::User(UserCommand::Ls) => login::user_ls(&client, out).await,
+        Command::User(UserCommand::Log { paging }) => {
+            history::users(&client, paging.older.as_deref(), paging.all, out).await
+        }
         Command::User(UserCommand::Passwd {
             name,
             password_file,
@@ -1561,6 +1587,24 @@ fn shown_repo(project: &Project) -> String {
     }
 }
 
+/// A project as `ls` and `show` print it: its repo, then who registered it, if anyone known did
+///
+/// # Arguments
+///
+/// * `project` - The project
+fn project_line(project: &Project) -> String {
+    let mut line = shown_repo(project);
+    if let Some(registered) = project
+        .registered
+        .as_ref()
+        .and_then(|registered| history::by_whom("registered", &registered.author))
+    {
+        line.push_str(", ");
+        line.push_str(&registered);
+    }
+    line
+}
+
 /// Lists every registered project and its repo
 ///
 /// # Arguments
@@ -1568,11 +1612,11 @@ fn shown_repo(project: &Project) -> String {
 /// * `client` - The service's client
 /// * `out` - Where to print them
 async fn project_ls<W: Write>(client: &Client, out: &mut W) -> anyhow::Result<()> {
-    // every project, by name, its repo beside it
+    // every project, by name, its repo and who registered it beside it
     let projects = client.projects().await?;
     let rows = projects
         .iter()
-        .map(|project| (project.name.clone(), shown_repo(project)));
+        .map(|project| (project.name.clone(), project_line(project)));
     columns(out, rows)
 }
 
@@ -1590,10 +1634,10 @@ async fn project_show<W: Write>(
     pick: &Pick,
     out: &mut W,
 ) -> anyhow::Result<()> {
-    // the project and its repo
+    // the project, its repo and who registered it
     let project = picked(client, cwd, pick).await?;
-    let repo = shown_repo(&project);
-    columns(out, [(project.name, repo)].into_iter())
+    let line = project_line(&project);
+    columns(out, [(project.name, line)].into_iter())
 }
 
 /// Lists a new, empty plan in the picked project
@@ -1637,12 +1681,21 @@ async fn plan_ls<W: Write>(
     pick: &Pick,
     out: &mut W,
 ) -> anyhow::Result<()> {
-    // every plan of the project, by name, its revision beside it
+    // every plan of the project, by name, its revision and who listed it beside it
     let project = picked(client, cwd, pick).await?;
     let plans = client.plans(&project.name).await?;
-    let rows = plans
-        .iter()
-        .map(|info| (info.name.to_string(), format!("revision {}", info.revision)));
+    let rows = plans.iter().map(|info| {
+        let mut line = format!("revision {}", info.revision);
+        if let Some(listed) = info
+            .registered
+            .as_ref()
+            .and_then(|registered| history::by_whom("listed", &registered.author))
+        {
+            line.push_str(", ");
+            line.push_str(&listed);
+        }
+        (info.name.to_string(), line)
+    });
     columns(out, rows)
 }
 
@@ -1805,7 +1858,7 @@ pub(crate) fn columns<W: Write>(
 mod tests {
     use super::{
         ClaudeCommand, Cli, Command, CommentCommand, HookCommand, LoopCommand, NodeCommand,
-        PageCommand, PlanCommand, ProjectCommand, QueueCommand, columns,
+        PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, columns,
     };
     use clap::{CommandFactory, Parser};
     use reef_model::{Met, Status};
@@ -1983,6 +2036,29 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--project", "reef"]).is_ok());
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central"]).is_err());
+    }
+
+    /// `user log` and `loop log` page as the other logs do, and `--older` and `--all` don't go
+    /// together
+    #[test]
+    fn act_logs_parse() {
+        // every act on a user
+        let users = Cli::try_parse_from(["reef", "user", "log", "--all"]).unwrap();
+        match users.command {
+            Command::User(UserCommand::Log { paging }) => assert!(paging.all),
+            other => panic!("parsed as {other:?}"),
+        }
+        // a page of another project's loops' acts
+        let line = ["reef", "loop", "log", "--project", "up", "--older", "c1"];
+        match Cli::try_parse_from(line).unwrap().command {
+            Command::Loop(LoopCommand::Log { pick, paging }) => {
+                assert_eq!(pick.project.as_deref(), Some("up"));
+                assert_eq!(paging.older.as_deref(), Some("c1"));
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // and a cursor with every page is refused
+        assert!(Cli::try_parse_from(["reef", "user", "log", "--all", "--older", "c1"]).is_err());
     }
 
     /// `loop run` takes no Claude of its own unless one is named, `loop detach` takes nothing,

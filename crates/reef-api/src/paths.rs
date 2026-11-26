@@ -48,6 +48,8 @@
 //! | `DELETE` | [`CURRENT_TOKEN`] |
 //! | `GET` | [`ME`] |
 //! | `GET`, `POST` | [`USERS`] |
+//! | `GET ?older=&limit=` | [`USER_HISTORY`] |
+//! | `GET ?older=&limit=` | [`LOOP_HISTORY`] |
 //! | `GET ?next=`, `POST` | [`SIGN_IN`] |
 //! | `POST` | [`SIGN_OUT`] |
 
@@ -181,6 +183,11 @@ pub const LOOPS: &str = "/api/v1/loops";
 /// One project's loops
 pub const PROJECT_LOOPS: &str = "/api/v1/projects/{project}/loops";
 
+/// One project's loops' and sessions' history: who started, paused, stopped or handed off each
+/// loop, what each took and let go of, and who attached each session and acted on it, newest
+/// first, a page at a time ([`history_page`])
+pub const LOOP_HISTORY: &str = "/api/v1/projects/{project}/loops/history";
+
 /// Runners' sessions: a runner attaches by `POST`
 pub const SESSIONS: &str = "/api/v1/sessions";
 
@@ -217,6 +224,12 @@ pub const USERS: &str = "/api/v1/users";
 
 /// One user, removed by `DELETE`, by an admin
 pub const USER: &str = "/api/v1/users/{name}";
+
+/// The log of every act on reef's users, read by an admin: who added or removed each, set a
+/// password or revoked a token, newest first, a page at a time ([`history_page`])
+///
+/// It is not under [`USERS`], where a user named `history` would lose their own route.
+pub const USER_HISTORY: &str = "/api/v1/user-history";
 
 /// One user's password, changed by `PUT`: their own with their current one, or another's by an
 /// admin
@@ -697,6 +710,15 @@ pub fn project_loops(project: &str) -> String {
     format!("{PROJECTS}/{}/loops", encode(project))
 }
 
+/// The path of one project's loops' and sessions' history
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn loop_history(project: &str) -> String {
+    format!("{}/history", project_loops(project))
+}
+
 /// The path of one runner's session
 ///
 /// # Arguments
@@ -890,6 +912,7 @@ mod tests {
         );
         // and a project's loops
         assert_eq!(super::project_loops("reef"), fill(super::PROJECT_LOOPS));
+        assert_eq!(super::loop_history("reef"), fill(super::LOOP_HISTORY));
         // and a runner's session, its orders and a project's sessions
         assert_eq!(super::session("k3x9-4242"), fill(super::SESSION));
         assert_eq!(

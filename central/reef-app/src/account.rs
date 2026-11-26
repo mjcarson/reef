@@ -9,10 +9,11 @@
 //! No password field sits in a `form`, so nothing typed is sent before the page's script runs.
 
 use dioxus::prelude::*;
-use reef_api::{PasswordChange, TokenInfo, TokenKind, User, UserRemoved};
+use reef_api::{HistoryPage, PasswordChange, TokenInfo, TokenKind, User, UserRemoved};
 
 use crate::app::Route;
 use crate::calls;
+use crate::side::history::HistoryList;
 use crate::sign_in::{CallFailed, SignedInAs};
 
 /// A time the service stamped, in milliseconds since the epoch, as a date and minute in UTC
@@ -67,6 +68,7 @@ pub fn Account() -> Element {
                         Tokens { tokens: account.tokens.clone(), changed }
                         if user.admin {
                             Users { users: account.users.clone(), me: user.name.clone(), changed }
+                            AdminLog { log: account.log.clone() }
                         }
                     },
                     None if account.me.required => rsx! {
@@ -299,6 +301,7 @@ fn Users(users: Vec<User>, me: String, changed: EventHandler) -> Element {
                     tr {
                         th { "Name" }
                         th { "Added" }
+                        th { "Added by" }
                         th {}
                     }
                 }
@@ -315,6 +318,32 @@ fn Users(users: Vec<User>, me: String, changed: EventHandler) -> Element {
                 }
             }
             Said { said: said() }
+        }
+    }
+}
+
+/// The log of acts on users, to an admin: who added or removed each, set a password or revoked a
+/// token, newest first, the newest 200 of them
+///
+/// # Arguments
+///
+/// * `log` - The log's newest page
+#[component]
+fn AdminLog(log: HistoryPage) -> Element {
+    rsx! {
+        section { class: "reef-app-account-part reef-app-admin-log",
+            h2 { "Log" }
+            HistoryList {
+                entries: log.edits.clone(),
+                none: "No act on a user is kept yet. Each one from now on is, with who made it.".to_string(),
+            }
+            if log.older.is_some() {
+                p { class: "reef-app-muted",
+                    "Older acts are kept too: "
+                    code { "reef user log --all" }
+                    " prints them."
+                }
+            }
         }
     }
 }
@@ -403,6 +432,12 @@ fn UserRow(
                 if own { span { class: "reef-app-muted", " (you)" } }
             }
             td { "{utc_minute(user.created_at)}" }
+            td { class: "reef-app-added-by",
+                match user.added_by.describe() {
+                    Some(who) => rsx! { span { class: "reef-app-author", "{who}" } },
+                    None => rsx! { span { class: "reef-app-muted", "—" } },
+                }
+            }
             td {
                 div { class: "reef-app-account-acts",
                     if !own {

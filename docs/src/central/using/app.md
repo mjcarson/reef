@@ -26,6 +26,8 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
     shows with its loop's node and its transcript, to read: no buttons, since you answer it in
     its terminal. `! reef loop detach` there, or the session's end, shows it ended.
 
-  [With Claude Code](claude-code.md) says how to attach each.
+  Each row says who attached its session, who started its loop, and who changed the loop last,
+  where that was someone else. [With Claude Code](claude-code.md) says how to attach each.
 - **Your name in the bar** opens your account: your password and your tokens, and, for an
-  admin, every user.
+  admin, every user, who added each, and the log of acts on users.
+- **The projects' page** says who registered each project; a plan's link, who listed it.

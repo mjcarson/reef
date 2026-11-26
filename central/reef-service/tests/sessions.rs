@@ -495,7 +495,10 @@ impl Sx {
     /// * `session` - The session
     /// * `act` - What is asked
     async fn act(&self, session: &Session, act: SessionAct) -> anyhow::Result<SessionActed> {
-        self.ax.service.act_on_session(&session.id, act).await
+        self.ax
+            .service
+            .act_on_session(&session.id, act, &reef_api::NOBODY)
+            .await
     }
 }
 
@@ -1314,13 +1317,15 @@ async fn a_second_session_on_a_pane_detaches_the_first() -> anyhow::Result<()> {
     };
     let pane: reef_api::Pane = "tmux:/tmp/tmux-1000/default:%3".parse()?;
     let runner: reef_api::Pane = "reef:k3x9-7".parse()?;
-    service.attach_session(attach(None, runner.clone())).await?;
+    service
+        .attach_session(attach(None, runner.clone()), &reef_api::NOBODY)
+        .await?;
     let first = service
-        .attach_session(attach(Some("t1-1"), pane.clone()))
+        .attach_session(attach(Some("t1-1"), pane.clone()), &reef_api::NOBODY)
         .await?;
     assert_eq!(first.claude.as_deref(), Some("s1"));
     let second = service
-        .attach_session(attach(Some("t2-2"), pane.clone()))
+        .attach_session(attach(Some("t2-2"), pane.clone()), &reef_api::NOBODY)
         .await?;
     // the first let go, the second shown, the runner as it was
     let sessions = service.project_sessions("runs").await?;
@@ -1345,7 +1350,7 @@ async fn a_second_session_on_a_pane_detaches_the_first() -> anyhow::Result<()> {
     // an id that isn't safe in a path, or none, is refused on a terminal's pane
     for id in [Some("Bad/Id"), Some(""), None] {
         let refused = service
-            .attach_session(attach(id, pane.clone()))
+            .attach_session(attach(id, pane.clone()), &reef_api::NOBODY)
             .await
             .expect_err("an unsafe id is refused");
         assert!(

@@ -8,12 +8,17 @@
 //!
 //! An entry is kept once its write is, so a write whose entry failed to keep still stands, and
 //! its history has a gap where it would be.
+//!
+//! Acts on what has no history of its own are kept the same way (C89): a project's and a
+//! plan's registration, each act on a project's loops and sessions ([`LoopAct`]), and each act
+//! on reef's users ([`UserAct`]).
 
 use reef_model::{Met, NodeName, Status};
 use serde::{Deserialize, Serialize};
 
+use crate::loops::Pane;
 use crate::queue::Place;
-use crate::user::Author;
+use crate::user::{Author, TokenKind};
 
 /// The most entries one page of a history holds, newest first
 pub const HISTORY_MAX: usize = 200;
@@ -194,6 +199,20 @@ pub enum Edited {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         again: bool,
     },
+    /// An act on a pane's loop, or on the session running in it
+    Loop {
+        /// The pane whose loop or session it was
+        pane: Pane,
+        /// What was done
+        act: LoopAct,
+    },
+    /// An act on one of reef's users
+    User {
+        /// The user's name
+        name: String,
+        /// What was done
+        act: UserAct,
+    },
     /// A kind of edit a newer reef kept, which this one can't read
     #[serde(other)]
     Other,
@@ -256,6 +275,8 @@ impl Edited {
             Edited::Queued { node, at } => format!("queued {node} {}", at.describe()),
             Edited::Moved { node, at } => format!("moved {node} {}", at.describe()),
             Edited::Unqueued { node } => format!("took {node} off the queue"),
+            Edited::Loop { pane, act } => act.describe(pane),
+            Edited::User { name, act } => act.describe(name),
             Edited::Started {
                 branch,
                 start,
@@ -279,12 +300,268 @@ impl Edited {
     }
 }
 
+/// An act on a pane's loop, or on the session running in it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "act", rename_all = "kebab-case")]
+pub enum LoopAct {
+    /// A loop was started in the pane
+    Started {
+        /// The one plan it takes nodes from, or `None` for every plan of its project
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
+        /// How many nodes it works at once
+        width: u8,
+    },
+    /// The pane's paused loop was set running again
+    Resumed,
+    /// The pane's loop was paused, to stop once its node is done
+    Paused,
+    /// The pane's loop was stopped, letting go of what it held
+    Stopped {
+        /// The nodes it held, its own first
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        held: Vec<NodeName>,
+    },
+    /// The pane's loop was handed to another session, after a clear or a resume
+    HandedOff {
+        /// The session's id
+        session: String,
+    },
+    /// The pane's loop took a node, and its group's members beside it
+    Took {
+        /// The node it works itself
+        node: NodeName,
+        /// The group's other nodes, each worked by a session of its own
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        members: Vec<NodeName>,
+    },
+    /// The pane's loop let go of everything it held
+    LetGo {
+        /// The nodes it held, its own first
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        held: Vec<NodeName>,
+    },
+    /// The pane joined another loop's member, to work its node
+    Joined {
+        /// The member's node
+        node: NodeName,
+        /// The pane whose loop holds it
+        of: Pane,
+    },
+    /// A session was attached in the pane, to be shown in the app
+    Attached {
+        /// The session's id
+        session: String,
+    },
+    /// The pane's session let go, as its runner or its terminal stopped
+    Detached {
+        /// The session's id
+        session: String,
+    },
+    /// A prompt the pane's session raised was answered from the app
+    Answered {
+        /// The session's id
+        session: String,
+        /// The prompt's id
+        prompt: String,
+    },
+    /// Something was said to Claude in the pane's session from the app, its turn ended mid-node
+    Said {
+        /// The session's id
+        session: String,
+    },
+    /// An act a newer reef kept, which this one can't read
+    #[serde(other)]
+    Other,
+}
+
+impl LoopAct {
+    /// What was done, as a reader is told, naming the pane it was done in
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The pane whose loop or session it was
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::LoopAct;
+    /// use reef_api::loops::Pane;
+    ///
+    /// let pane = Pane::Claude { pid: 7 };
+    /// let started = LoopAct::Started { plan: Some("central".to_string()), width: 2 };
+    /// assert_eq!(
+    ///     started.describe(&pane),
+    ///     "started a loop in Claude Code process 7, feeding plan `central`, 2 nodes at once"
+    /// );
+    /// ```
+    pub fn describe(&self, pane: &Pane) -> String {
+        // the nodes held, by name, in the order held
+        let named = |nodes: &[NodeName]| {
+            let names: Vec<String> = nodes.iter().map(|node| format!("`{node}`")).collect();
+            names.join(", ")
+        };
+        let pane = pane.describe();
+        match self {
+            LoopAct::Started { plan, width } => {
+                // which plans it feeds, then how many nodes at once if more than one
+                let mut said = match plan {
+                    Some(plan) => format!("started a loop in {pane}, feeding plan `{plan}`"),
+                    None => format!("started a loop in {pane}, feeding every plan"),
+                };
+                if *width > 1 {
+                    said.push_str(&format!(", {width} nodes at once"));
+                }
+                said
+            }
+            LoopAct::Resumed => format!("set the loop in {pane} running again"),
+            LoopAct::Paused => format!("paused the loop in {pane}"),
+            LoopAct::Stopped { held } if held.is_empty() => format!("stopped the loop in {pane}"),
+            LoopAct::Stopped { held } => {
+                format!("stopped the loop in {pane}, letting go of {}", named(held))
+            }
+            LoopAct::HandedOff { session } => {
+                format!("handed the loop in {pane} to session `{session}`")
+            }
+            LoopAct::Took { node, members } if members.is_empty() => {
+                format!("the loop in {pane} took `{node}`")
+            }
+            LoopAct::Took { node, members } => {
+                format!("the loop in {pane} took `{node}`, with {}", named(members))
+            }
+            LoopAct::LetGo { held } => {
+                format!("the loop in {pane} let go of {}", named(held))
+            }
+            LoopAct::Joined { node, of } => {
+                format!("{pane} joined `{node}` of the loop in {}", of.describe())
+            }
+            LoopAct::Attached { session } => format!("attached session `{session}` in {pane}"),
+            LoopAct::Detached { session } => format!("detached session `{session}` in {pane}"),
+            LoopAct::Answered { session, prompt } => {
+                format!("answered prompt `{prompt}` of session `{session}` in {pane}")
+            }
+            LoopAct::Said { session } => {
+                format!("replied to Claude in session `{session}` in {pane}")
+            }
+            LoopAct::Other => format!("an act on the loop in {pane} this reef can't read"),
+        }
+    }
+}
+
+/// An act on one of reef's users, which an admin's log keeps
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "act", rename_all = "kebab-case")]
+pub enum UserAct {
+    /// The user was added
+    Added {
+        /// Whether they were added as an admin
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        admin: bool,
+    },
+    /// The user was removed, with every token of theirs
+    Removed {
+        /// How many of their tokens were revoked with them
+        revoked: usize,
+    },
+    /// The user's password was changed: their own, or set by an admin
+    Password {
+        /// Whether they changed their own, with their current one
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        own: bool,
+        /// How many of their tokens were revoked with it
+        #[serde(default)]
+        revoked: usize,
+    },
+    /// One of the user's tokens was revoked, by its id
+    TokenRevoked {
+        /// The token's id, as a listing shows it
+        id: String,
+        /// What it was issued to
+        kind: TokenKind,
+        /// What it was for
+        label: String,
+    },
+    /// The user was recovered as an admin on the service's host, by `reef-serve recover`
+    Recovered {
+        /// Whether no user had the name, so they were added
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        added: bool,
+        /// How many of their tokens were revoked
+        #[serde(default)]
+        revoked: usize,
+    },
+    /// An act a newer reef kept, which this one can't read
+    #[serde(other)]
+    Other,
+}
+
+impl UserAct {
+    /// What was done, as a reader is told, naming the user it was done to
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The user's name
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::UserAct;
+    ///
+    /// assert_eq!(UserAct::Added { admin: true }.describe("carol"), "added carol, an admin");
+    /// assert_eq!(
+    ///     UserAct::Password { own: false, revoked: 2 }.describe("bob"),
+    ///     "set bob's password, revoking 2 tokens"
+    /// );
+    /// ```
+    pub fn describe(&self, name: &str) -> String {
+        // how many tokens went with it, if any did
+        let revoking = |revoked: usize| match revoked {
+            0 => String::new(),
+            1 => ", revoking 1 token".to_string(),
+            revoked => format!(", revoking {revoked} tokens"),
+        };
+        match self {
+            UserAct::Added { admin: true } => format!("added {name}, an admin"),
+            UserAct::Added { admin: false } => format!("added {name}"),
+            UserAct::Removed { revoked } => format!("removed {name}{}", revoking(*revoked)),
+            UserAct::Password { own: true, .. } => format!("{name} changed their own password"),
+            UserAct::Password {
+                own: false,
+                revoked,
+            } => {
+                format!("set {name}'s password{}", revoking(*revoked))
+            }
+            UserAct::TokenRevoked { id, kind, label } => {
+                // a terminal's token or a browser's, by its id and what it was for
+                let kind = match kind {
+                    TokenKind::Cli => "terminal",
+                    TokenKind::Browser => "browser",
+                };
+                format!("revoked {name}'s {kind} token {id} ({label})")
+            }
+            UserAct::Recovered { added: true, .. } => {
+                format!("added {name} as an admin, recovering")
+            }
+            UserAct::Recovered {
+                added: false,
+                revoked,
+            } => {
+                format!("recovered {name} as an admin{}", revoking(*revoked))
+            }
+            UserAct::Other => format!("an act on {name} this reef can't read"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Edited, HistoryPage, Logged};
+    use super::{Edited, HistoryPage, Logged, LoopAct, UserAct};
     use crate::comment::Writer;
+    use crate::loops::Pane;
     use crate::queue::Place;
     use crate::user::Author;
+    use crate::user::TokenKind;
+    use reef_model::NodeName;
     use reef_model::{Met, Status};
     use serde_json::json;
 
@@ -373,6 +650,116 @@ mod tests {
         let value = serde_json::to_value(&paged).unwrap();
         assert_eq!(value["older"], "cursor");
         assert_eq!(serde_json::from_value::<HistoryPage>(value).unwrap(), paged);
+    }
+
+    /// A loop's and a user's acts read back as written, and an act a newer reef keeps, fields
+    /// and all, reads as one this reef can't, keeping the pane or the user it was done to
+    #[test]
+    fn acts_read_back_and_unknown_ones_keep_their_subject() {
+        let pane = Pane::Claude { pid: 7 };
+        // a start, tagged by its kind
+        let started = Edited::Loop {
+            pane: pane.clone(),
+            act: LoopAct::Started {
+                plan: None,
+                width: 1,
+            },
+        };
+        let value = serde_json::to_value(&started).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "edit": "loop",
+                "pane": {"kind": "claude", "pid": 7},
+                "act": {"act": "started", "width": 1},
+            })
+        );
+        assert_eq!(serde_json::from_value::<Edited>(value).unwrap(), started);
+        // an act no reef here knows, with a field of its own
+        let unknown: Edited = serde_json::from_value(json!({
+            "edit": "loop",
+            "pane": {"kind": "claude", "pid": 7},
+            "act": {"act": "renamed", "to": "elsewhere"},
+        }))
+        .unwrap();
+        assert_eq!(
+            unknown,
+            Edited::Loop {
+                pane,
+                act: LoopAct::Other
+            }
+        );
+        assert_eq!(
+            unknown.describe(),
+            "an act on the loop in Claude Code process 7 this reef can't read"
+        );
+        // a user's removal, and one of their acts no reef here knows
+        let removed = Edited::User {
+            name: "bob".to_string(),
+            act: UserAct::Removed { revoked: 2 },
+        };
+        let value = serde_json::to_value(&removed).unwrap();
+        assert_eq!(
+            value,
+            json!({"edit": "user", "name": "bob", "act": {"act": "removed", "revoked": 2}})
+        );
+        assert_eq!(serde_json::from_value::<Edited>(value).unwrap(), removed);
+        assert_eq!(removed.describe(), "removed bob, revoking 2 tokens");
+        let unknown: Edited = serde_json::from_value(json!({
+            "edit": "user",
+            "name": "bob",
+            "act": {"act": "renamed", "to": "rob"},
+        }))
+        .unwrap();
+        assert_eq!(unknown.describe(), "an act on bob this reef can't read");
+    }
+
+    /// Each act is told plainly, naming its pane or its user
+    #[test]
+    fn acts_are_told_plainly() {
+        let pane = Pane::Claude { pid: 7 };
+        let node = |id: &str| -> NodeName { format!("reef/central/{id}").parse().unwrap() };
+        let loop_told = |act: LoopAct| act.describe(&pane);
+        assert_eq!(
+            loop_told(LoopAct::Stopped { held: Vec::new() }),
+            "stopped the loop in Claude Code process 7"
+        );
+        assert_eq!(
+            loop_told(LoopAct::LetGo {
+                held: vec![node("C1"), node("C2")]
+            }),
+            "the loop in Claude Code process 7 let go of `reef/central/C1`, `reef/central/C2`"
+        );
+        assert_eq!(
+            loop_told(LoopAct::Answered {
+                session: "s1".to_string(),
+                prompt: "p2".to_string()
+            }),
+            "answered prompt `p2` of session `s1` in Claude Code process 7"
+        );
+        let user_told = |act: UserAct| act.describe("bob");
+        assert_eq!(
+            user_told(UserAct::Password {
+                own: true,
+                revoked: 0
+            }),
+            "bob changed their own password"
+        );
+        assert_eq!(
+            user_told(UserAct::TokenRevoked {
+                id: "3f9a".to_string(),
+                kind: TokenKind::Browser,
+                label: "a phone".to_string()
+            }),
+            "revoked bob's browser token 3f9a (a phone)"
+        );
+        assert_eq!(
+            user_told(UserAct::Recovered {
+                added: false,
+                revoked: 1
+            }),
+            "recovered bob as an admin, revoking 1 token"
+        );
     }
 
     /// An edit a newer reef kept reads as one this reef can't, rather than failing the history

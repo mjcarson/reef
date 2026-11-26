@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::user::Author;
+
 /// Where a loop's session runs: a terminal multiplexer's pane, or else the Claude Code process,
 /// either of which a `/clear` keeps, or a runner that starts each node's session itself
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -313,6 +315,12 @@ pub struct Loop {
     /// The group's nodes past its own, each worked by a session of its own in a worktree
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub members: Vec<Member>,
+    /// Who started it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub started_by: Author,
+    /// Who made its latest change, a node's end it acted on aside
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub changed_by: Author,
 }
 
 impl Loop {
@@ -394,6 +402,8 @@ impl Loop {
     ///     opens: true,
     ///     pid: None,
     ///     members: Vec::new(),
+    ///     started_by: reef_api::Author::default(),
+    ///     changed_by: reef_api::Author::default(),
     /// };
     /// let handed = cleared.clone().handed_to("after");
     /// assert_eq!(handed.session.as_deref(), Some("after"));
@@ -628,6 +638,8 @@ mod tests {
     /// * `node` - The node it holds, a bare id in `reef/central`
     fn looped(pid: u32, node: Option<&str>) -> Loop {
         Loop {
+            changed_by: crate::user::Author::default(),
+            started_by: crate::user::Author::default(),
             pane: Pane::Claude { pid },
             project: "reef".to_string(),
             plan: Some("central".to_string()),

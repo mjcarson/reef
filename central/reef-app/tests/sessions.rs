@@ -11,6 +11,7 @@ use reef_app::session::AttachedRow;
 /// A terminal's session in a Claude Code process with no multiplexer, working
 fn attached() -> Session {
     Session {
+        attached_by: reef_api::Author::default(),
         id: "k3x9-7".to_string(),
         pane: Pane::Claude { pid: 4242 },
         project: "reef".to_string(),
@@ -29,6 +30,8 @@ fn attached() -> Session {
 /// The loop of its pane, running on C84
 fn feeding() -> Loop {
     Loop {
+        changed_by: reef_api::Author::default(),
+        started_by: reef_api::Author::default(),
         pane: Pane::Claude { pid: 4242 },
         project: "reef".to_string(),
         plan: None,

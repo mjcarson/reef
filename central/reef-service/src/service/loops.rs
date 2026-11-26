@@ -11,7 +11,7 @@
 //! - **Each loop written is a change**, [`Change::LoopChanged`], to the project it feeds. An edit
 //!   that wrote nothing sends none.
 
-use reef_api::{Change, EditLoop, Loop, LoopEdit, LoopEdited};
+use reef_api::{Author, Change, EditLoop, Loop, LoopEdit, LoopEdited};
 use reef_model::PlanName;
 use tracing::instrument;
 
@@ -49,8 +49,9 @@ impl<B: Backend> Service<B> {
     /// # Arguments
     ///
     /// * `edit` - The pane, and the change to its loop
+    /// * `author` - Who makes it, from the caller's token
     #[instrument(name = "Service::edit_loop", skip_all, err(Debug))]
-    pub async fn edit_loop(&self, edit: EditLoop) -> anyhow::Result<LoopEdited> {
+    pub async fn edit_loop(&self, edit: EditLoop, author: &Author) -> anyhow::Result<LoopEdited> {
         match &edit.edit {
             // a runner starts one session at a time, so its loop works one node at a time
             LoopEdit::Start {
@@ -89,7 +90,7 @@ impl<B: Backend> Service<B> {
             _ => {}
         }
         // changed under the loops' lock, and told to the change stream once it is
-        let edited = self.store.edit_loop(&edit.pane, edit.edit).await?;
+        let edited = self.store.edit_loop(&edit.pane, edit.edit, author).await?;
         match &edited {
             LoopEdited::Started { r#loop }
             | LoopEdited::Resumed { r#loop }
