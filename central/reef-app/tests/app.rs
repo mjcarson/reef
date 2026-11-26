@@ -432,6 +432,70 @@ fn revisions_are_served_a_file_at_a_time() -> anyhow::Result<()> {
     })
 }
 
+/// A node's timeline is served whole: its edits, its start, its capture and its comment, newest
+/// first
+#[test]
+fn a_nodes_timeline_is_served() -> anyhow::Result<()> {
+    use reef_api::Target;
+    use reef_app::calls::{node_timeline, start_thread};
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // A1 put, started, a file staged and captured, then a thread started on it
+        let repo = fx.project("timeline", &["central"]).await?;
+        fx.reef(&repo, &["start", "A1"]).await?;
+        std::fs::write(repo.join("a.txt"), "one\ntwo\n")?;
+        let staged = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "a.txt"])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .status()?;
+        anyhow::ensure!(staged.success(), "git add failed");
+        fx.reef(&repo, &["node", "capture"]).await?;
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        start_thread(
+            "timeline".into(),
+            "central".into(),
+            "A1".into(),
+            Target::Node,
+            "Why *this*?\n\nMore below.".into(),
+            false,
+        )
+        .await
+        .map_err(failed)?;
+        // newest first: the comment, the capture, the status `reef start` set once it recorded
+        // the start, the start, and A1's addition
+        let timeline = node_timeline("timeline".into(), "central".into(), "A1".into(), 0)
+            .await
+            .map_err(failed)?;
+        let told: Vec<(&str, String)> = timeline
+            .moments
+            .iter()
+            .map(|moment| (moment.kind(), moment.describe()))
+            .collect();
+        let kinds: Vec<&str> = told.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            kinds,
+            ["comment", "capture", "edit", "start", "edit"],
+            "{told:?}"
+        );
+        assert_eq!(told[0].1, "commented in thread #1: Why *this*?");
+        assert_eq!(told[1].1, "captured revision 1: 1 file +2 −0");
+        assert_eq!(told[2].1, "status unset → in-progress");
+        assert!(told[3].1.starts_with("started on main at "), "{told:?}");
+        assert_eq!(told[4].1, "added");
+        assert!(!timeline.older);
+        assert!(
+            timeline
+                .moments
+                .windows(2)
+                .all(|pair| pair[0].at >= pair[1].at)
+        );
+        anyhow::Ok(())
+    })
+}
+
 /// Comments are kept and read through the app's server functions: a thread on the node and one
 /// on a line of its revision, a reply, and a mark over the version read, a stale one refused;
 /// then a review started, its comments read back pending and unmarkable, and submitted at once

@@ -1614,6 +1614,73 @@ def c88_history_pages_back(page):
            "newest": newest})
 
 
+def c90_the_timeline_says_what_happened(page):
+    """C90: a node's Timeline tab shows its edits, its start, its capture and its comment newest
+    first, a comment and a start again show live, and a capture's line opens it in Changes."""
+    repo = WORK / "repo"
+    reef("plan", "new", "timeline")
+    put("timeline", node_yaml("T1", "T1 Watched closely"))
+    # T1 started, a file captured, then a comment on it through the JSON API
+    reef("start", "T1", "--plan", "timeline")
+    (repo / "timeline.txt").write_text("one\ntwo\n")
+    git("add", "timeline.txt")
+    reef("node", "capture")
+    comments = "/api/v1/projects/check/plans/timeline/nodes/T1/comments"
+    api("POST", comments, {"target": {"on": "node"}, "body": "Why this way?"})
+    page.goto(URL + "/plans/check/timeline")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="T1 Watched closely").click()
+    page.wait_for_selector(".reef-side", timeout=5000)
+    page.click("button[data-tab=timeline]")
+    page.wait_for_selector(".reef-app-timeline-entry", timeout=10000)
+    page.evaluate("() => { window.__kept = 'same page'; }")
+
+    def kinds():
+        """Each line's kind, newest first."""
+        return page.locator(".reef-app-timeline-entry").evaluate_all("els => els.map(e => e.dataset.kind)")
+
+    def wait_for(count, kind):
+        """Waits for the tab to show a number of lines, the newest of a kind."""
+        try:
+            page.wait_for_function(
+                "([count, kind]) => { const lines = document.querySelectorAll('.reef-app-timeline-entry');"
+                " return lines.length === count && lines[0].dataset.kind === kind; }",
+                arg=[count, kind], timeout=10000)
+        except Exception:
+            pass
+
+    first = kinds()
+    whats = page.locator(".reef-app-timeline-what").evaluate_all("els => els.map(e => e.innerText)")
+    # another comment shows live, newest
+    api("POST", comments, {"target": {"on": "node"}, "body": "And this?"})
+    wait_for(len(first) + 1, "comment")
+    commented = kinds()
+    # and so does a start again
+    reef("start", "T1", "--plan", "timeline", "--restart")
+    wait_for(len(commented) + 1, "start")
+    restarted = kinds()
+    again = page.locator(".reef-app-timeline-what").first.inner_text()
+    page.screenshot(path=str(SHOTS / "reef-app-timeline.png"))
+    # a capture's line opens the Changes tab at its revision
+    page.locator(".reef-app-timeline-entry[data-kind=capture] .reef-app-timeline-open").first.click()
+    try:
+        page.wait_for_selector(".reef-app-tab.on:text-is('Changes')", timeout=5000)
+        page.wait_for_selector(".reef-app-revision", timeout=10000)
+        picked = page.eval_on_selector(".reef-app-revision", "s => s.value")
+    except Exception as error:
+        picked = f"none: {error}".splitlines()[0]
+    check("C90 the Timeline tab shows what happened newest first, a comment and a start live, and opens a capture",
+          first == ["comment", "capture", "edit", "start", "edit"]
+          and whats[0] == "commented in thread #1: Why this way?" and whats[2] == "status unset → in-progress"
+          and (whats[1].startswith("drafted revision 1: 1 file +2 −0")
+               or whats[1].startswith("captured revision 1: 1 file +2 −0"))
+          and commented[0] == "comment" and len(commented) == len(first) + 1
+          and restarted[0] == "start" and again.startswith("started again")
+          and picked == "1" and page.evaluate("() => window.__kept") == "same page",
+          {"first": first, "lines": whats, "after a comment": commented, "after a start again": restarted,
+           "newest": again, "picked": picked})
+
+
 def c87_http_lands_on_https(page):
     """C87: a server that names no certificate serves reef's own, made under its `certs`, over HTTPS and HTTP/2, and
     a page asked for over http:// lands there, its path kept."""
@@ -2198,14 +2265,15 @@ def c50_the_app_says_who_did_what(browser):
         page.click("button[data-tab=decisions]")
         page.wait_for_selector(".reef-app-decision-when .reef-app-author", timeout=10000)
         asked = page.inner_text(".reef-app-decision-when .reef-app-author")
-        # the History tab says who made each edit, newest first, and a new one shows up live
+        # the History tab says who made each edit and start (C90), newest first, and a new one shows
+        # up live
         page.click("button[data-tab=history]")
         page.wait_for_selector(".reef-app-history-entry", timeout=10000)
         history = page.locator(".reef-app-history-entry").evaluate_all(
             "es => es.map(e => [e.querySelector('.reef-app-author')?.textContent ?? null, "
             "e.querySelector('.reef-app-history-what').textContent])")
         author_reef("bob", "status", "A1", "done")
-        page.wait_for_function("() => document.querySelectorAll('.reef-app-history-entry').length === 3",
+        page.wait_for_function("() => document.querySelectorAll('.reef-app-history-entry').length === 4",
                                timeout=10000)
         newest = page.inner_text(".reef-app-history-entry:first-child")
         page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-history.png"))
@@ -2217,7 +2285,8 @@ def c50_the_app_says_who_did_what(browser):
           "entry and made each edit",
               placed == "queued by bob" and wrote == "ada" and marked == "resolved by ada"
               and captured == "bob" and asked == "ada"
-              and history == [["bob", "status unset → in-progress"], ["ada", "added"]]
+              and len(history) == 3 and history[0][0] == "bob" and history[0][1].startswith("started on main at ")
+              and history[1:] == [["bob", "status unset → in-progress"], ["ada", "added"]]
               and "bob" in newest and "status in-progress → done" in newest,
               {"placed": placed, "wrote": wrote, "marked": marked, "captured": captured, "asked": asked,
                "history": history, "newest": newest})
@@ -2267,6 +2336,7 @@ def main():
                 c84_an_attached_session_streams_its_transcript,
                 c76_a_nodes_decisions_show_in_its_sidebar,
                 c88_history_pages_back,
+                c90_the_timeline_says_what_happened,
             ]
             for step in checks:
                 # every check, or those `--only` names

@@ -53,8 +53,8 @@ code { font-size: 0.92em; }
 .reef-app-stage > .reef.reef-page { margin: 0; border: 0; border-radius: 0; min-width: 0; }
 .reef-app-over { position: absolute; top: 3rem; left: 0; right: 0; text-align: center; }
 .reef-app-stage > .reef.reef-page { flex: 1; }
-.reef-app-tabs { display: flex; gap: 0.2rem; margin: 0.6rem 0 0.2rem; border-bottom: 1px solid var(--line); }
-.reef-app-tab { font: inherit; font-size: 0.85rem; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; padding: 0.25rem 0.6rem; margin-bottom: -1px; cursor: pointer; }
+.reef-app-tabs { display: flex; flex-wrap: wrap; gap: 0.2rem; margin: 0.6rem 0 0.2rem; border-bottom: 1px solid var(--line); }
+.reef-app-tab { font: inherit; font-size: 0.85rem; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; padding: 0.25rem 0.6rem; margin-bottom: -1px; cursor: pointer; white-space: nowrap; }
 .reef-app-tab:hover { color: var(--fg); }
 .reef-app-tab.on { color: var(--fg); border-bottom-color: var(--links); }
 .reef-app-editor { margin-top: 0.6rem; }
@@ -161,6 +161,17 @@ code { font-size: 0.92em; }
 .reef-app-history-version { font-family: monospace; }
 .reef-app-history-what { overflow-wrap: anywhere; }
 .reef-app-history-more { margin: 0.5rem 0 0; }
+.reef-app-timeline { list-style: none; margin: 0; padding: 0; }
+.reef-app-timeline-entry { padding: 0.35rem 0 0.35rem 0.55rem; border-bottom: 1px dashed var(--line); border-left: 3px solid var(--line); }
+.reef-app-timeline-entry:last-child { border-bottom: none; }
+.reef-app-timeline-entry.start { border-left-color: var(--reef-progress); }
+.reef-app-timeline-entry.capture { border-left-color: var(--links); }
+.reef-app-timeline-entry.comment, .reef-app-timeline-entry.mark, .reef-app-timeline-entry.resolution { border-left-color: var(--reef-done); }
+.reef-app-timeline-head { font-size: 0.75rem; color: var(--muted); }
+.reef-app-timeline-kind { font-size: 0.65rem; }
+.reef-app-timeline-what { overflow-wrap: anywhere; }
+button.reef-app-timeline-open { display: block; width: 100%; padding: 0; border: none; background: none; color: var(--links); font: inherit; text-align: left; cursor: pointer; }
+button.reef-app-timeline-open:hover { text-decoration: underline; }
 .reef-app-composer { margin-top: 0.35rem; }
 .reef-app-compose { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.45rem; }
 .reef-app-composer .reef-app-actions { margin: 0.3rem 0 0; }

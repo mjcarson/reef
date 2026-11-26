@@ -11,7 +11,7 @@ use reef_api::{
 };
 use reef_model::accept::{Criterion, Kind};
 use reef_model::{Diagnostic, Met, Status};
-use reef_service::{Checked, NodeWrite, PageEdited, Proposal, Queued, Rewrite};
+use reef_service::{Checked, NodeWrite, PageEdited, Proposal, Queued, Rewrite, StartWork, Started};
 
 use super::{Fx, Reopen, work};
 
@@ -593,5 +593,88 @@ pub async fn a_history_pages_past_its_newest<B: Reopen>(fx: Fx<B>) -> anyhow::Re
         .node_history(&node, &HistoryQuery::default())
         .await?;
     assert_eq!(reread, newest);
+    Ok(())
+}
+
+/// Each start keeps an entry in its node's history, naming who started it, on what branch and
+/// at what commit, and a start again says so, its version left as it was
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_start_is_kept_in_its_nodes_history<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    let node = fx.plan.node("C1")?;
+    let (ada, bob) = (by("ada", Writer::User), by("bob", Writer::Claude));
+    put(&fx, work("C1", 0), None, &ada).await?;
+    // ada starts C1, then Claude, for bob, starts it again over her record
+    let worktree = std::path::Path::new("/work/reef");
+    let first = StartWork {
+        start: super::work_cases::start_in(worktree, "C1", 'a'),
+        replaces: None,
+    };
+    let Started::Recorded { record, .. } = fx.store.start_work(&node, first, &ada).await? else {
+        anyhow::bail!("the first start wasn't recorded");
+    };
+    let again = StartWork {
+        start: super::work_cases::start_in(worktree, "C1", 'b'),
+        replaces: Some(record.version),
+    };
+    let Started::Recorded { record: again, .. } = fx.store.start_work(&node, again, &bob).await?
+    else {
+        anyhow::bail!("the start again wasn't recorded");
+    };
+    // newest first: the start again, the first start, then the node's addition
+    let history = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?
+        .edits;
+    let told: Vec<(Option<u64>, Option<String>, String)> = history
+        .iter()
+        .map(|logged| (logged.version, logged.author.describe(), logged.describe()))
+        .collect();
+    assert_eq!(
+        told,
+        vec![
+            (
+                None,
+                Some("Claude, for bob".to_string()),
+                "started again on reef/C1 at bbbbbbb".to_string()
+            ),
+            (
+                None,
+                Some("ada".to_string()),
+                "started on reef/C1 at aaaaaaa".to_string()
+            ),
+            (Some(1), Some("ada".to_string()), "added".to_string()),
+        ]
+    );
+    // each naming when its record says it started, which a timeline matches it by
+    assert_eq!(
+        history[0].edits,
+        vec![Edited::Started {
+            started_at: again.started_at,
+            branch: Some("reef/C1".to_string()),
+            start: "b".repeat(40),
+            again: true,
+        }]
+    );
+    assert!(matches!(
+        history[1].edits[..],
+        [Edited::Started { started_at, again: false, .. }] if started_at == record.started_at
+    ));
+    // and a stale start keeps nothing
+    let stale = StartWork {
+        start: super::work_cases::start_in(worktree, "C1", 'c'),
+        replaces: Some(record.version),
+    };
+    let refused = fx.store.start_work(&node, stale, &ada).await?;
+    assert!(matches!(refused, Started::Stale { .. }), "{refused:?}");
+    let after = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?
+        .edits;
+    assert_eq!(after, history);
     Ok(())
 }

@@ -76,9 +76,11 @@ const PLAN_KINDS: &[&str] = &[
     "missed",
 ];
 
-/// The changes that mean reading a node's work again: a revision captured, a comment kept, a
-/// thread marked, threads followed to a new revision, a review marked, decisions kept, or a gap
+/// The changes that mean reading a node's work again: a start or a capture recorded, a revision
+/// captured, a comment kept, a thread marked, threads followed to a new revision, a review
+/// marked, decisions kept, or a gap
 const WORK_KINDS: &[&str] = &[
+    "work-recorded",
     "revision-captured",
     "comment-added",
     "thread-marked",

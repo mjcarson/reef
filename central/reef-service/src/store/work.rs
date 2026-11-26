@@ -17,9 +17,12 @@
 //!   A seal of a draft it matches rewrites only the draft's row, sealed.
 //! - **Writes take a lock per project; reads take none.** A start is one row's write, and a
 //!   capture its revision's rows, then the record's.
+//! - **Each start is kept in its node's history** once its row has landed, under the same lock,
+//!   naming who started it, where and whether it started again, so a start a restart replaced is
+//!   still seen.
 
 use reef_api::{
-    AddCapture, Author, CaptureRead, Captured, StartWork, Started, WorkRecord, WorkStart,
+    AddCapture, Author, CaptureRead, Captured, Edited, StartWork, Started, WorkRecord, WorkStart,
 };
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
@@ -27,7 +30,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 use super::revision::{Latest, Slot, check_files};
-use super::{Store, Unkeepable};
+use super::{Store, Unkeepable, history};
 use crate::backend::{Backend, Expect, Written};
 use crate::schema::WorkRow;
 
@@ -176,10 +179,25 @@ impl<B: Backend> Store<B> {
         };
         let row = work_row(node, version, &kept)?;
         match self.backend.write_work(row, expect).await? {
-            Written::Applied => Ok(Started::Recorded {
-                record: recorded(node, version, kept),
-                sealed,
-            }),
+            Written::Applied => {
+                // kept in the node's history once it has landed, under the same lock
+                let started = Edited::Started {
+                    started_at,
+                    branch: kept.start.branch.clone(),
+                    start: kept.start.start.clone(),
+                    again: current.is_some(),
+                };
+                let pending = history::Pending {
+                    subject: history::node_subject(node),
+                    version: None,
+                    edits: vec![started],
+                };
+                self.keep_edits(project, author, false, vec![pending]).await;
+                Ok(Started::Recorded {
+                    record: recorded(node, version, kept),
+                    sealed,
+                })
+            }
             // another writer got there between the read and the write
             Written::Refused(_) => Ok(Started::Stale {
                 record: self.work_of(node).await?,

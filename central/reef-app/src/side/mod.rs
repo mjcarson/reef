@@ -5,7 +5,8 @@
 //! file's diff drawn once it is opened, with the threads on its lines. **Comments** is the
 //! node's threads, general and on its lines, with how many are open. **Decisions** is each plan
 //! its sessions asked approval for and each question they asked, and what came of it. **History** is
-//! who made each edit of the node, what it changed and when. **Edit** is the node's
+//! who made each edit of the node, what it changed and when. **Timeline** is everything that
+//! happened to it, its edits, starts, captures and comments, newest first. **Edit** is the node's
 //! YAML, saved as `reef node put` saves it. Inside a plan's page, its actions queue the node first or last in its project's
 //! queue, or take it off.
 
@@ -18,6 +19,7 @@ mod docs;
 pub mod history;
 mod perf;
 pub mod threads;
+pub mod timeline;
 
 pub use changes::when;
 pub use decisions::picked;
@@ -35,6 +37,7 @@ use reef_api::{Anchor, Place, QueueEdit};
 use reef_draw::markup::{status_class, status_label};
 use reef_model::PlanName;
 use std::collections::HashSet;
+use timeline::Timeline;
 
 /// The sidebar's tabs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,9 @@ pub enum Tab {
     Decisions,
     /// Who made each edit of the node, what it changed and when
     History,
+    /// Everything that happened to the node, its edits, starts, captures and comments, newest
+    /// first
+    Timeline,
     /// The node's YAML, to edit and save
     Edit,
 }
@@ -131,6 +137,8 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
     let (changes_project, changes_plan) = (project.clone(), plan.clone());
     let (decided_project, decided_plan, decided_id) = (project.clone(), plan.clone(), id.clone());
     let (history_project, history_plan, history_id) = (project.clone(), plan.clone(), id.clone());
+    let (timeline_project, timeline_plan, timeline_id) =
+        (project.clone(), plan.clone(), id.clone());
     // the node in full, as the queue names it, and whether it is queued
     let queued = PlanName::new(project.clone(), plan.clone())
         .ok()
@@ -292,6 +300,14 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
                     "History"
                 }
                 button {
+                    class: tab_class(Tab::Timeline),
+                    role: "tab",
+                    "aria-selected": "{tab == Tab::Timeline}",
+                    "data-tab": "timeline",
+                    onclick: move |_| view.tab.set(Tab::Timeline),
+                    "Timeline"
+                }
+                button {
                     class: tab_class(Tab::Edit),
                     role: "tab",
                     "aria-selected": "{tab == Tab::Edit}",
@@ -314,6 +330,9 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
                 },
                 Tab::History => rsx! {
                     History { project: history_project, plan: history_plan, id: history_id, changes }
+                },
+                Tab::Timeline => rsx! {
+                    Timeline { project: timeline_project, plan: timeline_plan, id: timeline_id, changes }
                 },
                 Tab::Edit => rsx! {
                     NodeEditor { project, plan, id: edit_id, changes }

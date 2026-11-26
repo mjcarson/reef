@@ -19,6 +19,8 @@ use reef_model::Payload;
 use reef_model::{NodeSpec, PlanName};
 use serde::{Deserialize, Serialize};
 
+use crate::side::timeline::NodeTimeline;
+
 /// A project and its plans, as the picker lists them
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectPlans {
@@ -322,25 +324,72 @@ pub async fn node_history(
     let node = plan_name(project, plan)?
         .node(id)
         .map_err(|error| ServerFnError::new(error.to_string()))?;
+    history_pages(&node, count).await.map_err(failed)
+}
+
+/// Reads a node's history from its newest edit, a page at a time, until it holds a number of
+/// edits or none is left
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+/// * `count` - How many edits to read, a page at the least and [`HISTORY_SHOWN_MAX`] at most
+#[cfg(feature = "server")]
+#[tracing::instrument(name = "calls::history_pages", skip_all, err(Debug))]
+async fn history_pages(node: &reef_model::NodeName, count: usize) -> anyhow::Result<HistoryPage> {
     let service = crate::server::service();
     // a page at the least, and never more than the most the app reads
     let count = count.clamp(HISTORY_MAX, HISTORY_SHOWN_MAX);
-    let mut page = service
-        .node_history(&node, &HistoryQuery::default())
-        .await
-        .map_err(failed)?;
+    let mut page = service.node_history(node, &HistoryQuery::default()).await?;
     // then each older page in turn, until it holds as many as asked or none is left
     while page.edits.len() < count
         && let Some(older) = page.older.take()
     {
         let next = service
-            .node_history(&node, &HistoryQuery::older(older))
-            .await
-            .map_err(failed)?;
+            .node_history(node, &HistoryQuery::older(older))
+            .await?;
         page.edits.extend(next.edits);
         page.older = next.older;
     }
     Ok(page)
+}
+
+/// A node's timeline: its edits, starts, captures and comments, newest first, its edits read
+/// as the History tab reads them, and whether older edits are kept
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+/// * `count` - How many of its edits to read, a page at the least and [`HISTORY_SHOWN_MAX`] at
+///   most
+#[get("/app/timeline?project&plan&id&count")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::node_timeline", skip_all, err(Debug))
+)]
+pub async fn node_timeline(
+    project: String,
+    plan: String,
+    id: String,
+    count: usize,
+) -> Result<NodeTimeline, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    let service = crate::server::service();
+    // its edits and starts, its revisions, its published threads, and its latest start
+    let page = history_pages(&node, count).await.map_err(failed)?;
+    let revisions = service.revisions(&node).await.map_err(failed)?;
+    let threads = service
+        .node_threads(&node, reef_service::Pending::Leave)
+        .await
+        .map_err(failed)?;
+    let work = service.work_of(&node).await.map_err(failed)?;
+    // merged, newest first
+    Ok(crate::side::timeline::merge(page, work, revisions, threads))
 }
 
 /// A project's runners' sessions, and every loop feeding it, a terminal's or a runner's

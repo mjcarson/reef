@@ -181,6 +181,19 @@ pub enum Edited {
         /// The node taken off
         node: NodeName,
     },
+    /// The node's work was started, by `reef start`, which leaves its version as it was
+    Started {
+        /// When its work record says it started, in milliseconds since the epoch
+        started_at: u64,
+        /// The branch checked out where it started, or `None` on a detached HEAD
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// The commit HEAD was at
+        start: String,
+        /// Whether it was started before, so this start replaced that one
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        again: bool,
+    },
     /// A kind of edit a newer reef kept, which this one can't read
     #[serde(other)]
     Other,
@@ -243,6 +256,24 @@ impl Edited {
             Edited::Queued { node, at } => format!("queued {node} {}", at.describe()),
             Edited::Moved { node, at } => format!("moved {node} {}", at.describe()),
             Edited::Unqueued { node } => format!("took {node} off the queue"),
+            Edited::Started {
+                branch,
+                start,
+                again,
+                ..
+            } => {
+                // started, or again, then where: on its branch, at its commit's short form
+                let mut said = match again {
+                    true => "started again".to_string(),
+                    false => "started".to_string(),
+                };
+                if let Some(branch) = branch {
+                    said.push_str(&format!(" on {branch}"));
+                }
+                let short: String = start.chars().take(7).collect();
+                said.push_str(&format!(" at {short}"));
+                said
+            }
             Edited::Other => "an edit this reef can't read".to_string(),
         }
     }
@@ -394,5 +425,40 @@ mod tests {
             told(Edited::Unqueued { node: node() }),
             "took reef/central/C1 off the queue"
         );
+        assert_eq!(
+            told(Edited::Started {
+                started_at: 1,
+                branch: Some("main".to_string()),
+                start: "1a2b3c4d5e6f".to_string(),
+                again: false,
+            }),
+            "started on main at 1a2b3c4"
+        );
+        assert_eq!(
+            told(Edited::Started {
+                started_at: 1,
+                branch: None,
+                start: "1a2b3c4d5e6f".to_string(),
+                again: true,
+            }),
+            "started again at 1a2b3c4"
+        );
+    }
+
+    /// A start reads back as written, leaving out a branch it hasn't and a first start's `again`
+    #[test]
+    fn starts_read_back_as_written() {
+        let started = Edited::Started {
+            started_at: 7,
+            branch: None,
+            start: "abc".to_string(),
+            again: false,
+        };
+        let value = serde_json::to_value(&started).unwrap();
+        assert_eq!(
+            value,
+            json!({"edit": "started", "started_at": 7, "start": "abc"})
+        );
+        assert_eq!(serde_json::from_value::<Edited>(value).unwrap(), started);
     }
 }

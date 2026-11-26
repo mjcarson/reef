@@ -360,6 +360,10 @@ own.
   queue's names the node queued, moved or taken off and where. A put that left its node as it
   was keeps none, and so does a whole-plan write for each node and page it left so, so importing
   the same plan again keeps nothing.
+- **A start is an entry of its node's** ([C90](../milestones/m10.md)), with no version, since a start leaves
+  the node's spec as it was. It names when the work record says it started, the branch and the
+  commit, and whether it started again; a stale start keeps none. A node's work record holds
+  only its latest start, so its history is where an earlier one is still seen.
 - **Its record is one JSON field,** so what an entry keeps can change without changing the table,
   and a kind of edit a newer reef keeps reads as one this reef can't, rather than failing the
   history.

@@ -113,8 +113,9 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
 - **One sidebar, with tabs.** The node's header, then **Details**, which is what reef-view's
   sidebar shows, **Changes**, which is the node's captured revisions ([C33](../milestones/m7.md)),
   **Comments**, which is its threads ([C35](../milestones/m7.md)), **Decisions** ([C76](../milestones/m9.md)),
-  **History**, which is who made each edit of it ([C50](../milestones/m10.md)), and **Edit**, which is C20's
-  editor.
+  **History**, which is who made each edit of it ([C50](../milestones/m10.md)), **Timeline**, which is
+  everything that happened to it ([C90](../milestones/m10.md)), and **Edit**, which is C20's editor. The
+  tabs wrap onto a second line where the sidebar is too narrow for them.
 - **The boxes say what was hit.** Each box, group head and toggle writes what a press or a move
   landed on to a signal, as the event bubbles, and the SVG's own handler takes it. Nothing reads
   the DOM to find the target, and nothing stops the event.
@@ -349,6 +350,32 @@ Who made each edit of the node, what it changed and when ([C50](../milestones/m1
 - **A line an edit, newest first:** when, who if anyone known, the version it left the node at,
   and what it changed, as `reef node log` says it. A whole plan's write is tagged, so an
   import reads apart from an edit of the node alone.
+- **200 at a time** ([C88](../milestones/m10.md)). "Older edits" reads 200 more, from the newest each time,
+  so an edit while older ones are shown leaves no gap among them.
+
+## The Timeline tab
+
+Everything that happened to the node, newest first, in one list ([C90](../milestones/m10.md)): its edits,
+each start, each capture, and each comment, thread mark and resolution, which before took
+reading four tabs.
+
+### Design choices
+
+- **A tab of its own, after History,** which stays for the edits alone, as `reef node log` prints
+  them.
+- **Merged on the server, from four reads.** The node's history gives its edits and starts, its
+  revisions its captures, and its threads its comments, marks and resolutions; one server
+  function merges them by time, so the client draws one list.
+- **Every start is in the history.** A work record keeps only a node's latest start, so each
+  start keeps a `started` entry in the node's history as it lands, naming who, where and whether
+  it started again. A start recorded before that is added from the record, unless an entry names
+  it.
+- **Paged as History is.** While older edits are kept, nothing older than the oldest edit read is
+  shown, so a capture or a comment never sits above a gap of edits.
+- **Read again on any change to the node:** a plan's change, and a start, a capture, a comment or
+  a mark, so each shows live.
+- **A capture's line opens Changes at its revision, and a comment's opens Comments.** A comment
+  pending in a review is left out, as everything but its reviewer's Comments tab leaves it out.
 
 ## The sessions panel
 

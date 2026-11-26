@@ -124,4 +124,5 @@ suite!(
     pages_and_the_queue_keep_histories,
     an_unkept_history_leaves_its_edit,
     a_history_pages_past_its_newest,
+    a_start_is_kept_in_its_nodes_history,
 );

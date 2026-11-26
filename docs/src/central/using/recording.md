@@ -1,7 +1,9 @@
 # Recording work
 
 - **Start a node where its work happens:** `reef start L2` records your checkout's branch and
-  start and marks the node in progress. `reef work` shows what this checkout is on.
+  start and marks the node in progress. Each start, a start again included, is kept in the
+  node's history, so `reef node log L2` and the app's Timeline say who started it and when.
+  `reef work` shows what this checkout is on.
 - **Its changes are captured from your checkout,** by the git hooks `reef claude install` writes
   ([Set the repo up for Claude Code](../projects/claude.md)),
   or by hand with `reef node capture`. Each capture is a revision of the node, which the app's

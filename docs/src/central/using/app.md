@@ -10,7 +10,11 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   - **Decisions**: every plan its Claude sessions asked approval for, and every question they
     asked, with what was answered;
   - **History**: who made each edit of the node, what it changed and when, newest first, 200
-    at a time: **Older edits** shows the next 200.
+    at a time: **Older edits** shows the next 200. Each start is there too.
+  - **Timeline**: everything that happened to the node, newest first, in one list: its edits,
+    each start, each capture, and each comment, thread mark and resolution. A capture's line
+    opens it in **Changes**, and a comment's opens **Comments**. A comment pending in a review
+    isn't there until the review is submitted.
 
   Each comment says who wrote it, "Claude, for ada" where Claude wrote it with ada's login, and
   each thread who marked it last. A revision says who captured it, a decision whose session
