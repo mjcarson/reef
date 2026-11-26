@@ -12,11 +12,13 @@ cores = 2                     # the in-process pool's shards
 memory = "256MiB"             # each shard's memory budget
 
 [api]
-address = "127.0.0.1:12180"   # where the JSON API listens over plain HTTP, and `reef` calls it: loopback only
+address = "127.0.0.1:12180"   # where the JSON API listens over HTTPS, and `reef` calls it: loopback only
+certs = "/home/me/.local/share/reef/certs"   # reef's own CA and certificate; default $XDG_DATA_HOME/reef/certs
+names = ["reef.example"]      # more names reef's own certificate covers
 
-[api.tls]                     # other hosts, over TLS, beside it; needs `[auth] required`
+[api.tls]                     # other hosts, beside it; off loopback, needs `[auth] required`
 address = "0.0.0.0:12443"     # any address
-cert = "/etc/reef/fullchain.pem"   # the certificate chain, as PEM, the server's own first
+cert = "/etc/reef/fullchain.pem"   # the certificate chain, as PEM, the server's own first; else reef's own
 key = "/etc/reef/privkey.pem"      # its private key, as PEM
 
 [auth]

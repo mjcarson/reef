@@ -10,15 +10,17 @@ cores = 2                           # shards; each wants 30 MiB of locked memory
 memory = "256MiB"                   # each shard's memory budget
 
 [api]
-address = "127.0.0.1:12180"         # plain HTTP, loopback only: this host's CLI and first admin
+address = "127.0.0.1:12180"         # HTTPS, loopback only: this host's CLI and first admin
+certs = "/var/lib/reef/certs"       # where reef keeps the CA and certificate it makes
+ca = "/etc/reef/reef-ca.pem"        # a readable copy of that CA, for the CLI on this host
 
 [api.tls]
-address = "0.0.0.0:12443"           # other hosts, over TLS
+address = "0.0.0.0:12443"           # other hosts, over HTTPS
 cert = "/etc/reef/fullchain.pem"    # the chain, as PEM, the server's own certificate first
-key = "/etc/reef/privkey.pem"       # its private key, as PEM
+key = "/etc/reef/privkey.pem"       # its private key, as PEM; leave both out for reef's own
 
 [auth]
-required = true                     # every caller signs in; TLS won't start without it
+required = true                     # every caller signs in; off loopback, TLS won't start without it
 
 [remotes]
 clones = "/var/lib/reef/clones"     # absolute; never move it once projects are registered
@@ -29,5 +31,13 @@ hosts = ["github.com"]              # the only hosts a remote may be cloned from
 - **A misspelt key stops the server,** naming it, rather than being ignored.
 - **The server checks the config before shoal starts.** It refuses a memory budget of 0, a
   relative or tmpfs data path, and a certificate or key it can't read, and says what to change.
-- **The plain port stays loopback.** The server refuses to listen for plain HTTP on any other
-  address. Other hosts reach it only through `[api.tls]`.
+- **Every port speaks HTTPS.** A plain-HTTP request is answered with a redirect to `https://` at
+  the same host, port and path. The loopback port serves reef's own certificate, made in
+  `certs` on the first start ([Certificates](certificates.md)). `[api.tls]` serves the one it
+  names, else reef's own too.
+- **The loopback port stays loopback.** The server refuses to listen on any other address for
+  `[api] address`. Other hosts reach it only through `[api.tls]`.
+- **The CLI on this host trusts reef's own CA** from `certs`, if it can read it. The `reef`
+  account's data directory is closed to other accounts, so copy `ca.pem` out once the server
+  has made it, and name the copy as `ca`:
+  `sudo install -m 0644 /var/lib/reef/certs/ca.pem /etc/reef/reef-ca.pem`.

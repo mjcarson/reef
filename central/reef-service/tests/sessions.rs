@@ -338,7 +338,7 @@ impl Sx {
             .api()
             .await?;
         let conf = ax.dir.join("reef.toml");
-        std::fs::write(&conf, format!("[api]\naddress = \"{}\"\n", ax.address))?;
+        std::fs::write(&conf, ax.cli_config())?;
         let repo = git::repo(&ax.dir.join("runs"))?;
         // Claude, played by this binary, whatever the runner passes it
         let claude = ax.dir.join("claude.sh");

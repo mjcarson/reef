@@ -1,7 +1,8 @@
 # One person on localhost
 
-reef's own plan runs this way: reef-serve as a systemd user unit on `127.0.0.1:12180`, with no
-config file, no TLS and no sign-in. Its data is in `~/.local/share/reef/shoal`.
+reef's own plan runs this way: reef-serve as a systemd user unit on `https://127.0.0.1:12180`,
+with no config file and no sign-in. Its data is in `~/.local/share/reef/shoal`, and the CA and
+certificate it makes for itself in `~/.local/share/reef/certs` ([Certificates](certificates.md)).
 
 ```sh
 cargo install --locked --path crates/reef                     # the CLI, into ~/.cargo/bin
@@ -35,7 +36,13 @@ the limit is too low, add a `memlock` line for your user in `/etc/security/limit
 log in again.
 
 Then [add a project and a plan](../projects/index.md). Nothing else changes: the CLI finds the
-server at its default address.
+server at its default address, and trusts the CA it made. Open `https://localhost:12180` in a
+browser, and import `~/.local/share/reef/certs/ca.pem` as an authority to drop its warning.
+
+**Upgrading from a reef that served plain HTTP:** install the CLI and reef-serve together and
+restart the unit. An older CLI calls `http://`, which the new server only redirects to a
+certificate it doesn't trust. A login kept for `http://127.0.0.1:12180` goes on signing in to
+`https://127.0.0.1:12180`.
 
 On a machine that also runs shoal's benchmarks, reef's shards share their cores. See [Beside a
 benchmark](benchmarks.md).

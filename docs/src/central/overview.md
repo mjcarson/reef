@@ -21,7 +21,7 @@ internals, its JSON API and its store are in [Internals](../internals/central.md
 ┌──────────────────────────┐                      ┌─────────────────────────────────────┐
 │ reef (CLI)               │                      │ reef-app  or  reef-serve            │
 │ reef mcp  (Claude Code)  │── HTTPS, a token ───▶│   [api.tls]  e.g. 0.0.0.0:12443     │
-│ reef hook (git, Claude)  │                      │   [api]      127.0.0.1:12180        │
+│ reef hook (git, Claude)  │                      │   [api]      127.0.0.1:12180, HTTPS │
 │ browser                  │── HTTPS, a cookie ──▶│        │                            │
 │ a checkout of the repo   │                      │        ▼                            │
 └──────────────────────────┘                      │  shoal, in process or a node        │
@@ -42,11 +42,11 @@ internals, its JSON API and its store are in [Internals](../internals/central.md
 
 ## Two ways to run it
 
-- **One person on one machine:** reef-serve as a systemd user unit on loopback, with no config
-  and no sign-in. This is how reef's own plan runs. See
+- **One person on one machine:** reef-serve as a systemd user unit on loopback, over HTTPS with
+  a certificate of its own, with no config and no sign-in. This is how reef's own plan runs. See
   [One person on localhost](deploy/localhost.md).
 - **A team server:** reef-app as a system service under an account of its own, serving other
-  hosts over TLS, with sign-in required and projects registered by their git URLs. [Deploying](deploy/index.md)
+  hosts too, with sign-in required and projects registered by their git URLs. [Deploying](deploy/index.md)
   walks through it.
 
 ## Where things are
@@ -54,11 +54,14 @@ internals, its JSON API and its store are in [Internals](../internals/central.md
 | | Default | Set by |
 |---|---|---|
 | Config | `$XDG_CONFIG_HOME/reef/config.toml`, else `~/.config/reef/config.toml` | `--conf` (reef-serve, the CLI), `$REEF_CONFIG` |
-| Loopback port, plain HTTP | `127.0.0.1:12180` | `[api] address` |
-| Port for other hosts, TLS | none | `[api.tls] address` |
+| Loopback port, HTTPS | `127.0.0.1:12180` | `[api] address` |
+| Port for other hosts, HTTPS | none | `[api.tls] address` |
+| reef's own CA and certificate | `$XDG_DATA_HOME/reef/certs`, else `~/.local/share/reef/certs` | `[api] certs` |
 | Shoal's data | `$XDG_DATA_HOME/reef/shoal`, else `~/.local/share/reef/shoal` | `[shoal] data` |
 | Remote projects' clones | `$XDG_DATA_HOME/reef/clones`, else `~/.local/share/reef/clones` | `[remotes] clones` |
 | A user's tokens | `$XDG_CONFIG_HOME/reef/credentials.toml` | `--credentials`, `$REEF_TOKEN`, `$REEF_CREDENTIALS` |
 
 The server and the CLI read the same config file. The server reads all of it. The CLI reads
-only `[api]`'s `address`, `url` and `ca`, which is how it finds the server.
+only `[api]`'s `address`, `url`, `ca` and `certs`, which is how it finds the server and what it
+trusts. Every port speaks HTTPS, and answers plain HTTP with a redirect to it
+([Certificates](deploy/certificates.md)).

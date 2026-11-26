@@ -11,8 +11,9 @@ in](../central/using/sign-in.md) and [Users](../central/admin/users.md#users).
   from `--password-file PATH` (`-` for standard input), through `reef_api::prompt`, which the
   CLI and reef-serve share. The service keeps only its argon2id hash.
 - **A login keeps a token, never the password,** in `$XDG_CONFIG_HOME/reef/credentials.toml`,
-  readable by its owner alone, a token for each server by its root (`http://127.0.0.1:12180`,
-  or the `https://` one `[api] url` names).
+  readable by its owner alone, a token for each server by its root (`https://127.0.0.1:12180`,
+  or the one `[api] url` names). One kept for a plain-HTTP root, from before reef served HTTPS
+  alone, signs in its `https://` twin at the same host and port.
   Every request reads it again, so the MCP server, the hooks and a runner started before the
   login send it too. `--credentials PATH` names another file, `$REEF_TOKEN` gives a token
   outright, and `$REEF_CREDENTIALS` names a file, in that order, before the default.
@@ -32,14 +33,22 @@ in](../central/using/sign-in.md) and [Users](../central/admin/users.md#users).
 
 ## Serving other hosts
 
-The loopback port stays plain HTTP, for the service's own host. Other hosts reach the JSON API,
-and the app, over TLS on a second listener, `[api.tls]`, which sign-in must be required for. The
-first admin is added on the service's host, over loopback. A `reef` on another host names the
-service by `[api] url`, which wins over `address`, and trusts `[api] ca` beside the system's
-roots and `$SSL_CERT_FILE`'s. The configs for both sides are in
+Every port speaks HTTPS (C87). The loopback port, for the service's own host, serves reef's own
+certificate, signed by a CA reef makes and keeps in `[api] certs`, which the CLI on the host
+trusts. Other hosts reach the JSON API, and the app, on a second listener, `[api.tls]`, serving
+the certificate it names or reef's own, which sign-in must be required for unless it is on
+loopback too. A plain-HTTP request on either is answered with a 307 to `https://` at the host,
+port and path it asked for, read by `tls::redirect_answer` from the connection's first bytes,
+since a TLS client's open with a handshake record. The first admin is added on the service's
+host, over loopback. A `reef` on another host names the service by `[api] url`, which wins over
+`address`, and trusts `[api] ca` beside the system's roots and `$SSL_CERT_FILE`'s. The configs for both sides are in
 [Configure](../central/deploy/config.md) and [Point it at the
 server](../central/using/index.md#point-it-at-the-server).
 
+- **reef's own is made once and kept** (`certs::ensure`): its CA for ten years, and the
+  certificate it signs for 397 days, made again from the same CA when the names it must cover
+  change or it nears its end, so trust in `ca.pem` outlives it. The keys are readable by the
+  server's account alone.
 - **The certificate is read as the server starts,** so a renewed one is served from the next
   restart. A chain or key that can't be read, or a key that isn't the certificate's, stops it,
   naming the key that set the file.
@@ -53,7 +62,9 @@ server](../central/using/index.md#point-it-at-the-server).
   directory (`--repo`), or a remote that names a path on it, `file://` or bare. A user who isn't
   one is refused before the path is looked at. `[remotes] hosts` limits the hosts a remote may
   be cloned from, for every caller.
-- **Known limits:** no HSTS, since the loopback port is plain HTTP on a name the browser may
-  share; no reading of a reverse proxy's `X-Forwarded-*`, so a proxy in front makes every caller
-  look local; and on the plain port, with sign-in off, a page whose name a DNS rebinding points at
-  loopback is the same origin as the service (C80).
+- **Known limits:** no HSTS, since it would make the warning a browser shows before it trusts
+  reef's own CA one that can't be clicked through; no reading of a reverse proxy's
+  `X-Forwarded-*`, so a proxy in front makes every caller look local; and with sign-in off,
+  anything on the host reaches the loopback port. A page whose name a DNS rebinding points at
+  loopback is only redirected to `https://` at that name, which reef's certificate doesn't cover
+  (C80).

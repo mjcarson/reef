@@ -76,10 +76,13 @@
 //!   which hands each route its [`Caller`] and, with sign-in required, answers 401 to a caller
 //!   whose token signs nobody in. A 401 says `WWW-Authenticate: Bearer`, and a 429
 //!   `Retry-After`. With sign-in required, a change stream ends once its token signs nobody in.
-//! - **Plain HTTP on localhost, TLS beside it.** [`bind`] refuses any address but a loopback
-//!   one for plain HTTP, which this host's CLI, hooks and first admin call. Other hosts reach
-//!   the API over TLS, on the listener `[api.tls]` adds ([`tls::bind`](crate::tls::bind)), and
-//!   [`serve_router`] serves one router on both.
+//! - **HTTPS on localhost, and beside it for other hosts.** [`Listeners::bind`] makes or reads
+//!   back reef's own certificate ([`certs`](crate::certs)) and listens over HTTPS on a loopback
+//!   address alone, which this host's CLI, hooks and first admin call. Other hosts reach the API
+//!   on the listener `[api.tls]` adds ([`tls::bind`](crate::tls::bind)), and [`serve_router`]
+//!   serves one router on both. A plain-HTTP request on either is redirected to https, and only
+//!   a proxy on this host that speaks nothing else, as `dx serve`'s, is served plain
+//!   ([`Local::Plain`]).
 //! - **Writes from another origin are refused.** The guard judges every write a browser sends
 //!   by where it came from ([`origin`](crate::origin)), so a page of another origin can't write
 //!   through a visitor's browser, signed in or not.
@@ -110,6 +113,7 @@ use serde::de::DeserializeOwned;
 use std::convert::Infallible;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::BroadcastStream;
@@ -119,6 +123,7 @@ use tracing::instrument;
 
 use crate::auth::{self, Caller, Peer};
 use crate::backend::Backend;
+use crate::certs::Own;
 use crate::conf::Conf;
 use crate::remote::{BadRemote, FetchFailed};
 use crate::service::{NoSession, NoUser, NotAllowed, NotSignedIn, Service, TooManyTries};
@@ -263,72 +268,124 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .with_state(serves)
 }
 
-/// Listens over plain HTTP where reef's config says the API is served, refusing any but a
-/// loopback address
-///
-/// Plain HTTP is for this host alone, signed in or not; other hosts are served over TLS, on the
-/// listener [`Listeners::bind`] adds where `[api.tls]` says.
-///
-/// # Arguments
-///
-/// * `conf` - reef's config, whose `api.address` names where to listen
-#[instrument(name = "api::bind", skip_all, err(Debug))]
-pub async fn bind(conf: &Conf) -> anyhow::Result<TcpListener> {
-    let address = conf.api.address;
-    // only this host, over plain HTTP
-    anyhow::ensure!(
-        address.ip().is_loopback(),
-        "reef's JSON API serves plain HTTP to localhost only, and {address} is not a loopback \
-         address: set {} to 127.0.0.1 or [::1], and serve other hosts over TLS with `[api.tls]`",
-        conf.key("api.address")
-    );
-    // a port another program holds is named, with the key that chose it
-    TcpListener::bind(address).await.map_err(|error| {
-        anyhow::anyhow!(
-            "listening on {address}, set by {}: {error}",
-            conf.key("api.address")
-        )
-    })
+/// This host's listener: HTTPS on a loopback address, or plain HTTP under `dx serve` alone,
+/// whose proxy speaks it to the port dx names
+pub enum Local {
+    /// HTTPS, serving reef's own certificate, a plain-HTTP request redirected to it
+    Tls(TlsListener),
+    /// Plain HTTP, for a proxy on this host that speaks nothing else
+    Plain(TcpListener),
 }
 
-/// Where a server listens: plain HTTP on loopback, and TLS beside it if reef's config says
+/// Where a server listens: HTTPS on loopback, and for other hosts beside it if reef's config
+/// says
 pub struct Listeners {
-    /// Plain HTTP, on a loopback address, for this host
-    pub plain: TcpListener,
-    /// TLS, on any address, for other hosts, if `[api.tls]` names a certificate
+    /// This host's, on a loopback address
+    pub local: Local,
+    /// Other hosts', on the address `[api.tls]` names, if it names one
     pub tls: Option<TlsListener>,
+    /// reef's own certificate, which the loopback listener serves, if it was made or read
+    pub own: Option<Own>,
 }
 
 impl From<TcpListener> for Listeners {
-    /// Plain HTTP alone
+    /// Plain HTTP alone, as under `dx serve`
     ///
     /// # Arguments
     ///
     /// * `plain` - The loopback listener
     fn from(plain: TcpListener) -> Listeners {
-        Listeners { plain, tls: None }
+        Listeners {
+            local: Local::Plain(plain),
+            tls: None,
+            own: None,
+        }
+    }
+}
+
+impl From<TlsListener> for Listeners {
+    /// HTTPS on loopback alone
+    ///
+    /// # Arguments
+    ///
+    /// * `local` - The loopback listener
+    fn from(local: TlsListener) -> Listeners {
+        Listeners {
+            local: Local::Tls(local),
+            tls: None,
+            own: None,
+        }
     }
 }
 
 impl Listeners {
-    /// Listens everywhere reef's config says: plain HTTP on loopback, then TLS if it names a
-    /// certificate
+    /// Listens everywhere reef's config says, over HTTPS: on loopback with reef's own
+    /// certificate, made if it isn't there, then for other hosts if `[api.tls]` names an address
     ///
     /// # Arguments
     ///
-    /// * `conf` - reef's config, whose `api.address` and `api.tls` name where to listen
+    /// * `conf` - reef's config, whose `api` names where to listen and what to serve
     #[instrument(name = "Listeners::bind", skip_all, err(Debug))]
     pub async fn bind(conf: &Conf) -> anyhow::Result<Listeners> {
-        // this host's first, so a mistake in either stops the server before shoal starts
-        let plain = bind(conf).await?;
-        let tls = tls::bind(conf).await?;
-        Ok(Listeners { plain, tls })
+        // reef's own certificate, then this host's listener, so a mistake in any stops the
+        // server before shoal starts
+        let own = tls::own(conf)?;
+        let local = Local::Tls(tls::bind_local(conf, &own).await?);
+        let tls = tls::bind(conf, &own).await?;
+        Ok(Listeners {
+            local,
+            tls,
+            own: Some(own),
+        })
     }
 
-    /// The root each listener serves at, such as `http://127.0.0.1:12180`, for a server to say
+    /// Listens on a plain loopback port a proxy on this host speaks to, as dx's does, and for
+    /// other hosts over HTTPS if `[api.tls]` names an address
+    ///
+    /// # Arguments
+    ///
+    /// * `plain` - The loopback listener the proxy speaks to
+    /// * `conf` - reef's config, whose `api.tls` names where other hosts reach it
+    #[instrument(name = "Listeners::beside_plain", skip_all, err(Debug))]
+    pub async fn beside_plain(plain: TcpListener, conf: &Conf) -> anyhow::Result<Listeners> {
+        // reef's own certificate only if other hosts are served one
+        let (tls, own) = match &conf.api.tls {
+            Some(_) => {
+                let own = tls::own(conf)?;
+                (tls::bind(conf, &own).await?, Some(own))
+            }
+            None => (None, None),
+        };
+        Ok(Listeners {
+            local: Local::Plain(plain),
+            tls,
+            own,
+        })
+    }
+
+    /// Where reef's own CA is, for a server to say as it starts, so a browser or another host's
+    /// CLI can be told to trust it, or `None` if no listener serves reef's own certificate
+    pub fn trust_note(&self) -> Option<String> {
+        // made this start, or kept from an earlier one
+        let own = self.own.as_ref()?;
+        let made = match own.made_ca {
+            true => "made now",
+            false => "kept",
+        };
+        Some(format!(
+            "reef's own certificate is signed by its CA in {} ({made}): trust that file in a \
+             browser, or name it as `[api] ca` on another host",
+            own.ca.display()
+        ))
+    }
+
+    /// The root each listener serves at, such as `https://127.0.0.1:12180`, for a server to say
     pub fn roots(&self) -> std::io::Result<Vec<String>> {
-        // plain HTTP, then TLS if there is a listener for it
-        let mut roots = vec![format!("http://{}", self.plain.local_addr()?)];
+        // this host's, then other hosts' if there is a listener for them
+        let mut roots = vec![match &self.local {
+            Local::Tls(local) => format!("https://{}", axum::serve::Listener::local_addr(local)?),
+            Local::Plain(plain) => format!("http://{}", plain.local_addr()?),
+        }];
         if let Some(tls) = &self.tls {
             roots.push(format!(
                 "https://{}",
@@ -362,12 +419,25 @@ pub async fn serve_router(
         // stopped, or the stop dropped as the other listener failed
         let _ = stopping.wait_for(|stopped| *stopped).await;
     };
-    // plain HTTP, and TLS beside it, each request knowing its peer
-    let plain = axum::serve(
-        listeners.plain,
-        router.clone().into_make_service_with_connect_info::<Peer>(),
-    )
-    .with_graceful_shutdown(told(stopping.clone()));
+    // this host's listener, and other hosts' beside it, each request knowing its peer
+    let local: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> = match listeners.local {
+        Local::Tls(local) => Box::pin(
+            axum::serve(
+                local,
+                router.clone().into_make_service_with_connect_info::<Peer>(),
+            )
+            .with_graceful_shutdown(told(stopping.clone()))
+            .into_future(),
+        ),
+        Local::Plain(plain) => Box::pin(
+            axum::serve(
+                plain,
+                router.clone().into_make_service_with_connect_info::<Peer>(),
+            )
+            .with_graceful_shutdown(told(stopping.clone()))
+            .into_future(),
+        ),
+    };
     let tls = listeners.tls.map(|tls| {
         axum::serve(tls, router.into_make_service_with_connect_info::<Peer>())
             .with_graceful_shutdown(told(stopping))
@@ -375,9 +445,9 @@ pub async fn serve_router(
     let serving = async move {
         match tls {
             Some(tls) => {
-                tokio::try_join!(plain.into_future(), tls.into_future())?;
+                tokio::try_join!(local, tls.into_future())?;
             }
-            None => plain.await?,
+            None => local.await?,
         }
         Ok::<(), std::io::Error>(())
     };
@@ -403,7 +473,7 @@ pub async fn serve_router(
 ///
 /// # Arguments
 ///
-/// * `listeners` - Where to serve, from [`Listeners::bind`], or a loopback listener from [`bind`]
+/// * `listeners` - Where to serve, from [`Listeners::bind`], or one loopback listener
 /// * `serves` - The service every route calls
 /// * `stop` - Resolves when the server should stop
 #[instrument(name = "api::serve", skip_all, err(Debug))]

@@ -67,7 +67,8 @@
 //!   diff, the carry of its start and its commits' trailers taken through gix.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
-//! - **Config** ([`conf`]): `[api] address` alone, from the file the service reads.
+//! - **Config** ([`conf`]): `[api]`'s `address`, `url`, `ca` and `certs` alone, from the file the
+//!   service reads.
 //! - **Credentials** ([`credentials`]): the token each service issued at `reef login`, kept a
 //!   server each in a file private to the user, and sent with every request.
 //! - **Signing in** ([`login`]): `reef login`, `logout` and `whoami`, and adding and listing the

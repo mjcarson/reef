@@ -18,8 +18,9 @@ serde_json.workspace = true
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
 toml = "1"
-# HTTP to the service: plain on localhost, over TLS to another host, trusting the system's roots
-# and any the config names, at the version central's tests resolve
+# HTTPS to the service, on localhost and on another host alike, trusting the system's roots, the
+# CA the service on this host made, and any the config names, at the version central's tests
+# resolve
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 # reqwest's runtime, which the MCP server runs on too, over standard input and output, and
 # the clear's injector, which runs zellij, tmux and `claude agents` and waits between looks

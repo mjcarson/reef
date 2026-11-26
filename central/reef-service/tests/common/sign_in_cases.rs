@@ -485,9 +485,10 @@ pub async fn the_browser_signs_in_with_a_cookie<B: Backend + 'static>(
     for attribute in ["HttpOnly", "SameSite=Strict", "Path=/", "Max-Age=2592000"] {
         assert!(cookie.contains(attribute), "{cookie} lacks {attribute}");
     }
+    // Secure, since every port reef has speaks HTTPS
     assert!(
-        !cookie.contains("Secure"),
-        "{cookie} is Secure with no TLS to send it over"
+        cookie.contains("Secure"),
+        "{cookie} isn't Secure over HTTPS"
     );
     let pair = cookie.split(';').next().unwrap().to_string();
     // but never on to another site
@@ -663,7 +664,7 @@ async fn refuses_cross_origin<B: Backend + 'static>(
     // and so does a page of the service's own, as each browser says so
     let ours = [
         ("sec-fetch-site", "same-origin".to_string()),
-        ("origin", format!("http://{}", ax.address)),
+        ("origin", format!("https://{}", ax.address)),
     ];
     for ((header, value), id) in ours.iter().zip(["C2", "C3"]) {
         let request = client
@@ -755,11 +756,14 @@ pub async fn signing_in_over_tls_sets_a_secure_cookie<B: Backend + 'static>(
         cleared.contains("Max-Age=0") && cleared.contains("Secure"),
         "{cleared}"
     );
-    // over plain loopback, the cookie isn't Secure
+    // on this host's loopback port too, which speaks HTTPS as well, the cookie is Secure
     let response = ax.client.raw(form(&ax.client)).await?;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let cookie = set_cookie(&response).expect("signing in over loopback set no cookie");
-    assert!(!cookie.contains("Secure"), "{cookie} is Secure with no TLS");
+    assert!(
+        cookie.contains("Secure"),
+        "{cookie} isn't Secure over HTTPS"
+    );
     // and an origin naming plain HTTP is refused over TLS, the same host and port or not
     let request = tls
         .request(Method::POST, paths::SIGN_OUT)
@@ -769,8 +773,8 @@ pub async fn signing_in_over_tls_sets_a_secure_cookie<B: Backend + 'static>(
 }
 
 /// Over TLS, a client that offers HTTP/2 is answered over it, eight change streams held open
-/// and a read beside them, as a browser's tabs share one connection; plain HTTP, and a client
-/// that offers only HTTP/1.1, are answered over HTTP/1.1
+/// and a read beside them, as a browser's tabs share one connection, on this host's port as on
+/// other hosts'; a client that offers only HTTP/1.1 is answered over HTTP/1.1
 ///
 /// # Arguments
 ///
@@ -804,8 +808,8 @@ pub async fn tls_serves_http2_to_a_client_that_offers_it<B: Backend + 'static>(
         (StatusCode::OK, Version::HTTP_2)
     );
     // and a change made now reaches every stream
-    let plain = ax.client.signed(&token);
-    let (status, _): (_, Checked) = plain.post(&paths::nodes(&ax.plan), &work("C2")).await?;
+    let local = ax.client.signed(&token);
+    let (status, _): (_, Checked) = local.post(&paths::nodes(&ax.plan), &work("C2")).await?;
     assert_eq!(status, StatusCode::OK);
     for stream in &mut streams {
         let chunk = tokio::time::timeout(Duration::from_secs(5), stream.chunk()).await??;
@@ -831,14 +835,134 @@ pub async fn tls_serves_http2_to_a_client_that_offers_it<B: Backend + 'static>(
         (read.status(), read.version()),
         (StatusCode::OK, Version::HTTP_11)
     );
-    // and plain HTTP stays HTTP/1.1, since browsers speak HTTP/2 only over TLS
-    let read = plain
-        .raw(plain.request(Method::GET, paths::PROJECTS))
+    // and this host's loopback port, HTTPS as well, speaks HTTP/2 too
+    let read = local
+        .raw(local.request(Method::GET, paths::PROJECTS))
         .await?;
     assert_eq!(
         (read.status(), read.version()),
-        (StatusCode::OK, Version::HTTP_11)
+        (StatusCode::OK, Version::HTTP_2)
     );
+    Ok(())
+}
+
+/// Sends a request's head over plain TCP to a TLS port, and reads the whole answer
+///
+/// # Arguments
+///
+/// * `address` - The port's address
+/// * `head` - The request's head, up to its blank line
+async fn plain_answer(address: std::net::SocketAddr, head: &str) -> anyhow::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // the head written, then everything read until the port closes
+    let mut stream = tokio::net::TcpStream::connect(address).await?;
+    stream.write_all(head.as_bytes()).await?;
+    let mut answer = String::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut answer)).await??;
+    Ok(answer)
+}
+
+/// A plain-HTTP request on a TLS port, this host's or other hosts', is answered with a 307 to
+/// https at the host, port and path it asked for, its method kept, and one naming no host with
+/// a 400; the port then answers over HTTPS as ever
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served over TLS beside loopback, asking callers to sign in
+pub async fn plain_http_is_redirected_to_https<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api_over_tls().await?;
+    let wide = ax
+        .tls
+        .as_ref()
+        .expect("the fixture serves other hosts")
+        .address;
+    let wide = std::net::SocketAddr::from(([127, 0, 0, 1], wide.port()));
+    // a page asked for on either port, by the name it was called at, through a tunnel or not
+    for address in [ax.address, wide] {
+        let head = "GET /plans/reef/central?node=C1 HTTP/1.1\r\nHost: localhost:11180\r\n\
+                    User-Agent: a case\r\n\r\n";
+        let answer = plain_answer(address, head).await?;
+        assert!(
+            answer.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"),
+            "{address}: {answer}"
+        );
+        assert!(
+            answer.contains("\r\nLocation: https://localhost:11180/plans/reef/central?node=C1\r\n"),
+            "{address}: {answer}"
+        );
+        assert!(answer.ends_with(
+            "reef answers over HTTPS only: https://localhost:11180/plans/reef/central?node=C1\n"
+        ));
+        // and a request naming no host, which has nowhere to go, is told to call https
+        let answer = plain_answer(address, "GET / HTTP/1.0\r\n\r\n").await?;
+        assert!(
+            answer.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{answer}"
+        );
+        assert!(answer.contains("HTTPS only"), "{answer}");
+    }
+    // a write, as an HTTP client sends it, is sent on with its method and body kept
+    let plain = Client::new(format!("http://{}", ax.address));
+    let request = plain
+        .request(Method::POST, &paths::nodes(&ax.plan))
+        .json(&work("C1"));
+    let response = plain.raw(request).await?;
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+    let location = response
+        .headers()
+        .get(LOCATION)
+        .and_then(|location| location.to_str().ok())
+        .map(str::to_string);
+    assert_eq!(
+        location,
+        Some(format!("https://{}{}", ax.address, paths::nodes(&ax.plan)))
+    );
+    // and the same port answers over HTTPS beside it, as if nothing happened
+    let (status, _): (_, Me) = ax.client.get(paths::ME).await?;
+    assert_eq!(status, StatusCode::OK);
+    Ok(())
+}
+
+/// With no certificate configured and sign-in off, as one person's server on localhost runs,
+/// the loopback port serves HTTPS over HTTP/2 with reef's own certificate, and the CLI on the
+/// host calls it trusting reef's own CA with no `ca` named
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking nobody to sign in
+pub async fn this_hosts_port_serves_the_cli_over_https_with_sign_in_off<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api().await?;
+    // a client trusting reef's own CA, offering HTTP/2, as a browser that trusts it does
+    let read = ax
+        .client
+        .raw(ax.client.request(Method::GET, paths::ME))
+        .await?;
+    assert_eq!(
+        (read.status(), read.version()),
+        (StatusCode::OK, Version::HTTP_2)
+    );
+    // the CLI on the host, its config naming the address and where reef keeps its CA alone
+    let conf = ax.dir.join("cli.toml");
+    std::fs::write(&conf, ax.cli_config())?;
+    let cli = reef::Client::new(&reef::Conf::load(Some(&conf))?)?;
+    assert_eq!(cli.base(), format!("https://{}", ax.address));
+    let me = cli.me().await?;
+    assert!(!me.required, "{me:?}");
+    // and with no CA to trust, it says what to trust rather than that nothing is running
+    let mut bare = reef::Conf::load(Some(&conf))?;
+    bare.api.certs = Some(ax.dir.join("no-certs-here"));
+    let refused = reef::Client::new(&bare)?
+        .me()
+        .await
+        .expect_err("an untrusted certificate was trusted")
+        .to_string();
+    assert!(refused.contains("certificate"), "{refused}");
+    assert!(refused.contains("`[api] ca`"), "{refused}");
+    assert!(!refused.contains("isn't running"), "{refused}");
     Ok(())
 }
 

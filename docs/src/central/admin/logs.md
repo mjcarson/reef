@@ -3,6 +3,7 @@
 ```sh
 journalctl -u reef -b              # where it listens, sign-in, and any warning about its config
 curl https://reef.example.com:12443/api/v1/me      # {"required":true}: up, and asking callers to sign in
+curl --cacert /etc/reef/reef-ca.pem https://127.0.0.1:12180/api/v1/me   # its loopback port, on the host
 ```
 
 `/api/v1/me` answers without signing in, so it can serve as a health check.

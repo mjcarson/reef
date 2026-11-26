@@ -100,9 +100,9 @@ impl Cx {
     ///
     /// * `ax` - The served twin
     fn over(ax: Ax<MemoryBackend>) -> anyhow::Result<Cx> {
-        // the config the CLI reads its address from
+        // the config the CLI reads its address and reef's own CA from
         let conf = ax.dir.join("reef.toml");
-        std::fs::write(&conf, format!("[api]\naddress = \"{}\"\n", ax.address))?;
+        std::fs::write(&conf, ax.cli_config())?;
         let credentials = ax.dir.join("home/reef/credentials.toml");
         Ok(Cx {
             ax,

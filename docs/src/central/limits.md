@@ -12,8 +12,9 @@ What central reef can't do yet, and the plan's node for each where there is one.
 - **A project follows one branch.** Docs on other branches can't be linked until they reach it.
 - **No reverse proxy.** reef reads no forwarded headers
   ([What not to do](deploy/dont.md)).
-- **The plain port trusts its host.** With sign-in off, a web page that DNS rebinding points at
-  127.0.0.1 counts as the plain port's own origin (C80).
+- **The loopback port trusts its host.** With sign-in off, anything on the host reaches it. A
+  web page that DNS rebinding points at 127.0.0.1 is only redirected to `https://` at its own
+  name, which reef's certificate doesn't cover (C80).
 - **Docs in LFS or submodules.** A doc kept in LFS reads as its pointer, and a submodule's
   files aren't read.
 - **The sign-in throttle forgets** on a restart.

@@ -67,9 +67,10 @@ impl Fx {
             tokio::spawn(async move { axum::serve(listener, router).await });
             anyhow::Ok(address)
         })?;
-        // the CLI finds the app where the config says the JSON API is
+        // the CLI finds the app where the config says the JSON API is, served plain here, as
+        // only a proxy on this host is, since the suite is of the app and not its listeners
         let conf = dir.join("reef.toml");
-        std::fs::write(&conf, format!("[api]\naddress = \"{address}\"\n"))?;
+        std::fs::write(&conf, format!("[api]\nurl = \"http://{address}\"\n"))?;
         let http = reqwest::Client::builder().no_proxy().build()?;
         Ok(Fx {
             runtime,

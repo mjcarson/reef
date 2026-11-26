@@ -1,11 +1,18 @@
-//! Serving over TLS: the listener beside the loopback one, which other hosts reach
+//! Serving over TLS: every listener reef has, the loopback one and the one other hosts reach
 //!
-//! `[api] address` is plain HTTP and loopback only, for the service's own host: its CLI, its
-//! hooks and the first admin. `[api.tls]` adds a second listener, on any address, that speaks TLS
-//! with the certificate and key it names, so the JSON API and the app reach other hosts.
+//! `[api] address` is loopback only, for the service's own host: its CLI, its hooks and the
+//! first admin, and a browser through a tunnel to it. It serves reef's own certificate
+//! ([`certs`](crate::certs)), made for this host's names, so the CLI here trusts reef's CA and
+//! calls it by name. `[api.tls]` adds a second listener, on any address, serving the
+//! certificate it names, else reef's own, so the JSON API and the app reach other hosts.
 //!
-//! - **Only with sign-in required.** Other hosts reaching a service that answers anyone would let
-//!   anyone on the network write, so [`bind`] refuses TLS unless `[auth] required` is set.
+//! - **HTTPS only.** A connection that doesn't open with a TLS handshake is answered as plain
+//!   HTTP once, with a redirect to https at the host, port and path it asked for
+//!   ([`redirect_answer`]), so `http://` typed in a browser, or through a tunnel, lands on the
+//!   same port over TLS.
+//! - **Sign-in off loopback.** Other hosts reaching a service that answers anyone would let
+//!   anyone on the network write, so [`bind`] refuses `[api.tls]` on an address that isn't a
+//!   loopback one unless `[auth] required` is set.
 //! - **Read once, as the server starts.** The chain and its key are PEM files read by [`bind`],
 //!   so a renewed certificate is served from the next restart.
 //! - **Handshakes run beside each other.** [`TlsListener`] hands axum a connection once its
@@ -13,15 +20,17 @@
 //!   so a client that opens a connection and says nothing never holds up the next.
 //! - **HTTP/2 first, then HTTP/1.1,** offered by ALPN. Over HTTP/2 a browser carries every
 //!   tab's change streams and calls on one connection, where HTTP/1.1 gives it six to a host
-//!   across all its tabs, which a few plan pages' streams take up. The plain listener speaks
-//!   HTTP/1.1, since browsers speak HTTP/2 only over TLS.
+//!   across all its tabs, which a few plan pages' streams take up. Browsers speak HTTP/2 only
+//!   over TLS, which is why every listener speaks it.
 
 use axum::extract::connect_info::Connected;
+use axum::http::uri::{Authority, PathAndQuery};
 use axum::serve::{IncomingStream, Listener};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -32,6 +41,7 @@ use tokio_rustls::server::TlsStream;
 use tracing::instrument;
 
 use crate::auth::Peer;
+use crate::certs::{self, Own};
 use crate::conf::Conf;
 
 /// How long a connection has to finish its TLS handshake before it is dropped
@@ -42,6 +52,12 @@ pub const HANDSHAKES_MAX: usize = 128;
 
 /// How long to wait before accepting again after an error a retry can't fix at once
 const ACCEPT_BACKOFF: Duration = Duration::from_secs(1);
+
+/// The first byte of a TLS record that opens a handshake, which every TLS client sends first
+const HANDSHAKE_RECORD: u8 = 0x16;
+
+/// The most of a plain-HTTP request's head read to answer it with a redirect
+pub const PLAIN_HEAD_MAX: usize = 8 * 1024;
 
 /// A listener that hands axum each connection once its TLS handshake is done
 pub struct TlsListener {
@@ -77,20 +93,114 @@ impl TlsListener {
     fn start(&mut self, stream: TcpStream, peer: SocketAddr) {
         let acceptor = self.acceptor.clone();
         self.handshakes.spawn(async move {
-            // a handshake that fails or takes too long is dropped, saying so to the logs alone
-            match tokio::time::timeout(HANDSHAKE_WAIT, acceptor.accept(stream)).await {
-                Ok(Ok(stream)) => Some((stream, peer)),
+            // a handshake, or a plain request answered, that fails or takes too long is
+            // dropped, saying so to the logs alone
+            match tokio::time::timeout(HANDSHAKE_WAIT, open(acceptor, stream)).await {
+                Ok(Ok(Some(stream))) => Some((stream, peer)),
+                Ok(Ok(None)) => None,
                 Ok(Err(error)) => {
-                    tracing::debug!(%peer, %error, "a TLS handshake failed");
+                    tracing::debug!(%peer, %error, "a connection's TLS handshake failed");
                     None
                 }
                 Err(_) => {
-                    tracing::debug!(%peer, "a TLS handshake took too long");
+                    tracing::debug!(%peer, "a connection's TLS handshake took too long");
                     None
                 }
             }
         });
     }
+}
+
+/// Opens a connection: its TLS handshake made if it opens with one, else its plain-HTTP request
+/// answered with a redirect to https, and `None` returned
+///
+/// # Arguments
+///
+/// * `acceptor` - The TLS config every handshake is made with
+/// * `stream` - The connection, as TCP accepted it
+async fn open(
+    acceptor: TlsAcceptor,
+    mut stream: TcpStream,
+) -> std::io::Result<Option<TlsStream<TcpStream>>> {
+    // the first byte, left for the handshake to read; a connection that closes says nothing
+    let mut first = [0u8; 1];
+    if stream.peek(&mut first).await? == 0 {
+        return Ok(None);
+    }
+    // a TLS client's first record opens its handshake
+    if first[0] == HANDSHAKE_RECORD {
+        return acceptor.accept(stream).await.map(Some);
+    }
+    // anything else is read as plain HTTP's head, up to its blank line, and redirected
+    let mut head = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 1024];
+    while head.len() < PLAIN_HEAD_MAX && !head.windows(4).any(|end| end == b"\r\n\r\n") {
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        head.extend_from_slice(&chunk[..read]);
+    }
+    stream.write_all(redirect_answer(&head).as_bytes()).await?;
+    stream.shutdown().await?;
+    Ok(None)
+}
+
+/// What a plain-HTTP request on a TLS port is answered with: a 307 to https at the host, port and
+/// path it asked for, else a 400 saying reef answers over HTTPS
+///
+/// A 307 keeps the request's method and body, and isn't kept by a browser as a permanent one.
+///
+/// # Arguments
+///
+/// * `head` - The request's head as it came, up to its blank line
+///
+/// # Examples
+///
+/// ```
+/// use reef_service::tls::redirect_answer;
+///
+/// let answer = redirect_answer(b"GET /plans/reef/central?x=1 HTTP/1.1\r\nHost: localhost:11180\r\n\r\n");
+/// assert!(answer.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"));
+/// assert!(answer.contains("\r\nLocation: https://localhost:11180/plans/reef/central?x=1\r\n"));
+/// assert!(redirect_answer(b"GET / HTTP/1.1\r\n\r\n").starts_with("HTTP/1.1 400 Bad Request\r\n"));
+/// ```
+pub fn redirect_answer(head: &[u8]) -> String {
+    // the request's target and the host it was sent to, each one a URL can hold
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut request = httparse::Request::new(&mut headers);
+    let parsed = matches!(request.parse(head), Ok(httparse::Status::Complete(_)));
+    let host = request
+        .headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("host"))
+        .and_then(|header| std::str::from_utf8(header.value).ok())
+        .and_then(|host| host.trim().parse::<Authority>().ok());
+    let path = request
+        .path
+        .filter(|path| path.starts_with('/'))
+        .and_then(|path| path.parse::<PathAndQuery>().ok());
+    // the same place over https, else what to do instead
+    let (status, location, body) = match (parsed, host, path) {
+        (true, Some(host), Some(path)) => {
+            let location = format!("https://{host}{path}");
+            let body = format!("reef answers over HTTPS only: {location}\n");
+            ("307 Temporary Redirect", Some(location), body)
+        }
+        _ => (
+            "400 Bad Request",
+            None,
+            "reef answers over HTTPS only: call this host and port with https://\n".to_string(),
+        ),
+    };
+    let location = location
+        .map(|location| format!("Location: {location}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "HTTP/1.1 {status}\r\n{location}Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
 }
 
 impl Listener for TlsListener {
@@ -163,35 +273,101 @@ async fn backoff(error: std::io::Error) {
     tokio::time::sleep(ACCEPT_BACKOFF).await;
 }
 
-/// Listens over TLS where reef's config says, if it says anywhere
+/// reef's own certificate, made or read back for every name this config's listeners are
+/// reached by: this host's, `[api] names`, and `[api.tls]`'s address if it names one host
 ///
-/// Refuses TLS with sign-in off, since other hosts would reach a service that answers anyone,
-/// and names the key behind a certificate or key that can't be read.
+/// # Arguments
+///
+/// * `conf` - reef's config
+#[instrument(name = "tls::own", skip_all, err(Debug))]
+pub fn own(conf: &Conf) -> anyhow::Result<Own> {
+    // the names configured, and the wide listener's own address
+    let mut extra = conf.api.names.clone();
+    if let Some(tls) = &conf.api.tls {
+        let ip = tls.address.ip();
+        if !ip.is_unspecified() && !ip.is_loopback() {
+            extra.push(ip.to_string());
+        }
+    }
+    // kept where the config says, else in reef's data home, as the CLI here looks for it
+    let dir = conf.certs_dir()?;
+    certs::ensure(&dir, &certs::names(&extra), std::time::SystemTime::now()).map_err(|error| {
+        anyhow::anyhow!(
+            "{error:#}: reef's own certificate is kept in {}, set by {}",
+            dir.display(),
+            conf.key("api.certs")
+        )
+    })
+}
+
+/// Listens over HTTPS on this host's loopback address, serving reef's own certificate
+///
+/// # Arguments
+///
+/// * `conf` - reef's config, whose `api.address` names where to listen
+/// * `own` - reef's own certificate, from [`own`]
+#[instrument(name = "tls::bind_local", skip_all, err(Debug))]
+pub async fn bind_local(conf: &Conf, own: &Own) -> anyhow::Result<TlsListener> {
+    // only this host, whom reef's own certificate names
+    let address = conf.api.address;
+    anyhow::ensure!(
+        address.ip().is_loopback(),
+        "{address} is not a loopback address: set {} to 127.0.0.1 or [::1], and serve other \
+         hosts with `[api.tls]`",
+        conf.key("api.address")
+    );
+    let config = server_config(&own.cert, &own.key)?;
+    // a port another program holds is named, with the key that chose it
+    let tcp = TcpListener::bind(address).await.map_err(|error| {
+        anyhow::anyhow!(
+            "listening on {address}, set by {}: {error}",
+            conf.key("api.address")
+        )
+    })?;
+    Ok(TlsListener::new(tcp, config))
+}
+
+/// Listens for other hosts where `[api.tls]` says, if it says anywhere, serving the certificate
+/// it names, else reef's own
+///
+/// Refuses an address that isn't a loopback one with sign-in off, since other hosts would reach
+/// a service that answers anyone, and names the key behind a certificate or key that can't be
+/// read.
 ///
 /// # Arguments
 ///
 /// * `conf` - reef's config, whose `api.tls` names where to listen and the certificate to serve
+/// * `own` - reef's own certificate, from [`own`], served if `api.tls` names none
 #[instrument(name = "tls::bind", skip_all, err(Debug))]
-pub async fn bind(conf: &Conf) -> anyhow::Result<Option<TlsListener>> {
-    // no `[api.tls]` is plain HTTP on loopback alone
+pub async fn bind(conf: &Conf, own: &Own) -> anyhow::Result<Option<TlsListener>> {
+    // no `[api.tls]` is this host's loopback port alone
     let Some(tls) = &conf.api.tls else {
         return Ok(None);
     };
     // other hosts reach it only if every caller signs in
     anyhow::ensure!(
-        conf.auth.required,
+        tls.address.ip().is_loopback() || conf.auth.required,
         "{} serves reef to other hosts, so every caller must sign in: set {} to true",
         conf.key("api.tls"),
         conf.key("auth.required")
     );
-    // the certificate and its key, read before anything listens
-    let config = server_config(&tls.cert, &tls.key).map_err(|error| {
-        anyhow::anyhow!(
-            "{error}, as {} and {} name them",
+    // the certificate and its key named, both or neither, read before anything listens
+    let config = match (&tls.cert, &tls.key) {
+        (Some(cert), Some(key)) => server_config(cert, key).map_err(|error| {
+            anyhow::anyhow!(
+                "{error}, as {} and {} name them",
+                conf.key("api.tls.cert"),
+                conf.key("api.tls.key")
+            )
+        })?,
+        (None, None) => server_config(&own.cert, &own.key)?,
+        _ => anyhow::bail!(
+            "{} and {} name a certificate and its key together: set both, or neither for reef's \
+             own",
             conf.key("api.tls.cert"),
             conf.key("api.tls.key")
-        )
-    })?;
+        ),
+    };
     // any address, named with its key if it is taken
     let address = tls.address;
     let tcp = TcpListener::bind(address).await.map_err(|error| {

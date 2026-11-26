@@ -11,8 +11,9 @@
 //! with `embedded` or reaches an external node such as `reef-shoal`, or a `MemoryBackend`, its
 //! in-memory twin. The rows reef keeps in shoal are its `schema`, the user's queue sorts by
 //! `rank` strings, and reef's `conf` says how to
-//! reach shoal and where to serve: plain HTTP on loopback, and over TLS beside it (`tls`), every
-//! write a browser sends judged by its `origin`. Projects name the repos their plans describe, and `repo`
+//! reach shoal and where to serve: HTTPS on loopback, and beside it for other hosts (`tls`),
+//! with a certificate of reef's own (`certs`) unless one is named, every write a browser sends
+//! judged by its `origin`. Projects name the repos their plans describe, and `repo`
 //! locates the one a working directory, or a linked worktree, is in. A project registered by its
 //! git URL is a remote one: `remote` checks the URL and keeps a clone of it, and `tree` reads its
 //! docs at the commit last fetched. Before a pool starts,
@@ -22,6 +23,7 @@
 pub mod api;
 pub mod auth;
 pub mod backend;
+pub mod certs;
 #[cfg(feature = "embedded")]
 pub mod checks;
 pub mod client;

@@ -1,12 +1,13 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
 Each step checks one of M4's to M10's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
-it saw; the script exits 1 if any failed. C48's sign-in runs last, on a server of its own that asks
-every caller to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`), then
-C51's, on another that serves over TLS beside it (127.0.0.1:12192 and 12193, under `origin`), with
-a page of another origin served from 127.0.0.1:12194, then C85's eight tabs over TLS, on a third
-(127.0.0.1:12197 and 12198, under `tabs`), then C77's account page, on a fourth (127.0.0.1:12196,
-under `account`).
+it saw; the script exits 1 if any failed. Every server speaks HTTPS, with reef's own certificate made
+under its directory's `certs`, so nothing touches the user's own, and every browser context takes
+that certificate unchecked. C48's sign-in runs last, on a server of its own that asks every caller
+to sign in (127.0.0.1:12191, its data under the same directory's `sign-in`), then C51's, on another
+that serves other hosts beside it (127.0.0.1:12192 and 12193, under `origin`), with a page of
+another origin served from 127.0.0.1:12194, then C85's eight tabs, on a third (127.0.0.1:12197 and
+12198, under `tabs`), then C77's account page, on a fourth (127.0.0.1:12196, under `account`).
 
 It runs everything itself: it builds the CLI, writes a config of its own (the app on
 127.0.0.1:12190, shoal's data under central/target/tmp/reef-app-check), registers a scratch repo,
@@ -31,6 +32,7 @@ import json
 import os
 import shutil
 import signal
+import ssl
 import subprocess
 import sys
 import threading
@@ -52,7 +54,7 @@ SERVER = REEF / f"central/target/dx/reef-app/{'release' if RELEASE else 'debug'}
 # where the check keeps its config, repo and shoal's data: under target, never a tmpfs /tmp
 WORK = REEF / "central/target/tmp/reef-app-check"
 ADDRESS = "127.0.0.1:12190"
-URL = f"http://{ADDRESS}"
+URL = f"https://{ADDRESS}"
 SHOTS = Path(ARGS[0]) if ARGS else WORK
 # the checks that failed, and everything the page logged
 failed = []
@@ -62,20 +64,37 @@ BOOK = {}
 # C48's server, which asks every caller to sign in, its own config, repo and data, and the
 # password its user signs in with
 SIGN_IN_WORK = WORK / "sign-in"
-SIGN_IN_URL = "http://127.0.0.1:12191"
+SIGN_IN_URL = "https://127.0.0.1:12191"
 PASSWORD = "correct horse battery"
 # C51's server, over plain HTTP and TLS, and the page of another origin that posts to it
 ORIGIN_WORK = WORK / "origin"
-ORIGIN_URL = "http://127.0.0.1:12192"
+ORIGIN_URL = "https://127.0.0.1:12192"
 ORIGIN_TLS = "https://127.0.0.1:12193"
-ELSEWHERE = "http://127.0.0.1:12194"
+ELSEWHERE = "https://127.0.0.1:12194"
 # C77's server, whose users and tokens the account page manages
 ACCOUNT_WORK = WORK / "account"
-ACCOUNT_URL = "http://127.0.0.1:12196"
-# C85's server, over plain HTTP for its runner and TLS for the browser's tabs
+ACCOUNT_URL = "https://127.0.0.1:12196"
+# C85's server, its loopback port for its runner and other hosts' for the browser's tabs
 TABS_WORK = WORK / "tabs"
-TABS_URL = "http://127.0.0.1:12197"
+TABS_URL = "https://127.0.0.1:12197"
 TABS_TLS = "https://127.0.0.1:12198"
+
+
+# the check's own calls take each server's certificate unchecked, as its browser contexts do: the
+# CLI's and the service's suites are what check that reef's own CA is trusted
+UNCHECKED = ssl.create_default_context()
+UNCHECKED.check_hostname = False
+UNCHECKED.verify_mode = ssl.CERT_NONE
+
+
+def address_of(url):
+    """The host and port a server's root names, for `[api] address`."""
+    return url.split("://", 1)[1]
+
+
+def api_section(url, work):
+    """A config's `[api]`: the server's loopback address, and its own certificates kept in its work directory."""
+    return f'[api]\naddress = "{address_of(url)}"\ncerts = "{work / "certs"}"\n\n'
 
 
 def check(label, ok, seen):
@@ -119,7 +138,7 @@ def setup():
     git("init", "-q")
     git("commit", "-q", "--allow-empty", "-m", "start")
     (WORK / "reef.toml").write_text(
-        f'[api]\naddress = "{ADDRESS}"\n\n[shoal]\ndata = "{WORK / "shoal"}"\ncores = 1\n'
+        f'{api_section(URL, WORK)}[shoal]\ndata = "{WORK / "shoal"}"\ncores = 1\n'
     )
     run("cargo", "build", "-q", "-p", "reef", cwd=REEF)
     run("cargo", "build", "-q", "--release", "-p", "mdbook-reef", cwd=REEF)
@@ -142,7 +161,7 @@ def start(conf=None, url=URL, log_path=None):
     # shoal starts in the process, so the first answer takes a moment
     for _ in range(120):
         try:
-            with urllib.request.urlopen(f"{url}/api/v1/me", timeout=1) as answer:
+            with urllib.request.urlopen(f"{url}/api/v1/me", timeout=1, context=UNCHECKED) as answer:
                 if answer.status == 200:
                     return server
         except OSError:
@@ -891,7 +910,7 @@ def c35_comment_threads_in_the_diff(page):
         f"{URL}/api/v1/projects/check/plans/changes/nodes/K1/comments",
         data=json.dumps({"target": {"on": "node"}, "body": "From the terminal"}).encode(),
         headers={"content-type": "application/json"}, method="POST")
-    with urllib.request.urlopen(request, timeout=5) as answer:
+    with urllib.request.urlopen(request, timeout=5, context=UNCHECKED) as answer:
         answer.read()
     live = {"counts": wait_counts(page, 2), "no reload": page.evaluate("() => window.__kept")}
     # the toolbar's list goes to a thread: the sidebar closed, then the entry clicked
@@ -945,7 +964,7 @@ def c73_a_review_holds_comments_until_submitted(page):
     # the JSON API leaves it out unless asked for it
     def bodies(query):
         path = f"{URL}/api/v1/projects/check/plans/changes/nodes/K1/comments{query}"
-        with urllib.request.urlopen(path, timeout=5) as answer:
+        with urllib.request.urlopen(path, timeout=5, context=UNCHECKED) as answer:
             threads = json.loads(answer.read())
         return [c["body"] for t in threads for c in t["comments"] if "later" in c["body"]]
 
@@ -985,7 +1004,7 @@ def c36_comments_follow_the_code(page):
         f"{URL}/api/v1/projects/check/plans/changes/nodes/K1/comments",
         data=json.dumps({"target": line, "body": "Why more?"}).encode(),
         headers={"content-type": "application/json"}, method="POST")
-    with urllib.request.urlopen(request, timeout=5) as answer:
+    with urllib.request.urlopen(request, timeout=5, context=UNCHECKED) as answer:
         answer.read()
     # revision 3 adds a line above keep.rs's `B`, C35's resolved thread's line, and drops small.rs's last
     (repo / "src" / "keep.rs").write_text("a\nz\nB\nc\n")
@@ -1050,7 +1069,7 @@ def queue_order():
 
 def queue_ranks():
     """Each entry of the check's queue with its rank, as the JSON API lists them."""
-    with urllib.request.urlopen(f"{URL}/api/v1/projects/check/queue", timeout=5) as answer:
+    with urllib.request.urlopen(f"{URL}/api/v1/projects/check/queue", timeout=5, context=UNCHECKED) as answer:
         listing = json.load(answer)
     return [(listed["entry"]["node"], listed["rank"]) for listed in listing["entries"]]
 
@@ -1278,6 +1297,12 @@ def c45_a_loop_started_from_the_app_streams_its_transcript(page):
         page.click(".reef-app-runner button[data-act=start]")
         # R1 taken, its tool waiting in a card, and counted in the bar
         page.wait_for_selector(".reef-app-prompt[data-prompt=perm-R1]", timeout=20000)
+        # the bar counts from its own read of the sessions, which may come after the transcript's
+        try:
+            page.wait_for_function("() => document.querySelector('.reef-app-sessions-toggle').innerText"
+                                   ".includes('1 waiting')", timeout=10000)
+        except Exception:
+            pass
         waiting = page.inner_text(".reef-app-sessions-toggle")
         before = entries(page)
         page.screenshot(path=str(SHOTS / "reef-app-session-prompt.png"))
@@ -1292,6 +1317,12 @@ def c45_a_loop_started_from_the_app_streams_its_transcript(page):
         # stopped from the app, letting go of R2
         page.click(".reef-app-runner button[data-act=stop]")
         page.wait_for_function("() => !document.querySelector('.reef-app-prompt')", timeout=10000)
+        # the runner's row follows its own read of the loops, which may come after the transcript's
+        try:
+            page.wait_for_function("() => document.querySelector('.reef-app-runner-loop').innerText"
+                                   " === 'No loop started'", timeout=10000)
+        except Exception:
+            pass
         stopped = page.inner_text(".reef-app-runner-loop")
         check("C45 a loop started from the app shows its transcript live",
               idle == "idle" and "1 waiting" in waiting and after > before
@@ -1389,7 +1420,7 @@ def api(method, path, body=None):
     request = urllib.request.Request(f"{URL}{path}", data=data, method=method,
                                      headers={"content-type": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=10) as answer:
+        with urllib.request.urlopen(request, timeout=10, context=UNCHECKED) as answer:
             return answer.status, json.load(answer)
     except urllib.error.HTTPError as error:
         return error.code, json.load(error)
@@ -1407,7 +1438,7 @@ def c84_an_attached_session_streams_its_transcript(page):
     reef("loop", "start", "--pane", pane, "--plan", "terminal", "--no-open")
     reef("loop", "take", "--pane", pane)
     session = "c84-check"
-    attach = {"id": session, "pane": pane, "project": "check", "plan": "terminal",
+    attach = {"id": session, "pane": {"kind": "claude", "pid": 4242}, "project": "check", "plan": "terminal",
               "host": "check-host", "cwd": str(WORK / "repo"), "state": "working", "claude": "s1"}
     attached, _ = api("POST", "/api/v1/sessions", attach)
     row = f".reef-app-runner.attached[data-session={session}]"
@@ -1465,7 +1496,7 @@ def keep_decisions(plan, node, decisions):
     body = json.dumps({"decisions": decisions}).encode()
     url = f"{URL}/api/v1/projects/check/plans/{plan}/nodes/{node}/decisions"
     request = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
-    with urllib.request.urlopen(request, timeout=10) as answer:
+    with urllib.request.urlopen(request, timeout=10, context=UNCHECKED) as answer:
         return json.load(answer)
 
 
@@ -1519,6 +1550,29 @@ def c76_a_nodes_decisions_show_in_its_sidebar(page):
            "where": where, "own words": own})
 
 
+def c87_http_lands_on_https(page):
+    """C87: a server that names no certificate serves reef's own, made under its `certs`, over HTTPS and HTTP/2, and
+    a page asked for over http:// lands there, its path kept."""
+    # asked for over plain HTTP, and sent on
+    answer = page.goto(URL.replace("https://", "http://") + "/plans/check/first?from=http")
+    wait_drawn(page)
+    sent_from = answer.request.redirected_from
+    first_hop = sent_from.response() if sent_from else None
+    seen = {
+        "landed": page.url,
+        "first hop": (sent_from.url, first_hop.status) if sent_from and first_hop else None,
+        "protocol": page.evaluate("() => performance.getEntriesByType('navigation')[0].nextHopProtocol"),
+        "issuer": (answer.security_details() or {}).get("issuer"),
+        "own ca": (WORK / "certs/ca.pem").is_file(),
+        "said": [line for line in (WORK / "server.log").read_text().splitlines() if "reef's own certificate" in line],
+    }
+    check("C87 a server naming no certificate serves its own over HTTPS, and http:// lands there",
+          seen["landed"] == URL + "/plans/check/first?from=http" and seen["first hop"]
+          == (URL.replace("https://", "http://") + "/plans/check/first?from=http", 307)
+          and seen["protocol"] == "h2" and "reef's own CA" in (seen["issuer"] or "") and seen["own ca"]
+          and any("(made now)" in line for line in seen["said"]), seen)
+
+
 def c13_every_plan_opens(page):
     """C13: every plan the picker lists opens its own page."""
     page.goto(URL + "/")
@@ -1551,7 +1605,7 @@ def c48_a_browser_signs_in_and_reaches_its_plan(browser):
     repo.mkdir(parents=True)
     run("git", "-C", repo, "-c", "init.defaultBranch=main", "init", "-q")
     (SIGN_IN_WORK / "reef.toml").write_text(
-        f'[api]\naddress = "{SIGN_IN_URL.removeprefix("http://")}"\n\n'
+        f'{api_section(SIGN_IN_URL, SIGN_IN_WORK)}'
         f'[shoal]\ndata = "{SIGN_IN_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
     )
     server = start(SIGN_IN_WORK / "reef.toml", SIGN_IN_URL, SIGN_IN_WORK / "server.log")
@@ -1565,7 +1619,7 @@ def c48_a_browser_signs_in_and_reaches_its_plan(browser):
         first = SIGN_IN_WORK / "a1.yaml"
         first.write_text(node_yaml("A1", "A1 The first"))
         signed_reef("node", "put", first)
-        context = browser.new_context(viewport={"width": 1400, "height": 900})
+        context = browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
         page = context.new_page()
         page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
         # a plan's page sends a browser that isn't signed in to sign in, and back after
@@ -1595,7 +1649,7 @@ def c48_a_browser_signs_in_and_reaches_its_plan(browser):
                                timeout=10000)
         # the page's own fetches carry it, and another browser's don't
         inside = page.evaluate("() => fetch('/api/v1/projects').then(r => r.status)")
-        other = browser.new_context()
+        other = browser.new_context(ignore_https_errors=True)
         stranger = other.new_page()
         # from the stylesheet, a page of this origin anyone may open, since the sign-in page's
         # policy lets no script fetch anything
@@ -1617,7 +1671,7 @@ def c48_a_browser_signs_in_and_reaches_its_plan(browser):
         check("C48 a browser that signs in reaches its plan, and signing out sends it back to sign in",
               landed == "/sign-in?next=%2Fplans%2Fcheck%2Ffirst" and wrong[0] and "don't match" in wrong[1]
               and reached == ("/plans/check/first", "check/first", "ada")
-              and flags == {"httpOnly": True, "sameSite": "Strict", "secure": False}
+              and flags == {"httpOnly": True, "sameSite": "Strict", "secure": True}
               and inside == 200 and outside == 401 and blocked == "blocked" and signed_out == "/sign-in"
               and again.startswith("/sign-in?next="),
               {"landed": landed, "wrong": wrong, "reached": reached, "cookie": flags, "fetch inside": inside,
@@ -1649,8 +1703,9 @@ ELSEWHERE_PAGE = """<!doctype html>
 
 def c51_a_cross_origin_write_is_refused(browser):
     """C51: a page on another port of this host posts with the cookie and is refused, while the app's own writes
-    go through, and over TLS the app is reached with a Secure cookie."""
-    # a server of its own, over plain HTTP and TLS, asking every caller to sign in, with a user and a plan
+    go through, and on either port, this host's or other hosts', the app is reached with a Secure cookie."""
+    # a server of its own, on its loopback port and other hosts' beside it, asking every caller to sign in, with a
+    # user and a plan
     if ORIGIN_WORK.exists():
         shutil.rmtree(ORIGIN_WORK)
     repo = ORIGIN_WORK / "repo"
@@ -1660,18 +1715,22 @@ def c51_a_cross_origin_write_is_refused(browser):
         "-keyout", ORIGIN_WORK / "key.pem", "-out", ORIGIN_WORK / "cert.pem", "-days", "1", "-subj", "/CN=localhost",
         "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
     (ORIGIN_WORK / "reef.toml").write_text(
-        f'[api]\naddress = "{ORIGIN_URL.removeprefix("http://")}"\n\n'
+        f'{api_section(ORIGIN_URL, ORIGIN_WORK)}'
         f'[api.tls]\naddress = "{ORIGIN_TLS.removeprefix("https://")}"\n'
         f'cert = "{ORIGIN_WORK / "cert.pem"}"\nkey = "{ORIGIN_WORK / "key.pem"}"\n\n'
         f'[shoal]\ndata = "{ORIGIN_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
     )
     server = start(ORIGIN_WORK / "reef.toml", ORIGIN_URL, ORIGIN_WORK / "server.log")
-    # the page of another origin, on another port of the same host, so the same site
+    # the page of another origin, on another port of the same host and over HTTPS too, so the same site, served
+    # with the certificate reef made for this host
     pages = ORIGIN_WORK / "elsewhere"
     pages.mkdir()
     (pages / "index.html").write_text(ELSEWHERE_PAGE.format(url=ORIGIN_URL))
     handler = functools.partial(QuietPages, directory=str(pages))
     elsewhere = http.server.ThreadingHTTPServer(("127.0.0.1", int(ELSEWHERE.rsplit(":", 1)[1])), handler)
+    served = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    served.load_cert_chain(ORIGIN_WORK / "certs/cert.pem", ORIGIN_WORK / "certs/key.pem")
+    elsewhere.socket = served.wrap_socket(elsewhere.socket, server_side=True)
     threading.Thread(target=elsewhere.serve_forever, daemon=True).start()
     try:
         password = ORIGIN_WORK / "password"
@@ -1701,7 +1760,7 @@ def c51_a_cross_origin_write_is_refused(browser):
             return page.evaluate("() => fetch('/app/me').then(r => r.json()).then(me => me.user && me.user.name)")
 
         # over plain HTTP: signed in, then the other origin's forms post with the cookie
-        context = browser.new_context(viewport={"width": 1400, "height": 900})
+        context = browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
         page = signed_in(context, ORIGIN_URL)
         cookie = next(c for c in context.cookies() if c["name"] == "reef_sign_in")
         refused = {}
@@ -1733,9 +1792,10 @@ def c51_a_cross_origin_write_is_refused(browser):
         secure.close()
         check("C51 a cross-origin write is refused, and the same page's own writes go through",
               refused == {"out": (403, True), "queue": (403, True)} and kept == "ada" and own == 200
-              and signed_out == "/sign-in" and not cookie["secure"] and tls_cookie["secure"] and tls_name == "ada",
+              and signed_out == "/sign-in" and cookie["secure"] and tls_cookie["secure"] and tls_name == "ada",
               {"refused": refused, "still signed in": kept, "own put": own, "signed out": signed_out,
-               "plain cookie secure": cookie["secure"], "tls cookie secure": tls_cookie["secure"], "over tls": tls_name})
+               "loopback cookie secure": cookie["secure"], "tls cookie secure": tls_cookie["secure"],
+               "over tls": tls_name})
     finally:
         elsewhere.shutdown()
         stop(server)
@@ -1765,7 +1825,7 @@ def c85_many_tabs_over_tls_each_read_a_session(browser):
         "-keyout", TABS_WORK / "key.pem", "-out", TABS_WORK / "cert.pem", "-days", "1", "-subj", "/CN=localhost",
         "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1")
     (TABS_WORK / "reef.toml").write_text(
-        f'[api]\naddress = "{TABS_URL.removeprefix("http://")}"\n\n'
+        f'{api_section(TABS_URL, TABS_WORK)}'
         f'[api.tls]\naddress = "{TABS_TLS.removeprefix("https://")}"\n'
         f'cert = "{TABS_WORK / "cert.pem"}"\nkey = "{TABS_WORK / "key.pem"}"\n\n'
         f'[shoal]\ndata = "{TABS_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
@@ -1870,7 +1930,7 @@ def c77_the_account_page_manages_passwords_and_tokens(browser):
     repo.mkdir(parents=True)
     run("git", "-C", repo, "-c", "init.defaultBranch=main", "init", "-q")
     (ACCOUNT_WORK / "reef.toml").write_text(
-        f'[api]\naddress = "{ACCOUNT_URL.removeprefix("http://")}"\n\n'
+        f'{api_section(ACCOUNT_URL, ACCOUNT_WORK)}'
         f'[shoal]\ndata = "{ACCOUNT_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
     )
     server = start(ACCOUNT_WORK / "reef.toml", ACCOUNT_URL, ACCOUNT_WORK / "server.log")
@@ -1887,7 +1947,7 @@ def c77_the_account_page_manages_passwords_and_tokens(browser):
         terminal = next(line.split()[0] for line in account_reef("ada", "token", "ls").splitlines()
                         if "(this reef)" in line)
         # ada signs in in a browser, and comes to her account page
-        context = browser.new_context(viewport={"width": 1200, "height": 900})
+        context = browser.new_context(viewport={"width": 1200, "height": 900}, ignore_https_errors=True)
         page = context.new_page()
         page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
         page.goto(ACCOUNT_URL + "/account")
@@ -1942,7 +2002,7 @@ def c77_the_account_page_manages_passwords_and_tokens(browser):
         own_row = page.inner_text('tr[data-user="ada"]')
         context.close()
         # a browser that tries a wrong password over and over is told to wait, even with the right one
-        stranger = browser.new_context()
+        stranger = browser.new_context(ignore_https_errors=True)
         guess = stranger.new_page()
         guess.goto(ACCOUNT_URL + "/sign-in")
         for _ in range(5):
@@ -1982,11 +2042,12 @@ def main():
             put(plan, node_yaml("A1", f"A1 The first of {plan}"))
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            page = browser.new_page(viewport={"width": 1400, "height": 900})
+            page = browser.new_page(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
             # a debug client looks for dx's hot-reload socket, which only `dx serve` answers
             page.on("console", lambda m: "/_dioxus" in m.text or logs.append(f"console.{m.type}: {m.text}"))
             page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
             checks = [
+                c87_http_lands_on_https,
                 c13_every_plan_opens,
                 c54_draws_as_in_mdbook,
                 c54_selecting_opens_the_panel,

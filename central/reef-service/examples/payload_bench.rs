@@ -34,7 +34,7 @@ use reef_model::{Graph, Payload, PlanName, nodes_from_records};
 use reef_render::paths::{Target, resolve};
 use reef_render::{DocSource, Layered, MemSource, Renderer, RepoSource, Sections};
 use reef_service::{
-    Asker, Backend, Checked, Conf, NodePut, NodeWrite, PageEdit, PageEdited, PageWrite, PlanWrite,
+    Asker, Backend, Checked, NodePut, NodeWrite, PageEdit, PageEdited, PageWrite, PlanWrite,
     Service, api,
 };
 use std::path::{Path, PathBuf};
@@ -143,11 +143,10 @@ async fn bench<B: Backend + 'static>(
         pages: Some(book.pages.to_vec()),
     };
     service.store().write_plan(&paged, write).await?;
-    // served on a loopback port of its own
+    // served over plain HTTP on a loopback port of its own, as only a bench is, so the figures
+    // are of the payload and its JSON, not of TLS
     let service = Arc::new(service);
-    let mut conf = Conf::default();
-    conf.api.address = "127.0.0.1:0".parse()?;
-    let listener = api::bind(&conf).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(api::serve(
         listener,

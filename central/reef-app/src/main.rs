@@ -1,7 +1,8 @@
 //! reef-app's binary: the wasm client in the browser, or the server that serves it
 //!
-//! The server reads reef's config (`$REEF_CONFIG`, else the default path) and listens on
-//! `api.address`, where the CLI looks for the JSON API, unless dx names an address of its own.
+//! The server reads reef's config (`$REEF_CONFIG`, else the default path) and listens over HTTPS
+//! on `api.address`, where the CLI looks for the JSON API, unless dx names an address of its
+//! own, which its proxy calls over plain HTTP.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]

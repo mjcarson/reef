@@ -38,17 +38,17 @@ the pages and the JSON API alike.
   says whom the server takes the browser for, with a Sign out, once sign-in is required. A
   browser whose sign-in lapses finds its change stream closed and its calls answered 401, and
   is offered the sign-in page again, which brings it back where it was.
-- **It listens where the CLI looks:** `[api] address`, loopback only, so it takes reef-serve's
-  place, and over TLS beside it where `[api.tls]` says. Only one process can open shoal's data
-  directory, so run one or the other. Under
-  `dx serve`, dx names the server's address and proxies its own port to it; point `[api] address`
-  at dx's port to reach it from the CLI.
-- **Over TLS it speaks HTTP/2, else HTTP/1.1.** A plan's page holds three change streams open,
-  the plan's, its queue's and its runners', and over HTTP/1.1 a browser keeps six connections
-  to a host across all its tabs, so two tabs leave every other call waiting. Over TLS, ALPN
-  offers `h2` first, and a browser carries every tab's streams and calls on one connection, up
-  to hyper's 200 streams at once. Browsers speak HTTP/2 only over TLS, so the plain loopback
-  port stays HTTP/1.1, for the CLI, its hooks and one tab.
+- **It listens where the CLI looks:** `[api] address`, loopback only, over HTTPS, so it takes
+  reef-serve's place, and beside it for other hosts where `[api.tls]` says. Only one process can
+  open shoal's data directory, so run one or the other. Under `dx serve`, dx names the server's
+  address and proxies its own port to it over plain HTTP, the one plain port reef keeps; point
+  `[api] url` at `http://` and dx's port to reach it from the CLI.
+- **It speaks HTTP/2, over HTTPS on every port.** A plan's page holds three change streams
+  open, the plan's, its queue's and its runners', and over HTTP/1.1 a browser keeps six
+  connections to a host across all its tabs, so two tabs leave every other call waiting (C85).
+  ALPN offers `h2` first, and a browser carries every tab's streams and calls on one
+  connection, up to hyper's 200 streams at once. Browsers speak HTTP/2 only over TLS, which is
+  why every port speaks it (C87); a plain-HTTP request is redirected to `https://`.
 - **It is served by `api::serve_router`, not `dioxus::serve`,** which would listen on `PORT`
   or 8080. It stops on SIGINT or SIGTERM, ending the change stream first.
 - **`embedded` goes to the server build alone,** since dx keeps default features on in the wasm
@@ -70,5 +70,6 @@ python check.py --release --only=c33,c35                                     # t
 
 `tests/app.rs` serves the app's router over shoal in-process and puts plans through the CLI.
 `check.py` drives the built server in headless Chromium with Playwright: it starts the server
-itself, on a config and data directory of its own under `target/tmp`, and stops its process
-group at the end.
+itself, on a config and data directory of its own under `target/tmp`, reef's own certificate
+made under it too, takes that certificate unchecked in every browser context, and stops its
+process group at the end.

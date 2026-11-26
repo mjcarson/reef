@@ -53,6 +53,8 @@ suite!(
     cross_origin_writes_are_refused_with_sign_in_off,
     signing_in_over_tls_sets_a_secure_cookie,
     tls_serves_http2_to_a_client_that_offers_it,
+    plain_http_is_redirected_to_https,
+    this_hosts_port_serves_the_cli_over_https_with_sign_in_off,
     only_an_admin_registers_what_is_on_the_host,
     a_revoked_token_signs_nothing_in,
     repeated_wrong_passwords_are_slowed,

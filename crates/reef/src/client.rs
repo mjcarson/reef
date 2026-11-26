@@ -6,9 +6,10 @@
 //! that is taken, is an answer, not an error. When nothing answers at the service's address, the
 //! error says where the CLI looked, which key set it, and how to start the service.
 //!
-//! The service is called at `[api] url` if the config names one, over TLS to another host,
-//! trusting the system's roots and `[api] ca`'s, else at `[api] address` on this host, over plain
-//! HTTP and past any proxy a shell has set.
+//! The service is called at `[api] url` if the config names one, trusting the system's roots and
+//! `[api] ca`'s, else at `[api] address` on this host, over HTTPS, trusting the CA the service
+//! made and keeps in `[api] certs`, if it is there. A service on this host, or through a tunnel
+//! to another host's loopback port, is called past any proxy a shell has set.
 //!
 //! Every request sends the token kept for the service, if one is, as `Authorization: Bearer`,
 //! read from where [`credentials`](crate::credentials) says for each request. A service that asks
@@ -39,7 +40,7 @@ const CONNECT_WAIT: Duration = Duration::from_secs(5);
 pub struct Client {
     /// The HTTP client, which keeps its connection open between requests
     http: reqwest::Client,
-    /// The service's root, such as `http://127.0.0.1:12180`
+    /// The service's root, such as `https://127.0.0.1:12180`
     base: String,
     /// Where that root came from, for a message that says what to change
     origin: String,
@@ -54,7 +55,7 @@ impl Client {
     ///
     /// * `conf` - The CLI's part of reef's config
     pub fn new(conf: &Conf) -> anyhow::Result<Client> {
-        // the root `url` names, else this host's address over plain HTTP
+        // the root `url` names, else this host's address over HTTPS, which is all it speaks
         let (base, key) = match &conf.api.url {
             Some(url) => {
                 let base = root(url).map_err(|error| {
@@ -62,7 +63,7 @@ impl Client {
                 })?;
                 (base, "api.url")
             }
-            None => (format!("http://{}", conf.api.address), "api.address"),
+            None => (format!("https://{}", conf.api.address), "api.address"),
         };
         // a config that set the root is named, else the key that would change the default
         let origin = match conf.source {
@@ -70,9 +71,23 @@ impl Client {
             None => format!("reef's default; set {} to change it", conf.key(key)),
         };
         let mut http = reqwest::Client::builder().connect_timeout(CONNECT_WAIT);
-        // a service on this host is reached past any proxy a shell has set
-        if conf.api.url.is_none() {
+        // a service on this host, or through a tunnel to its loopback, is reached past any proxy
+        // a shell has set
+        if conf.api.url.is_none() || is_loopback_root(&base) {
             http = http.no_proxy();
+        }
+        // the CA the service on this host made, if it has, for the address it is called at
+        let own = conf.api.url.is_none().then(|| conf.own_ca()).flatten();
+        if let Some(own) = &own {
+            let roots = roots(own).map_err(|error| {
+                anyhow::anyhow!(
+                    "{}, which reef's service made, is unreadable: {error}",
+                    own.display()
+                )
+            })?;
+            for root in roots {
+                http = http.add_root_certificate(root);
+            }
         }
         // the roots its certificate is trusted by, beside the system's own
         if let Some(ca) = &conf.api.ca {
@@ -91,7 +106,7 @@ impl Client {
         })
     }
 
-    /// The service's root, such as `http://127.0.0.1:12180`, which a login is kept by
+    /// The service's root, such as `https://127.0.0.1:12180`, which a login is kept by
     pub fn base(&self) -> &str {
         &self.base
     }
@@ -891,13 +906,21 @@ impl Client {
         // anything else, such as a certificate refused, a name that resolves nowhere or a
         // connection dropped partway, with every cause
         let causes = causes.iter().map(ToString::to_string).collect::<Vec<_>>();
-        match causes.is_empty() {
-            true => anyhow::anyhow!("calling reef's service at {}: {error}", self.base),
-            false => anyhow::anyhow!(
+        let said = match causes.is_empty() {
+            true => format!("calling reef's service at {}: {error}", self.base),
+            false => format!(
                 "calling reef's service at {}: {error}: {}",
                 self.base,
                 causes.join(": ")
             ),
+        };
+        // a certificate refused says what to trust
+        match causes.iter().any(|cause| cause.contains("certificate")) {
+            true => anyhow::anyhow!(
+                "{said}: trust the CA its certificate is signed by, its `ca.pem` if it is reef's \
+                 own, with `[api] ca`, or on its host with `[api] certs`"
+            ),
+            false => anyhow::anyhow!("{said}"),
         }
     }
 }
@@ -932,6 +955,28 @@ fn root(url: &str) -> Result<String, String> {
         return Err("which is not a root: name the scheme, host and port alone".to_string());
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// Whether a root names this host, by `localhost` or a loopback address, as a tunnel to another
+/// host's loopback port does
+///
+/// # Arguments
+///
+/// * `base` - The root, such as `https://localhost:11180`
+fn is_loopback_root(base: &str) -> bool {
+    // the host it names, an IPv6 address out of its brackets
+    let Ok(url) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    // this host by name, or a loopback address
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The roots a PEM file holds, which the service's certificate is trusted by
@@ -1165,5 +1210,26 @@ mod tests {
         assert!(message.contains(&address.to_string()), "{message}");
         assert!(message.contains("`api.address`"), "{message}");
         assert!(message.contains("`reef-serve`"), "{message}");
+    }
+
+    /// This host's service is called over HTTPS at its address, and a root names this host by
+    /// `localhost` or a loopback address alone
+    #[test]
+    fn this_hosts_service_is_called_over_https() {
+        // the default address, over HTTPS, its root's spelling the one a login is kept by
+        let client = Client::new(&Conf::default()).unwrap();
+        assert_eq!(client.base(), "https://127.0.0.1:12180");
+        // this host, however it is named, and through a tunnel to another's loopback port
+        for root in [
+            "https://localhost:11180",
+            "https://127.0.0.1:12180",
+            "https://[::1]:12180",
+        ] {
+            assert!(super::is_loopback_root(root), "{root}");
+        }
+        // and not another host
+        for root in ["https://reef.example:12443", "https://10.0.0.5:12443"] {
+            assert!(!super::is_loopback_root(root), "{root}");
+        }
     }
 }

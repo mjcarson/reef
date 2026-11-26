@@ -5,13 +5,14 @@
 //! cargo +stable run -p reef-service --bin reef-serve -- --conf reef.toml   # an external node
 //! ```
 //!
-//! It reads reef's config (`--conf`, else `$REEF_CONFIG`, else the default path), listens on
-//! `api.address` over plain HTTP, which must be a loopback address, and over TLS on
-//! `api.tls.address` if `[api.tls]` names a certificate, then opens the service: shoal in this
-//! process with `embedded`, or the external node `shoal.address` names. With `[auth] required`
-//! it says callers must sign in, and while reef has no user, how to add the first. It listens
-//! before shoal starts, so a port that is taken, an address that isn't local, or a certificate
-//! that can't be read stops it before a pool locks the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
+//! It reads reef's config (`--conf`, else `$REEF_CONFIG`, else the default path), makes or reads
+//! back reef's own certificate, listens over HTTPS on `api.address`, which must be a loopback
+//! address, and on `api.tls.address` if `[api.tls]` names one, then opens the service: shoal in
+//! this process with `embedded`, or the external node `shoal.address` names. It says where
+//! reef's own CA is, to trust, and with `[auth] required` that callers must sign in, and while
+//! reef has no user, how to add the first. It listens before shoal starts, so a port that is
+//! taken, an address that isn't local, or a certificate that can't be read stops it before a
+//! pool locks the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
 //! still open, and closes the service, stopping an in-process pool cleanly.
 //!
 //! ```sh
@@ -128,6 +129,10 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
         listeners.roots()?.join(" and "),
         service.mode().name()
     );
+    // where reef's own CA is, to trust
+    if let Some(note) = listeners.trust_note() {
+        eprintln!("reef-serve: {note}");
+    }
     // that callers must sign in, if they must, and how to add the first user
     if let Some(note) = service.sign_in_note().await? {
         eprintln!("reef-serve: {note}");

@@ -3,12 +3,14 @@
 //!
 //! Each case's server runs on a port of its own, chosen by the OS, over the same store a service
 //! case would get: the `reef` project registered for a fresh git repo, and `reef/central` listed.
-//! A case that serves over TLS too gets a second port, on every interface, with a certificate
-//! minted for it, and a client that trusts it.
+//! It speaks HTTPS, serving reef's own certificate, made in the case's own directory so no case
+//! touches the user's, and its client trusts reef's own CA alone. A case that serves other hosts
+//! too gets a second port, on every interface, with a certificate minted for it, and a client
+//! that trusts that.
 
 use reef_api::ApiError;
 use reef_model::PlanName;
-use reef_service::api::Listeners;
+use reef_service::api::{Listeners, Local};
 use reef_service::{Backend, Conf, Service, TlsSettings, api};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
@@ -39,7 +41,8 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client of the server at an address
+    /// A client of a server at a root, trusting the system's roots alone, as for a plain-HTTP
+    /// request that is only redirected
     ///
     /// # Arguments
     ///
@@ -222,10 +225,14 @@ pub struct OverTls {
 
 /// A served service, a client of it, and the project and plan a case works in
 pub struct Ax<B: Backend + 'static> {
-    /// The client, which knows only `reef-api`'s types
+    /// The client, over HTTPS to this host's port, which knows only `reef-api`'s types
     pub client: Client,
     /// The address the server listens on, for a config to name
     pub address: SocketAddr,
+    /// The directory reef's own CA and certificate are kept in, for a config's `[api] certs`
+    pub certs: PathBuf,
+    /// reef's own CA, which the client trusts
+    pub ca: PathBuf,
     /// The listener over TLS, for a case that serves one
     pub tls: Option<OverTls>,
     /// The service the server calls, for a case to end its change stream
@@ -238,6 +245,18 @@ pub struct Ax<B: Backend + 'static> {
     pub dir: PathBuf,
     /// The server's task, stopped when the fixture is dropped
     server: JoinHandle<anyhow::Result<()>>,
+}
+
+impl<B: Backend + 'static> Ax<B> {
+    /// The config the CLI calls this server by: its loopback address, over HTTPS, trusting reef's
+    /// own CA from the case's directory, as the CLI on a server's host does
+    pub fn cli_config(&self) -> String {
+        format!(
+            "[api]\naddress = \"{}\"\ncerts = \"{}\"\n",
+            self.address,
+            self.certs.display()
+        )
+    }
 }
 
 impl<B: Backend + 'static> Drop for Ax<B> {
@@ -259,52 +278,17 @@ impl<B: Backend + 'static> Fx<B> {
         self.api_with(true).await
     }
 
-    /// Serves this fixture's store asking every caller to sign in, on a loopback port and over
-    /// TLS on every interface, with a certificate minted for this host
+    /// Serves this fixture's store asking every caller to sign in, on a loopback port and for
+    /// other hosts on every interface, with a certificate minted for this host there
     pub async fn api_over_tls(self) -> anyhow::Result<Ax<B>> {
-        // the service, shared by the server and the case
-        let sx = self.serve();
-        let service = Arc::new(sx.service.requiring_sign_in(true));
-        // a certificate for this host, and any free ports, the TLS one on every interface
-        let minted = minted(&sx.dir.join("tls"))?;
-        let mut conf = Conf::default();
-        conf.api.address = "127.0.0.1:0".parse()?;
-        conf.auth.required = true;
-        conf.api.tls = Some(TlsSettings {
+        // a certificate minted for this host, which the other hosts' listener names
+        let minted = minted(&self.dir.join("tls"))?;
+        let tls = TlsSettings {
             address: "0.0.0.0:0".parse()?,
-            cert: minted.cert.clone(),
-            key: minted.key.clone(),
-        });
-        let listeners = Listeners::bind(&conf).await?;
-        let address = listeners.plain.local_addr()?;
-        let tls = listeners
-            .tls
-            .as_ref()
-            .map(axum::serve::Listener::local_addr)
-            .transpose()?
-            .ok_or_else(|| anyhow::anyhow!("`[api.tls]` bound no listener"))?;
-        // called by its name, which the certificate names, as another host would
-        let over = OverTls {
-            client: Client::trusting(format!("https://localhost:{}", tls.port()), &minted.ca)?,
-            address: tls,
-            minted,
+            cert: Some(minted.cert.clone()),
+            key: Some(minted.key.clone()),
         };
-        // served until the fixture is dropped
-        let server = tokio::spawn(api::serve(
-            listeners,
-            service.clone(),
-            std::future::pending(),
-        ));
-        Ok(Ax {
-            client: Client::new(format!("http://{address}")),
-            address,
-            tls: Some(over),
-            service,
-            plan: sx.plan,
-            repo: sx.repo,
-            dir: sx.dir,
-            server,
-        })
+        self.api_on(true, Some((tls, minted))).await
     }
 
     /// Serves this fixture's store on a loopback port of its own, asking callers to sign in or
@@ -314,25 +298,69 @@ impl<B: Backend + 'static> Fx<B> {
     ///
     /// * `required` - Whether every caller must sign in
     async fn api_with(self, required: bool) -> anyhow::Result<Ax<B>> {
+        self.api_on(required, None).await
+    }
+
+    /// Serves this fixture's store over HTTPS on a loopback port of its own, with reef's own
+    /// certificate made in the case's directory, and for other hosts too if a listener is given
+    ///
+    /// # Arguments
+    ///
+    /// * `required` - Whether every caller must sign in
+    /// * `wide` - Other hosts' listener, and the certificate minted for it, if the case has one
+    async fn api_on(
+        self,
+        required: bool,
+        wide: Option<(TlsSettings, Minted)>,
+    ) -> anyhow::Result<Ax<B>> {
         // the service, shared by the server and the case
         let sx = self.serve();
         let service = Arc::new(sx.service.requiring_sign_in(required));
-        // any free port on localhost
+        // any free port on localhost, reef's own certificate in the case's own directory
+        let certs = sx.dir.join("certs");
         let mut conf = Conf::default();
         conf.api.address = "127.0.0.1:0".parse()?;
-        let listener = api::bind(&conf).await?;
-        let address = listener.local_addr()?;
-        let base = format!("http://{address}");
+        conf.api.certs = Some(certs.clone());
+        conf.auth.required = required;
+        let minted = wide.as_ref().map(|(_, minted)| minted.clone());
+        conf.api.tls = wide.map(|(tls, _)| tls);
+        let listeners = Listeners::bind(&conf).await?;
+        let address = match &listeners.local {
+            Local::Tls(local) => axum::serve::Listener::local_addr(local)?,
+            Local::Plain(plain) => plain.local_addr()?,
+        };
+        let ca = listeners
+            .own
+            .as_ref()
+            .map(|own| own.ca.clone())
+            .ok_or_else(|| anyhow::anyhow!("no certificate of reef's own was made"))?;
+        // other hosts' listener, called by its name, which the minted certificate names
+        let over = match (&listeners.tls, minted) {
+            (Some(tls), Some(minted)) => {
+                let tls = axum::serve::Listener::local_addr(tls)?;
+                Some(OverTls {
+                    client: Client::trusting(
+                        format!("https://localhost:{}", tls.port()),
+                        &minted.ca,
+                    )?,
+                    address: tls,
+                    minted,
+                })
+            }
+            _ => None,
+        };
         // served until the fixture is dropped
         let server = tokio::spawn(api::serve(
-            listener,
+            listeners,
             service.clone(),
             std::future::pending(),
         ));
         Ok(Ax {
-            client: Client::new(base),
+            client: Client::trusting(format!("https://{address}"), &ca)?,
             address,
-            tls: None,
+            certs,
+            ca,
+            tls: over,
             service,
             plan: sx.plan,
             repo: sx.repo,

@@ -142,9 +142,10 @@ impl Session {
 ///
 /// * `ax` - The served service
 fn client_of(ax: &Ax<MemoryBackend>) -> anyhow::Result<reef::Client> {
-    // a config naming the twin's port, and nothing else
+    // a config naming the twin's port and where reef's own CA is kept, and nothing else
     let mut conf = Conf::default();
     conf.api.address = ax.address;
+    conf.api.certs = Some(ax.certs.clone());
     reef::Client::new(&conf)
 }
 

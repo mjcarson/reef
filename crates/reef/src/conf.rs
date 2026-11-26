@@ -1,17 +1,20 @@
 //! The part of reef's config the CLI reads: where the JSON API is served
 //!
 //! The CLI reads the service's own config file, found by `reef_api::config`, so the two meet at
-//! the address one file names. It reads `[api]`'s `address`, `url` and `ca` alone and ignores
-//! every other key, since the service is what checks the rest of the file. On the service's own
-//! host it calls `address`, over plain HTTP; on another host, `url` names the service, over TLS,
-//! and `ca` a root its certificate is trusted by beside the system's. The token it signs in with
+//! the address one file names. It reads `[api]`'s `address`, `url`, `ca` and `certs` alone and
+//! ignores every other key, since the service is what checks the rest of the file. On the
+//! service's own host it calls `address` over HTTPS, trusting the CA the service made and keeps
+//! in `certs`, else in `$XDG_DATA_HOME/reef/certs`; on another host, `url` names the service, and
+//! `ca` a root its certificate is trusted by beside the system's. The token it signs in with
 //! is kept apart, in a credentials file of the user's own ([`credentials`](crate::credentials)),
 //! which `--credentials` can name.
 //!
 //! ```toml
 //! [api]
-//! # where the JSON API listens on this host, and so where the CLI calls it
+//! # where the JSON API listens on this host, over HTTPS, and so where the CLI calls it
 //! address = "127.0.0.1:12180"
+//! # where the service keeps the CA it made, which the CLI on its host trusts
+//! certs = "/home/me/.local/share/reef/certs"
 //! # or, on another host, the service's root, which wins over `address`
 //! url = "https://reef.example:12443"
 //! # a PEM root to trust the service's certificate by, beside the system's own
@@ -41,8 +44,10 @@ pub struct Conf {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ApiSettings {
-    /// The address the service listens on over plain HTTP, on this host
+    /// The address the service listens on over HTTPS, on this host
     pub address: SocketAddr,
+    /// Where the service keeps the CA it made, else the default under `$XDG_DATA_HOME`
+    pub certs: Option<PathBuf>,
     /// The service's root, such as `https://reef.example:12443`, which wins over `address`
     pub url: Option<String>,
     /// A PEM root the service's certificate is trusted by, beside the system's own
@@ -50,12 +55,14 @@ pub struct ApiSettings {
 }
 
 impl Default for ApiSettings {
-    /// Localhost, at the port the service listens on unless its config names another
+    /// Localhost, at the port the service listens on unless its config names another, trusting
+    /// the CA it keeps in the default directory
     fn default() -> Self {
         ApiSettings {
             address: reef_api::DEFAULT_ADDRESS
                 .parse()
                 .expect("reef-api's default address is an address"),
+            certs: None,
             url: None,
             ca: None,
         }
@@ -89,6 +96,24 @@ impl Conf {
     /// * `text` - The config file's TOML
     pub fn parse(text: &str) -> Result<Conf, toml::de::Error> {
         toml::from_str(text)
+    }
+
+    /// Where the service on this host keeps the CA it made: the directory `[api] certs` names,
+    /// else the default, `$XDG_DATA_HOME/reef/certs`
+    pub fn certs_dir(&self) -> Option<PathBuf> {
+        // a configured directory wins
+        self.api
+            .certs
+            .clone()
+            .or_else(reef_api::config::default_certs)
+    }
+
+    /// The CA the service on this host made, if it is there to trust
+    pub fn own_ca(&self) -> Option<PathBuf> {
+        // its certificate, if the service has made one, which a CLI on another host never finds
+        self.certs_dir()
+            .map(|dir| dir.join("ca.pem"))
+            .filter(|ca| ca.is_file())
     }
 
     /// Names a key and the file it is set in, for a message that says what to change

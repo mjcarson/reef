@@ -34,8 +34,11 @@ sudo systemctl enable --now reef
 journalctl -u reef -b                     # where it listens, and that it has no user yet
 ```
 
-It says where it listens and, with no user yet:
+It says where it listens, where reef's own CA is, and, with no user yet:
 
 ```
+reef-app: reef's own certificate is signed by its CA in /var/lib/reef/certs/ca.pem (made now): trust that file in a browser, or name it as `[api] ca` on another host
 reef-app: callers must sign in, and reef has no user yet: add the first with `reef user add NAME` from this host
 ```
+
+Copy that CA where the CLI on this host can read it, as [Configuring](config.md) says.

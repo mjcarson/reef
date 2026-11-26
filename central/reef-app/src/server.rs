@@ -1,9 +1,10 @@
 //! The app's server: its pages, its server functions and reef's JSON API on one port
 //!
 //! It listens on reef's `api.address`, where the CLI, the MCP server and the hooks look for the
-//! JSON API, so the app takes reef-serve's place. Under `dx serve`, dx names the address instead
-//! and proxies to it. Either way only a loopback address is taken for plain HTTP; other hosts
-//! reach the app over TLS, on the listener `[api.tls]` adds beside it. Every route, the pages,
+//! JSON API, so the app takes reef-serve's place: over HTTPS, serving reef's own certificate, a
+//! plain-HTTP request redirected to it. Under `dx serve`, dx names the address instead and
+//! proxies to it over plain HTTP, the one plain port reef keeps, on loopback alone. Other hosts
+//! reach the app on the listener `[api.tls]` adds beside it. Every route, the pages,
 //! the server functions and the JSON API alike, sits under the one layer that signs callers in
 //! and refuses writes from other origins, [`auth::guard`], which serves the sign-in page beside
 //! them.
@@ -12,7 +13,7 @@ use axum::Router;
 use axum::http::header;
 use axum::routing::get;
 use reef_service::api::Listeners;
-use reef_service::{Conf, Service, api, auth, tls};
+use reef_service::{Conf, Service, api, auth};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use tokio::net::TcpListener;
@@ -68,10 +69,7 @@ pub async fn serve() -> anyhow::Result<()> {
     dioxus::logger::initialize_default();
     // reef's config, from `$REEF_CONFIG` or the default path
     let conf = Conf::load(None)?;
-    let listeners = Listeners {
-        plain: listen(&conf).await?,
-        tls: tls::bind(&conf).await?,
-    };
+    let listeners = listen(&conf).await?;
     // shoal in this process, or the external node the config names: opened once per process
     let service = Service::shared(&conf).await?;
     eprintln!(
@@ -79,6 +77,10 @@ pub async fn serve() -> anyhow::Result<()> {
         listeners.roots()?.join(" and "),
         service.mode().name()
     );
+    // where reef's own CA is, to trust
+    if let Some(note) = listeners.trust_note() {
+        eprintln!("reef-app: {note}");
+    }
     // that callers must sign in, if they must, and how to add the first user
     if let Some(note) = service.sign_in_note().await? {
         eprintln!("reef-app: {note}");
@@ -100,26 +102,28 @@ pub async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Listens where dx says, under `dx serve`, or else where reef's config puts the JSON API
+/// Listens where reef's config puts the JSON API, over HTTPS, or under `dx serve` on the plain
+/// port dx names, whose proxy speaks nothing else, with other hosts' listener beside either
 ///
 /// # Arguments
 ///
-/// * `conf` - reef's config, whose `api.address` names where the JSON API is served
-async fn listen(conf: &Conf) -> anyhow::Result<TcpListener> {
+/// * `conf` - reef's config, whose `api` names where the JSON API is served
+async fn listen(conf: &Conf) -> anyhow::Result<Listeners> {
     // dx sets `PORT` (and `IP`) for the server it runs, and proxies its own port to it
     let Some(_) = dioxus::cli_config::server_port() else {
-        return api::bind(conf).await;
+        return Listeners::bind(conf).await;
     };
     let address: SocketAddr = dioxus::cli_config::fullstack_address_or_localhost();
     // only this host over plain HTTP, whoever chose the address
     anyhow::ensure!(
         address.ip().is_loopback(),
-        "reef-app serves plain HTTP to localhost only, and dx gave it {address}: serve other \
-         hosts over TLS with `[api.tls]`"
+        "reef-app serves plain HTTP to dx's proxy on localhost only, and dx gave it {address}: \
+         serve other hosts with `[api.tls]`"
     );
-    TcpListener::bind(address)
+    let plain = TcpListener::bind(address)
         .await
-        .map_err(|error| anyhow::anyhow!("listening on {address}, which dx gave: {error}"))
+        .map_err(|error| anyhow::anyhow!("listening on {address}, which dx gave: {error}"))?;
+    Listeners::beside_plain(plain, conf).await
 }
 
 /// Resolves on the first SIGINT or SIGTERM

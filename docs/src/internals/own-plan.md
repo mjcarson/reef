@@ -33,7 +33,7 @@ buffers, so a session whose `ulimit -l` is lower needs `LimitMEMLOCK=` in the un
 
 ```sh
 systemctl --user daemon-reload && systemctl --user enable --now reef
-journalctl --user -u reef                  # what it said starting, and any warning
+journalctl --user -u reef                  # what it said starting, where its CA is, and any warning
 reef project add reef                      # from the repo's root, once
 reef import plan --plan central            # the plan, from its book
 reef claude install                        # the MCP entry, the hooks and the skill, for the loop

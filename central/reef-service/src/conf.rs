@@ -3,7 +3,7 @@
 //! The config is a TOML file, read from `$REEF_CONFIG`, else `$XDG_CONFIG_HOME/reef/config.toml`,
 //! else `~/.config/reef/config.toml`. A default path with no file there means every default; a
 //! path named by `$REEF_CONFIG` or by a caller must exist. `reef_api::config` finds it, so the
-//! CLI, which reads `[api]`'s `address`, `url` and `ca` alone, finds the same file.
+//! CLI, which reads `[api]`'s `address`, `url`, `ca` and `certs` alone, finds the same file.
 //!
 //! ```toml
 //! [shoal]
@@ -17,17 +17,23 @@
 //! memory = "256MiB"
 //!
 //! [api]
-//! # where the JSON API listens over plain HTTP: a loopback address, for this host alone
+//! # where the JSON API listens over HTTPS: a loopback address, for this host alone
 //! address = "127.0.0.1:12180"
+//! # where reef keeps the CA it makes and the certificate that CA signs, which the loopback port
+//! # serves, and `[api.tls]` too unless it names one; the CLI on this host trusts that CA
+//! certs = "/home/me/.local/share/reef/certs"
+//! # names reef's own certificate covers beside localhost, its loopback addresses and the host's
+//! names = ["reef.example", "10.0.0.5"]
 //! # where a client on another host reaches the service, and a root it trusts for its cert; the
 //! # CLI reads these two, and the service leaves them be
 //! url = "https://reef.example:12443"
 //! ca = "/home/me/.config/reef/ca.pem"
 //!
 //! [api.tls]
-//! # where the JSON API listens over TLS too, on any address, which needs `[auth] required`
+//! # where the JSON API listens for other hosts too, over HTTPS; off loopback, it needs
+//! # `[auth] required`
 //! address = "0.0.0.0:12443"
-//! # the certificate chain and its private key, as PEM
+//! # the certificate chain and its private key, as PEM, else reef's own
 //! cert = "/etc/reef/fullchain.pem"
 //! key = "/etc/reef/privkey.pem"
 //!
@@ -44,7 +50,6 @@
 //! hosts = ["github.com", "git.example"]
 //! ```
 
-use reef_api::config::env_dir;
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -100,9 +105,15 @@ impl Default for ShoalSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApiSettings {
-    /// The address it listens on over plain HTTP, which must be a loopback one
+    /// The address it listens on over HTTPS, which must be a loopback one
     pub address: SocketAddr,
-    /// Where it listens over TLS too, for other hosts, if anywhere
+    /// Where reef keeps the CA it makes and the certificate that CA signs, else the default
+    /// under `$XDG_DATA_HOME`
+    pub certs: Option<PathBuf>,
+    /// The names reef's own certificate covers beside localhost, its loopback addresses and the
+    /// host's own name
+    pub names: Vec<String>,
+    /// Where it listens for other hosts too, if anywhere
     pub tls: Option<TlsSettings>,
     /// Where a client on another host reaches the service: the CLI's alone, left be here
     pub url: Option<String>,
@@ -110,16 +121,18 @@ pub struct ApiSettings {
     pub ca: Option<PathBuf>,
 }
 
-/// Where the JSON API listens over TLS, and the certificate it serves
+/// Where the JSON API listens for other hosts, and the certificate it serves there
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsSettings {
     /// The address it listens on, which may be any
     pub address: SocketAddr,
-    /// The certificate chain, as PEM, the server's own first
-    pub cert: PathBuf,
-    /// The certificate's private key, as PEM
-    pub key: PathBuf,
+    /// The certificate chain, as PEM, the server's own first, else reef's own
+    #[serde(default)]
+    pub cert: Option<PathBuf>,
+    /// The certificate's private key, as PEM, named with `cert`
+    #[serde(default)]
+    pub key: Option<PathBuf>,
 }
 
 /// Whether callers sign in
@@ -158,12 +171,15 @@ impl Default for RemoteSettings {
 }
 
 impl Default for ApiSettings {
-    /// Localhost, at the port reef's clients look for it on, and no TLS
+    /// Localhost, at the port reef's clients look for it on, with reef's own certificate in the
+    /// default directory, and no listener for other hosts
     fn default() -> Self {
         ApiSettings {
             address: reef_api::DEFAULT_ADDRESS
                 .parse()
                 .expect("reef-api's default address is an address"),
+            certs: None,
+            names: Vec::new(),
             tls: None,
             url: None,
             ca: None,
@@ -235,6 +251,18 @@ impl Conf {
         Ok(self.data_home("remotes.clones")?.join("clones"))
     }
 
+    /// The directory reef keeps its own CA and certificate in: the one configured, else the
+    /// default, `$XDG_DATA_HOME/reef/certs`, else `~/.local/share/reef/certs`, where the CLI on
+    /// this host looks for the CA too
+    pub fn certs_dir(&self) -> anyhow::Result<PathBuf> {
+        // a configured directory wins
+        if let Some(dir) = &self.api.certs {
+            return Ok(dir.clone());
+        }
+        // else reef's directory in XDG's data home, as reef's clients find it
+        Ok(self.data_home("api.certs")?.join("certs"))
+    }
+
     /// How often every remote project is fetched, or `None` if never
     pub fn fetch_every(&self) -> anyhow::Result<Option<Duration>> {
         // a number and its unit, refused with the key to change
@@ -256,16 +284,13 @@ impl Conf {
     ///
     /// * `key` - The key that would name a directory instead, for the message if there is none
     fn data_home(&self, key: &str) -> anyhow::Result<PathBuf> {
-        // XDG's data home, else its default under the home directory
-        let base = env_dir("XDG_DATA_HOME")
-            .or_else(|| env_dir("HOME").map(|home| home.join(".local").join("share")))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no data directory for reef: set {}, or `XDG_DATA_HOME` or `HOME`",
-                    self.key(key)
-                )
-            })?;
-        Ok(base.join("reef"))
+        // XDG's data home, else its default under the home directory, as reef's clients find it
+        reef_api::config::data_home().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no data directory for reef: set {}, or `XDG_DATA_HOME` or `HOME`",
+                self.key(key)
+            )
+        })
     }
 
     /// Names a key and the file it is set in, for a message that says what to change
@@ -354,27 +379,45 @@ mod tests {
         assert!(parsed.is_err(), "a host name was read as an address");
     }
 
-    /// TLS is off unless `[api.tls]` names an address, a certificate and its key
+    /// Other hosts' listener is off unless `[api.tls]` names an address, and serves the
+    /// certificate it names, else reef's own, kept where `[api] certs` says
     #[test]
-    fn tls_is_off_unless_named() {
-        // nothing said is plain HTTP alone
+    fn the_wide_listener_names_its_certificate_or_takes_reefs_own() {
+        // nothing said is this host's loopback port alone, with reef's own certificate kept in
+        // the default directory
         let conf: Conf = toml::from_str("").expect("an empty config parses");
         assert!(conf.api.tls.is_none());
-        // and all three said, TLS on any address, beside the loopback one
+        assert!(conf.api.certs.is_none() && conf.api.names.is_empty());
+        // all said, other hosts served the certificate named, beside the loopback port
         let text = "[api]\naddress = \"127.0.0.1:12180\"\nurl = \"https://reef.example:12443\"\n\
-                    ca = \"/etc/reef/ca.pem\"\n\n[api.tls]\naddress = \"0.0.0.0:12443\"\n\
+                    ca = \"/etc/reef/ca.pem\"\ncerts = \"/var/lib/reef/certs\"\n\
+                    names = [\"reef.example\"]\n\n[api.tls]\naddress = \"0.0.0.0:12443\"\n\
                     cert = \"/etc/reef/cert.pem\"\nkey = \"/etc/reef/key.pem\"\n";
         let conf: Conf = toml::from_str(text).expect("it parses");
-        let tls = conf.api.tls.expect("TLS was named");
+        let tls = conf.api.tls.clone().expect("other hosts were named");
         assert_eq!(tls.address.to_string(), "0.0.0.0:12443");
-        assert_eq!(tls.cert, std::path::Path::new("/etc/reef/cert.pem"));
-        assert_eq!(tls.key, std::path::Path::new("/etc/reef/key.pem"));
+        assert_eq!(
+            tls.cert.as_deref(),
+            Some(std::path::Path::new("/etc/reef/cert.pem"))
+        );
+        assert_eq!(
+            tls.key.as_deref(),
+            Some(std::path::Path::new("/etc/reef/key.pem"))
+        );
+        assert_eq!(
+            conf.certs_dir().unwrap(),
+            std::path::Path::new("/var/lib/reef/certs")
+        );
+        assert_eq!(conf.api.names, ["reef.example"]);
         // the client's keys are read, so one file serves both
         assert_eq!(conf.api.url.as_deref(), Some("https://reef.example:12443"));
         assert_eq!(conf.api.ca, Some("/etc/reef/ca.pem".into()));
-        // a certificate with no key, or a misspelt key, is refused
-        let parsed = toml::from_str::<Conf>("[api.tls]\naddress = \"0.0.0.0:1\"\ncert = \"c\"\n");
-        assert!(parsed.is_err(), "TLS with no key was read");
+        // an address alone serves reef's own certificate there too
+        let conf: Conf =
+            toml::from_str("[api.tls]\naddress = \"0.0.0.0:1\"\n").expect("an address parses");
+        let tls = conf.api.tls.expect("other hosts were named");
+        assert!(tls.cert.is_none() && tls.key.is_none());
+        // a misspelt key is refused
         let parsed = toml::from_str::<Conf>(
             "[api.tls]\naddress = \"0.0.0.0:1\"\ncert = \"c\"\nkey = \"k\"\nkye = \"k\"\n",
         );

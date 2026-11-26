@@ -9,7 +9,7 @@
 mod common;
 
 use reef_service::api::Listeners;
-use reef_service::{Conf, TlsSettings, api};
+use reef_service::{Conf, TlsSettings};
 
 /// Expands each case into a test against the twin, and one against an in-process pool
 macro_rules! suite {
@@ -66,10 +66,38 @@ suite!(
     remote_registrations_answer_with_their_status,
 );
 
-/// The API listens on a loopback address over plain HTTP, and refuses any other, which only TLS
-/// serves
+/// A config listening on this host's loopback port alone, over HTTPS, with reef's own
+/// certificate kept in a directory of the case's own
+///
+/// # Arguments
+///
+/// * `dir` - The case's directory
+/// * `address` - The loopback port's address
+fn loopback(dir: &std::path::Path, address: &str) -> anyhow::Result<Conf> {
+    let mut conf = Conf::default();
+    conf.api.address = address.parse()?;
+    conf.api.certs = Some(dir.join("certs"));
+    Ok(conf)
+}
+
+/// A fresh directory of a case's own, under cargo's target dir
+///
+/// # Arguments
+///
+/// * `name` - The case's name
+fn fresh_dir(name: &str) -> anyhow::Result<std::path::PathBuf> {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    Ok(dir)
+}
+
+/// The API listens over HTTPS on a loopback address, and refuses any other, which only
+/// `[api.tls]` serves
 #[tokio::test]
 async fn server_binds_to_localhost_only() -> anyhow::Result<()> {
+    let dir = fresh_dir("api-loopback")?;
     // every address but a loopback one is refused, naming the key that set it
     for address in [
         "0.0.0.0:0",
@@ -77,55 +105,66 @@ async fn server_binds_to_localhost_only() -> anyhow::Result<()> {
         "192.168.1.2:0",
         "[::ffff:127.0.0.1]:0",
     ] {
-        let mut conf = Conf::default();
-        conf.api.address = address.parse()?;
-        let refused = api::bind(&conf).await.expect_err(address).to_string();
-        assert!(refused.contains("localhost only"), "{address}: {refused}");
+        let refused = Listeners::bind(&loopback(&dir, address)?)
+            .await
+            .err()
+            .expect(address)
+            .to_string();
+        assert!(
+            refused.contains("not a loopback address"),
+            "{address}: {refused}"
+        );
         assert!(refused.contains("`api.address`"), "{address}: {refused}");
     }
-    // and IPv4's and IPv6's loopback are listened on, each on a port the OS chose
+    // and IPv4's and IPv6's loopback are listened on over HTTPS, each on a port the OS chose,
+    // serving reef's own certificate, made in the directory named
     for address in ["127.0.0.1:0", "[::1]:0"] {
-        let mut conf = Conf::default();
-        conf.api.address = address.parse()?;
-        let listener = api::bind(&conf).await?;
-        assert!(listener.local_addr()?.ip().is_loopback(), "{address}");
+        let listeners = Listeners::bind(&loopback(&dir, address)?).await?;
+        let root = &listeners.roots()?[0];
+        assert!(root.starts_with("https://"), "{address}: {root}");
+        let own = listeners.own.as_ref().expect("reef's own certificate");
+        assert_eq!(own.ca, dir.join("certs/ca.pem"));
     }
     // the default is localhost too
     assert!(Conf::default().api.address.ip().is_loopback());
     Ok(())
 }
 
-/// TLS is refused with sign-in off, plain HTTP still binds loopback only beside it, and a
-/// certificate or key that can't be read is named with its key
+/// Other hosts' listener needs sign-in off loopback, serves the certificate it names or reef's
+/// own, the loopback port still takes loopback alone beside it, and a certificate or key that
+/// can't be read is named with its key
 #[tokio::test]
 async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()> {
     // a certificate, and another's key, in a directory of the case's own
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("api-tls");
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
-    }
+    let dir = fresh_dir("api-tls")?;
     let minted = common::tls::minted(&dir.join("ours"))?;
     let other = common::tls::minted(&dir.join("other"))?;
-    // a config serving it on every interface, beside loopback, asking callers to sign in
-    let conf = |cert: &std::path::Path, key: &std::path::Path, required: bool| {
-        let mut conf = Conf::default();
-        conf.api.address = "127.0.0.1:0".parse().unwrap();
+    // a config serving other hosts at an address, beside loopback, signing in or not
+    let conf = |address: &str,
+                cert: Option<&std::path::Path>,
+                key: Option<&std::path::Path>,
+                required: bool| {
+        let mut conf = loopback(&dir, "127.0.0.1:0").unwrap();
         conf.auth.required = required;
         conf.api.tls = Some(TlsSettings {
-            address: "0.0.0.0:0".parse().unwrap(),
-            cert: cert.to_path_buf(),
-            key: key.to_path_buf(),
+            address: address.parse().unwrap(),
+            cert: cert.map(std::path::Path::to_path_buf),
+            key: key.map(std::path::Path::to_path_buf),
         });
         conf
     };
+    let ours = |required| conf("0.0.0.0:0", Some(&minted.cert), Some(&minted.key), required);
     // with sign-in off, other hosts would reach a service that answers anyone
-    let refused = Listeners::bind(&conf(&minted.cert, &minted.key, false))
+    let refused = Listeners::bind(&ours(false))
         .await
         .err()
-        .expect("TLS was served with sign-in off")
+        .expect("other hosts were served with sign-in off")
         .to_string();
     assert!(refused.contains("`auth.required`"), "{refused}");
     assert!(refused.contains("`api.tls`"), "{refused}");
+    // but a second port on loopback reaches this host alone, so it needs none
+    let local = conf("127.0.0.1:0", None, None, false);
+    assert!(Listeners::bind(&local).await?.tls.is_some());
     // a chain that isn't there, holds no certificate, or isn't its key's, names the files
     let missing = dir.join("missing.pem");
     let garbage = dir.join("garbage.pem");
@@ -137,7 +176,7 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
         (&minted.cert, &garbage, "garbage.pem"),
         (&minted.cert, &other.key, "serving the certificate"),
     ] {
-        let refused = Listeners::bind(&conf(cert, key, true))
+        let refused = Listeners::bind(&conf("0.0.0.0:0", Some(cert), Some(key), true))
             .await
             .err()
             .expect(says)
@@ -145,16 +184,27 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
         assert!(refused.contains(says), "{says}: {refused}");
         assert!(refused.contains("`api.tls.cert`"), "{says}: {refused}");
     }
-    // plain HTTP beside it still takes loopback alone
-    let mut wide = conf(&minted.cert, &minted.key, true);
+    // a certificate named without its key is refused, naming both keys
+    let refused = Listeners::bind(&conf("0.0.0.0:0", Some(&minted.cert), None, true))
+        .await
+        .err()
+        .expect("a certificate with no key")
+        .to_string();
+    assert!(refused.contains("together"), "{refused}");
+    assert!(refused.contains("`api.tls.key`"), "{refused}");
+    // the loopback port beside it still takes loopback alone
+    let mut wide = ours(true);
     wide.api.address = "0.0.0.0:0".parse()?;
     let refused = Listeners::bind(&wide)
         .await
         .err()
-        .expect("plain HTTP bound wide");
-    assert!(refused.to_string().contains("localhost only"), "{refused}");
-    // and a certificate its key signs serves on every interface, beside loopback
-    let listeners = Listeners::bind(&conf(&minted.cert, &minted.key, true)).await?;
+        .expect("the loopback port bound wide");
+    assert!(
+        refused.to_string().contains("not a loopback address"),
+        "{refused}"
+    );
+    // a certificate its key signs serves on every interface, beside loopback, both over HTTPS
+    let listeners = Listeners::bind(&ours(true)).await?;
     let tls = listeners.tls.as_ref().expect("TLS was named");
     assert!(
         axum::serve::Listener::local_addr(tls)?
@@ -162,7 +212,14 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
             .is_unspecified()
     );
     let roots = listeners.roots()?;
-    assert!(roots[0].starts_with("http://127.0.0.1:"), "{roots:?}");
+    assert!(roots[0].starts_with("https://127.0.0.1:"), "{roots:?}");
     assert!(roots[1].starts_with("https://0.0.0.0:"), "{roots:?}");
+    // and with none named, other hosts are served reef's own
+    assert!(
+        Listeners::bind(&conf("0.0.0.0:0", None, None, true))
+            .await?
+            .tls
+            .is_some()
+    );
     Ok(())
 }

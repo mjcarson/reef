@@ -7,15 +7,16 @@
 //! - **Picked in one order** ([`pick`]): a file named by `--credentials`, else a token in
 //!   `$REEF_TOKEN`, else a file named by `$REEF_CREDENTIALS`, else
 //!   `$XDG_CONFIG_HOME/reef/credentials.toml`, beside reef's config.
-//! - **A token a server, by the server's root**, such as `http://127.0.0.1:12180`, so a login to
-//!   one server never signs in to another.
+//! - **A token a server, by the server's root**, such as `https://127.0.0.1:12180`, so a login
+//!   to one server never signs in to another. One kept for a plain-HTTP root, as before reef
+//!   served HTTPS alone, is found for its HTTPS twin at the same host and port ([`plain_twin`]).
 //! - **Read for each request,** so a server or a runner started before `reef login` sends the
 //!   token once there is one.
 //! - **Private.** The file is written whole, readable by its owner alone, in a directory only
 //!   its owner can enter, and swapped in by a rename, so it is never seen half-written.
 //!
 //! ```toml
-//! [servers."http://127.0.0.1:12180"]
+//! [servers."https://127.0.0.1:12180"]
 //! user = "ada"
 //! token = "reef_…"
 //! ```
@@ -182,12 +183,39 @@ pub fn read(path: &Path) -> anyhow::Result<Credentials> {
 
 /// The login a credentials file keeps for a server, if it keeps one
 ///
+/// A server called over HTTPS finds a login kept for its plain-HTTP root too, at the same host
+/// and port, as one kept before reef served HTTPS alone was.
+///
 /// # Arguments
 ///
 /// * `path` - The file
-/// * `base` - The server's root, such as `http://127.0.0.1:12180`
+/// * `base` - The server's root, such as `https://127.0.0.1:12180`
 pub fn login_for(path: &Path, base: &str) -> anyhow::Result<Option<Login>> {
-    Ok(read(path)?.servers.remove(base))
+    // the root's own login, else the one its plain-HTTP twin kept
+    let mut servers = read(path)?.servers;
+    Ok(servers
+        .remove(base)
+        .or_else(|| plain_twin(base).and_then(|twin| servers.remove(&twin))))
+}
+
+/// The plain-HTTP root at the same host and port as an HTTPS one, or `None` for any other
+///
+/// # Arguments
+///
+/// * `base` - The server's root
+///
+/// # Examples
+///
+/// ```
+/// use reef::credentials::plain_twin;
+///
+/// assert_eq!(plain_twin("https://127.0.0.1:12180").as_deref(), Some("http://127.0.0.1:12180"));
+/// assert_eq!(plain_twin("http://127.0.0.1:12180"), None);
+/// ```
+pub fn plain_twin(base: &str) -> Option<String> {
+    // the same host and port, which a scheme's default port never is, so its spelling holds
+    base.strip_prefix("https://")
+        .map(|rest| format!("http://{rest}"))
 }
 
 /// Keeps a server's login, replacing any it kept before
@@ -198,8 +226,11 @@ pub fn login_for(path: &Path, base: &str) -> anyhow::Result<Option<Login>> {
 /// * `base` - The server's root
 /// * `login` - Who it signs in, and the token
 pub fn keep(path: &Path, base: &str, login: Login) -> anyhow::Result<()> {
-    // every other server's login stays as it was
+    // every other server's login stays as it was, and its plain-HTTP twin's gives way
     let mut credentials = read(path)?;
+    if let Some(twin) = plain_twin(base) {
+        credentials.servers.remove(&twin);
+    }
     credentials.servers.insert(base.to_string(), login);
     write(path, &credentials)
 }
@@ -211,9 +242,11 @@ pub fn keep(path: &Path, base: &str, login: Login) -> anyhow::Result<()> {
 /// * `path` - The file
 /// * `base` - The server's root
 pub fn forget(path: &Path, base: &str) -> anyhow::Result<bool> {
-    // nothing kept is nothing to forget, and leaves no file written
+    // nothing kept, for the root or its plain-HTTP twin, is nothing to forget, and leaves no
+    // file written
     let mut credentials = read(path)?;
-    if credentials.servers.remove(base).is_none() {
+    let twin = plain_twin(base).and_then(|twin| credentials.servers.remove(&twin));
+    if credentials.servers.remove(base).is_none() && twin.is_none() {
         return Ok(false);
     }
     write(path, &credentials)?;
@@ -382,6 +415,42 @@ mod tests {
         assert_eq!(login_for(&file, "http://b").unwrap(), Some(bob));
         // a login shows no token
         assert!(!format!("{:?}", read(&file).unwrap()).contains("reef_b"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A login kept for a plain-HTTP root signs in its HTTPS twin at the same host and port,
+    /// gives way once that twin keeps its own, and is forgotten with it
+    #[test]
+    fn a_plain_http_login_serves_its_https_twin() {
+        let dir = scratch("twin");
+        let file = dir.join("reef/credentials.toml");
+        let ada = Login {
+            user: "ada".into(),
+            token: "reef_a".into(),
+        };
+        // kept before reef served HTTPS alone, and found for the same host and port over it
+        keep(&file, "http://127.0.0.1:12180", ada.clone()).unwrap();
+        assert_eq!(
+            login_for(&file, "https://127.0.0.1:12180").unwrap(),
+            Some(ada.clone())
+        );
+        // but not for another port
+        assert_eq!(login_for(&file, "https://127.0.0.1:12181").unwrap(), None);
+        // a login kept over HTTPS takes its twin's place
+        let bob = Login {
+            user: "bob".into(),
+            token: "reef_b".into(),
+        };
+        keep(&file, "https://127.0.0.1:12180", bob.clone()).unwrap();
+        assert_eq!(
+            login_for(&file, "https://127.0.0.1:12180").unwrap(),
+            Some(bob)
+        );
+        assert_eq!(read(&file).unwrap().servers.len(), 1);
+        // and a twin left alone is forgotten by its HTTPS root
+        keep(&file, "http://127.0.0.1:12190", ada).unwrap();
+        assert!(forget(&file, "https://127.0.0.1:12190").unwrap());
+        assert_eq!(login_for(&file, "https://127.0.0.1:12190").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

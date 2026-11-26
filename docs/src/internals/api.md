@@ -87,13 +87,18 @@ that `Service::shared` opens. Every route is one service call, and every body an
 - **The first user comes from the service's own host**, over loopback, and is an admin; after
   that only an admin adds users, whether sign-in is required or not, so users can be added before
   it is turned on.
-- **Plain HTTP on localhost, TLS beside it.** `api::bind` refuses any address but a loopback one
-  for plain HTTP, and `tls::bind` adds a listener over TLS on any address where `[api.tls]` names
-  one, refused unless sign-in is required. `api::serve_router` serves one router on both, and
-  each request knows its `Peer`: where it came from, and whether over TLS.
+- **HTTPS on localhost, and beside it for other hosts.** `Listeners::bind` makes or reads back
+  reef's own certificate (`tls::own`), listens over HTTPS on a loopback address alone
+  (`tls::bind_local`), and adds a listener on any address where `[api.tls]` names one
+  (`tls::bind`), refused off loopback unless sign-in is required. A plain-HTTP request on
+  either is answered with a redirect to `https://`. `api::serve_router` serves one router on
+  both, and each request knows its `Peer`: where it came from, and whether over TLS. Only a
+  proxy on this host that speaks nothing else, as `dx serve`'s, is served plain
+  (`Listeners::beside_plain`).
 
 `reef-serve` serves it alone, until reef-app mounts it. It listens before it opens shoal, so a
-taken port, an address that isn't local or a certificate that can't be read stops it first, and
+taken port, an address that isn't local or a certificate that can't be read stops it first. It
+says where reef's own CA is, to trust, and
 on SIGINT or SIGTERM it ends the change stream, waits for open requests and closes the service.
 
 ```sh

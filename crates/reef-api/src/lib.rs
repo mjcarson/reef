@@ -37,8 +37,8 @@
 //!   or reading one from a file, for the CLI and `reef-serve`.
 //! - **Config** ([`config`]): where reef's config file is, which the service and its clients read.
 //!
-//! The service serves plain HTTP to localhost, at [`DEFAULT_ADDRESS`] unless reef's config names
-//! another, and other hosts over TLS where its `[api.tls]` says.
+//! The service serves HTTPS to localhost, at [`DEFAULT_ADDRESS`] unless reef's config names
+//! another, with a certificate of its own, and other hosts where its `[api.tls]` says.
 
 pub mod change;
 pub mod comment;
