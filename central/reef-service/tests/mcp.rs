@@ -273,6 +273,65 @@ async fn claudes_writes_are_marked_for_its_user() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The `history` tool prints a node's history as `reef node log` does, naming Claude's edits as
+/// Claude's for the user signed in, and a cursor no page named comes back as a tool error
+#[tokio::test]
+async fn the_history_tool_prints_node_log() -> anyhow::Result<()> {
+    // a twin asking every caller to sign in, and ada, its first user, signed in
+    let ax = common::Fx::memory("mcp-history-tool")
+        .await?
+        .api_signing_in()
+        .await?;
+    common::sign_in_cases::first_admin(&ax, "ada").await?;
+    let request = reef_api::SignIn {
+        name: "ada".to_string(),
+        password: common::sign_in_cases::PASSWORD.to_string(),
+        label: Some("a case".to_string()),
+    };
+    let (_, issued): (_, reef_api::IssuedToken) =
+        ax.client.post(reef_api::paths::TOKENS, &request).await?;
+    let mut session =
+        Session::open_over(&ax, signed_client_of(&ax, "ada", &issued.token)?, None).await?;
+    // a node never edited says so, as the command does
+    let (never, failed) = session.call("history", json!({"id": "C1"})).await?;
+    assert!(!failed, "{never}");
+    assert_eq!(never, "no edit of `reef/central/C1` is kept\n");
+    // a node put and set in progress through the tools
+    let yaml = "id: C1\ntitle: C1 Some work\ndescription:\n  why: Without C1, something is \
+                missing.\n  what: With C1, it is there.\n";
+    let (put, failed) = session.call("put", json!({"yaml": yaml})).await?;
+    assert!(!failed, "{put}");
+    let (status, failed) = session
+        .call("status", json!({"id": "C1", "status": "in-progress"}))
+        .await?;
+    assert!(!failed, "{status}");
+    // the tool's text is the command's, each edit Claude's for ada
+    let (told, failed) = session.call("history", json!({"id": "C1"})).await?;
+    assert!(!failed, "{told}");
+    let client = signed_client_of(&ax, "ada", &issued.token)?;
+    let mut printed = Vec::new();
+    reef::history::node(&client, &ax.plan.node("C1")?, None, false, &mut printed).await?;
+    assert_eq!(told, String::from_utf8(printed)?);
+    let lines: Vec<&str> = told.lines().collect();
+    assert_eq!(lines.len(), 2, "{told}");
+    assert!(
+        lines[0].starts_with("v2 ")
+            && lines[0].ends_with("  Claude, for ada: status unset → in-progress"),
+        "{told}"
+    );
+    assert!(
+        lines[1].starts_with("v1 ") && lines[1].ends_with("  Claude, for ada: added"),
+        "{told}"
+    );
+    // and a cursor no page named is a tool error, saying where one comes from
+    let (bad, failed) = session
+        .call("history", json!({"id": "C1", "older": "nope"}))
+        .await?;
+    assert!(failed, "{bad}");
+    assert!(bad.contains("no history's cursor"), "{bad}");
+    Ok(())
+}
+
 /// Exactly the tools that only read say so, the tools say what the CLI does, and a put that
 /// breaks the plan comes back as a tool error with check's message
 #[tokio::test]
@@ -298,6 +357,7 @@ async fn read_only_tools_say_so_and_writes_say_why_they_fail() -> anyhow::Result
         ("check", true),
         ("comments", true),
         ("get", true),
+        ("history", true),
         ("next", true),
         ("next_task", false),
         ("put", false),

@@ -25,8 +25,8 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   `reef project fetch`; pushing is theirs to do.
 - **Tools first, the CLI where there are none.** Claude Code serves reef's tools as
   `mcp__reef__*` when the repo's `.mcp.json` runs `reef mcp`. Plan mode blocks Bash, but it
-  runs `mcp__reef__next`, `mcp__reef__get`, `mcp__reef__check` and `mcp__reef__comments`
-  without a prompt, since they only read. The others write, so they wait until the plan is approved. Each tool's text is
+  runs `mcp__reef__next`, `mcp__reef__get`, `mcp__reef__history`, `mcp__reef__check` and
+  `mcp__reef__comments` without a prompt, since they only read. The others write, so they wait until the plan is approved. Each tool's text is
   what its command prints.
 - **With no `mcp__reef__*` tools, the repo isn't set up for them.** `reef claude install`, run
   from the repo's root, writes the MCP entry, Claude Code's and git's hooks and this skill. It
@@ -41,7 +41,7 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   | Show this session in the app | | `! reef loop run`, then `! reef loop detach` |
   | Read a node's YAML | `mcp__reef__get` | `reef node get <ID>` |
   | Read its body too | | `reef node get <ID> --md` |
-  | See who changed it, and how | | `reef node log <ID>` |
+  | See who changed it, and how | `mcp__reef__history` | `reef node log <ID>` |
   | Check the plan | `mcp__reef__check` | `reef check` |
   | Put a node | `mcp__reef__put` | `reef node put <FILE>` |
   | Set its status | `mcp__reef__status` | `reef status <ID> <STATUS>` |

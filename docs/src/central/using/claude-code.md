@@ -4,8 +4,9 @@ Once a repo is set up with `reef claude install`
 ([how](../projects/claude.md)), Claude Code in it has reef's
 tools and skill:
 
-- **Tools:** `mcp__reef__next`, `get`, `check` and `comments` only read, so plan mode runs them
-  without asking. `put`, `status`, `accept`, `reply`, `resolve` and `next_task` write, with your
+- **Tools:** `mcp__reef__next`, `get`, `history`, `check` and `comments` only read, so plan mode
+  runs them without asking. `history` is `reef node log`: who made each edit of a node, and what
+  it changed. `put`, `status`, `accept`, `reply`, `resolve` and `next_task` write, with your
   token; a reply or a resolve is marked as Claude's.
 - **The skill** tells Claude to draw new work as a node before starting it, and to mark it done,
   with its criteria, in the change that finishes it.

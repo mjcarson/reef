@@ -135,6 +135,7 @@ problem is a tool error carrying the message, and writes nothing.
 | `mcp__reef__next` | reads | `plan` | `reef next` |
 | `mcp__reef__next_task` | writes | nothing: the pane's loop names the plans | `reef loop take` |
 | `mcp__reef__get` | reads | `id` | `reef node get <ID>` |
+| `mcp__reef__history` | reads | `id`; `older`, the cursor a page ends naming, for the 200 before it | `reef node log <ID>` |
 | `mcp__reef__check` | reads | `plan` | `reef check` |
 | `mcp__reef__put` | writes | `yaml` | `reef node put <FILE>` |
 | `mcp__reef__status` | writes | `id`, `status` | `reef status <ID> <STATUS>` |

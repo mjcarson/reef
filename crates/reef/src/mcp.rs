@@ -8,9 +8,9 @@
 //! the CLI, and `--project` and `--plan` name one instead. Each tool takes a `plan` of its own
 //! too.
 //!
-//! - **Read-only tools are marked `readOnlyHint`:** `get`, `check`, `next` and `comments`. Plan
-//!   mode runs them without a prompt, and asks for every other tool, so nothing Claude needs
-//!   while it plans writes (X4).
+//! - **Read-only tools are marked `readOnlyHint`:** `get`, `history`, `check`, `next` and
+//!   `comments`. Plan mode runs them without a prompt, and asks for every other tool, so nothing
+//!   Claude needs while it plans writes (X4).
 //! - **Writes are the CLI's:** `put` takes a node's YAML, as `reef node put` does, and
 //!   `status` and `accept` set a node's status and a criterion's.
 //! - **Comments are answered as Claude's.** `comments` lists open threads as `reef comment ls`
@@ -41,7 +41,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::cli::{Pick, PlanPick, picked, picked_plan};
 use crate::client::Client;
 use crate::comment::{self, Answering};
-use crate::{node, open, task, work};
+use crate::{history, node, open, task, work};
 use reef_api::Writer;
 
 /// The tools one session's server offers, over the service reef's config names
@@ -71,6 +71,18 @@ pub struct NodeArgs {
     pub id: String,
     /// The plan within the project, if the project has several and the server names none
     pub plan: Option<String>,
+}
+
+/// Names one node, and which page of its history to read
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HistoryArgs {
+    /// The node's id, such as C18
+    pub id: String,
+    /// The plan within the project, if the project has several and the server names none
+    pub plan: Option<String>,
+    /// The cursor a page ended by naming, after `--older`, to read the 200 edits older than it;
+    /// none for the newest 200
+    pub older: Option<String>,
 }
 
 /// A node's YAML to put
@@ -304,6 +316,27 @@ impl Tools {
         said(out, done)
     }
 
+    /// Reads a node's history: who made each edit, what it changed and when
+    #[tool(
+        description = "Read a reef node's history, newest first, as `reef node log` prints it: \
+                       a line an edit, with the version it left, when, who made it (\"Claude, \
+                       for ada\" where Claude did, through these tools) and what it changed. A \
+                       page holds 200 edits; one with older edits kept ends naming a cursor \
+                       after `--older`, which `older` takes to read the next 200.",
+        annotations(read_only_hint = true)
+    )]
+    async fn history(&self, Parameters(args): Parameters<HistoryArgs>) -> Result<String, String> {
+        // the history as `reef node log` prints it, a page at a time
+        let mut out = Vec::new();
+        let done = async {
+            let plan = self.plan(args.plan).await?;
+            let node = plan.node(args.id)?;
+            history::node(&self.client, &node, args.older.as_deref(), false, &mut out).await
+        }
+        .await;
+        said(out, done)
+    }
+
     /// Lists the plan's problems
     #[tool(
         description = "Check the reef plan as `mdbook-reef check` checks a book, listing each \
@@ -530,9 +563,9 @@ impl Tools {
     name = "reef",
     instructions = "reef keeps this repo's plan: a graph of nodes, each a piece of work with a \
                     why, a what, needs and acceptance criteria. `next` says what is ready to \
-                    start, the user's queue first, `get` reads a node as YAML and `check` lists \
-                    the plan's problems; these only read, as does `comments`, which lists open \
-                    comment threads. `next_task` takes the next node for this session's loop \
+                    start, the user's queue first, `get` reads a node as YAML, `history` who \
+                    changed it and how, and `check` lists the plan's problems; these only read, \
+                    as does `comments`, which lists open comment threads. `next_task` takes the next node for this session's loop \
                     and starts it, before plan mode, or a done node again for a round of its \
                     open comments. `put` writes a node's YAML, `status` sets where its work \
                     stands and `accept` whether a criterion is met. `reply` answers a comment \
