@@ -14,10 +14,12 @@
 //!   its reviewer; everything else, Claude's tools included, never sees it.
 //! - **A review is submitted or discarded at once,** over the version read, which is a change,
 //!   [`Change::ReviewMarked`].
+//! - **Each write names its author,** the user the caller's token signs in, and Claude if the
+//!   caller says it writes as Claude, never a name a body gives.
 //! - **Each comment kept is a change**, [`Change::CommentAdded`], and each mark or resolve one,
 //!   [`Change::ThreadMarked`]. A comment, a mark or a resolve that wrote nothing sends none.
 
-use reef_api::Change;
+use reef_api::{Author, Change};
 use reef_model::{NodeName, PlanName};
 use tracing::instrument;
 
@@ -115,12 +117,18 @@ impl<B: Backend> Service<B> {
     ///
     /// * `node` - The node's full name
     /// * `mark` - Whether it is submitted or discarded, and the version it was marked against
+    /// * `author` - Who marks it, from the caller's token
     #[instrument(name = "Service::mark_review", skip_all, err(Debug))]
-    pub async fn mark_review(&self, node: &NodeName, mark: MarkReview) -> anyhow::Result<Reviewed> {
+    pub async fn mark_review(
+        &self,
+        node: &NodeName,
+        mark: MarkReview,
+        author: &Author,
+    ) -> anyhow::Result<Reviewed> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(&node.plan).await?;
         // written under the project's comment lock, and told to the change stream once it is
-        let reviewed = self.store.mark_review(node, mark).await?;
+        let reviewed = self.store.mark_review(node, mark, author).await?;
         if let Reviewed::Marked { review } = &reviewed {
             self.publish(Change::ReviewMarked {
                 node: review.node.clone(),
@@ -138,14 +146,20 @@ impl<B: Backend> Service<B> {
     ///
     /// * `node` - The node's full name
     /// * `new` - What the thread is on, and its first comment's body
+    /// * `author` - Who writes it, from the caller's token
     #[instrument(name = "Service::start_thread", skip_all, err(Debug))]
-    pub async fn start_thread(&self, node: &NodeName, new: NewThread) -> anyhow::Result<Commented> {
+    pub async fn start_thread(
+        &self,
+        node: &NodeName,
+        new: NewThread,
+        author: &Author,
+    ) -> anyhow::Result<Commented> {
         // a node its plan doesn't have can't be commented on, and a plan not listed is refused
         if self.store.get(&node.plan, &node.id).await?.is_none() {
             return Ok(Commented::NotInPlan { node: node.clone() });
         }
         // written under the project's comment lock, and told to the change stream once it is
-        let commented = self.store.start_thread(node, new).await?;
+        let commented = self.store.start_thread(node, new, author).await?;
         Ok(self.announced(commented))
     }
 
@@ -156,17 +170,19 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     /// * `thread` - The thread's number
     /// * `reply` - The reply's body
+    /// * `author` - Who writes it, from the caller's token
     #[instrument(name = "Service::reply", skip_all, err(Debug))]
     pub async fn reply(
         &self,
         plan: &PlanName,
         thread: u32,
         reply: NewReply,
+        author: &Author,
     ) -> anyhow::Result<Commented> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(plan).await?;
         // written under the project's comment lock, and told to the change stream once it is
-        let commented = self.store.reply(plan, thread, reply).await?;
+        let commented = self.store.reply(plan, thread, reply, author).await?;
         Ok(self.announced(commented))
     }
 
@@ -177,17 +193,19 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     /// * `thread` - The thread's number
     /// * `mark` - The state to mark it, and the version it was marked against
+    /// * `author` - Who marks it, from the caller's token
     #[instrument(name = "Service::mark_thread", skip_all, err(Debug))]
     pub async fn mark_thread(
         &self,
         plan: &PlanName,
         thread: u32,
         mark: MarkThread,
+        author: &Author,
     ) -> anyhow::Result<Marked> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(plan).await?;
         // written under the project's comment lock, and told to the change stream once it is
-        let marked = self.store.mark_thread(plan, thread, mark).await?;
+        let marked = self.store.mark_thread(plan, thread, mark, author).await?;
         Ok(match marked {
             Marked::Marked { thread } => {
                 self.publish(Change::ThreadMarked {
@@ -215,12 +233,14 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     /// * `thread` - The thread's number
     /// * `resolve` - The revision that answered it, and the version it was resolved against
+    /// * `author` - Who resolves it, from the caller's token
     #[instrument(name = "Service::resolve_thread", skip_all, err(Debug))]
     pub async fn resolve_thread(
         &self,
         plan: &PlanName,
         thread: u32,
         resolve: ResolveThread,
+        author: &Author,
     ) -> anyhow::Result<Resolved> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(plan).await?;
@@ -242,7 +262,10 @@ impl<B: Backend> Service<B> {
             return Ok(no_revision());
         }
         // written under the project's comment lock, and told to the change stream once it is
-        let resolved = self.store.resolve_thread(plan, thread, resolve).await?;
+        let resolved = self
+            .store
+            .resolve_thread(plan, thread, resolve, author)
+            .await?;
         Ok(match resolved {
             Resolved::Resolved { thread } => {
                 self.publish(Change::ThreadMarked {

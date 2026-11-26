@@ -2,7 +2,14 @@
 
 What central reef can't do yet, and the plan's node for each where there is one.
 
-- **No authors.** Edits, comments and work records don't say which user made them (C50).
+- **A history shows its newest 200 edits.** A node's, a page's or a queue's history reads no
+  further back (C88).
+- **A write sent with no token names nobody.** With sign-in off, anything on the host can write
+  without saying who it is.
+- **An author is shown by name.** A name reused after its user was removed reads as the same
+  user, though the history keeps when each was added.
+- **Not every act names its author.** Registering a project or a plan, a loop's or a session's
+  acts, and managing users don't say who did them (C89).
 - **One disk.** Shoal keeps one copy of the data, so a lost disk is a restore from backup
   (C52).
 - **No push webhook.** A pushed doc is seen at the next fetch, or after `reef project fetch`

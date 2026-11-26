@@ -129,7 +129,8 @@ pub fn picked<'a>(question: &Question, answer: Option<&'a str>) -> (Vec<&'a str>
     }
 }
 
-/// One decision as a card: what it asked, what came of it, and where and when it was answered
+/// One decision as a card: what it asked, what came of it, where and when it was answered, and
+/// whose session asked it
 ///
 /// # Arguments
 ///
@@ -139,6 +140,8 @@ fn decision_card(decision: &Decision, open: bool) -> Element {
     let decided = &decision.decided;
     let (state, class) = verdict(decided.outcome.as_ref());
     let at = when(decided.answered_at.unwrap_or(decided.asked_at));
+    // whose session asked it, if that is known
+    let by = decided.author.describe();
     let (what, kind) = match &decided.kind {
         DecisionKind::Plan { .. } => ("Plan", "plan"),
         DecisionKind::Question { .. } => ("Question", "question"),
@@ -164,6 +167,10 @@ fn decision_card(decision: &Decision, open: bool) -> Element {
                 span { class: "reef-app-tag reef-app-verdict {class}", "{state}" }
                 span { class: "reef-app-muted reef-app-decision-when",
                     "{decided.via.describe()}, {at}"
+                    if let Some(by) = by {
+                        ", by "
+                        span { class: "reef-app-author", "{by}" }
+                    }
                 }
             }
             if let Some(said) = said {

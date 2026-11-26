@@ -139,7 +139,7 @@ run killed midway is followed by one that opens what it left on disk.
   deliberate. The pin is the schema's `SCHEMA_ID` and each table's fingerprint, which leave out
   shoal's protocol version, so a shoal bump that keeps every row moves nothing.
 - **Each table arrives with the node that needs it.** The queue, a plan's pages, work records,
-  comments and loop state each add a table. While reef is in development a table may also change, at the
+  comments, loop state and histories each add a table. While reef is in development a table may also change, at the
   cost of a fresh data directory, until shoal can migrate it.
 - **Persistent tables throughout.** Ephemeral tables are lost on restart and never evicted.
 
@@ -246,6 +246,10 @@ Changes and Comments tabs show.
   thread was started. A capture's follow reads the plan's comments and the node's revisions
   under the comment lock, and writes each thread it moved over the version it read; a row
   another process wrote since is left for the next follow. A file is read once a follow.
+- **Each comment names its author** ([C50](../milestones/m10.md)). Who wrote it, the user signed in and
+  whether Claude wrote it for them, sits in its record beside the writer it always kept, and so
+  does each mark a thread takes, each revision a resolve links, and who started and who submitted
+  or discarded a review. A row kept before names nobody, and reads as such.
 - **Writes take a lock per project; reads take none.** Each write is one row, so the plan's
   comments read whole after every step.
 - **Every row checked against its full key on read**, its project and plan, so a hash collision
@@ -318,3 +322,39 @@ partition, as projects, loops and users are.
   Two registrations of it are judged under the lock every registration holds.
 - **A fetch writes over the version read**, whether its branch moved or not, so the row says
   when it was last fetched, and two fetches can't both land.
+
+## History
+
+Who made each edit of a node, a page or a project's queue, and what it changed
+([C50](../milestones/m10.md)). A node's, a page's and a queue's rows hold no record a field could be added to,
+and changing one would take a fresh data directory, so their edits are rows of a table of their
+own.
+
+### Design choices
+
+- **One table, a partition a subject.** An `EditRow` sits in its project's partition under its
+  subject: `node/<plan>/<id>`, `page/<plan>/<path>` or `queue`. A plan's name and a node's id
+  never hold a `/`, so no two subjects share one, and a node removed and added again keeps one
+  history.
+- **Keys count down, so a read takes the newest first.** A key is `u64::MAX` less the edit's
+  stamp, padded to twenty digits, so a get with a limit reads the newest edits and stops: 200 of
+  them, which [C88](../milestones/m10.md) pages past. The stamp is the time in milliseconds, but always past the
+  last one the store took, so one store's edits to a subject never share a key and need no read
+  first. The key ends with a number each store draws when it opens, so a store opened again after
+  a restart never writes over the last one's edit of the same millisecond.
+- **Written once, after the write it records, under the same lock.** An entry is kept once its
+  write has landed and before the change is published, so a client that reads again on the change
+  finds it. A history that fails to keep is warned of and leaves its write standing, with a gap:
+  an entry kept first would outlive a write that then failed, and failing a write that landed
+  would send its writer back to a stale refusal.
+- **What changed, not the node again.** A node's entry says its status went from one to another,
+  a criterion was marked or named another test, which other keys were edited, its description by
+  part, and whether its body was. A page's says it was added, its text edited or removed, and a
+  queue's names the node queued, moved or taken off and where. A put that left its node as it
+  was keeps none, and so does a whole-plan write for each node and page it left so, so importing
+  the same plan again keeps nothing.
+- **Its record is one JSON field,** so what an entry keeps can change without changing the table,
+  and a kind of edit a newer reef keeps reads as one this reef can't, rather than failing the
+  history.
+- **Who placed each queue entry is read from the queue's history,** its newest edit that queued
+  or moved the node, among the newest 200.

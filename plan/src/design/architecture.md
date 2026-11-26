@@ -215,8 +215,8 @@ localhost ([C51](../milestones/m10.md)) both build on it.
   same-site and its posts carry the cookie: [C51](../milestones/m10.md)'s origin check refuses them
   ([Served beyond localhost](#served-beyond-localhost)). Changing a password, removing a user,
   listing and revoking tokens and slowing repeated failures came with [C77](../milestones/m10.md)
-  ([Managing users and tokens](#managing-users-and-tokens)), and every write's author is
-  [C50](../milestones/m10.md)'s.
+  ([Managing users and tokens](#managing-users-and-tokens)), and every write's author came with
+  [C50](../milestones/m10.md) ([Who did what](#who-did-what)).
 
 ### What C48 found
 
@@ -365,6 +365,43 @@ back, an open change stream outlived its token, and nothing slowed a guesser ([C
 - **A page's buttons do nothing before its script runs,** so the browser check clicks until a
   field opens before it types. No password field sits in a `form`, so an early submit sends
   nothing.
+
+## Who did what
+
+With several users, edits, comments and work records said nothing of whose they were
+([C50](../milestones/m10.md)). Each now carries its author, and the app shows it.
+
+### Design choices
+
+- **The author comes from the token, never the body.** The guard's `Caller` names the user its
+  token or cookie signs in, and `Caller::author` hands that to every write the JSON API and the
+  app's server functions make. With sign-in off, a token sent still names its user, and a write
+  with none names nobody.
+- **Claude says so, for its user.** Claude writes with the user's own token, so reef's MCP
+  server sends `reef-writer: claude` on every request, and its writes read "Claude, for ada". The
+  header can only add that to the token's user, never name another. Hooks and the terminal's own
+  commands are the user's.
+- **An author keeps when its user was added,** beside the name, so a name reused after its user
+  was removed can be told from the one it named before, though nothing shows it yet.
+- **Records with JSON keep it there; the rest keep a history.** Comments, thread and review
+  marks, resolutions, work starts, captures, revisions and decisions name their author in their
+  records, so no row changed. A node's, a page's and a queue's rows have no record, so each of
+  their edits is a row of a new table ([History](store.md#history)), and their histories are
+  read at `…/nodes/{id}/history`, `…/page-history/{*path}` and `…/queue/history`.
+- **A history is best-effort.** An entry is kept once its write lands, and one that fails to keep
+  leaves the write standing with a gap, rather than refusing a write that happened.
+- **Shown where each thing is.** A comment's head names its writer, a thread's foot who marked
+  it, the Changes tab who captured a revision, a decision who asked it, a queue entry who placed
+  it, and a node's History tab every edit of it. The CLI prints the same with `reef node log`,
+  `reef page log`, `reef queue log`, `reef comment ls` and `reef queue ls`.
+
+### What C50 found
+
+- **No fresh data directory.** `EditRow` joined the schema last, and every other table's
+  fingerprint stayed as it was.
+- **A store opened again starts its clock over,** so an edit within the millisecond of the last
+  one before a restart could take its key. Each store's keys end with a number it draws when it
+  opens, so it can't.
 
 ## The CLI
 

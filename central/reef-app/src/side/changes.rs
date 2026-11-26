@@ -114,14 +114,23 @@ fn RevisionView(
     let stamp = revision.at;
     let draft = revision.draft;
     let at = when(revision.at);
+    // who sent the capture it was kept from, if anyone known did
+    let by = revision.author.describe();
     rsx! {
         p { class: "reef-app-muted reef-app-revision-sum",
             if draft {
                 span { class: "reef-app-tag draft", "draft" }
-                " Captured {at}, sealed once the node is done · {files} "
-            } else {
-                "Captured {at} · {files} "
+                " "
             }
+            "Captured {at}"
+            if let Some(by) = by {
+                " by "
+                span { class: "reef-app-author", "{by}" }
+            }
+            if draft {
+                ", sealed once the node is done"
+            }
+            " · {files} "
             if files == 1 {
                 "file"
             } else {

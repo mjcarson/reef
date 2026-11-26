@@ -69,6 +69,9 @@ pub const PLANS: &str = "/api/v1/projects/{project}/plans";
 /// A project's queue: listed by `GET`, edited an entry at a time by `POST`
 pub const QUEUE: &str = "/api/v1/projects/{project}/queue";
 
+/// A project's queue's history: who queued, moved or took off each entry, newest first
+pub const QUEUE_HISTORY: &str = "/api/v1/projects/{project}/queue/history";
+
 /// The work ready to start across a project's plans, in the user's order first, and what the
 /// rest waits on
 pub const PROJECT_NEXT: &str = "/api/v1/projects/{project}/next";
@@ -110,6 +113,11 @@ pub const PAGES: &str = "/api/v1/projects/{project}/plans/{plan}/pages";
 /// One of a plan's own pages, by its path: `design/app.md`
 pub const PAGE: &str = "/api/v1/projects/{project}/plans/{plan}/pages/{*path}";
 
+/// One of a plan's own pages' history, by its path: who edited it and when, newest first
+///
+/// It sits beside the pages, not under one, since a page's path is the route's last part.
+pub const PAGE_HISTORY: &str = "/api/v1/projects/{project}/plans/{plan}/page-history/{*path}";
+
 /// One node's work record: read by `GET`, and recorded by `POST`, which starts the node
 pub const NODE_WORK: &str = "/api/v1/projects/{project}/plans/{plan}/work/{id}";
 
@@ -140,6 +148,9 @@ pub const NODE_REVIEW: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id
 /// A node's decisions: listed by `GET`, those a hook read from a session's transcript kept by
 /// `POST`
 pub const NODE_DECISIONS: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/decisions";
+
+/// A node's history: who made each edit of it, what it changed and when, newest first
+pub const NODE_HISTORY: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/history";
 
 /// The query a thread's routes take to serve threads pending in a review too, which they leave
 /// out otherwise
@@ -282,6 +293,15 @@ pub fn plans(project: &str) -> String {
 /// * `project` - The project's name
 pub fn queue(project: &str) -> String {
     format!("{PROJECTS}/{}/queue", encode(project))
+}
+
+/// The path of a project's queue's history
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn queue_history(project: &str) -> String {
+    format!("{}/history", queue(project))
 }
 
 /// The path of the work ready to start across a project's plans
@@ -439,6 +459,31 @@ pub fn page(plan: &PlanName, path: &str) -> String {
     format!("{}/{}", pages(plan), parts.join("/"))
 }
 
+/// The path of one of a plan's own pages' history, by its path
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `path` - The page's path, such as `design/app.md`
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::paths;
+/// use reef_model::PlanName;
+///
+/// let plan = PlanName::new("reef", "central").unwrap();
+/// assert_eq!(
+///     paths::page_history(&plan, "design/app.md"),
+///     "/api/v1/projects/reef/plans/central/page-history/design/app.md"
+/// );
+/// ```
+pub fn page_history(plan: &PlanName, path: &str) -> String {
+    // each part is encoded, and the slashes between them kept, as a page's own path is
+    let parts: Vec<String> = path.split('/').map(encode).collect();
+    format!("{}/page-history/{}", self::plan(plan), parts.join("/"))
+}
+
 /// The path of one node's work record
 ///
 /// # Arguments
@@ -553,6 +598,15 @@ pub fn node_review(node: &NodeName) -> String {
 /// * `node` - The node's full name
 pub fn node_decisions(node: &NodeName) -> String {
     format!("{}/decisions", self::node(&node.plan, &node.id))
+}
+
+/// The path of a node's history
+///
+/// # Arguments
+///
+/// * `node` - The node's full name
+pub fn node_history(node: &NodeName) -> String {
+    format!("{}/history", self::node(&node.plan, &node.id))
 }
 
 /// The path of one comment thread
@@ -716,6 +770,21 @@ mod tests {
             .replace("{plan}", "central")
             .replace("{*path}", "design/app.md");
         assert_eq!(super::page(&plan, "design/app.md"), page);
+        // and a page's history fills in its own
+        let history = super::PAGE_HISTORY
+            .replace("{project}", "reef")
+            .replace("{plan}", "central")
+            .replace("{*path}", "design/app.md");
+        assert_eq!(super::page_history(&plan, "design/app.md"), history);
+        let node: reef_model::NodeName = "reef/central/C50".parse().unwrap();
+        assert_eq!(
+            super::node_history(&node),
+            format!("{filled}/nodes/C50/history")
+        );
+        assert_eq!(
+            super::queue_history("reef"),
+            super::QUEUE_HISTORY.replace("{project}", "reef")
+        );
         // and a project's queue and its next fill in theirs
         assert_eq!(
             super::queue("reef"),

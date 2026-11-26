@@ -18,10 +18,12 @@
 //!   `Reef-Resolves` trailer names is resolved once the capture is kept and its threads followed,
 //!   linking the revision it kept, or the latest it matched, and each one written is
 //!   [`Change::ThreadMarked`]. A capture that kept nothing resolves nothing.
+//! - **A start and a capture name their author,** the user the caller's token signs in, and so
+//!   does each thread a capture's trailer resolves.
 //! - **A node's revisions are read where its plan is listed,** as its record is, whether or not
 //!   the node is still in its plan.
 
-use reef_api::Change;
+use reef_api::{Author, Change};
 use reef_model::{NodeName, PlanName};
 use tracing::instrument;
 
@@ -70,14 +72,20 @@ impl<B: Backend> Service<B> {
     ///
     /// * `node` - The node's full name
     /// * `start` - What the start read in the node's checkout, and the version it replaces
+    /// * `author` - Who starts it, from the caller's token
     #[instrument(name = "Service::start_work", skip_all, err(Debug))]
-    pub async fn start_work(&self, node: &NodeName, start: StartWork) -> anyhow::Result<Started> {
+    pub async fn start_work(
+        &self,
+        node: &NodeName,
+        start: StartWork,
+        author: &Author,
+    ) -> anyhow::Result<Started> {
         // a node its plan doesn't have can't be started, and a plan not listed is refused
         if self.store.get(&node.plan, &node.id).await?.is_none() {
             return Ok(Started::NotInPlan { node: node.clone() });
         }
         // written under the project's work lock, and told to the change stream once it is
-        let started = self.store.start_work(node, start).await?;
+        let started = self.store.start_work(node, start, author).await?;
         if let Started::Recorded { record, sealed } = &started {
             // a draft the restart sealed is a revision changed, as a capture's seal is
             if let Some(revision) = sealed {
@@ -106,18 +114,20 @@ impl<B: Backend> Service<B> {
     ///
     /// * `node` - The node's full name
     /// * `add` - The start the capture was taken from, what it read, and its files
+    /// * `author` - Who sends the capture, from the caller's token
     #[instrument(name = "Service::add_capture", skip_all, err(Debug))]
     pub async fn add_capture(
         &self,
         node: &NodeName,
         mut add: AddCapture,
+        author: &Author,
     ) -> anyhow::Result<Captured> {
         // refused if the project isn't registered, or its plan isn't listed
         self.listed(&node.plan).await?;
         // the trailers are the comments', so the work record never sees them
         let resolves = std::mem::take(&mut add.resolves);
         // written under the project's work lock
-        let mut captured = self.store.add_capture(node, add).await?;
+        let mut captured = self.store.add_capture(node, add, author).await?;
         // the node's threads follow it before anything is told, under the comment lock
         let followed = match &captured {
             Captured::Added { .. } | Captured::Replaced { .. } | Captured::Unchanged { .. } => {
@@ -169,7 +179,7 @@ impl<B: Backend> Service<B> {
         {
             let read = self
                 .store
-                .resolve_by_trailers(node, revision.revision, resolves)
+                .resolve_by_trailers(node, revision.revision, resolves, author)
                 .await?;
             for (trailer, thread) in read {
                 // each thread written is told as it now stands

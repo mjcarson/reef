@@ -51,8 +51,23 @@ impl Session {
     /// * `ax` - The served service, whose plan the tools work in
     /// * `pane` - The pane the session runs in, whose loop next_task takes nodes for
     async fn open_in(ax: &Ax<MemoryBackend>, pane: Option<Pane>) -> anyhow::Result<Session> {
+        Session::open_over(ax, client_of(ax)?, pane).await
+    }
+
+    /// Starts the server over a pipe with a client of its own, in a session's pane, and shakes
+    /// hands with it
+    ///
+    /// # Arguments
+    ///
+    /// * `ax` - The served service, whose plan the tools work in
+    /// * `client` - The client the tools call the service with
+    /// * `pane` - The pane the session runs in, whose loop next_task takes nodes for
+    async fn open_over(
+        ax: &Ax<MemoryBackend>,
+        client: reef::Client,
+        pane: Option<Pane>,
+    ) -> anyhow::Result<Session> {
         // the tools over a client of the served twin, started in the plan's repo
-        let client = client_of(ax)?;
         let tools = Tools::new(client, ax.repo.clone(), PlanPick::default()).in_pane(pane);
         // served over one end of a pipe, the session holding the other
         let (ours, theirs) = tokio::io::duplex(1 << 16);
@@ -147,6 +162,114 @@ fn client_of(ax: &Ax<MemoryBackend>) -> anyhow::Result<reef::Client> {
     conf.api.address = ax.address;
     conf.api.certs = Some(ax.certs.clone());
     reef::Client::new(&conf)
+}
+
+/// The CLI's client of a served twin, signed in with a token kept in a credentials file of the
+/// case's own, as `reef login` keeps one
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+/// * `user` - The user the token signs in
+/// * `token` - The token
+fn signed_client_of(
+    ax: &Ax<MemoryBackend>,
+    user: &str,
+    token: &str,
+) -> anyhow::Result<reef::Client> {
+    // the login kept for the root the client calls, and the config naming that file
+    let credentials = ax.dir.join(format!("credentials-{user}.toml"));
+    let login = reef::credentials::Login {
+        user: user.to_string(),
+        token: token.to_string(),
+    };
+    reef::credentials::keep(&credentials, &format!("https://{}", ax.address), login)?;
+    let mut conf = Conf::default();
+    conf.api.address = ax.address;
+    conf.api.certs = Some(ax.certs.clone());
+    conf.credentials = Some(credentials);
+    reef::Client::new(&conf)
+}
+
+/// Claude's writes through the tools name Claude, for the user the client's token signs in,
+/// and the same client's own writes outside the tools name the user alone
+#[tokio::test]
+async fn claudes_writes_are_marked_for_its_user() -> anyhow::Result<()> {
+    // a twin asking every caller to sign in, and ada, its first user, signed in
+    let ax = common::Fx::memory("mcp-claudes-writes")
+        .await?
+        .api_signing_in()
+        .await?;
+    common::sign_in_cases::first_admin(&ax, "ada").await?;
+    let request = reef_api::SignIn {
+        name: "ada".to_string(),
+        password: common::sign_in_cases::PASSWORD.to_string(),
+        label: Some("a case".to_string()),
+    };
+    let (_, issued): (_, reef_api::IssuedToken) =
+        ax.client.post(reef_api::paths::TOKENS, &request).await?;
+    let mut session =
+        Session::open_over(&ax, signed_client_of(&ax, "ada", &issued.token)?, None).await?;
+    // a node put and set in progress through the tools
+    let yaml = "id: C1\ntitle: C1 Some work\ndescription:\n  why: Without C1, something is \
+                missing.\n  what: With C1, it is there.\n";
+    let (put, failed) = session.call("put", json!({"yaml": yaml})).await?;
+    assert!(!failed, "{put}");
+    let (status, failed) = session
+        .call("status", json!({"id": "C1", "status": "in-progress"}))
+        .await?;
+    assert!(!failed, "{status}");
+    // each is Claude's, for ada, in the node's history
+    let client = signed_client_of(&ax, "ada", &issued.token)?;
+    let node = ax.plan.node("C1")?;
+    let history = client.node_history(&node).await?;
+    let authors: Vec<Option<String>> = history
+        .iter()
+        .map(|logged| logged.author.describe())
+        .collect();
+    assert_eq!(
+        authors,
+        vec![
+            Some("Claude, for ada".to_string()),
+            Some("Claude, for ada".to_string())
+        ]
+    );
+    // a thread ada starts herself, and Claude's reply to it through the tools
+    let new = reef_api::NewThread {
+        target: reef_api::Target::Node,
+        body: "Why?".to_string(),
+        by: reef_api::Writer::User,
+        review: false,
+    };
+    let ada = ax.client.signed(&issued.token);
+    let (_, commented): (_, reef_api::Commented) = ada
+        .post(&reef_api::paths::node_comments(&node), &new)
+        .await?;
+    let reef_api::Commented::Added { thread, .. } = commented else {
+        anyhow::bail!("the thread wasn't kept: {commented:?}");
+    };
+    let (replied, failed) = session
+        .call(
+            "reply",
+            json!({"thread": thread.number, "body": "Because."}),
+        )
+        .await?;
+    assert!(!failed, "{replied}");
+    let thread = client
+        .thread(&ax.plan, thread.number)
+        .await?
+        .expect("the thread is kept");
+    let said: Vec<Option<String>> = thread
+        .comments
+        .iter()
+        .map(|comment| comment.author.describe())
+        .collect();
+    assert_eq!(
+        said,
+        vec![Some("ada".to_string()), Some("Claude, for ada".to_string())]
+    );
+    assert!(!thread.wants_answer());
+    Ok(())
 }
 
 /// Exactly the tools that only read say so, the tools say what the CLI does, and a put that
@@ -435,7 +558,7 @@ async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()>
     let client = client_of(&ax)?;
     let first = client.thread(&ax.plan, numbers[0]).await?.unwrap();
     assert!(first.is_open() && !first.wants_answer());
-    assert_eq!(first.comments[1].by, reef_api::Writer::Claude);
+    assert_eq!(first.comments[1].author.by, reef_api::Writer::Claude);
     // the second resolved with no change, linking C1's latest revision, after Claude's reply
     let (resolved, failed) = session
         .call(
@@ -454,7 +577,7 @@ async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()>
     let second = client.thread(&ax.plan, numbers[1]).await?.unwrap();
     assert!(!second.is_open());
     assert_eq!(second.resolved_by().map(|by| by.revision), Some(1));
-    assert_eq!(second.comments[1].by, reef_api::Writer::Claude);
+    assert_eq!(second.comments[1].author.by, reef_api::Writer::Claude);
     // listing every thread shows the resolved one too
     let (all, _) = session.call("comments", json!({"all": true})).await?;
     assert!(all.contains("the node as a whole: resolved"), "{all}");

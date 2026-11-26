@@ -7,6 +7,8 @@
 use reef_model::{NodeName, PlanName, QueueEntry};
 use serde::{Deserialize, Serialize};
 
+use crate::user::Author;
+
 /// Where in the queue an edit puts its node
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -27,6 +29,27 @@ impl Place {
         match self {
             Place::Before(anchor) | Place::After(anchor) => Some(anchor),
             Place::Top | Place::Bottom => None,
+        }
+    }
+
+    /// Where it is, as a reader is told: "at the top", "before reef/central/C21"
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::Place;
+    ///
+    /// assert_eq!(Place::Top.describe(), "at the top");
+    /// let after = Place::After("reef/central/C21".parse().unwrap());
+    /// assert_eq!(after.describe(), "after reef/central/C21");
+    /// ```
+    pub fn describe(&self) -> String {
+        // an end by its name, and a place beside a node by the node
+        match self {
+            Place::Top => "at the top".to_string(),
+            Place::Bottom => "at the bottom".to_string(),
+            Place::Before(anchor) => format!("before {anchor}"),
+            Place::After(anchor) => format!("after {anchor}"),
         }
     }
 }
@@ -120,6 +143,45 @@ pub struct Listed {
     pub rank: String,
     /// The node queued, and whether next takes it, and if not why
     pub entry: QueueEntry,
+    /// Who put it where it is, and when, if the queue's history still holds it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placed: Option<Placed>,
+}
+
+/// Who put a queue's entry where it is, and when: the queue's latest edit that queued or moved it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Placed {
+    /// When it was put there, in milliseconds since the epoch
+    pub at: u64,
+    /// Who put it there
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
+    /// Whether it was moved there, rather than queued
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub moved: bool,
+}
+
+impl Placed {
+    /// How a reader is told who put it there: "queued by ada", "moved by Claude, for ada", or
+    /// `None` for nobody
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{Author, Placed};
+    ///
+    /// let author = Author { user: Some("ada".to_string()), ..Author::default() };
+    /// let placed = Placed { at: 1, author, moved: false };
+    /// assert_eq!(placed.describe().as_deref(), Some("queued by ada"));
+    /// ```
+    pub fn describe(&self) -> Option<String> {
+        // what was done to it, by whom, if anyone is known
+        let done = match self.moved {
+            true => "moved",
+            false => "queued",
+        };
+        self.author.describe().map(|who| format!("{done} by {who}"))
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +251,7 @@ mod tests {
                     title: "C21 Rank strings".to_string(),
                     state: EntryState::Done,
                 },
+                placed: None,
             }],
         };
         let json = serde_json::to_string(&listing).unwrap();

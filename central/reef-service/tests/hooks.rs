@@ -1663,7 +1663,7 @@ async fn a_comment_on_a_done_node_comes_back_as_a_round_squashed_into_its_commit
     let answered = thread_of(&hx, general).await?;
     assert!(!answered.is_open());
     assert_eq!(
-        answered.comments.last().map(|comment| comment.by),
+        answered.comments.last().map(|comment| comment.author.by),
         Some(reef_api::Writer::Claude)
     );
     std::fs::write(a.join("a.txt"), "one\n2\n")?;

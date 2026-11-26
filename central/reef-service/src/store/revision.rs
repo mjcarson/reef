@@ -20,7 +20,7 @@
 //! - **Every row checked against its full key on read**, so a hash collision is caught rather
 //!   than served as another node's changes.
 
-use reef_api::{AddCapture, CaptureShas, FileDiff, FileSummary, ResolvingCommit, Revision};
+use reef_api::{AddCapture, Author, CaptureShas, FileDiff, FileSummary, ResolvingCommit, Revision};
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -54,6 +54,9 @@ struct Kept {
     /// Whether it is the node's draft, which a capture may still rewrite
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     draft: bool,
+    /// Who sent the capture it was kept from, as rows kept before authors read naming nobody
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    author: Author,
 }
 
 /// A node's latest revision, and the version its row was read at, which a draft's rewrite is
@@ -226,6 +229,7 @@ impl<B: Backend> Store<B> {
     /// * `slot` - Whether it is new, or written over the node's draft
     /// * `at` - When it was stored, in milliseconds since the epoch
     /// * `add` - The capture: what it read, its conflicts, its files and whether it is a draft
+    /// * `author` - Who sent the capture
     pub(super) async fn keep_revision(
         &self,
         node: &NodeName,
@@ -233,6 +237,7 @@ impl<B: Backend> Store<B> {
         slot: Slot,
         at: u64,
         add: AddCapture,
+        author: &Author,
     ) -> anyhow::Result<Revision> {
         // each file as its row, and as the revision lists it
         let key = node_key(node);
@@ -255,6 +260,7 @@ impl<B: Backend> Store<B> {
             files: listed,
             commits: add.commits,
             draft: add.draft,
+            author: author.clone(),
         };
         self.write_kept(node, number, slot, kept).await
     }
@@ -271,6 +277,7 @@ impl<B: Backend> Store<B> {
     /// * `at` - When it was sealed, in milliseconds since the epoch
     /// * `shas` - What the sealing capture read
     /// * `commits` - The node's own commits the sealing capture read
+    /// * `author` - Who sealed it, or nobody to keep the draft's own author
     pub(super) async fn seal_revision(
         &self,
         node: &NodeName,
@@ -278,9 +285,15 @@ impl<B: Backend> Store<B> {
         at: u64,
         shas: CaptureShas,
         commits: Vec<ResolvingCommit>,
+        author: &Author,
     ) -> anyhow::Result<Revision> {
         // the draft's files and conflicts, which the same base and tree give again
         let Latest { revision, version } = latest;
+        // whoever sealed it, unless nobody is known to have, when the draft's author stands
+        let author = match author.is_unknown() {
+            true => revision.author,
+            false => author.clone(),
+        };
         let kept = Kept {
             at,
             shas,
@@ -288,6 +301,7 @@ impl<B: Backend> Store<B> {
             files: revision.files,
             commits,
             draft: false,
+            author,
         };
         self.write_kept(node, revision.revision, Slot::Over(version), kept)
             .await
@@ -427,6 +441,7 @@ fn revised(node: &NodeName, number: u32, kept: Kept) -> Revision {
         files: kept.files,
         commits: kept.commits,
         draft: kept.draft,
+        author: kept.author,
     }
 }
 

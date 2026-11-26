@@ -641,6 +641,7 @@ mod tests {
             ],
             commits: Vec::new(),
             draft: false,
+            author: reef_api::Author::default(),
         };
         let mut out = Vec::new();
         show(&revision, true, &mut out).unwrap();

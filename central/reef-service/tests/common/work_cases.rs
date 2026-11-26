@@ -57,7 +57,9 @@ async fn start<B: Backend>(
     replaces: Option<u64>,
 ) -> anyhow::Result<Started> {
     let request = StartWork { start, replaces };
-    fx.store.start_work(&named(fx, id), request).await
+    fx.store
+        .start_work(&named(fx, id), request, &reef_api::NOBODY)
+        .await
 }
 
 /// Starts a node that must be recorded, and hands back its record
@@ -178,7 +180,7 @@ pub async fn kept<B: Backend>(
     node: &NodeName,
     add: AddCapture,
 ) -> anyhow::Result<Revision> {
-    match fx.store.add_capture(node, add).await? {
+    match fx.store.add_capture(node, add, &reef_api::NOBODY).await? {
         Captured::Added { revision, .. } => Ok(revision),
         other => panic!("a capture of `{node}` added no revision: {other:?}"),
     }
@@ -235,7 +237,10 @@ pub async fn second_start_is_stale_unless_it_names_the_record<B: Reopen>(
     let add = capture(&first.start.pinned, 'c', Vec::new());
     let Captured::Added {
         record: captured, ..
-    } = fx.store.add_capture(&named(&fx, "A"), add).await?
+    } = fx
+        .store
+        .add_capture(&named(&fx, "A"), add, &reef_api::NOBODY)
+        .await?
     else {
         panic!("a capture of A's start wasn't added");
     };
@@ -285,7 +290,11 @@ pub async fn a_worktree_is_on_its_latest_start<B: Reopen>(fx: Fx<B>) -> anyhow::
         start: start_in(&other, "C", 'c'),
         replaces: None,
     };
-    let Started::Recorded { .. } = fx.store.start_work(&elsewhere, request).await? else {
+    let Started::Recorded { .. } = fx
+        .store
+        .start_work(&elsewhere, request, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a node of another plan of the project wasn't recorded");
     };
     // every start later than the last, even within a millisecond
@@ -314,14 +323,17 @@ pub async fn captures_add_to_their_own_start<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     // a node not started has nowhere to add a capture
     let add = |pinned: &str, sha: char| capture(pinned, sha, Vec::new());
     let node = named(&fx, "A");
-    let none = fx.store.add_capture(&node, add("x", 'c')).await?;
+    let none = fx
+        .store
+        .add_capture(&node, add("x", 'c'), &reef_api::NOBODY)
+        .await?;
     assert_eq!(none, Captured::NotStarted { node: node.clone() });
     // two captures of A's start, added in order, each a version
     let first = recorded(&fx, "A", start_in(&fx.repo, "A", 'a'), None).await?;
     for sha in ['c', 'd'] {
         let Captured::Added { .. } = fx
             .store
-            .add_capture(&node, add(&first.start.pinned, sha))
+            .add_capture(&node, add(&first.start.pinned, sha), &reef_api::NOBODY)
             .await?
         else {
             panic!("a capture of A's start wasn't added");
@@ -336,7 +348,7 @@ pub async fn captures_add_to_their_own_start<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     let second = recorded(&fx, "A", start_in(&fx.repo, "A", 'b'), Some(read.version)).await?;
     let late = fx
         .store
-        .add_capture(&node, add(&first.start.pinned, 'e'))
+        .add_capture(&node, add(&first.start.pinned, 'e'), &reef_api::NOBODY)
         .await?;
     assert_eq!(
         late,
@@ -386,7 +398,11 @@ pub async fn each_project_has_its_own_work<B: Reopen>(fx: Fx<B>) -> anyhow::Resu
         start: start_in(&repo, "A", 'b'),
         replaces: None,
     };
-    let Started::Recorded { record, .. } = fx.store.start_work(&theirs, request).await? else {
+    let Started::Recorded { record, .. } = fx
+        .store
+        .start_work(&theirs, request, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("a node of another project wasn't recorded");
     };
     // and reef's A, which the same key in another partition doesn't make stale
@@ -440,7 +456,7 @@ pub async fn captures_are_kept_as_numbered_revisions<B: Reopen>(fx: Fx<B>) -> an
     // the same base and tree as the latest adds no revision, and its SHAs name the latest
     let again = fx
         .store
-        .add_capture(&node, capture(&pinned, 'd', Vec::new()))
+        .add_capture(&node, capture(&pinned, 'd', Vec::new()), &reef_api::NOBODY)
         .await?;
     let Captured::Unchanged {
         record, revision, ..
@@ -458,6 +474,7 @@ pub async fn captures_are_kept_as_numbered_revisions<B: Reopen>(fx: Fx<B>) -> an
         .add_capture(
             &node,
             capture(&pinned, 'e', vec![added_file("e.rs", "e\n")]),
+            &reef_api::NOBODY,
         )
         .await?;
     assert!(matches!(late, Captured::Restarted { .. }), "{late:?}");
@@ -465,7 +482,11 @@ pub async fn captures_are_kept_as_numbered_revisions<B: Reopen>(fx: Fx<B>) -> an
     // and its SHAs name the latest, which the earlier start took
     let nothing = fx
         .store
-        .add_capture(&node, capture(&second.start.pinned, 'f', Vec::new()))
+        .add_capture(
+            &node,
+            capture(&second.start.pinned, 'f', Vec::new()),
+            &reef_api::NOBODY,
+        )
         .await?;
     let Captured::Unchanged { revision, .. } = nothing else {
         panic!("a capture of nothing after a restart was {nothing:?}");
@@ -504,7 +525,7 @@ pub async fn killed_capture_serves_none_of_its_files<B: Reopen>(fx: Fx<B>) -> an
     let files = vec![added_file("a.rs", "a\n"), added_file("b.rs", "b\n")];
     let error = fx
         .store
-        .add_capture(&node, capture(&pinned, 'c', files))
+        .add_capture(&node, capture(&pinned, 'c', files), &reef_api::NOBODY)
         .await
         .expect_err("a killed capture succeeded");
     assert!(format!("{error:#}").contains("killed"), "{error:#}");
@@ -558,7 +579,7 @@ pub async fn captures_keep_what_fits_and_refuse_what_cant_be_read<B: Reopen>(
     for files in [twice, vec![nameless]] {
         let error = fx
             .store
-            .add_capture(&node, capture(&pinned, 'd', files))
+            .add_capture(&node, capture(&pinned, 'd', files), &reef_api::NOBODY)
             .await
             .unwrap_err();
         assert!(error.downcast_ref::<Unkeepable>().is_some(), "{error:#}");
@@ -586,21 +607,24 @@ pub async fn drafts_are_rewritten_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow::
     let two = vec![added_file("a.rs", "a\nmore\n")];
     let replaced = fx
         .store
-        .add_capture(&node, drafted(&pinned, 'd', two.clone()))
+        .add_capture(&node, drafted(&pinned, 'd', two.clone()), &reef_api::NOBODY)
         .await?;
     let Captured::Replaced { revision, .. } = replaced else {
         panic!("a draft over a draft was {replaced:?}");
     };
     assert_eq!((revision.revision, revision.draft), (1, true));
     assert_eq!(revision.shas, shas('d'));
-    assert_eq!(fx.store.revisions(&node).await?, std::slice::from_ref(&revision));
+    assert_eq!(
+        fx.store.revisions(&node).await?,
+        std::slice::from_ref(&revision)
+    );
     let read = fx.store.revision_file(&node, 1, "a.rs").await?;
     assert_eq!(read.as_ref(), Some(&two[0]));
     assert!(fx.store.revision_file(&node, 1, "b.rs").await?.is_none());
     // a draft of the same base and tree writes nothing, and names the draft
     let same = fx
         .store
-        .add_capture(&node, drafted(&pinned, 'd', two.clone()))
+        .add_capture(&node, drafted(&pinned, 'd', two.clone()), &reef_api::NOBODY)
         .await?;
     let Captured::Unchanged {
         revision: matched, ..
@@ -613,7 +637,10 @@ pub async fn drafts_are_rewritten_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow::
     // a local squash leaves the tree and moves the head
     let mut squashed = capture(&pinned, 'd', Vec::new());
     squashed.shas.head = "9".repeat(40);
-    let sealed = fx.store.add_capture(&node, squashed.clone()).await?;
+    let sealed = fx
+        .store
+        .add_capture(&node, squashed.clone(), &reef_api::NOBODY)
+        .await?;
     let Captured::Replaced {
         revision: sealed, ..
     } = sealed
@@ -627,7 +654,7 @@ pub async fn drafts_are_rewritten_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow::
     assert_eq!(read.as_ref(), Some(&two[0]));
     // a seal or a draft of the sealed tree keeps nothing more
     for add in [squashed.clone(), drafted(&pinned, 'd', Vec::new())] {
-        let again = fx.store.add_capture(&node, add).await?;
+        let again = fx.store.add_capture(&node, add, &reef_api::NOBODY).await?;
         assert!(matches!(again, Captured::Unchanged { .. }), "{again:?}");
     }
     // a draft after the seal opens revision 2, which a seal that changes it seals in its place
@@ -637,7 +664,11 @@ pub async fn drafts_are_rewritten_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow::
     let four = vec![added_file("c.rs", "c\nd\n")];
     let last = fx
         .store
-        .add_capture(&node, capture(&pinned, 'f', four.clone()))
+        .add_capture(
+            &node,
+            capture(&pinned, 'f', four.clone()),
+            &reef_api::NOBODY,
+        )
         .await?;
     let Captured::Replaced { revision: r2, .. } = last else {
         panic!("a changed seal over a draft was {last:?}");

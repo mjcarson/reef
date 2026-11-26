@@ -17,6 +17,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/nodes` | its `Listing` |
 | `POST …/plans/{plan}/nodes` `Puts` | `Checked`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/nodes/{id}` | the `StoredNode` |
+| `GET …/plans/{plan}/nodes/{id}/history` | every `Logged` edit of the node, newest first, at most 200, a node removed included |
 | `PUT …/plans/{plan}/revision` `PlanWrite` | `Rewrite`: 200, or 422 if it would add a problem |
 | `GET …/plans/{plan}/payload` | the viewer's `Payload` |
 | `GET …/plans/{plan}/check` | its problems, as check prints them |
@@ -24,6 +25,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/pages` | its own pages: a `PageListing` |
 | `POST …/plans/{plan}/pages` `PageEdit` | `PageEdited`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/pages/{*path}` | the `StoredPage`, or 404 |
+| `GET …/plans/{plan}/page-history/{*path}` | every `Logged` edit of the page, newest first |
+| `GET /api/v1/projects/{project}/queue/history` | every `Logged` edit of its queue, newest first |
 | `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
 | `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
 | `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
@@ -79,6 +82,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
   page a browser opens is sent to `/sign-in?next=…`, and anything else is answered 401 with
   `WWW-Authenticate: Bearer`. A change stream opened with a token ends once the token signs
   nobody in: revoked, expired, or its user removed or given a new password by an admin.
+- **Every write names its author,** from its `Caller`: the user the token or cookie signs in, and
+  Claude, for them, if the request sends `reef-writer: claude`, as reef's MCP server does. A
+  body's own word on who wrote it is never taken, but a comment's `by: claude`, which older
+  clients send, still marks it Claude's. A write sent with no token names nobody.
 - **A write from a page of another origin is refused,** 403, with sign-in on or off, as Go's
   `CrossOriginProtection` judges it (`origin::judge`): a `Sec-Fetch-Site` other than
   `same-origin` or `none`, or without one, an `Origin` that isn't the scheme, host and port the

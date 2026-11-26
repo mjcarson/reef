@@ -241,7 +241,8 @@ pub async fn ls<W: Write>(client: &Client, project: &str, out: &mut W) -> anyhow
 }
 
 /// A queue's listing as `reef queue ls` prints it: a line an entry, its place, its name, its
-/// state and its title, and under it why it waits, or which members next takes for it
+/// state and its title, and under it why it waits, or which members next takes for it, and who
+/// queued or moved it there, if that is known
 ///
 /// # Arguments
 ///
@@ -262,6 +263,7 @@ pub async fn ls<W: Write>(client: &Client, project: &str, out: &mut W) -> anyhow
 ///             title: "C1 First".into(),
 ///             state: EntryState::Ready(vec!["C1".into()]),
 ///         },
+///         placed: None,
 ///     }],
 /// };
 /// assert_eq!(reef::queue::listed(&listing), "1. C1  ready  C1 First\n");
@@ -278,12 +280,12 @@ pub fn listed(listing: &QueueListing) -> String {
                 true => entry.node.to_string(),
                 false => entry.node.id.clone(),
             };
-            (
-                name,
-                entry.state.as_str(),
-                entry.title.clone(),
-                details(&entry.node, &entry.state),
-            )
+            // why it waits, then who put it there, if anyone is known to have
+            let mut details = details(&entry.node, &entry.state);
+            if let Some(placed) = listed.placed.as_ref().and_then(|placed| placed.describe()) {
+                details.push(placed);
+            }
+            (name, entry.state.as_str(), entry.title.clone(), details)
         })
         .collect();
     // each column as wide as its widest cell

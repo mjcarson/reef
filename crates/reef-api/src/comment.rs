@@ -28,6 +28,7 @@ use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 
 use crate::revision::Anchor;
+use crate::user::Author;
 
 /// The most bytes a comment's body may hold
 pub const COMMENT_BODY_MAX: usize = 64 << 10;
@@ -113,10 +114,11 @@ impl ThreadState {
     }
 }
 
-/// Who wrote a comment
+/// Whether the user or Claude made a write
 ///
-/// Until reef knows its users, a comment is the user's unless Claude wrote it through reef's
-/// tools, so a thread whose last word is Claude's waits on the user rather than on Claude.
+/// A comment is the user's unless Claude wrote it through reef's tools, so a thread whose last
+/// word is Claude's waits on the user rather than on Claude. The user is named beside it, in its
+/// [`Author`], from the token that sent it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Writer {
@@ -149,9 +151,9 @@ pub struct Comment {
     pub number: u32,
     /// When it was written, in milliseconds since the epoch
     pub at: u64,
-    /// Who wrote it, the user unless it says so
-    #[serde(default, skip_serializing_if = "Writer::is_user")]
-    pub by: Writer,
+    /// Who wrote it: the user signed in, if one was, and whether Claude wrote it for them
+    #[serde(flatten)]
+    pub author: Author,
     /// The review it is pending in, unsubmitted, if it is
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<u32>,
@@ -186,6 +188,9 @@ pub struct Thread {
     /// Each change linked to it as one that answered it, oldest first
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolutions: Vec<Resolution>,
+    /// Each time it was marked open or resolved by hand, oldest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<ThreadMark>,
     /// Whether its first comment is pending in a review not yet submitted, so it is shown only
     /// where pending threads are asked for, and can't be resolved
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -214,7 +219,7 @@ impl Thread {
                 .iter()
                 .rev()
                 .find(|comment| comment.review.is_none())
-                .is_none_or(|comment| comment.by.is_user())
+                .is_none_or(|comment| comment.author.by.is_user())
     }
 
     /// Whether it is open and published, as the user counts what still wants an answer
@@ -225,6 +230,11 @@ impl Thread {
     /// The change linked to it last as the one that answered it, if one was
     pub fn resolved_by(&self) -> Option<&Resolution> {
         self.resolutions.last()
+    }
+
+    /// The last time it was marked open or resolved by hand, if it was
+    pub fn last_mark(&self) -> Option<&ThreadMark> {
+        self.marks.last()
     }
 
     /// Whether a later revision no longer held its line
@@ -267,6 +277,7 @@ impl Thread {
     ///     outdated: Some(3),
     ///     state: ThreadState::Open,
     ///     resolutions: Vec::new(),
+    ///     marks: Vec::new(),
     ///     pending: false,
     ///     comments: Vec::new(),
     /// };
@@ -281,6 +292,18 @@ impl Thread {
             .chain(&self.followed)
             .find(|anchor| anchor.revision == revision)
     }
+}
+
+/// A thread marked open or resolved by hand: the state it was marked, when, and by whom
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadMark {
+    /// The state it was marked
+    pub state: ThreadState,
+    /// When, in milliseconds since the epoch
+    pub at: u64,
+    /// Who marked it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
 }
 
 /// A new thread, its first comment and what it is on
@@ -352,6 +375,15 @@ pub struct Review {
     pub at: u64,
     /// How many comments are written in it
     pub comments: u32,
+    /// Who started it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
+    /// When it was submitted or discarded, in milliseconds since the epoch, if it was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked_at: Option<u64>,
+    /// Who submitted or discarded it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub marked_by: Author,
 }
 
 /// A node's open review submitted or discarded, over the version its writer read
@@ -458,6 +490,9 @@ pub struct Resolution {
     /// The commit whose trailer named the thread, or `None` for one resolved by hand
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<ResolvingCommit>,
+    /// Who linked it: whoever resolved it by hand, or sent the capture that read the trailer
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
 }
 
 /// A thread a commit's `Reef-Resolves` trailer names, sent with the capture that read it
@@ -607,6 +642,7 @@ mod tests {
         TrailerOutcome, TrailerRead, Writer, trailer_threads,
     };
     use crate::revision::{Anchor, Side};
+    use crate::user::Author;
     use serde_json::json;
 
     /// A line of `src/lib.rs` in revision 3
@@ -661,11 +697,12 @@ mod tests {
             outdated: None,
             state: ThreadState::Resolved,
             resolutions: Vec::new(),
+            marks: Vec::new(),
             comments: vec![
                 Comment {
                     number: 4,
                     at: 10,
-                    by: Writer::User,
+                    author: Author::default(),
                     body: "Why a lock?".to_string(),
                     html: String::new(),
                     review: None,
@@ -673,7 +710,7 @@ mod tests {
                 Comment {
                     number: 6,
                     at: 12,
-                    by: Writer::User,
+                    author: Author::default(),
                     body: "*Two* writers.".to_string(),
                     html: "<p><em>Two</em> writers.</p>\n".to_string(),
                     review: None,
@@ -789,12 +826,17 @@ mod tests {
             revision: 2,
             at: 10,
             commit: Some(commit.clone()),
+            author: Author::default(),
         };
         let by_hand = Resolution {
             node: "reef/central/C38".parse().unwrap(),
             revision: 1,
             at: 12,
             commit: None,
+            author: Author {
+                user: Some("ada".to_string()),
+                ..Author::default()
+            },
         };
         let thread = Thread {
             node: "reef/central/C37".parse().unwrap(),
@@ -805,6 +847,7 @@ mod tests {
             outdated: None,
             state: ThreadState::Resolved,
             resolutions: vec![by_trailer.clone(), by_hand.clone()],
+            marks: Vec::new(),
             comments: Vec::new(),
             pending: false,
         };
@@ -812,6 +855,8 @@ mod tests {
         assert_eq!(value["resolutions"][0]["node"], "reef/central/C37");
         assert_eq!(value["resolutions"][0]["commit"]["authored"], 1_700_000_000);
         assert!(value["resolutions"][1].get("commit").is_none());
+        assert!(value["resolutions"][0].get("author").is_none());
+        assert_eq!(value["resolutions"][1]["author"]["user"], "ada");
         assert_eq!(serde_json::from_value::<Thread>(value).unwrap(), thread);
         assert_eq!(thread.resolved_by(), Some(&by_hand));
         // a thread never resolved by a change leaves them out
@@ -869,7 +914,10 @@ mod tests {
         let said = |number, by| Comment {
             number,
             at: u64::from(number),
-            by,
+            author: Author {
+                by,
+                ..Author::default()
+            },
             review: None,
             body: "Why?".to_string(),
             html: String::new(),
@@ -883,6 +931,7 @@ mod tests {
             outdated: None,
             state: ThreadState::Open,
             resolutions: Vec::new(),
+            marks: Vec::new(),
             comments: vec![said(1, Writer::User)],
             pending: false,
         };
@@ -892,13 +941,35 @@ mod tests {
         let claudes = serde_json::to_value(said(2, Writer::Claude)).unwrap();
         assert_eq!(claudes["by"], "claude");
         assert_eq!(
-            serde_json::from_value::<Comment>(claudes).unwrap().by,
+            serde_json::from_value::<Comment>(claudes)
+                .unwrap()
+                .author
+                .by,
             Writer::Claude
         );
         // a comment kept before writers were said reads back as the user's
         let old: Comment =
             serde_json::from_value(json!({"number": 3, "at": 4, "body": "Old"})).unwrap();
-        assert_eq!(old.by, Writer::User);
+        assert_eq!(old.author, Author::default());
+        // a signed-in user's comment names them beside its writer, at the comment's own level
+        let ada = Comment {
+            author: Author {
+                user: Some("ada".to_string()),
+                since: Some(9),
+                by: Writer::Claude,
+            },
+            ..said(5, Writer::User)
+        };
+        let value = serde_json::to_value(&ada).unwrap();
+        assert_eq!(
+            (
+                value["user"].clone(),
+                value["since"].clone(),
+                value["by"].clone()
+            ),
+            (json!("ada"), json!(9), json!("claude"))
+        );
+        assert_eq!(serde_json::from_value::<Comment>(value).unwrap(), ada);
         // open, the user's word last, it wants an answer
         assert!(thread.wants_answer());
         // Claude's reply last leaves it waiting on the user
@@ -950,11 +1021,12 @@ mod tests {
             outdated: None,
             state: ThreadState::Open,
             resolutions: Vec::new(),
+            marks: Vec::new(),
             pending: true,
             comments: vec![Comment {
                 number: 4,
                 at: 1,
-                by: Writer::User,
+                author: Author::default(),
                 review: Some(3),
                 body: "Why?".to_string(),
                 html: String::new(),
@@ -980,7 +1052,10 @@ mod tests {
                 },
                 Comment {
                     number: 5,
-                    by: Writer::Claude,
+                    author: Author {
+                        by: Writer::Claude,
+                        ..Author::default()
+                    },
                     review: None,
                     ..thread.comments[0].clone()
                 },
@@ -1013,8 +1088,18 @@ mod tests {
             state: ReviewState::Submitted,
             at: 1,
             comments: 2,
+            author: Author::default(),
+            marked_at: Some(3),
+            marked_by: Author {
+                user: Some("bob".to_string()),
+                ..Author::default()
+            },
         };
-        assert_eq!(serde_json::to_value(&review).unwrap()["state"], "submitted");
+        let value = serde_json::to_value(&review).unwrap();
+        assert_eq!(value["state"], "submitted");
+        assert!(value.get("author").is_none());
+        assert_eq!(value["marked_by"]["user"], "bob");
+        assert_eq!(serde_json::from_value::<Review>(value).unwrap(), review);
         assert_eq!(ReviewState::Discarded.as_str(), "discarded");
         let none = Reviewed::NoReview {
             node: "reef/central/C73".parse().unwrap(),

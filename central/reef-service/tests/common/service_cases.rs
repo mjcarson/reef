@@ -84,7 +84,7 @@ async fn ids<B: Backend>(sx: &Sx<B>) -> anyhow::Result<Vec<String>> {
 pub async fn refused_batch_writes_none_of_it<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // a good node, and one needing a node that isn't there
     let batch = new(vec![work("A", 0), needing(work("B", 1), &["nope"])]);
-    let answer = sx.service.put(&sx.plan, batch).await?;
+    let answer = sx.service.put(&sx.plan, batch, &reef_api::NOBODY).await?;
     // only the bad node's problem refuses it
     let expected = vec![problem("B", "needs `nope`, which is not a node")];
     assert_eq!(answer, Checked::Refused(expected));
@@ -102,7 +102,10 @@ pub async fn fix_gets_through_on_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyhow:
     // a node whose why and what come from a doc in the working tree
     doc(&sx.repo, "docs/a.md", DESIGN)?;
     let linked = linking(work("A", 0), &["docs/a.md#rows"]);
-    let answer = sx.service.put(&sx.plan, new(vec![linked])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![linked]), &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![1] });
     // the doc's removal breaks the plan: the link, and the why and the what it gave
     std::fs::remove_file(sx.repo.join("docs/a.md"))?;
@@ -115,16 +118,19 @@ pub async fn fix_gets_through_on_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyhow:
         "{broken:?}"
     );
     // a put that adds nothing broken gets through anyway
-    let answer = sx.service.put(&sx.plan, new(vec![work("B", 1)])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![work("B", 1)]), &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![1] });
     // one that adds a problem is refused with its own problem alone, not A's
     let bad = new(vec![needing(work("C", 2), &["nope"])]);
-    let answer = sx.service.put(&sx.plan, bad).await?;
+    let answer = sx.service.put(&sx.plan, bad, &reef_api::NOBODY).await?;
     let expected = vec![problem("C", "needs `nope`, which is not a node")];
     assert_eq!(answer, Checked::Refused(expected));
     // and the fix gets through, leaving the plan whole
     let fix = vec![NodePut::new(work("A", 0), Some(1))];
-    let answer = sx.service.put(&sx.plan, fix).await?;
+    let answer = sx.service.put(&sx.plan, fix, &reef_api::NOBODY).await?;
     assert_eq!(answer, Checked::Applied { versions: vec![2] });
     assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
     Ok(())
@@ -153,7 +159,11 @@ pub async fn half_brief_fix_gets_through<B: Backend>(sx: Sx<B>) -> anyhow::Resul
     }
     let answer = sx
         .service
-        .put(&sx.plan, vec![NodePut::new(half, Some(1))])
+        .put(
+            &sx.plan,
+            vec![NodePut::new(half, Some(1))],
+            &reef_api::NOBODY,
+        )
         .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![2] });
     // and the why's problem is left as it was, word for word
@@ -168,7 +178,10 @@ pub async fn half_brief_fix_gets_through<B: Backend>(sx: Sx<B>) -> anyhow::Resul
 /// * `sx` - The service and its plan
 pub async fn batch_adds_a_group_with_its_members<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // a group alone is a piece of work that says neither why nor what, a problem for each
-    let alone = sx.service.put(&sx.plan, new(vec![group("G", 0)])).await?;
+    let alone = sx
+        .service
+        .put(&sx.plan, new(vec![group("G", 0)]), &reef_api::NOBODY)
+        .await?;
     let Checked::Refused(problems) = alone else {
         panic!("a group with no members was written: {alone:?}");
     };
@@ -188,7 +201,7 @@ pub async fn batch_adds_a_group_with_its_members<B: Backend>(sx: Sx<B>) -> anyho
     // a member alone names a group that isn't a node
     let alone = sx
         .service
-        .put(&sx.plan, new(vec![member("m1", "G", 1)]))
+        .put(&sx.plan, new(vec![member("m1", "G", 1)]), &reef_api::NOBODY)
         .await?;
     let expected = vec![problem("m1", "group `G` is not a node")];
     assert_eq!(alone, Checked::Refused(expected));
@@ -198,7 +211,7 @@ pub async fn batch_adds_a_group_with_its_members<B: Backend>(sx: Sx<B>) -> anyho
         member("m1", "G", 1),
         member("m2", "G", 2),
     ]);
-    let answer = sx.service.put(&sx.plan, batch).await?;
+    let answer = sx.service.put(&sx.plan, batch, &reef_api::NOBODY).await?;
     assert_eq!(
         answer,
         Checked::Applied {
@@ -222,7 +235,10 @@ pub async fn missing_doc_is_refused_and_present_doc_accepted<B: Backend>(
     // a node whose why and what come from a doc the working tree has
     doc(&sx.repo, "docs/design.md", DESIGN)?;
     let linked = linking(work("A", 0), &["docs/design.md#rows"]);
-    let answer = sx.service.put(&sx.plan, new(vec![linked])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![linked]), &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![1] });
     // its brief form is taken from the linked section
     let payload = sx.service.payload(&sx.plan).await?;
@@ -233,7 +249,10 @@ pub async fn missing_doc_is_refused_and_present_doc_accepted<B: Backend>(
     let gone = linking(work("B", 1), &["docs/gone.md"]);
     let mut gone_written = gone.clone();
     gone_written.spec.description = work("B", 1).spec.description;
-    let answer = sx.service.put(&sx.plan, new(vec![gone_written])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![gone_written]), &reef_api::NOBODY)
+        .await?;
     let expected = vec![problem(
         "B",
         "doc `docs/gone.md` not found (looked for docs/gone.md)",
@@ -242,7 +261,10 @@ pub async fn missing_doc_is_refused_and_present_doc_accepted<B: Backend>(
     // and so is a link to a heading the doc doesn't have
     let mut nope = work("C", 2);
     nope.spec.docs = vec!["docs/design.md#nope".to_string()];
-    let answer = sx.service.put(&sx.plan, new(vec![nope])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![nope]), &reef_api::NOBODY)
+        .await?;
     let expected = vec![problem(
         "C",
         "doc `docs/design.md#nope`: docs/design.md has no heading with the id `nope`",
@@ -263,7 +285,10 @@ pub async fn link_leaving_the_repo_is_refused<B: Backend>(sx: Sx<B>) -> anyhow::
     doc(&sx.dir, "outside.md", DESIGN)?;
     let out = linking(work("A", 0), &["../outside.md#rows"]);
     // refused with check's message, as a link that leaves the repo, and not briefed from it
-    let answer = sx.service.put(&sx.plan, new(vec![out])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![out]), &reef_api::NOBODY)
+        .await?;
     let Checked::Refused(problems) = answer else {
         panic!("a link that leaves the repo was written: {answer:?}");
     };
@@ -288,13 +313,15 @@ pub async fn link_leaving_the_repo_is_refused<B: Backend>(sx: Sx<B>) -> anyhow::
 /// * `sx` - The service and its plan
 pub async fn stale_put_in_a_batch_writes_nothing<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // a node at version 1
-    sx.service.put(&sx.plan, new(vec![work("A", 0)])).await?;
+    sx.service
+        .put(&sx.plan, new(vec![work("A", 0)]), &reef_api::NOBODY)
+        .await?;
     // a fresh node beside an edit of it from a version it never had, which would break the plan
     let batch = vec![
         NodePut::new(work("B", 1), None),
         NodePut::new(needing(work("A", 0), &["nope"]), Some(7)),
     ];
-    let answer = sx.service.put(&sx.plan, batch).await?;
+    let answer = sx.service.put(&sx.plan, batch, &reef_api::NOBODY).await?;
     let moved = StalePut {
         id: "A".to_string(),
         refusal: Refusal::Moved,
@@ -305,7 +332,7 @@ pub async fn stale_put_in_a_batch_writes_nothing<B: Backend>(sx: Sx<B>) -> anyho
         NodePut::new(work("A", 0), None),
         NodePut::new(work("Z", 2), Some(1)),
     ];
-    let answer = sx.service.put(&sx.plan, batch).await?;
+    let answer = sx.service.put(&sx.plan, batch, &reef_api::NOBODY).await?;
     let stale = vec![
         StalePut {
             id: "A".to_string(),
@@ -332,7 +359,7 @@ pub async fn batch_it_cant_keep_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::Re
     let twice = new(vec![work("A", 0), work("A", 1)]);
     let error = sx
         .service
-        .put(&sx.plan, twice)
+        .put(&sx.plan, twice, &reef_api::NOBODY)
         .await
         .expect_err("a node put twice was written");
     assert!(format!("{error:#}").contains("put twice"), "{error:#}");
@@ -344,7 +371,7 @@ pub async fn batch_it_cant_keep_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::Re
     }];
     let error = sx
         .service
-        .put(&sx.plan, new(vec![inline]))
+        .put(&sx.plan, new(vec![inline]), &reef_api::NOBODY)
         .await
         .expect_err("inline members were written");
     assert!(format!("{error:#}").contains("inline"), "{error:#}");
@@ -368,7 +395,7 @@ pub async fn removes_are_checked_with_the_batch<B: Backend>(sx: Sx<B>) -> anyhow
         member("m2", "G", 2),
         needing(work("W", 3), &["m1"]),
     ]);
-    let applied = sx.service.put(&sx.plan, batch).await?;
+    let applied = sx.service.put(&sx.plan, batch, &reef_api::NOBODY).await?;
     assert_eq!(
         applied,
         Checked::Applied {
@@ -378,12 +405,15 @@ pub async fn removes_are_checked_with_the_batch<B: Backend>(sx: Sx<B>) -> anyhow
     let mut changes = sx.service.changes();
     // a node another needs can't be removed alone
     let needed = Puts::removing(vec![NodeRemove::new("m1", 1)]);
-    let refused = sx.service.batch(&sx.plan, needed).await?;
+    let refused = sx
+        .service
+        .batch(&sx.plan, needed, &reef_api::NOBODY)
+        .await?;
     let expected = vec![problem("W", "needs `m1`, which is not a node")];
     assert_eq!(refused, Checked::Refused(expected));
     // nor a group without its members
     let alone = Puts::removing(vec![NodeRemove::new("G", 1)]);
-    let refused = sx.service.batch(&sx.plan, alone).await?;
+    let refused = sx.service.batch(&sx.plan, alone, &reef_api::NOBODY).await?;
     let expected = vec![
         problem("m1", "group `G` is not a node"),
         problem("m2", "group `G` is not a node"),
@@ -391,7 +421,7 @@ pub async fn removes_are_checked_with_the_batch<B: Backend>(sx: Sx<B>) -> anyhow
     assert_eq!(refused, Checked::Refused(expected));
     // a removal of a node that has moved on is stale, and so is one of a node that isn't there
     let stale = Puts::removing(vec![NodeRemove::new("m2", 7), NodeRemove::new("nope", 1)]);
-    let refused = sx.service.batch(&sx.plan, stale).await?;
+    let refused = sx.service.batch(&sx.plan, stale, &reef_api::NOBODY).await?;
     let expected = vec![
         StalePut {
             id: "m2".to_string(),
@@ -410,7 +440,7 @@ pub async fn removes_are_checked_with_the_batch<B: Backend>(sx: Sx<B>) -> anyhow
     };
     let error = sx
         .service
-        .batch(&sx.plan, both)
+        .batch(&sx.plan, both, &reef_api::NOBODY)
         .await
         .expect_err("a node put and removed was written");
     assert!(
@@ -429,7 +459,10 @@ pub async fn removes_are_checked_with_the_batch<B: Backend>(sx: Sx<B>) -> anyhow
             NodeRemove::new("m2", 1),
         ],
     };
-    let applied = sx.service.batch(&sx.plan, together).await?;
+    let applied = sx
+        .service
+        .batch(&sx.plan, together, &reef_api::NOBODY)
+        .await?;
     assert_eq!(applied, Checked::Applied { versions: vec![2] });
     assert_eq!(ids(&sx).await?, ["W"]);
     assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
@@ -459,16 +492,16 @@ pub async fn concurrent_puts_that_together_cycle_one_is_refused<B: Backend>(
 ) -> anyhow::Result<()> {
     // two nodes at version 1, each fine needing the other alone
     let batch = new(vec![work("Y", 0), work("Z", 1)]);
-    sx.service.put(&sx.plan, batch).await?;
+    sx.service.put(&sx.plan, batch, &reef_api::NOBODY).await?;
     let first = vec![NodePut::new(needing(work("Y", 0), &["Z"]), Some(1))];
     let second = vec![NodePut::new(needing(work("Z", 1), &["Y"]), Some(1))];
     // the first put stops once it is judged, just before its write
     let pause = sx.faults.pause_next_node_write();
-    let write = sx.service.put(&sx.plan, first);
+    let write = sx.service.put(&sx.plan, first, &reef_api::NOBODY);
     let racer = async {
         pause.reached.notified().await;
         // the second waits on the plan's lock, rather than being judged beside the first
-        let put = sx.service.put(&sx.plan, second);
+        let put = sx.service.put(&sx.plan, second, &reef_api::NOBODY);
         tokio::pin!(put);
         let waited = tokio::time::timeout(Duration::from_millis(200), &mut put)
             .await
@@ -505,15 +538,21 @@ pub async fn put_during_checked_import_is_judged_against_it<B: Backend>(
     sx: Sx<B>,
 ) -> anyhow::Result<()> {
     // a node a put will need, which a whole-plan write drops
-    sx.service.put(&sx.plan, new(vec![work("Y", 0)])).await?;
+    sx.service
+        .put(&sx.plan, new(vec![work("Y", 0)]), &reef_api::NOBODY)
+        .await?;
     let pause = sx.faults.pause_next_flip();
-    let write = sx.service.write_plan(&sx.plan, vec![work("W", 0)].into());
+    let write = sx
+        .service
+        .write_plan(&sx.plan, vec![work("W", 0)].into(), &reef_api::NOBODY);
     let racer = async {
         pause.reached.notified().await;
         // the put waits on the plan's lock while the write holds it
-        let put = sx
-            .service
-            .put(&sx.plan, new(vec![needing(work("X", 1), &["Y"])]));
+        let put = sx.service.put(
+            &sx.plan,
+            new(vec![needing(work("X", 1), &["Y"])]),
+            &reef_api::NOBODY,
+        );
         tokio::pin!(put);
         let waited = tokio::time::timeout(Duration::from_millis(200), &mut put)
             .await
@@ -545,7 +584,10 @@ pub async fn checked_import_refuses_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyh
     let row = sx.service.store().backend().plan(&sx.plan).await?;
     // an import into the empty plan with one broken node is refused with its problem
     let broken = vec![work("A", 0), needing(work("B", 1), &["nope"])];
-    let answer = sx.service.write_plan(&sx.plan, broken.into()).await?;
+    let answer = sx
+        .service
+        .write_plan(&sx.plan, broken.into(), &reef_api::NOBODY)
+        .await?;
     let expected = vec![problem("B", "needs `nope`, which is not a node")];
     assert_eq!(answer, Rewrite::Refused(expected));
     // leaving the plan's row as it was: no revision reserved, none made current
@@ -553,7 +595,10 @@ pub async fn checked_import_refuses_a_broken_plan<B: Backend>(sx: Sx<B>) -> anyh
     assert!(ids(&sx).await?.is_empty());
     // and a whole import goes in
     let whole = vec![work("A", 0), needing(work("B", 1), &["A"])];
-    let answer = sx.service.write_plan(&sx.plan, whole.into()).await?;
+    let answer = sx
+        .service
+        .write_plan(&sx.plan, whole.into(), &reef_api::NOBODY)
+        .await?;
     assert!(matches!(answer, Rewrite::Applied(_)), "{answer:?}");
     assert_eq!(ids(&sx).await?, ["A", "B"]);
     assert_eq!(sx.service.check(&sx.plan).await?, Vec::<Diagnostic>::new());
@@ -583,7 +628,10 @@ pub async fn payload_equals_graph_build_of_stored_nodes<B: Backend>(
         ),
         needing(work("C14", 3), &["C53"]),
     ];
-    let answer = sx.service.put(&sx.plan, new(written.clone())).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(written.clone()), &reef_api::NOBODY)
+        .await?;
     assert_eq!(
         answer,
         Checked::Applied {
@@ -651,7 +699,7 @@ pub async fn put_to_unlisted_plan_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::
     let unlisted = PlanName::new("reef", "unlisted")?;
     let error = sx
         .service
-        .put(&unlisted, new(vec![work("A", 0)]))
+        .put(&unlisted, new(vec![work("A", 0)]), &reef_api::NOBODY)
         .await
         .expect_err("a put to an unlisted plan was written");
     let not_listed = error
@@ -662,7 +710,7 @@ pub async fn put_to_unlisted_plan_is_an_error<B: Backend>(sx: Sx<B>) -> anyhow::
     let unknown = PlanName::new("nobody", "central")?;
     for error in [
         sx.service
-            .put(&unknown, new(vec![work("A", 0)]))
+            .put(&unknown, new(vec![work("A", 0)]), &reef_api::NOBODY)
             .await
             .expect_err("a put to an unknown project was written"),
         sx.service
@@ -695,7 +743,7 @@ pub async fn node_write_refused_in_place_is_an_error<B: Backend>(sx: Sx<B>) -> a
     sx.faults.refuse_node_writes_after(0);
     let error = sx
         .service
-        .put(&sx.plan, new(vec![work("A", 0)]))
+        .put(&sx.plan, new(vec![work("A", 0)]), &reef_api::NOBODY)
         .await
         .expect_err("a refused write was answered as written");
     // it names the node and says another process wrote the plan
@@ -714,7 +762,11 @@ pub async fn node_write_refused_in_place_is_an_error<B: Backend>(sx: Sx<B>) -> a
 pub async fn killed_batch_leaves_the_plan_as_it_was<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // a plan of two nodes, then a batch that changes one, adds one and removes the other
     sx.service
-        .put(&sx.plan, new(vec![work("A", 0), work("B", 1)]))
+        .put(
+            &sx.plan,
+            new(vec![work("A", 0), work("B", 1)]),
+            &reef_api::NOBODY,
+        )
         .await?;
     let before = sx.service.list(&sx.plan).await?;
     let mut changed = work("A", 0);
@@ -730,7 +782,7 @@ pub async fn killed_batch_leaves_the_plan_as_it_was<B: Backend>(sx: Sx<B>) -> an
     sx.faults.fail_rows_after(1);
     let error = sx
         .service
-        .batch(&sx.plan, batch)
+        .batch(&sx.plan, batch, &reef_api::NOBODY)
         .await
         .expect_err("the killed batch was answered as written");
     assert!(format!("{error:#}").contains("killed"), "{error:#}");
@@ -742,7 +794,10 @@ pub async fn killed_batch_leaves_the_plan_as_it_was<B: Backend>(sx: Sx<B>) -> an
     assert_ne!(row.pending, 0);
     let dead = RevisionKey::new(&sx.plan, row.pending);
     assert_eq!(backend.nodes(&dead, None).await?.len(), 1);
-    let answer = sx.service.put(&sx.plan, new(vec![work("D", 3)])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![work("D", 3)]), &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![1] });
     assert!(backend.nodes(&dead, None).await?.is_empty());
     let row = backend.plan(&sx.plan).await?.expect("the plan is listed");
@@ -766,6 +821,7 @@ pub async fn untouched_nodes_keep_their_versions_through_a_batch<B: Backend>(
         .put(
             &sx.plan,
             new(vec![work("A", 0), work("B", 1), work("C", 2)]),
+            &reef_api::NOBODY,
         )
         .await?;
     let read = sx.service.get(&sx.plan, "C").await?.expect("C was put");
@@ -779,7 +835,7 @@ pub async fn untouched_nodes_keep_their_versions_through_a_batch<B: Backend>(
         ],
         removes: vec![NodeRemove::new("B", 1)],
     };
-    let answer = sx.service.batch(&sx.plan, batch).await?;
+    let answer = sx.service.batch(&sx.plan, batch, &reef_api::NOBODY).await?;
     assert_eq!(
         answer,
         Checked::Applied {
@@ -800,7 +856,11 @@ pub async fn untouched_nodes_keep_their_versions_through_a_batch<B: Backend>(
     edit.spec.title = Some("C Edited".to_string());
     let answer = sx
         .service
-        .put(&sx.plan, vec![NodePut::new(edit, Some(1))])
+        .put(
+            &sx.plan,
+            vec![NodePut::new(edit, Some(1))],
+            &reef_api::NOBODY,
+        )
         .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![2] });
     Ok(())
@@ -818,7 +878,7 @@ async fn queue_last<B: Backend>(sx: &Sx<B>, plan: &PlanName, id: &str) -> anyhow
         node: plan.node(id)?,
         at: Place::Bottom,
     };
-    sx.service.edit_queue("reef", edit).await
+    sx.service.edit_queue("reef", edit, &reef_api::NOBODY).await
 }
 
 /// next takes the queue's ready entries first across a project's plans, then each plan's ready
@@ -832,9 +892,15 @@ pub async fn next_follows_the_queue_across_plans<B: Backend>(sx: Sx<B>) -> anyho
     let other = PlanName::new("reef", "other")?;
     sx.service.add_plan(&other).await?;
     sx.service
-        .put(&sx.plan, new(vec![work("A", 0), work("B", 1)]))
+        .put(
+            &sx.plan,
+            new(vec![work("A", 0), work("B", 1)]),
+            &reef_api::NOBODY,
+        )
         .await?;
-    sx.service.put(&other, new(vec![work("X", 0)])).await?;
+    sx.service
+        .put(&other, new(vec![work("X", 0)]), &reef_api::NOBODY)
+        .await?;
     // X then B queued
     queue_last(&sx, &other, "X").await?;
     queue_last(&sx, &sx.plan, "B").await?;
@@ -882,14 +948,16 @@ pub async fn queue_lists_each_entry_with_its_state<B: Backend>(sx: Sx<B>) -> any
         member("m1", "G", 4),
         work("E", 5),
     ];
-    sx.service.put(&sx.plan, new(nodes)).await?;
+    sx.service
+        .put(&sx.plan, new(nodes), &reef_api::NOBODY)
+        .await?;
     for id in ["B", "A", "D", "G", "E"] {
         queue_last(&sx, &sx.plan, id).await?;
     }
     // E goes from its plan, and stays queued
     let gone = Puts::removing(vec![NodeRemove::new("E", 1)]);
     assert!(matches!(
-        sx.service.batch(&sx.plan, gone).await?,
+        sx.service.batch(&sx.plan, gone, &reef_api::NOBODY).await?,
         Checked::Applied { .. }
     ));
     // each entry's state, in the queue's order, under ranks that sort it
@@ -922,7 +990,9 @@ pub async fn queue_lists_each_entry_with_its_state<B: Backend>(sx: Sx<B>) -> any
         node: sx.plan.node("E")?,
     };
     assert!(matches!(
-        sx.service.edit_queue("reef", off).await?,
+        sx.service
+            .edit_queue("reef", off, &reef_api::NOBODY)
+            .await?,
         Queued::Applied { .. }
     ));
     // while a node not in its plan isn't queued, and an unlisted plan or unknown project is an
@@ -948,7 +1018,9 @@ pub async fn queue_lists_each_entry_with_its_state<B: Backend>(sx: Sx<B>) -> any
 pub async fn queue_edit_is_a_change_and_a_refusal_none<B: Backend>(
     sx: Sx<B>,
 ) -> anyhow::Result<()> {
-    sx.service.put(&sx.plan, new(vec![work("A", 0)])).await?;
+    sx.service
+        .put(&sx.plan, new(vec![work("A", 0)]), &reef_api::NOBODY)
+        .await?;
     let mut changes = sx.service.changes();
     // an entry added tells the stream its project's queue changed
     queue_last(&sx, &sx.plan, "A").await?;
@@ -962,7 +1034,9 @@ pub async fn queue_edit_is_a_change_and_a_refusal_none<B: Backend>(
         at: Place::Top,
     };
     assert!(matches!(
-        sx.service.edit_queue("reef", stray).await?,
+        sx.service
+            .edit_queue("reef", stray, &reef_api::NOBODY)
+            .await?,
         Queued::NotQueued { .. }
     ));
     queue_last(&sx, &sx.plan, "nope").await?;
@@ -988,7 +1062,11 @@ async fn put_page<B: Backend>(
         page: PageWrite::new(path, text),
         read,
     };
-    match sx.service.edit_page(&sx.plan, edit).await? {
+    match sx
+        .service
+        .edit_page(&sx.plan, edit, &reef_api::NOBODY)
+        .await?
+    {
         PageEdited::Applied {
             version: Some(version),
         } => Ok(version),
@@ -1013,7 +1091,10 @@ pub async fn plan_pages_are_docs_over_the_repo<B: Backend>(sx: Sx<B>) -> anyhow:
     // nodes linking each are checked against the pages, and written
     let a = linking(work("A", 0), &["docs/design.md#rows"]);
     let b = linking(work("B", 1), &["plan/only.md#rows"]);
-    let answer = sx.service.put(&sx.plan, new(vec![a, b])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![a, b]), &reef_api::NOBODY)
+        .await?;
     assert_eq!(
         answer,
         Checked::Applied {
@@ -1046,7 +1127,10 @@ pub async fn plan_pages_are_docs_over_the_repo<B: Backend>(sx: Sx<B>) -> anyhow:
     // a heading the page lacks is refused, though the repo's doc has it
     let mut nope = work("C", 2);
     nope.spec.docs = vec!["docs/design.md#design-choices".to_string()];
-    let answer = sx.service.put(&sx.plan, new(vec![nope])).await?;
+    let answer = sx
+        .service
+        .put(&sx.plan, new(vec![nope]), &reef_api::NOBODY)
+        .await?;
     let expected = vec![problem(
         "C",
         "doc `docs/design.md#design-choices`: docs/design.md has no heading with the id \
@@ -1066,14 +1150,19 @@ pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()>
     // a node briefed from a page's section
     put_page(&sx, "design.md", PAGE, None).await?;
     let linked = linking(work("A", 0), &["design.md#rows"]);
-    sx.service.put(&sx.plan, new(vec![linked])).await?;
+    sx.service
+        .put(&sx.plan, new(vec![linked]), &reef_api::NOBODY)
+        .await?;
     let mut changes = sx.service.changes();
     // taking the page out leaves the link nowhere to lead
     let remove = PageEdit::Remove {
         path: "design.md".to_string(),
         read: 1,
     };
-    let answer = sx.service.edit_page(&sx.plan, remove.clone()).await?;
+    let answer = sx
+        .service
+        .edit_page(&sx.plan, remove.clone(), &reef_api::NOBODY)
+        .await?;
     let PageEdited::Refused(problems) = answer else {
         panic!("a linked page was taken out: {answer:?}");
     };
@@ -1086,7 +1175,10 @@ pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()>
         page: PageWrite::new("design.md", "# The page\n\nNo rows.\n"),
         read: Some(1),
     };
-    let answer = sx.service.edit_page(&sx.plan, headless).await?;
+    let answer = sx
+        .service
+        .edit_page(&sx.plan, headless, &reef_api::NOBODY)
+        .await?;
     let PageEdited::Refused(problems) = answer else {
         panic!("a linked heading was dropped: {answer:?}");
     };
@@ -1104,7 +1196,10 @@ pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()>
         ),
         read: Some(1),
     };
-    let answer = sx.service.edit_page(&sx.plan, whyless).await?;
+    let answer = sx
+        .service
+        .edit_page(&sx.plan, whyless, &reef_api::NOBODY)
+        .await?;
     let PageEdited::Refused(problems) = answer else {
         panic!("a page the node's why is from lost it: {answer:?}");
     };
@@ -1119,7 +1214,10 @@ pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()>
         page: PageWrite::new("design.md", PAGE),
         read: Some(9),
     };
-    let answer = sx.service.edit_page(&sx.plan, stale).await?;
+    let answer = sx
+        .service
+        .edit_page(&sx.plan, stale, &reef_api::NOBODY)
+        .await?;
     assert_eq!(
         answer,
         PageEdited::Stale {
@@ -1149,13 +1247,16 @@ pub async fn page_edits_are_checked<B: Backend>(sx: Sx<B>) -> anyhow::Result<()>
     assert_eq!(changes.try_recv()?, expected);
     // and once nothing links it, it comes out, which is a change too
     let gone = Puts::removing(vec![NodeRemove::new("A", 1)]);
-    sx.service.batch(&sx.plan, gone).await?;
+    sx.service.batch(&sx.plan, gone, &reef_api::NOBODY).await?;
     let _ = changes.try_recv()?;
     let remove = PageEdit::Remove {
         path: "design.md".to_string(),
         read: 2,
     };
-    let answer = sx.service.edit_page(&sx.plan, remove).await?;
+    let answer = sx
+        .service
+        .edit_page(&sx.plan, remove, &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, PageEdited::Applied { version: None });
     let expected = Change::PagesPut {
         plan: sx.plan.clone(),
@@ -1181,12 +1282,15 @@ pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Res
         page: PageWrite::new("design.md", columns),
         read: None,
     };
-    sx.service.edit_page(&other, edit).await?;
+    sx.service
+        .edit_page(&other, edit, &reef_api::NOBODY)
+        .await?;
     // each plan's node links its own page's heading
     sx.service
         .put(
             &sx.plan,
             new(vec![linking(work("A", 0), &["design.md#rows"])]),
+            &reef_api::NOBODY,
         )
         .await?;
     let answer = sx
@@ -1194,6 +1298,7 @@ pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Res
         .put(
             &other,
             new(vec![linking(work("B", 0), &["design.md#columns"])]),
+            &reef_api::NOBODY,
         )
         .await?;
     assert_eq!(answer, Checked::Applied { versions: vec![1] });
@@ -1203,6 +1308,7 @@ pub async fn each_plan_reads_its_own_pages<B: Backend>(sx: Sx<B>) -> anyhow::Res
         .put(
             &other,
             new(vec![linking(work("C", 1), &["design.md#rows"])]),
+            &reef_api::NOBODY,
         )
         .await?;
     assert!(matches!(answer, Checked::Refused(_)), "{answer:?}");

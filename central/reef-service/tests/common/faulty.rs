@@ -6,8 +6,8 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow,
+    ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +57,8 @@ pub struct Faults {
     /// Fail the next insert of a project row, before writing it, as a registration killed after
     /// its remote's row would be
     fail_project_insert: AtomicBool,
+    /// Fail the next write of edit rows, before writing any, as a history that couldn't keep
+    fail_edit_write: AtomicBool,
 }
 
 impl Faults {
@@ -115,6 +117,12 @@ impl Faults {
     /// its files would leave it
     pub fn fail_next_revision_write(&self) {
         self.fail_revision_write.store(true, Ordering::SeqCst);
+    }
+
+    /// Fails the next write of edit rows before any is written, as a history the store couldn't
+    /// keep after the write it records landed
+    pub fn fail_next_edit_write(&self) {
+        self.fail_edit_write.store(true, Ordering::SeqCst);
     }
 
     /// Refuses the next write of a comment row as moved, as a write from another process between
@@ -712,5 +720,34 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `expect` - What must be stored under its key
     async fn write_remote(&self, row: RemoteRow, expect: Expect) -> anyhow::Result<Written> {
         self.inner.write_remote(row, expect).await
+    }
+
+    /// Reads a subject's edit rows, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the subject belongs to
+    /// * `subject` - What was edited
+    /// * `limit` - The most rows to read
+    async fn edits(
+        &self,
+        project: &str,
+        subject: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<EditRow>> {
+        self.inner.edits(project, subject, limit).await
+    }
+
+    /// Writes edit rows, failing first if asked to
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_edits(&self, rows: Vec<EditRow>) -> anyhow::Result<()> {
+        // a fault armed for this write stops it before any row is written
+        if self.faults.fail_edit_write.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("killed before writing {} edit rows", rows.len());
+        }
+        self.inner.write_edits(rows).await
     }
 }

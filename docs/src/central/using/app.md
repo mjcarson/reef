@@ -8,7 +8,12 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   - **Changes**: the node's captured revisions and their diffs;
   - **Comments**: its threads; click a diff line's number to start one there;
   - **Decisions**: every plan its Claude sessions asked approval for, and every question they
-    asked, with what was answered.
+    asked, with what was answered;
+  - **History**: who made each edit of the node, what it changed and when, newest first.
+
+  Each comment says who wrote it, "Claude, for ada" where Claude wrote it with ada's login, and
+  each thread who marked it last. A revision says who captured it, a decision whose session
+  asked it, and a queue entry who placed it.
 - **The sessions panel**, from the bar, shows each session attached to central reef, live:
   - the headless sessions `reef loop run` started, whose loops it starts, pauses and stops and
     whose questions and plans it answers;

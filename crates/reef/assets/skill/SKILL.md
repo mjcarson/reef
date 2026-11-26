@@ -41,6 +41,7 @@ The full key reference is in [reference.md](reference.md). Read it before writin
   | Show this session in the app | | `! reef loop run`, then `! reef loop detach` |
   | Read a node's YAML | `mcp__reef__get` | `reef node get <ID>` |
   | Read its body too | | `reef node get <ID> --md` |
+  | See who changed it, and how | | `reef node log <ID>` |
   | Check the plan | `mcp__reef__check` | `reef check` |
   | Put a node | `mcp__reef__put` | `reef node put <FILE>` |
   | Set its status | `mcp__reef__status` | `reef status <ID> <STATUS>` |

@@ -16,6 +16,7 @@
 //! the caller to sign in answers 401, which comes back as an `unauthorized` error saying to run
 //! `reef login`.
 
+use reef_api::Logged;
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
     DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing, Loop,
@@ -23,7 +24,8 @@ use reef_api::{
     PageListing, PasswordChange, PasswordChanged, PlanInfo, PlanWrite, Project, Puts, QueueEdit,
     QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Revision, Rewrite,
     Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode,
-    StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WorkRecord, paths,
+    StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
+    WorkRecord, Writer, paths,
 };
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
@@ -46,6 +48,8 @@ pub struct Client {
     origin: String,
     /// Where the token it signs in with comes from
     held: Held,
+    /// Whether it writes as the user, or as Claude for them, which every request it sends says
+    writer: Writer,
 }
 
 impl Client {
@@ -103,7 +107,26 @@ impl Client {
             base,
             origin,
             held: credentials::held(conf.credentials.as_deref()),
+            writer: Writer::User,
         })
+    }
+
+    /// The same client, saying on every request it sends that it writes as Claude, for the user
+    /// its token signs in, or as the user themselves
+    ///
+    /// reef's MCP server writes as Claude, so the service names Claude, for the user, as the
+    /// author of what it writes. The header can only ever add "Claude, for" to the token's user.
+    ///
+    /// # Arguments
+    ///
+    /// * `writer` - Who it writes as
+    pub fn writing_as(self, writer: Writer) -> Client {
+        Client { writer, ..self }
+    }
+
+    /// Whether it writes as the user, or as Claude for them
+    pub fn writer(&self) -> Writer {
+        self.writer
     }
 
     /// The service's root, such as `https://127.0.0.1:12180`, which a login is kept by
@@ -449,6 +472,37 @@ impl Client {
     /// * `project` - The project's name
     pub async fn queue(&self, project: &str) -> anyhow::Result<QueueListing> {
         let path = paths::queue(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Reads a project's queue's history: who queued, moved or took off each entry, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn queue_history(&self, project: &str) -> anyhow::Result<Vec<Logged>> {
+        let path = paths::queue_history(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Reads a node's history: who made each edit, what it changed and when, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node's full name
+    pub async fn node_history(&self, node: &NodeName) -> anyhow::Result<Vec<Logged>> {
+        let path = paths::node_history(node);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Reads one of a plan's own pages' history, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `path` - The page's path
+    pub async fn page_history(&self, plan: &PlanName, path: &str) -> anyhow::Result<Vec<Logged>> {
+        let path = paths::page_history(plan, path);
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
@@ -859,6 +913,11 @@ impl Client {
         let request = match &token {
             Some(token) => request.bearer_auth(token),
             None => request,
+        };
+        // and Claude's word that it writes for the token's user, if it does
+        let request = match self.writer {
+            Writer::Claude => request.header(WRITER_HEADER, Writer::Claude.as_str()),
+            Writer::User => request,
         };
         // a service that isn't there is said plainly, with how to start it
         let response = request

@@ -18,7 +18,9 @@
 //! - **Writes take a lock per project; reads take none.** A start is one row's write, and a
 //!   capture its revision's rows, then the record's.
 
-use reef_api::{AddCapture, CaptureRead, Captured, StartWork, Started, WorkRecord, WorkStart};
+use reef_api::{
+    AddCapture, Author, CaptureRead, Captured, StartWork, Started, WorkRecord, WorkStart,
+};
 use reef_model::{NodeName, PlanName};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -48,6 +50,9 @@ struct Kept {
     /// Where the work happens and what it started from
     #[serde(flatten)]
     start: WorkStart,
+    /// Who started it, as rows kept before authors read naming nobody
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    started_by: Author,
     /// What each capture since the start read, oldest first
     #[serde(default)]
     captures: Vec<CaptureRead>,
@@ -116,8 +121,14 @@ impl<B: Backend> Store<B> {
     ///
     /// * `node` - The node's full name
     /// * `start` - What the start read, and the version of the record it replaces
+    /// * `author` - Who starts it
     #[instrument(name = "Store::start_work", skip_all, err(Debug))]
-    pub async fn start_work(&self, node: &NodeName, start: StartWork) -> anyhow::Result<Started> {
+    pub async fn start_work(
+        &self,
+        node: &NodeName,
+        start: StartWork,
+        author: &Author,
+    ) -> anyhow::Result<Started> {
         // a worktree is named as its host sees it, so only an absolute path names one
         check_start(node, &start.start)?;
         let project = node.plan.project.as_str();
@@ -148,8 +159,9 @@ impl<B: Backend> Store<B> {
         {
             let shas = latest.revision.shas.clone();
             let commits = latest.revision.commits.clone();
+            let nobody = Author::default();
             let revision = self
-                .seal_revision(node, latest, now_ms(), shas, commits)
+                .seal_revision(node, latest, now_ms(), shas, commits, &nobody)
                 .await?;
             sealed = Some(revision.revision);
         }
@@ -159,6 +171,7 @@ impl<B: Backend> Store<B> {
         let kept = Kept {
             started_at,
             start: start.start,
+            started_by: author.clone(),
             captures: Vec::new(),
         };
         let row = work_row(node, version, &kept)?;
@@ -195,8 +208,14 @@ impl<B: Backend> Store<B> {
     ///
     /// * `node` - The node's full name
     /// * `add` - The start the capture was taken from, what it read, and its files
+    /// * `author` - Who sends the capture
     #[instrument(name = "Store::add_capture", skip_all, err(Debug))]
-    pub async fn add_capture(&self, node: &NodeName, add: AddCapture) -> anyhow::Result<Captured> {
+    pub async fn add_capture(
+        &self,
+        node: &NodeName,
+        add: AddCapture,
+        author: &Author,
+    ) -> anyhow::Result<Captured> {
         // every file must be readable back by a path of its own
         check_files(node, &add.files)?;
         // one write to a project's work records at a time
@@ -225,7 +244,7 @@ impl<B: Backend> Store<B> {
                 true => (latest.revision, Outcome::Matched),
                 false => {
                     let sealed = self
-                        .seal_revision(node, latest, at, add.shas, add.commits)
+                        .seal_revision(node, latest, at, add.shas, add.commits, author)
                         .await?;
                     (sealed, Outcome::Replaced)
                 }
@@ -234,7 +253,9 @@ impl<B: Backend> Store<B> {
             Some(latest) if latest.revision.draft => {
                 let number = latest.revision.revision;
                 let slot = Slot::Over(latest.version);
-                let written = self.keep_revision(node, number, slot, at, add).await?;
+                let written = self
+                    .keep_revision(node, number, slot, at, add, author)
+                    .await?;
                 (written, Outcome::Replaced)
             }
             // a sealed revision it matches keeps nothing
@@ -248,7 +269,9 @@ impl<B: Backend> Store<B> {
             latest => {
                 // the next number after the latest, whatever start it was taken from
                 let number = latest.map_or(1, |latest| latest.revision.revision + 1);
-                let written = self.keep_revision(node, number, Slot::New, at, add).await?;
+                let written = self
+                    .keep_revision(node, number, Slot::New, at, add, author)
+                    .await?;
                 (written, Outcome::Added)
             }
         };
@@ -257,12 +280,14 @@ impl<B: Backend> Store<B> {
         let mut kept = Kept {
             started_at: current.started_at,
             start: current.start,
+            started_by: current.started_by,
             captures: current.captures,
         };
         kept.captures.push(CaptureRead {
             at,
             revision: Some(revision.revision),
             shas,
+            author: author.clone(),
         });
         let row = work_row(node, read + 1, &kept)?;
         match self.backend.write_work(row, Expect::Version(read)).await? {
@@ -376,6 +401,7 @@ fn recorded(node: &NodeName, version: u64, kept: Kept) -> WorkRecord {
         version,
         started_at: kept.started_at,
         start: kept.start,
+        started_by: kept.started_by,
         captures: kept.captures,
     }
 }
@@ -443,6 +469,7 @@ mod tests {
                 pin: "refs/reef/start/central/C30".to_string(),
                 pinned: "c".repeat(40),
             },
+            started_by: reef_api::Author::default(),
             captures: Vec::new(),
         };
         let stray: WorkRow = work_row(&node, 1, &kept)?;

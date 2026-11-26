@@ -11,6 +11,7 @@
 //! - **Numbered on its node,** from 1 in the order they were first kept.
 
 use crate::session::Question;
+use crate::user::Author;
 use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -117,6 +118,9 @@ pub struct Decided {
     /// What came of it, once it was answered
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<Outcome>,
+    /// Whose session asked it: the user who sent it to be kept, never what a body says
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
 }
 
 /// One decision kept on a node
@@ -161,6 +165,7 @@ pub enum DecisionsRecorded {
 #[cfg(test)]
 mod tests {
     use super::{Decided, Decision, DecisionKind, Outcome, Via};
+    use crate::user::Author;
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -183,6 +188,7 @@ mod tests {
                 outcome: Some(Outcome::Rejected {
                     feedback: "In capitals.".to_string(),
                 }),
+                author: Author::default(),
             },
         };
         let wire = serde_json::to_value(&decision).unwrap();

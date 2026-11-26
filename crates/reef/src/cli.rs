@@ -98,6 +98,7 @@ use crate::comment;
 use crate::conf::Conf;
 use crate::export;
 use crate::follow;
+use crate::history;
 use crate::hook;
 use crate::import;
 use crate::login;
@@ -540,6 +541,14 @@ pub enum NodeCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
+    /// Print a node's history: who made each edit, what it changed and when, newest first
+    Log {
+        /// The node's id
+        id: String,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
 }
 
 /// What can be done with a pane's loop
@@ -824,6 +833,14 @@ pub enum PageCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
+    /// Print a page's history: who edited it and when, newest first
+    Log {
+        /// The page's path
+        path: String,
+        /// The plan it is in, if not the project's only plan
+        #[command(flatten)]
+        pick: PlanPick,
+    },
 }
 
 /// What can be done with a project's queue
@@ -863,6 +880,12 @@ pub enum QueueCommand {
     /// List the queue, each entry ready, waiting on what, in progress, blocked, done or missing
     Ls {
         /// The project whose queue to list, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+    /// Print the queue's history: who queued, moved or took off each entry, newest first
+    Log {
+        /// The project whose queue's history to print, if not the working directory's
         #[command(flatten)]
         pick: Pick,
     },
@@ -985,6 +1008,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Node(NodeCommand::Capture { id, pick }) => {
             capture::capture(&client, cwd, id.as_deref(), &pick, out).await
         }
+        Command::Node(NodeCommand::Log { id, pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            history::node(&client, &plan.node(id)?, out).await
+        }
         Command::Page(PageCommand::Ls { pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             page::ls(&client, &plan, out).await
@@ -1002,6 +1029,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Page(PageCommand::Rm { path, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             page::rm(&client, &plan, &path, out).await
+        }
+        Command::Page(PageCommand::Log { path, pick }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            history::page(&client, &plan, &path, out).await
         }
         Command::Start {
             id,
@@ -1092,6 +1123,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Queue(QueueCommand::Ls { pick }) => {
             let project = picked(&client, cwd, &pick).await?;
             queue::ls(&client, &project.name, out).await
+        }
+        Command::Queue(QueueCommand::Log { pick }) => {
+            let project = picked(&client, cwd, &pick).await?;
+            history::queue(&client, &project.name, out).await
         }
         Command::Import {
             book,

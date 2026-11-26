@@ -7,10 +7,10 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, Decision, FileDiff, Loop, Marked, Me, PasswordChange, PasswordChanged, PlanInfo,
-    Project, QueueEdit, QueueListing, Queued, Review, ReviewState, Reviewed, Revision, Session,
-    SessionAct, SessionActed, SignedOut, Target, Thread, ThreadState, TokenInfo, Transcript, User,
-    UserRemoved,
+    Commented, Decision, FileDiff, Logged, Loop, Marked, Me, PasswordChange, PasswordChanged,
+    PlanInfo, Project, QueueEdit, QueueListing, Queued, Review, ReviewState, Reviewed, Revision,
+    Session, SessionAct, SessionActed, SignedOut, Target, Thread, ThreadState, TokenInfo,
+    Transcript, User, UserRemoved,
 };
 #[cfg(feature = "server")]
 use reef_api::{MarkReview, MarkThread, NewReply, NewThread, Writer};
@@ -259,7 +259,7 @@ pub async fn queue(project: String) -> Result<QueueListing, ServerFnError> {
 pub async fn edit_queue(project: String, edit: QueueEdit) -> Result<Queued, ServerFnError> {
     // under the queue's lock, told to the change stream once it is made
     crate::server::service()
-        .edit_queue(&project, edit)
+        .edit_queue(&project, edit, &caller().author())
         .await
         .map_err(failed)
 }
@@ -288,6 +288,33 @@ pub async fn node_decisions(
         .map_err(|error| ServerFnError::new(error.to_string()))?;
     crate::server::service()
         .node_decisions(&node)
+        .await
+        .map_err(failed)
+}
+
+/// A node's history: who made each edit of it, what it changed and when, newest first
+///
+/// # Arguments
+///
+/// * `project` - The project the node's plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+#[get("/app/history?project&plan&id")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::node_history", skip_all, err(Debug))
+)]
+pub async fn node_history(
+    project: String,
+    plan: String,
+    id: String,
+) -> Result<Vec<Logged>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let node = plan_name(project, plan)?
+        .node(id)
+        .map_err(|error| ServerFnError::new(error.to_string()))?;
+    crate::server::service()
+        .node_history(&node)
         .await
         .map_err(failed)
 }
@@ -488,7 +515,7 @@ pub async fn mark_review(
         .node(id)
         .map_err(|error| ServerFnError::new(error.to_string()))?;
     crate::server::service()
-        .mark_review(&node, MarkReview { state, read })
+        .mark_review(&node, MarkReview { state, read }, &caller().author())
         .await
         .map_err(failed)
 }
@@ -529,6 +556,7 @@ pub async fn start_thread(
                 by: Writer::User,
                 review,
             },
+            &caller().author(),
         )
         .await
         .map_err(failed)
@@ -566,6 +594,7 @@ pub async fn reply_to(
                 by: Writer::User,
                 review,
             },
+            &caller().author(),
         )
         .await
         .map_err(failed)
@@ -595,7 +624,12 @@ pub async fn mark_thread(
     // a name that breaks the naming rule is refused before the store is read
     let name = plan_name(project, plan)?;
     crate::server::service()
-        .mark_thread(&name, thread, MarkThread { state, read })
+        .mark_thread(
+            &name,
+            thread,
+            MarkThread { state, read },
+            &caller().author(),
+        )
         .await
         .map_err(failed)
 }
@@ -712,7 +746,7 @@ pub async fn save_node(
     let puts = puts_for(&listing, lift(spec), Some(read));
     // checked against the whole plan as one change
     match service
-        .batch(&name, Puts::new(puts))
+        .batch(&name, Puts::new(puts), &caller().author())
         .await
         .map_err(failed)?
     {

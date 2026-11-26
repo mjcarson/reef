@@ -15,7 +15,7 @@ use crate::calls;
 use crate::canvas::dom::{self, El};
 use crate::live::use_project_changes;
 use dioxus::prelude::*;
-use reef_api::{Listed, Place, QueueEdit, QueueListing, Queued};
+use reef_api::{Listed, Place, Placed, QueueEdit, QueueListing, Queued};
 use reef_model::next::needs_lines;
 use reef_model::{EntryState, NodeName};
 
@@ -214,6 +214,8 @@ fn QueueItem(
     };
     let state = entry.state.as_str();
     let lines = details(&node, &entry.state);
+    // who put it where it is, if that is known
+    let placed = listed.placed.as_ref().and_then(Placed::describe);
     // how the drag under way marks this entry: dragged, or where the dragged one would land
     let marks = drag.read().as_ref().filter(|d| d.moved).map(|d| {
         let others = d.order.len().saturating_sub(1);
@@ -308,6 +310,9 @@ fn QueueItem(
                 }
                 for line in lines {
                     div { class: "reef-app-queue-needs", "{line}" }
+                }
+                if let Some(placed) = placed {
+                    div { class: "reef-app-queue-placed", "{placed}" }
                 }
             }
             button {

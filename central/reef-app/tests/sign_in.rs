@@ -18,6 +18,102 @@ use std::path::Path;
 /// The password the suite's user signs in with
 const PASSWORD: &str = "correct horse battery";
 
+/// A comment the signed-in browser starts, and a node it saves, name the user its cookie signs in
+///
+/// # Arguments
+///
+/// * `service` - The service the app serves
+/// * `ada` - The user signed in, an admin
+/// * `dir` - The suite's own directory, which a repo is made in
+/// * `base` - The app's root
+/// * `http` - The browser's client
+/// * `cookie` - The sign-in cookie it sends
+async fn authored_by_the_browser(
+    service: &Service,
+    ada: &reef_api::User,
+    dir: &Path,
+    base: &str,
+    http: &reqwest::Client,
+    cookie: &str,
+) -> anyhow::Result<()> {
+    // a project registered by ada for a fresh repo, its plan listed, and a node in it
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo)?;
+    let made = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()?;
+    anyhow::ensure!(made.success(), "git init failed");
+    let admin = Asker {
+        user: Some(ada),
+        local: true,
+        ..Default::default()
+    };
+    service.add_project("reef", &repo, admin).await?;
+    let plan = reef_model::PlanName::new("reef", "central")?;
+    service.add_plan(&plan).await?;
+    let spec = reef_model::NodeSpec::from_yaml(
+        "id: C1\ntitle: C1 Some work\ndescription:\n  why: Missing.\n  what: There.\n",
+    )
+    .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    let node = reef_api::NodeWrite {
+        spec,
+        body: String::new(),
+        order: 0,
+    };
+    service
+        .put(
+            &plan,
+            vec![reef_api::NodePut::new(node, None)],
+            &reef_api::NOBODY,
+        )
+        .await?;
+    // the browser starts a thread on it, and saves it in progress, as its own pages do
+    let post = |path: &str, body: serde_json::Value| {
+        http.post(format!("{base}{path}"))
+            .header(CONTENT_TYPE, "application/json")
+            .header(COOKIE, cookie)
+            .header("sec-fetch-site", "same-origin")
+            .json(&body)
+    };
+    let thread = serde_json::json!({
+        "project": "reef",
+        "plan": "central",
+        "id": "C1",
+        "target": {"on": "node"},
+        "body": "Mine",
+        "review": false,
+    });
+    let answer = post("/app/thread", thread).send().await?;
+    anyhow::ensure!(answer.status().is_success(), "{}", answer.text().await?);
+    let yaml = "id: C1\ntitle: C1 Some work\nstatus: in-progress\ndescription:\n  why: \
+                Missing.\n  what: There.\n";
+    let save = serde_json::json!({
+        "project": "reef",
+        "plan": "central",
+        "id": "C1",
+        "yaml": yaml,
+        "read": 1,
+    });
+    let answer = post("/app/save", save).send().await?;
+    anyhow::ensure!(answer.status().is_success(), "{}", answer.text().await?);
+    // each names ada, by her name
+    let named = plan.node("C1")?;
+    let threads = service
+        .node_threads(&named, reef_service::Pending::Leave)
+        .await?;
+    assert_eq!(
+        threads[0].comments[0].author.describe().as_deref(),
+        Some("ada")
+    );
+    let history = service.node_history(&named).await?;
+    assert_eq!(history[0].author.describe().as_deref(), Some("ada"));
+    assert_eq!(history[0].version, Some(2));
+    // and nobody, for the put the suite made itself
+    assert!(history[1].author.is_unknown());
+    Ok(())
+}
+
 /// One layer guards the app's pages, its server functions and the JSON API: nobody signed in is
 /// sent to sign in or refused, a browser that signs in is shown whom it is signed in as, and a
 /// post from a page of another origin is refused, its cookie and all
@@ -57,10 +153,9 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
             local: true,
             ..Default::default()
         };
-        anyhow::ensure!(matches!(
-            service.add_user(new, local).await?,
-            UserAdded::Added(_)
-        ));
+        let UserAdded::Added(ada) = service.add_user(new, local).await? else {
+            anyhow::bail!("ada was taken in a fresh service");
+        };
         // the app's router on any free local port, each request knowing where it came from
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address: SocketAddr = listener.local_addr()?;
@@ -193,6 +288,8 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         assert_eq!(account.tokens.len(), 1);
         assert!(account.tokens[0].current);
         assert_eq!(account.users.len(), 1, "an admin sees every user");
+        // a comment and a save the signed-in browser makes name her
+        authored_by_the_browser(&service, &ada, &dir, &base, &http, &cookie).await?;
         // but a page on another port of this host, the same site, posts with the cookie and is
         // refused, whether its browser says so or only names its origin
         let elsewhere = "http://127.0.0.1:1";

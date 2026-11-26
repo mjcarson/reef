@@ -19,7 +19,7 @@
 //!   the plan approved, as `planContent`, beside a record naming the planning session's call,
 //!   so the approval is read from there, as that call's.
 
-use reef_api::{Decided, DecisionKind, Outcome, Question, Via};
+use reef_api::{Author, Decided, DecisionKind, Outcome, Question, Via};
 use reef_model::NodeName;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -151,6 +151,7 @@ pub fn read(text: &str, via: Via) -> Vec<Read> {
                         answered_at: None,
                         kind,
                         outcome: None,
+                        author: Author::default(),
                     };
                     let tool = tool.to_string();
                     calls.insert(
@@ -206,6 +207,7 @@ pub fn read(text: &str, via: Via) -> Vec<Read> {
                 html: String::new(),
             },
             outcome: Some(Outcome::Approved),
+            author: Author::default(),
         };
         decisions.push(Read {
             node: node.clone(),

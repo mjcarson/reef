@@ -11,6 +11,10 @@
 //!   the sign-in cookie, asks the service whose it is, and hands every route a [`Caller`]: the
 //!   user, the token, whether the request came from the service's own host, and whether it came
 //!   over TLS. Each connection's [`Peer`] says the last two.
+//! - **Who wrote it, for every write.** [`Caller::author`] names the user the token signs in, and
+//!   Claude if the request's `reef-writer` header says it writes as Claude, as reef's MCP server
+//!   does. The header only ever adds "Claude, for" to the token's user, so no request names
+//!   another.
 //! - **Off unless reef's config requires it.** With sign-in off every request goes through, as it
 //!   did before users, and only adding or listing users asks who is calling.
 //! - **On, everything but signing in is guarded** ([`judge`]): the JSON API's reads and writes,
@@ -32,7 +36,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::IncomingStream;
 use reef_api::user::SIGN_IN_COOKIE;
-use reef_api::{ApiError, ErrorCode, TokenKind, User, paths};
+use reef_api::{ApiError, Author, ErrorCode, TokenKind, User, WRITER_HEADER, Writer, paths};
 use reef_render::paths::escape;
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -91,9 +95,17 @@ pub struct Caller {
     pub secure: bool,
     /// The address the request came from, if the connection said
     pub address: Option<IpAddr>,
+    /// Whether it says it writes as Claude, for its user, or as the user themselves
+    pub writer: Writer,
 }
 
 impl Caller {
+    /// Who a write this caller makes is by: the user its token signs in, if any, and Claude if
+    /// it says it writes as Claude
+    pub fn author(&self) -> Author {
+        Author::signed(self.user.as_ref(), self.writer)
+    }
+
     /// The caller as the service judges one asking of its users or tokens
     pub fn asker(&self) -> Asker<'_> {
         Asker {
@@ -118,6 +130,7 @@ impl std::fmt::Debug for Caller {
             .field("local", &self.local)
             .field("secure", &self.secure)
             .field("address", &self.address)
+            .field("writer", &self.writer)
             .finish()
     }
 }
@@ -277,6 +290,23 @@ fn presented(headers: &HeaderMap) -> Option<(String, bool)> {
     cookie(headers).map(|token| (token, true))
 }
 
+/// Who a request says writes it: Claude if its `reef-writer` header says `claude`, else the user
+///
+/// # Arguments
+///
+/// * `headers` - The request's headers
+fn writer(headers: &HeaderMap) -> Writer {
+    // only Claude's word is read; anything else, or none, is the user's own
+    let claude = headers
+        .get(WRITER_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(Writer::Claude.as_str()));
+    match claude {
+        true => Writer::Claude,
+        false => Writer::User,
+    }
+}
+
 /// The sign-in cookie's value, if a request sent one
 ///
 /// # Arguments
@@ -432,12 +462,14 @@ async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: N
         Verdict::Pass => {
             // every route under the layer reads its caller from here
             let token = presented.map(|(token, _)| token);
+            let writer = writer(request.headers());
             request.extensions_mut().insert(Caller {
                 user,
                 token,
                 local,
                 secure,
                 address,
+                writer,
             });
             next.run(request).await
         }
@@ -682,9 +714,42 @@ async fn sign_out<S: Serves>(State(serves): State<S>, caller: Caller) -> Respons
 #[cfg(test)]
 mod tests {
     use super::{
-        Named, Verdict, cleared_cookie, cookie, judge, presented, safe_next, sign_in_cookie,
+        Caller, Named, Verdict, cleared_cookie, cookie, judge, presented, safe_next,
+        sign_in_cookie, writer,
     };
     use axum::http::{HeaderMap, HeaderValue, Method, header};
+    use reef_api::{User, WRITER_HEADER, Writer};
+
+    /// A request says it writes as Claude only by its header's `claude`, and a caller's author is
+    /// its token's user, Claude's for them where it says so
+    #[test]
+    fn the_writer_header_marks_claude_for_its_user() {
+        // no header, or any other word, is the user's own
+        let mut headers = HeaderMap::new();
+        assert_eq!(writer(&headers), Writer::User);
+        headers.insert(WRITER_HEADER, HeaderValue::from_static("ada"));
+        assert_eq!(writer(&headers), Writer::User);
+        // Claude's, whatever its case
+        headers.insert(WRITER_HEADER, HeaderValue::from_static(" Claude "));
+        assert_eq!(writer(&headers), Writer::Claude);
+        // and a caller's author is its user, Claude's for them, and nobody with no user
+        let ada = User {
+            name: "ada".to_string(),
+            admin: false,
+            created_at: 3,
+        };
+        let caller = Caller {
+            user: Some(ada),
+            writer: Writer::Claude,
+            ..Caller::default()
+        };
+        assert_eq!(
+            caller.author().describe().as_deref(),
+            Some("Claude, for ada")
+        );
+        assert_eq!(caller.author().since, Some(3));
+        assert!(Caller::default().author().is_unknown());
+    }
 
     /// Only a path of this origin is followed after sign-in
     #[test]

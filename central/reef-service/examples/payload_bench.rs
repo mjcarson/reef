@@ -33,6 +33,8 @@ use reef_model::spec::parse_node_file;
 use reef_model::{Graph, Payload, PlanName, nodes_from_records};
 use reef_render::paths::{Target, resolve};
 use reef_render::{DocSource, Layered, MemSource, Renderer, RepoSource, Sections};
+#[cfg(feature = "embedded")]
+use reef_service::Conf;
 use reef_service::{
     Asker, Backend, Checked, NodePut, NodeWrite, PageEdit, PageEdited, PageWrite, PlanWrite,
     Service, api,
@@ -270,7 +272,7 @@ async fn time_plan<B: Backend + 'static, S: DocSource>(
     for round in 0..WARMUP + rounds {
         let one = retitled(service, plan, &ids[..1], round).await?;
         let start = Instant::now();
-        let checked = service.put(plan, one).await?;
+        let checked = service.put(plan, one, &reef_api::NOBODY).await?;
         let took = start.elapsed();
         anyhow::ensure!(matches!(checked, Checked::Applied { .. }), "{checked:?}");
         if round >= WARMUP {
@@ -278,7 +280,7 @@ async fn time_plan<B: Backend + 'static, S: DocSource>(
         }
         let two = retitled(service, plan, &ids, round).await?;
         let start = Instant::now();
-        let checked = service.put(plan, two).await?;
+        let checked = service.put(plan, two, &reef_api::NOBODY).await?;
         let took = start.elapsed();
         anyhow::ensure!(matches!(checked, Checked::Applied { .. }), "{checked:?}");
         if round >= WARMUP {
@@ -313,7 +315,7 @@ async fn time_plan<B: Backend + 'static, S: DocSource>(
                 read: Some(page.version),
             };
             let start = Instant::now();
-            let edited = service.edit_page(plan, edit).await?;
+            let edited = service.edit_page(plan, edit, &reef_api::NOBODY).await?;
             let took = start.elapsed();
             anyhow::ensure!(matches!(edited, PageEdited::Applied { .. }), "{edited:?}");
             if round >= WARMUP {

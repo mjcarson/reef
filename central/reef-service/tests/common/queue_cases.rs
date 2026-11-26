@@ -29,7 +29,7 @@ async fn add<B: Backend>(fx: &Fx<B>, id: &str, at: Place) -> anyhow::Result<Queu
         node: named(fx, id),
         at,
     };
-    fx.store.edit_queue("reef", edit).await
+    fx.store.edit_queue("reef", edit, &reef_api::NOBODY).await
 }
 
 /// The ids of the case's queue, in its order
@@ -113,7 +113,9 @@ pub async fn queue_reads_in_the_order_entries_are_placed<B: Reopen>(
     let remove = QueueEdit::Remove {
         node: named(&fx, "D"),
     };
-    fx.store.edit_queue("reef", remove).await?;
+    fx.store
+        .edit_queue("reef", remove, &reef_api::NOBODY)
+        .await?;
     assert_eq!(order(&fx).await?, ["B", "C", "A", "E"]);
     Ok(())
 }
@@ -134,7 +136,7 @@ pub async fn a_move_writes_one_row<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
         node: named(&fx, "C"),
         at: Place::Top,
     };
-    fx.store.edit_queue("reef", edit).await?;
+    fx.store.edit_queue("reef", edit, &reef_api::NOBODY).await?;
     let after = rows(&fx).await?;
     // still a row each, A's and B's untouched, C's at a rank before them
     assert_eq!(after.len(), 3);
@@ -164,7 +166,7 @@ pub async fn interrupted_move_leaves_a_duplicate_dropped_on_read<B: Reopen>(
     };
     let error = fx
         .store
-        .edit_queue("reef", edit)
+        .edit_queue("reef", edit, &reef_api::NOBODY)
         .await
         .expect_err("the killed move succeeded");
     assert!(format!("{error:#}").contains("killed"), "{error:#}");
@@ -250,11 +252,17 @@ pub async fn edits_of_entries_not_queued_are_refused<B: Reopen>(fx: Fx<B>) -> an
         node: named(&fx, "X"),
         at: Place::Top,
     };
-    assert_eq!(fx.store.edit_queue("reef", edit).await?, not_x);
+    assert_eq!(
+        fx.store.edit_queue("reef", edit, &reef_api::NOBODY).await?,
+        not_x
+    );
     let edit = QueueEdit::Remove {
         node: named(&fx, "X"),
     };
-    assert_eq!(fx.store.edit_queue("reef", edit).await?, not_x);
+    assert_eq!(
+        fx.store.edit_queue("reef", edit, &reef_api::NOBODY).await?,
+        not_x
+    );
     // and B placed beside X, or beside itself while not queued
     assert_eq!(add(&fx, "B", Place::Before(named(&fx, "X"))).await?, not_x);
     assert_eq!(
@@ -310,7 +318,7 @@ pub async fn each_project_has_its_own_queue<B: Reopen>(fx: Fx<B>) -> anyhow::Res
         node: app.clone(),
         at: Place::Bottom,
     };
-    fx.store.edit_queue("app", edit).await?;
+    fx.store.edit_queue("app", edit, &reef_api::NOBODY).await?;
     // each reads only its own
     assert_eq!(order(&fx).await?, ["A"]);
     let theirs = fx.store.queue("app").await?;
@@ -321,7 +329,11 @@ pub async fn each_project_has_its_own_queue<B: Reopen>(fx: Fx<B>) -> anyhow::Res
         node: app,
         at: Place::Bottom,
     };
-    let error = fx.store.edit_queue("reef", edit).await.unwrap_err();
+    let error = fx
+        .store
+        .edit_queue("reef", edit, &reef_api::NOBODY)
+        .await
+        .unwrap_err();
     assert!(error.downcast_ref::<Unkeepable>().is_some(), "{error:#}");
     Ok(())
 }

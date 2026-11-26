@@ -303,11 +303,14 @@ The rules:
     summary match, as a rebase or an amend that keeps the message leaves them. A thread the
     user reopened stays open until a new commit names it, or it is resolved by hand.
   - **A thread resolved already** is linked to the new revision, and stays resolved.
-- **Who wrote each comment.** Until reef knows its users ([C50](../milestones/m10.md)), a comment is the
-  user's unless Claude wrote it through reef's `reply` or `resolve` tool, which say so. A thread
-  *wants an answer* while it is open and the user wrote its last comment. One Claude answered
-  last, with a question back, waits on the user, and calls for no round until the user answers.
-  Rows kept before writers were said read as the user's.
+- **Who wrote each comment** ([C50](../milestones/m10.md)). A comment names the user its token or cookie
+  signed in, never one its body names, and says whether Claude wrote it for them: reef's tools
+  send `reef-writer: claude`, and an older client's `by: claude` is still taken. A thread *wants
+  an answer* while it is open and the user wrote its last comment, whoever that user is. One
+  Claude answered last, with a question back, waits on the user, and calls for no round until the
+  user answers. Who marked a thread, who resolved it by hand or sent the capture whose trailer
+  resolved it, and who started and submitted a review are kept too. Rows kept before writers were
+  said read as the user's, and rows kept before authors name nobody.
 
 ### Reviews
 

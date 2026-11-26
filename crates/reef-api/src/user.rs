@@ -14,6 +14,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::comment::Writer;
+
 /// What every token starts with, so one is known for what it is wherever it is pasted
 pub const TOKEN_PREFIX: &str = "reef_";
 
@@ -226,6 +228,117 @@ pub enum UserRemoved {
     LastAdmin,
 }
 
+/// The header a client sends to say it writes as Claude, for the user its token signs in
+///
+/// reef's MCP server sends `claude` in it on every request. Anything else, or none, is the user's
+/// own. It can only add "Claude, for" to the name the token signs in, never name another user.
+pub const WRITER_HEADER: &str = "reef-writer";
+
+/// The author of a write sent with no token, as every write kept before reef knew its users was:
+/// nobody
+///
+/// It lives as long as the program, so a write can name it however long it waits.
+pub static NOBODY: Author = Author {
+    user: None,
+    since: None,
+    by: Writer::User,
+};
+
+/// Who made a write: the user its token or cookie signed in, and whether Claude made it for them
+///
+/// The service names the user from the request's token or cookie alone, never from its body, so
+/// nobody writes as another. A write sent with no token names nobody, as every write kept before
+/// reef knew its users does. Claude writes with the user's own token, so [`WRITER_HEADER`] says a
+/// write is Claude's, for that user.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Author {
+    /// The name of the user signed in, if one was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// When that user was added, in milliseconds since the Unix epoch, which tells a name reused
+    /// after its user was removed from the one it named before
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<u64>,
+    /// Whether Claude made it through reef's tools, the user unless it says so
+    #[serde(default, skip_serializing_if = "Writer::is_user")]
+    pub by: Writer,
+}
+
+impl Author {
+    /// The author of a write a user's token or cookie signed in, made by them or by Claude
+    ///
+    /// # Arguments
+    ///
+    /// * `user` - The user signed in, if one was
+    /// * `by` - Whether the user or Claude made it
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{Author, User, Writer};
+    ///
+    /// let ada = User { name: "ada".to_string(), admin: false, created_at: 7 };
+    /// let author = Author::signed(Some(&ada), Writer::Claude);
+    /// assert_eq!(author.describe().as_deref(), Some("Claude, for ada"));
+    /// assert_eq!(author.since, Some(7));
+    /// ```
+    pub fn signed(user: Option<&User>, by: Writer) -> Author {
+        // the name and when its user was added both come from the user signed in
+        Author {
+            user: user.map(|user| user.name.clone()),
+            since: user.map(|user| user.created_at),
+            by,
+        }
+    }
+
+    /// Whether it names nobody, as a write sent with no token, or kept before authors were,
+    /// does
+    pub fn is_unknown(&self) -> bool {
+        self.user.is_none() && self.by.is_user()
+    }
+
+    /// The same author, Claude's if either it or a request's own word says so
+    ///
+    /// A comment's body has said whether Claude wrote it since before the header did, so an older
+    /// client's word is still taken.
+    ///
+    /// # Arguments
+    ///
+    /// * `by` - Who the request's body says wrote it
+    pub fn claiming(&self, by: Writer) -> Author {
+        // Claude's word from either side makes it Claude's, for the same user
+        let by = match (self.by, by) {
+            (Writer::User, Writer::User) => Writer::User,
+            _ => Writer::Claude,
+        };
+        Author { by, ..self.clone() }
+    }
+
+    /// How a reader is told who made it: "ada", "Claude, for ada", "Claude", or `None` for
+    /// nobody
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{Author, Writer};
+    ///
+    /// let ada = Author { user: Some("ada".to_string()), ..Author::default() };
+    /// assert_eq!(ada.describe().as_deref(), Some("ada"));
+    /// let claude = Author { by: Writer::Claude, ..Author::default() };
+    /// assert_eq!(claude.describe().as_deref(), Some("Claude"));
+    /// assert_eq!(Author::default().describe(), None);
+    /// ```
+    pub fn describe(&self) -> Option<String> {
+        // the user's name, said to be Claude's for them where Claude made it
+        match (&self.user, self.by) {
+            (Some(name), Writer::User) => Some(name.clone()),
+            (Some(name), Writer::Claude) => Some(format!("Claude, for {name}")),
+            (None, Writer::Claude) => Some("Claude".to_string()),
+            (None, Writer::User) => None,
+        }
+    }
+}
+
 /// Who the service takes the caller for
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Me {
@@ -342,10 +455,47 @@ pub fn is_token_shaped(token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        IssuedToken, Me, NewUser, PasswordChange, SignIn, TokenInfo, TokenKind, User, UserAdded,
-        UserRemoved, check_password, check_user_name, is_token_id, is_token_shaped,
+        Author, IssuedToken, Me, NewUser, PasswordChange, SignIn, TokenInfo, TokenKind, User,
+        UserAdded, UserRemoved, check_password, check_user_name, is_token_id, is_token_shaped,
     };
+    use crate::comment::Writer;
     use serde_json::json;
+
+    /// An author names the user signed in and when they were added, says whether Claude wrote
+    /// for them, and leaves out whatever it doesn't know
+    #[test]
+    fn authors_say_only_what_they_know() {
+        let ada = User {
+            name: "ada".to_string(),
+            admin: false,
+            created_at: 7,
+        };
+        // a user's own write names them and when they were added
+        let author = Author::signed(Some(&ada), Writer::User);
+        assert_eq!(
+            serde_json::to_value(&author).unwrap(),
+            json!({"user": "ada", "since": 7})
+        );
+        assert!(!author.is_unknown());
+        assert_eq!(author.describe().as_deref(), Some("ada"));
+        // nobody signed in is nobody, and reads back from nothing at all
+        assert_eq!(serde_json::to_value(Author::default()).unwrap(), json!({}));
+        assert!(Author::default().is_unknown());
+        assert_eq!(
+            serde_json::from_value::<Author>(json!({})).unwrap(),
+            Author::default()
+        );
+        // Claude's word from either side makes it Claude's, for the same user
+        let claimed = author.claiming(Writer::Claude);
+        assert_eq!(claimed.describe().as_deref(), Some("Claude, for ada"));
+        assert_eq!(
+            serde_json::to_value(&claimed).unwrap(),
+            json!({"user": "ada", "since": 7, "by": "claude"})
+        );
+        let header = Author::signed(None, Writer::Claude);
+        assert_eq!(header.claiming(Writer::User).by, Writer::Claude);
+        assert!(!header.is_unknown());
+    }
 
     /// A user named in a request
     fn ada() -> User {

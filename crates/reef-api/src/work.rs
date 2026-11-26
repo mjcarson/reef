@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::comment::{Resolves, ResolvingCommit, TrailerRead};
 use crate::revision::{FileDiff, Revision};
+use crate::user::Author;
 
 /// Where a node's work happens and what it started from, as read from its own checkout
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +68,9 @@ pub struct CaptureRead {
     /// What the capture read
     #[serde(flatten)]
     pub shas: CaptureShas,
+    /// Who sent it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
 }
 
 /// A node's work record as the service keeps it
@@ -82,6 +86,9 @@ pub struct WorkRecord {
     /// Where the work happens and what it started from
     #[serde(flatten)]
     pub start: WorkStart,
+    /// Who started it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub started_by: Author,
     /// What each capture since the start read, oldest first
     #[serde(default)]
     pub captures: Vec<CaptureRead>,
@@ -231,6 +238,7 @@ mod tests {
         AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,
         on_worktree,
     };
+    use crate::user::Author;
     use std::path::{Path, PathBuf};
 
     /// A start in a worktree, its SHAs made up
@@ -264,6 +272,7 @@ mod tests {
             version: 1,
             started_at,
             start: start(worktree),
+            started_by: Author::default(),
             captures: Vec::new(),
         }
     }
@@ -282,6 +291,7 @@ mod tests {
                 merge_base: None,
                 base: "b".repeat(40),
             },
+            author: Author::default(),
         });
         let json = serde_json::to_value(&kept).unwrap();
         // the start's fields are the record's own, and so are a capture's SHAs
@@ -292,6 +302,19 @@ mod tests {
         assert_eq!(json["captures"][0]["revision"], 1);
         assert_eq!(json["captures"][0]["head"], "d".repeat(40));
         // and it reads back as it was
+        assert_eq!(serde_json::from_value::<WorkRecord>(json).unwrap(), kept);
+        // a record kept by nobody leaves its authors out, and one started by ada says so
+        let json = serde_json::to_value(&kept).unwrap();
+        assert!(json.get("started_by").is_none() && json["captures"][0].get("author").is_none());
+        let ada = Author {
+            user: Some("ada".to_string()),
+            ..Author::default()
+        };
+        kept.started_by = ada.clone();
+        kept.captures[0].author = ada;
+        let json = serde_json::to_value(&kept).unwrap();
+        assert_eq!(json["started_by"]["user"], "ada");
+        assert_eq!(json["captures"][0]["author"]["user"], "ada");
         assert_eq!(serde_json::from_value::<WorkRecord>(json).unwrap(), kept);
     }
 

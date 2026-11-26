@@ -30,6 +30,8 @@
 //!   orders the runner takes.
 //! - **Users** ([`user`]): reef's users, the tokens they sign in with, and the requests that add
 //!   and remove them, sign them in and out, change their passwords and list their tokens.
+//! - **History** ([`history`]): who made each edit of a node, a page or a queue, what it changed
+//!   and when.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
@@ -45,6 +47,7 @@ pub mod comment;
 pub mod config;
 pub mod decision;
 pub mod error;
+pub mod history;
 pub mod loops;
 pub mod node;
 pub mod page;
@@ -62,12 +65,14 @@ pub use change::{Change, FollowedThread, PutNode, PutPage};
 pub use comment::{
     COMMENT_BODY_MAX, Comment, Commented, MarkReview, MarkThread, Marked, NewReply, NewThread,
     RESOLVES_TRAILER, Resolution, ResolveThread, Resolved, Resolves, ResolvingCommit, Review,
-    ReviewState, Reviewed, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, Writer,
+    ReviewState, Reviewed, Target, Thread, ThreadMark, ThreadState, TrailerOutcome, TrailerRead,
+    Writer,
 };
 pub use decision::{
     Decided, Decision, DecisionKind, DecisionsRecorded, Outcome, RecordDecisions, Via,
 };
 pub use error::{ApiError, ErrorCode};
+pub use history::{Edited, HISTORY_MAX, Logged};
 pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
@@ -80,7 +85,7 @@ pub use page::{
 pub use project::{
     AddedPlan, AddedProject, Fetched, NewPlan, NewProject, NewRemote, PlanInfo, Project, Remote,
 };
-pub use queue::{Listed, Place, QueueEdit, QueueListing, Queued, Ranked};
+pub use queue::{Listed, Place, Placed, QueueEdit, QueueListing, Queued, Ranked};
 pub use revision::{
     Anchor, FileDiff, FileStatus, FileSummary, Hunk, Line, LineKind, Revision, Side,
 };
@@ -89,8 +94,8 @@ pub use session::{
     Session, SessionAct, SessionActed, SessionState, Transcript,
 };
 pub use user::{
-    IssuedToken, Me, NewUser, PasswordChange, PasswordChanged, SignIn, SignedOut, TokenInfo,
-    TokenKind, User, UserAdded, UserRemoved,
+    Author, IssuedToken, Me, NOBODY, NewUser, PasswordChange, PasswordChanged, SignIn, SignedOut,
+    TokenInfo, TokenKind, User, UserAdded, UserRemoved, WRITER_HEADER,
 };
 pub use work::{
     AddCapture, CaptureRead, CaptureShas, Captured, StartWork, Started, WorkRecord, WorkStart,

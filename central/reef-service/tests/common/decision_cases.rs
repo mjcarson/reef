@@ -23,6 +23,7 @@ fn plan(call: &str, outcome: Option<Outcome>) -> Decided {
             html: String::new(),
         },
         outcome,
+        author: reef_api::Author::default(),
     }
 }
 

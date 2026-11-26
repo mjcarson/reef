@@ -65,6 +65,8 @@
 //! - **git** ([`git`]): the checkout a node's work happens in, read through gix, its worktree
 //!   written as a tree through git's CLI, its start pinned under `refs/reef/start/`, and its
 //!   diff, the carry of its start and its commits' trailers taken through gix.
+//! - **History** ([`history`]): `reef node log`, `page log` and `queue log`, who made each edit,
+//!   what it changed and when.
 //! - **The client** ([`client`]): one typed method a route. When nothing answers, it says where
 //!   it looked and how to start the service, rather than starting one itself.
 //! - **Config** ([`conf`]): `[api]`'s `address`, `url`, `ca` and `certs` alone, from the file the
@@ -89,6 +91,7 @@ pub mod decisions;
 pub mod export;
 pub mod follow;
 pub mod git;
+pub mod history;
 pub mod hook;
 pub mod import;
 pub mod login;

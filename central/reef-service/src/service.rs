@@ -51,7 +51,9 @@
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
 //! pool would find the data directory locked.
 
-use reef_api::{Change, Listed, PutNode, PutPage, QueueListing, check_page_path, paths};
+use reef_api::{
+    Author, Change, Edited, Listed, Placed, PutNode, PutPage, QueueListing, check_page_path, paths,
+};
 use reef_model::{
     Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record, nodes_from_records,
 };
@@ -79,6 +81,7 @@ use crate::tree::Docs;
 
 mod comments;
 mod decisions;
+mod history;
 mod loops;
 mod remotes;
 mod sessions;
@@ -377,10 +380,16 @@ impl<B: Backend> Service<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `puts` - The nodes to write, each with the version its writer read
+    /// * `author` - Who writes them, from the caller's token
     #[instrument(name = "Service::put", skip_all, err(Debug))]
-    pub async fn put(&self, plan: &PlanName, puts: Vec<NodePut>) -> anyhow::Result<Checked> {
+    pub async fn put(
+        &self,
+        plan: &PlanName,
+        puts: Vec<NodePut>,
+        author: &Author,
+    ) -> anyhow::Result<Checked> {
         // a batch of puts alone
-        self.batch(plan, Puts::new(puts)).await
+        self.batch(plan, Puts::new(puts), author).await
     }
 
     /// Puts and removes a batch of nodes in a plan, unless one is stale or they would add a
@@ -392,12 +401,21 @@ impl<B: Backend> Service<B> {
     /// check's messages. Either writes nothing. A node another needs can't be removed alone, nor
     /// a group without its members.
     ///
+    ///
+    /// Each node it changes keeps an entry in its history, naming its author.
+    ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     /// * `batch` - The nodes to write and to remove, each with the version its writer read
+    /// * `author` - Who writes it, from the caller's token
     #[instrument(name = "Service::batch", skip_all, err(Debug))]
-    pub async fn batch(&self, plan: &PlanName, batch: Puts) -> anyhow::Result<Checked> {
+    pub async fn batch(
+        &self,
+        plan: &PlanName,
+        batch: Puts,
+        author: &Author,
+    ) -> anyhow::Result<Checked> {
         // the plan's docs are its project's working tree, or its clone at the commit fetched
         let docs = self.docs(plan).await?;
         let sections = self.sections.clone();
@@ -415,7 +433,9 @@ impl<B: Backend> Service<B> {
         // judged under the plan's write lock, against the plan the batch lands on
         let checked = self
             .store
-            .batch_checked(plan, batch, move |proposal| added(docs, sections, proposal))
+            .batch_checked(plan, batch, author, move |proposal| {
+                added(docs, sections, proposal)
+            })
             .await?;
         // tell the change stream of each node written, at its new version, and each removed
         if let Checked::Applied { versions } = &checked {
@@ -442,15 +462,23 @@ impl<B: Backend> Service<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
+    /// * `author` - Who writes it, from the caller's token
     #[instrument(name = "Service::write_plan", skip_all, err(Debug))]
-    pub async fn write_plan(&self, plan: &PlanName, write: PlanWrite) -> anyhow::Result<Rewrite> {
+    pub async fn write_plan(
+        &self,
+        plan: &PlanName,
+        write: PlanWrite,
+        author: &Author,
+    ) -> anyhow::Result<Rewrite> {
         // the plan's docs are its pages over its project's repo
         let docs = self.docs(plan).await?;
         let sections = self.sections.clone();
         // judged under the plan's write lock, against the plan it replaces
         let rewrite = self
             .store
-            .write_plan_checked(plan, write, move |proposal| added(docs, sections, proposal))
+            .write_plan_checked(plan, write, author, move |proposal| {
+                added(docs, sections, proposal)
+            })
             .await?;
         // tell the change stream of the revision readers now load
         if let Rewrite::Applied(rewritten) = &rewrite {
@@ -498,8 +526,14 @@ impl<B: Backend> Service<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `edit` - The page to write or take out, with the version its writer read
+    /// * `author` - Who edits it, from the caller's token
     #[instrument(name = "Service::edit_page", skip_all, err(Debug))]
-    pub async fn edit_page(&self, plan: &PlanName, edit: PageEdit) -> anyhow::Result<PageEdited> {
+    pub async fn edit_page(
+        &self,
+        plan: &PlanName,
+        edit: PageEdit,
+        author: &Author,
+    ) -> anyhow::Result<PageEdited> {
         // the plan's docs are its pages over its project's repo
         let docs = self.docs(plan).await?;
         let sections = self.sections.clone();
@@ -507,7 +541,9 @@ impl<B: Backend> Service<B> {
         // judged under the plan's write lock, against the plan the edit lands on
         let edited = self
             .store
-            .edit_page_checked(plan, edit, move |proposal| added(docs, sections, proposal))
+            .edit_page_checked(plan, edit, author, move |proposal| {
+                added(docs, sections, proposal)
+            })
             .await?;
         // tell the change stream of the page written, at its new version, or taken out
         if let PageEdited::Applied { version } = &edited {
@@ -579,8 +615,8 @@ impl<B: Backend> Service<B> {
         self.next_over(project, plans).await
     }
 
-    /// Lists a project's queue: each entry with its rank, and whether next takes it, and if not
-    /// why
+    /// Lists a project's queue: each entry with its rank, whether next takes it, and if not why,
+    /// and who put it where it is, if the queue's history still holds that
     ///
     /// Each plan an entry names is built without its docs, which no entry's state depends on.
     ///
@@ -611,12 +647,31 @@ impl<B: Backend> Service<B> {
                 problems: problems.len(),
             });
         }
-        // what each entry is now, beside its rank
+        // who put each entry where it is: the newest edit of the queue that queued or moved it
+        let history = self.store.queue_history(project).await?;
+        let placed = |node: &NodeName| {
+            history.iter().find_map(|logged| {
+                logged.edits.iter().find_map(|edit| match edit {
+                    Edited::Queued { node: placed, .. } | Edited::Moved { node: placed, .. }
+                        if placed == node =>
+                    {
+                        Some(Placed {
+                            at: logged.at,
+                            author: logged.author.clone(),
+                            moved: matches!(edit, Edited::Moved { .. }),
+                        })
+                    }
+                    _ => None,
+                })
+            })
+        };
+        // what each entry is now, beside its rank and who placed it
         let queue: Vec<NodeName> = ranked.iter().map(|r| r.node.clone()).collect();
         let entries = reef_model::queue::entries(&graphs, &queue)
             .into_iter()
             .zip(ranked)
             .map(|(entry, ranked)| Listed {
+                placed: placed(&ranked.node),
                 rank: ranked.rank,
                 entry,
             })
@@ -634,8 +689,14 @@ impl<B: Backend> Service<B> {
     ///
     /// * `project` - The project whose queue to edit
     /// * `edit` - The edit
+    /// * `author` - Who edits it, from the caller's token
     #[instrument(name = "Service::edit_queue", skip_all, err(Debug))]
-    pub async fn edit_queue(&self, project: &str, edit: QueueEdit) -> anyhow::Result<Queued> {
+    pub async fn edit_queue(
+        &self,
+        project: &str,
+        edit: QueueEdit,
+        author: &Author,
+    ) -> anyhow::Result<Queued> {
         // a project that isn't registered has no queue
         if self.store.project(project).await?.is_none() {
             return Err(NotRegistered(project.to_string()).into());
@@ -648,7 +709,7 @@ impl<B: Backend> Service<B> {
             return Ok(Queued::NotInPlan { node: node.clone() });
         }
         // edited under the queue's lock, and told to the change stream once it is
-        let queued = self.store.edit_queue(project, edit).await?;
+        let queued = self.store.edit_queue(project, edit, author).await?;
         if let Queued::Applied { .. } = &queued {
             self.publish(Change::QueueChanged {
                 project: project.to_string(),
@@ -1040,7 +1101,7 @@ mod tests {
         service.add_plan(&plan).await?;
         // a node needing one that isn't there is refused, with check's message, and not written
         let put = NodePut::new(work("C11", &["X"]), None);
-        let refused = service.put(&plan, vec![put]).await?;
+        let refused = service.put(&plan, vec![put], &reef_api::NOBODY).await?;
         let expected = vec![problem("C11", "needs `X`, which is not a node")];
         assert_eq!(refused, Checked::Refused(expected.clone()));
         assert!(service.list(&plan).await?.nodes.is_empty());
@@ -1079,13 +1140,21 @@ mod tests {
         );
         // a put that breaks the plan is refused, and nothing is sent
         let refused = service
-            .put(&plan, vec![NodePut::new(work("C11", &["X"]), None)])
+            .put(
+                &plan,
+                vec![NodePut::new(work("C11", &["X"]), None)],
+                &reef_api::NOBODY,
+            )
             .await?;
         assert!(matches!(refused, Checked::Refused(_)));
         assert!(changes.try_recv().is_err());
         // one that is written names each node at its new version
         service
-            .put(&plan, vec![NodePut::new(work("C11", &[]), None)])
+            .put(
+                &plan,
+                vec![NodePut::new(work("C11", &[]), None)],
+                &reef_api::NOBODY,
+            )
             .await?;
         let expected = Change::NodesPut {
             plan: plan.clone(),
@@ -1102,7 +1171,11 @@ mod tests {
         assert_eq!(service.changes().try_recv(), Err(TryRecvError::Closed));
         // and a write after it still goes in, sent nowhere
         let after = service
-            .put(&plan, vec![NodePut::new(work("C53", &["C11"]), None)])
+            .put(
+                &plan,
+                vec![NodePut::new(work("C53", &["C11"]), None)],
+                &reef_api::NOBODY,
+            )
             .await?;
         assert!(matches!(after, Checked::Applied { .. }));
         Ok(())
@@ -1144,8 +1217,8 @@ mod tests {
         // never run: this test passes once it compiles
         let service = Service::memory();
         let plan = PlanName::new("reef", "central").unwrap();
-        send(service.put(&plan, Vec::new()));
-        send(service.write_plan(&plan, Vec::new().into()));
+        send(service.put(&plan, Vec::new(), &reef_api::NOBODY));
+        send(service.write_plan(&plan, Vec::new().into(), &reef_api::NOBODY));
         send(service.check(&plan));
         send(service.payload(&plan));
         send(service.doc_page(&plan, "design.html"));
@@ -1155,13 +1228,13 @@ mod tests {
             path: "design.md".to_string(),
             read: 1,
         };
-        send(service.edit_page(&plan, page));
+        send(service.edit_page(&plan, page, &reef_api::NOBODY));
         send(service.next(&plan));
         send(service.project_next("reef"));
         send(service.queue("reef"));
         let edit = crate::store::QueueEdit::Remove {
             node: plan.node("C1").unwrap(),
         };
-        send(service.edit_queue("reef", edit));
+        send(service.edit_queue("reef", edit, &reef_api::NOBODY));
     }
 }

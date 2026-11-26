@@ -1,7 +1,7 @@
 //! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
 //! its nodes' work records, each node's captured revisions and their files, each plan's
-//! comments, the terminal loops, the users and the tokens they sign in with, and the git remotes
-//! projects were registered by
+//! comments, the terminal loops, the users and the tokens they sign in with, the git remotes
+//! projects were registered by, and who made each edit of a node, a page or a queue
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
@@ -41,6 +41,9 @@ pub const TOKENS: &str = "tokens";
 
 /// The one partition every project's git remote is kept in
 pub const REMOTES: &str = "remotes";
+
+/// The subject a project's queue's edits are kept under
+pub const QUEUE_SUBJECT: &str = "queue";
 
 /// A project: a name and the repo its plans describe
 #[derive(
@@ -485,6 +488,38 @@ pub struct RemoteRow {
     pub record: String,
 }
 
+/// One edit kept in a history: who made it, when, and what it changed of a node, a page or a
+/// project's queue
+///
+/// Each subject's edits share a partition: a node's under `node/<plan>/<id>`, a page's under
+/// `page/<plan>/<path>` and the queue's under [`QUEUE_SUBJECT`]. A plan's name and a node's id
+/// never hold a `/`, so no two subjects share one, and a node removed and added again keeps one
+/// history. The sort key counts down as time goes on, so a read with a limit takes the newest
+/// edits first, and ends with a number the store drew when it opened, so a store opened again
+/// within a millisecond of the last one's edit never takes its key. A row is written once and
+/// never changed, so it has no version. Its record is one
+/// JSON field, so what an edit keeps can change without changing this table.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct EditRow {
+    /// The project the subject belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// What was edited: `node/<plan>/<id>`, `page/<plan>/<path>` or [`QUEUE_SUBJECT`]
+    #[shoal(partition)]
+    pub subject: String,
+    /// `u64::MAX` less the edit's stamp, padded to twenty digits so the newest sorts first, then
+    /// `.` and the store's random number in sixteen hex digits
+    #[shoal(sort)]
+    pub key: String,
+    /// The edit as JSON: who made it, when, the version it left its subject at, and what it
+    /// changed
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -522,6 +557,8 @@ pub struct Reef {
     pub tokens: PersistentSortedTable<TokenRow, FileSystem>,
     /// Every project's git remote, by project
     pub remotes: PersistentSortedTable<RemoteRow, FileSystem>,
+    /// Each node's, page's and queue's edits, newest first
+    pub edits: PersistentSortedTable<EditRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -530,7 +567,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 14793265169819812354;
+    const SCHEMA_ID: u64 = 12512966910162319123;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -548,6 +585,7 @@ mod tests {
         ("UserRow", 15958980047123333854),
         ("TokenRow", 10275253647765591281),
         ("RemoteRow", 9724887961174009599),
+        ("EditRow", 1157834751091248219),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

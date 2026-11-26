@@ -117,10 +117,11 @@ pub fn show_threads<W: Write>(threads: &[Thread], out: &mut W) -> anyhow::Result
         )?;
         // each comment, its markdown as written
         for comment in &thread.comments {
-            let by = match comment.by {
-                Writer::User => "the user",
-                Writer::Claude => "Claude",
-            };
+            // the user signed in by name, else the user or Claude, as before reef knew them
+            let by = comment
+                .author
+                .describe()
+                .unwrap_or_else(|| "the user".to_string());
             writeln!(out, "    #{} by {by}:", comment.number)?;
             for line in comment.body.lines() {
                 writeln!(out, "        {line}")?;

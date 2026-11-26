@@ -52,6 +52,7 @@
 mod comment;
 mod decision;
 mod follow;
+mod history;
 mod loops;
 mod remotes;
 mod revision;
@@ -74,11 +75,11 @@ pub use reef_api::{
     PageListing, PageWrite, Place, PlanInfo, PlanWrite, Project, Puts, QueueEdit, Queued, Ranked,
     Rewrite, Rewritten, StalePut, StoredNode, StoredPage, records,
 };
+use reef_api::{Author, Edited, PLAN_PAGES_MAX_BYTES, check_page_path};
 pub use reef_api::{
     Comment, Commented, MarkReview, MarkThread, Marked, NewReply, NewThread, Resolution,
     ResolveThread, Resolved, Resolves, Review, ReviewState, Reviewed, Thread, TrailerRead,
 };
-use reef_api::{PLAN_PAGES_MAX_BYTES, check_page_path};
 use reef_model::{Diagnostic, NodeName, PlanName, Record};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -191,6 +192,11 @@ pub struct Store<B = ShoalBackend> {
     decisions: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The users' lock, held to add one, so two can't both be the first
     user_lock: tokio::sync::Mutex<()>,
+    /// The last stamp an edit kept in a history took, so the next is always past it
+    edit_clock: Mutex<u64>,
+    /// A random number this store's edit keys end with, so a store opened again after a restart
+    /// never takes a key the last one wrote within the same millisecond
+    edit_nonce: u64,
 }
 
 impl Store<ShoalBackend> {
@@ -246,6 +252,8 @@ impl<B: Backend> Store<B> {
             loop_lock: tokio::sync::Mutex::new(()),
             decisions: Mutex::new(HashMap::new()),
             user_lock: tokio::sync::Mutex::new(()),
+            edit_clock: Mutex::new(0),
+            edit_nonce: fresh_revision(),
         }
     }
 
@@ -826,16 +834,21 @@ impl<B: Backend> Store<B> {
     /// The check runs under the plan's write lock, so it must not read or write this plan
     /// through the store, or it waits forever.
     ///
+    /// Once written, each node and page it added, changed or removed keeps an entry in its
+    /// history, marked as a whole plan's write.
+    ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     /// * `write` - Every node of the plan, each a node of its own, and its pages if they change
+    /// * `author` - Who writes it
     /// * `check` - Finds the problems the write would add, or none
     #[instrument(name = "Store::write_plan_checked", skip_all, err(Debug))]
     pub async fn write_plan_checked<F, Fut>(
         &self,
         plan: &PlanName,
         write: PlanWrite,
+        author: &Author,
         check: F,
     ) -> anyhow::Result<Rewrite>
     where
@@ -868,22 +881,33 @@ impl<B: Backend> Store<B> {
             .collect();
         // judge the plan as this write would make it, and write nothing if it adds a problem
         in_written_order(&mut nodes);
-        let before = records(plan, current.into_iter().map(NodeWrite::from).collect())?;
+        let stood_nodes: Vec<NodeWrite> = current.into_iter().map(NodeWrite::from).collect();
+        let stood_pages: Vec<PageWrite> = stood.into_iter().map(PageWrite::from).collect();
         let proposal = Proposal {
-            before,
+            before: records(plan, stood_nodes.clone())?,
             after: records(plan, nodes.clone())?,
-            pages: stood.into_iter().map(PageWrite::from).collect(),
+            pages: stood_pages.clone(),
             pages_after: pages.clone(),
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
             return Ok(Rewrite::Refused(problems));
         }
-        // write the new revision, make it current and prune the old one
+        // what it changes of each node and page, told once it is written
+        let nodes = moved_on(nodes, &old);
         let pages = pages.map(|pages| pages_moved_on(pages, &old_pages));
-        let rewritten = self
-            .rewrite(plan, row, recovered, moved_on(nodes, &old), pages)
-            .await?;
+        let before: HashMap<String, NodeWrite> = stood_nodes
+            .into_iter()
+            .map(|node| (node.spec.id.clone(), node))
+            .collect();
+        let pages_before: HashMap<String, PageWrite> = stood_pages
+            .into_iter()
+            .map(|page| (page.path.clone(), page))
+            .collect();
+        let edits = history::plan_edits(plan, &before, &nodes, &pages_before, pages.as_deref())?;
+        // write the new revision, make it current and prune the old one
+        let rewritten = self.rewrite(plan, row, recovered, nodes, pages).await?;
+        self.keep_edits(&plan.project, author, true, edits).await;
         Ok(Rewrite::Applied(rewritten))
     }
 
@@ -986,12 +1010,14 @@ impl<B: Backend> Store<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `puts` - The nodes to write, each with the version its writer read
+    /// * `author` - Who writes them
     /// * `check` - Finds the problems the puts would add, or none
     #[instrument(name = "Store::put_checked", skip_all, err(Debug))]
     pub async fn put_checked<F, Fut>(
         &self,
         plan: &PlanName,
         puts: Vec<NodePut>,
+        author: &Author,
         check: F,
     ) -> anyhow::Result<Checked>
     where
@@ -999,7 +1025,8 @@ impl<B: Backend> Store<B> {
         Fut: Future<Output = anyhow::Result<Vec<Diagnostic>>> + Send,
     {
         // a batch of puts alone
-        self.batch_checked(plan, Puts::new(puts), check).await
+        self.batch_checked(plan, Puts::new(puts), author, check)
+            .await
     }
 
     /// Writes a batch of puts and removals to a plan as one change, if each node is as its writer
@@ -1025,6 +1052,9 @@ impl<B: Backend> Store<B> {
     /// single write refused in step 5 means another process wrote the plan, since reef-service
     /// is shoal's only writer, and is an error.
     ///
+    /// Once written, each node a put changed, and each one removed, keeps an entry in its
+    /// history. A put that left its node as it was keeps none.
+    ///
     /// The check runs under the plan's write lock, so it must not read or write this plan
     /// through the store, or it waits forever.
     ///
@@ -1032,12 +1062,14 @@ impl<B: Backend> Store<B> {
     ///
     /// * `plan` - The plan's full name
     /// * `batch` - The nodes to write and to remove, each with the version its writer read
+    /// * `author` - Who writes it
     /// * `check` - Finds the problems the batch would add, or none
     #[instrument(name = "Store::batch_checked", skip_all, err(Debug))]
     pub async fn batch_checked<F, Fut>(
         &self,
         plan: &PlanName,
         batch: Puts,
+        author: &Author,
         check: F,
     ) -> anyhow::Result<Checked>
     where
@@ -1066,6 +1098,17 @@ impl<B: Backend> Store<B> {
                 versions: Vec::new(),
             });
         }
+        // each node the batch touches as it stood, for its history to tell what changed
+        let touched: HashSet<&str> = puts
+            .iter()
+            .map(|put| put.node.spec.id.as_str())
+            .chain(removes.iter().map(|remove| remove.id.as_str()))
+            .collect();
+        let stood: HashMap<String, NodeWrite> = current
+            .iter()
+            .filter(|node| touched.contains(node.spec.id.as_str()))
+            .map(|node| (node.spec.id.clone(), NodeWrite::from(node.clone())))
+            .collect();
         // 4. the plan as the batch would leave it, each node at the version it would be at: each
         // removal gone, each node it doesn't touch as it is, and each put replacing its node in
         // place or joining it, one version on from the one read
@@ -1108,12 +1151,15 @@ impl<B: Backend> Store<B> {
         if !problems.is_empty() {
             return Ok(Checked::Refused(problems));
         }
+        // what each put and removal changes, told once it is written
+        let edits = history::batch_edits(plan, &stood, &puts, &versions, &removes)?;
         // 5. one write lands whole as it is, and several as a revision of their own
         if puts.len() + removes.len() == 1 {
             self.write_one(plan, &row, puts, removes).await?;
         } else {
             self.rewrite(plan, row, recovered, after, None).await?;
         }
+        self.keep_edits(&plan.project, author, false, edits).await;
         Ok(Checked::Applied { versions })
     }
 
@@ -1189,16 +1235,21 @@ impl<B: Backend> Store<B> {
     /// The check runs under the plan's write lock, so it must not read or write this plan
     /// through the store, or it waits forever.
     ///
+    /// Once written, a page added, edited or taken out keeps an entry in its history; one written
+    /// again as it was keeps none.
+    ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     /// * `edit` - The page to write or take out, with the version its writer read
+    /// * `author` - Who edits it
     /// * `check` - Finds the problems the edit would add, or none
     #[instrument(name = "Store::edit_page_checked", skip_all, err(Debug))]
     pub async fn edit_page_checked<F, Fut>(
         &self,
         plan: &PlanName,
         edit: PageEdit,
+        author: &Author,
         check: F,
     ) -> anyhow::Result<PageEdited>
     where
@@ -1225,6 +1276,14 @@ impl<B: Backend> Store<B> {
             .iter()
             .find(|page| page.path == path)
             .map(|page| page.version);
+        // what the edit changes of the page, told once it is written
+        let edited = history::page_edit(
+            pages
+                .iter()
+                .find(|page| page.path == path)
+                .map(|page| page.text.as_str()),
+            history::page_text(&edit),
+        );
         let read = match &edit {
             PageEdit::Put { read, .. } => *read,
             PageEdit::Remove { read, .. } => Some(*read),
@@ -1285,6 +1344,8 @@ impl<B: Backend> Store<B> {
                          another process wrote the plan"
                     );
                 }
+                self.keep_page_edit(plan, &path, Some(version), edited, author)
+                    .await;
                 Ok(PageEdited::Applied {
                     version: Some(version),
                 })
@@ -1297,9 +1358,40 @@ impl<B: Backend> Store<B> {
                     .map_err(|error| {
                         error.context(format!("removing page `{path}` of plan `{plan}`"))
                     })?;
+                self.keep_page_edit(plan, &path, None, edited, author).await;
                 Ok(PageEdited::Applied { version: None })
             }
         }
+    }
+
+    /// Keeps a page's edit in its history, if it changed the page
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan the page is one of
+    /// * `path` - The page's path
+    /// * `version` - The version the edit left it at, or `None` for one that took it out
+    /// * `edited` - What the edit changed of it, or `None` for nothing
+    /// * `author` - Who edited it
+    async fn keep_page_edit(
+        &self,
+        plan: &PlanName,
+        path: &str,
+        version: Option<u64>,
+        edited: Option<Edited>,
+        author: &Author,
+    ) {
+        // a page written again as it was keeps nothing
+        let Some(edited) = edited else {
+            return;
+        };
+        let pending = history::Pending {
+            subject: history::page_subject(plan, path),
+            version,
+            edits: vec![edited],
+        };
+        self.keep_edits(&plan.project, author, false, vec![pending])
+            .await;
     }
 
     /// Prunes any revision a killed or failed write left named on a plan's row
@@ -1528,12 +1620,20 @@ impl<B: Backend> Store<B> {
     /// The store keeps rows; it doesn't check the nodes named are in their plans. The service
     /// does.
     ///
+    /// An edit that changed the queue keeps an entry in its history, under the queue's lock.
+    ///
     /// # Arguments
     ///
     /// * `project` - The project whose queue to edit
     /// * `edit` - The edit
+    /// * `author` - Who edits it
     #[instrument(name = "Store::edit_queue", skip_all, err(Debug))]
-    pub async fn edit_queue(&self, project: &str, edit: QueueEdit) -> anyhow::Result<Queued> {
+    pub async fn edit_queue(
+        &self,
+        project: &str,
+        edit: QueueEdit,
+        author: &Author,
+    ) -> anyhow::Result<Queued> {
         // every node the edit names is of this project's
         let named = std::iter::once(edit.node()).chain(edit.place().and_then(Place::anchor));
         for node in named {
@@ -1543,9 +1643,33 @@ impl<B: Backend> Store<B> {
                 return Err(Unkeepable(message).into());
             }
         }
-        // one write to a project's queue at a time
+        // one write to a project's queue at a time, its history kept under the same lock
         let lock = self.queue_lock(project);
         let _write = lock.lock().await;
+        let (queued, edited) = self.edit_queue_held(project, &edit).await?;
+        if let Some(edited) = edited {
+            let pending = history::Pending {
+                subject: crate::schema::QUEUE_SUBJECT.to_string(),
+                version: None,
+                edits: vec![edited],
+            };
+            self.keep_edits(project, author, false, vec![pending]).await;
+        }
+        Ok(queued)
+    }
+
+    /// Edits a project's queue under its lock, which the caller holds, and answers what came of
+    /// it and what it changed, `None` for an edit that changed nothing
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project whose queue to edit
+    /// * `edit` - The edit
+    async fn edit_queue_held(
+        &self,
+        project: &str,
+        edit: &QueueEdit,
+    ) -> anyhow::Result<(Queued, Option<Edited>)> {
         // the queue as it stands, after pruning what a killed write left
         let read = self.queue_rows(project).await?;
         let mut seq = read.iter().map(|row| row.seq).max().unwrap_or(0);
@@ -1553,29 +1677,28 @@ impl<B: Backend> Store<B> {
         self.prune_queue(leftovers).await?;
         let node = edit.node();
         let queued = rows.iter().any(|row| is_entry_of(row, node));
-        let at = match &edit {
+        let at = match edit {
             // taking a node off deletes its one row
             QueueEdit::Remove { .. } => {
                 let Some(i) = rows.iter().position(|row| is_entry_of(row, node)) else {
-                    return Ok(Queued::NotQueued { node: node.clone() });
+                    return Ok((Queued::NotQueued { node: node.clone() }, None));
                 };
                 let row = rows.remove(i);
                 self.delete_row(&row).await?;
-                return Ok(Queued::Applied {
-                    queue: ranked_all(&rows)?,
-                });
+                let queue = ranked_all(&rows)?;
+                let edited = Edited::Unqueued { node: node.clone() };
+                return Ok((Queued::Applied { queue }, Some(edited)));
             }
             // a move is of a node already queued
             QueueEdit::Move { .. } if !queued => {
-                return Ok(Queued::NotQueued { node: node.clone() });
+                return Ok((Queued::NotQueued { node: node.clone() }, None));
             }
             QueueEdit::Add { at, .. } | QueueEdit::Move { at, .. } => at,
         };
         // a queued node placed beside itself stays where it is
         if queued && at.anchor() == Some(node) {
-            return Ok(Queued::Applied {
-                queue: ranked_all(&rows)?,
-            });
+            let queue = ranked_all(&rows)?;
+            return Ok((Queued::Applied { queue }, None));
         }
         // at most twice: once as the queue stands, and once spread anew if that was too long
         let mut spread = false;
@@ -1586,13 +1709,12 @@ impl<B: Backend> Store<B> {
                 rows.iter().filter(|row| !is_entry_of(row, node)).collect();
             let index = match place_index(&others, at) {
                 Ok(index) => index,
-                Err(anchor) => return Ok(Queued::NotQueued { node: anchor }),
+                Err(anchor) => return Ok((Queued::NotQueued { node: anchor }, None)),
             };
             // a node placed where it already is changes nothing
             if old == Some(index) {
-                return Ok(Queued::Applied {
-                    queue: ranked_all(&rows)?,
-                });
+                let queue = ranked_all(&rows)?;
+                return Ok((Queued::Applied { queue }, None));
             }
             // a rank between its new neighbours, unless that is too long to keep
             let lo = index.checked_sub(1).map(|i| others[i].rank.as_str());
@@ -1614,12 +1736,21 @@ impl<B: Backend> Store<B> {
             };
             let replaced = old.map(|i| rows[i].clone());
             self.move_row(replaced.as_ref(), row.clone()).await?;
-            // and the queue as the edit leaves it
+            // and the queue as the edit leaves it, a node queued already told as moved
             let mut after: Vec<QueueRow> = others.into_iter().cloned().collect();
             after.insert(index, row);
-            return Ok(Queued::Applied {
-                queue: ranked_all(&after)?,
-            });
+            let queue = ranked_all(&after)?;
+            let edited = match queued {
+                true => Edited::Moved {
+                    node: node.clone(),
+                    at: at.clone(),
+                },
+                false => Edited::Queued {
+                    node: node.clone(),
+                    at: at.clone(),
+                },
+            };
+            return Ok((Queued::Applied { queue }, Some(edited)));
         }
     }
 

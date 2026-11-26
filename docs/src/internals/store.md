@@ -47,6 +47,13 @@ is the twin's oracle.
   and state, and a mark writes it again by version; a reply is a row of its own. Where a line's
   thread was followed to sits on that row too, which a capture's follow writes by version, and
   so does each revision linked to it as one that answered it, which a resolve writes.
+- **Each node's, page's and queue's edits are a row each** (`Store::node_history`), in a
+  partition of the subject's own, keyed newest first, so a read with a limit takes the newest.
+  A write's entries are kept once it has landed, under its lock, with one stamp from the store's
+  clock, always past the last it took; its key ends with a number the store drew when it opened,
+  so a store opened again never takes a key the last one wrote. A history that fails to keep is
+  warned of, and leaves its write standing. Only what changed is kept: a put that left its node
+  as it was, or a whole-plan write's nodes and pages left so, keep nothing.
 - **Every loop is a row of one partition** (`Store::edit_loop`), under its pane's key, so a
   pane keeps one loop. Every change reads them all under one lock and writes the one row, a
   start `if_absent` and anything else by version, so two loops taking one node at once are

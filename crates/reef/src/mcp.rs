@@ -206,6 +206,9 @@ pub struct AcceptArgs {
 impl Tools {
     /// The tools of a server started in a directory
     ///
+    /// Every write the tools make says it is Claude's, so the service names Claude, for the user
+    /// the client's token signs in, as its author.
+    ///
     /// # Arguments
     ///
     /// * `client` - The service's client
@@ -213,7 +216,7 @@ impl Tools {
     /// * `pick` - The project and plan named when it was started, if any
     pub fn new(client: Client, cwd: PathBuf, pick: PlanPick) -> Tools {
         Tools {
-            client: Arc::new(client),
+            client: Arc::new(client.writing_as(Writer::Claude)),
             cwd,
             pick,
             pane: None,

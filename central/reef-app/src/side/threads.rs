@@ -156,6 +156,36 @@ pub fn resolution_label(thread: &Thread) -> Option<String> {
     })
 }
 
+/// Who marked a thread last, as its foot names them: "resolved by ada", "reopened by Claude, for
+/// ada", or `None` if nobody known marked or resolved it
+///
+/// The later of its last mark by hand and its last change linked is taken, so a thread a
+/// commit's trailer resolved after it was reopened names whoever sent that capture.
+///
+/// # Arguments
+///
+/// * `thread` - The thread
+pub fn mark_label(thread: &Thread) -> Option<String> {
+    // the last mark by hand and the last change linked, each with when and by whom
+    let marked = thread
+        .last_mark()
+        .map(|mark| (mark.at, mark.state == ThreadState::Resolved, &mark.author));
+    let linked = thread
+        .resolved_by()
+        .map(|linked| (linked.at, true, &linked.author));
+    // whichever came last, told only if its author is known
+    let (_, resolved, author) = match (marked, linked) {
+        (Some(marked), Some(linked)) if linked.0 > marked.0 => linked,
+        (Some(marked), _) => marked,
+        (None, linked) => linked?,
+    };
+    let who = author.describe()?;
+    Some(match resolved {
+        true => format!("resolved by {who}"),
+        false => format!("reopened by {who}"),
+    })
+}
+
 /// Where a line is, as a list names it: its revision, its file and its number
 ///
 /// # Arguments
@@ -210,8 +240,9 @@ pub fn ThreadView(thread: Thread) -> Element {
     let pending = thread.pending;
     let id = thread.node.id.clone();
     let (number, read, outdated) = (thread.number, thread.version, thread.outdated);
-    // the change that answered it, its full commit id on hover
+    // the change that answered it, its full commit id on hover, and who marked it last
     let resolution = resolution_label(&thread);
+    let marked = mark_label(&thread);
     let commit = thread
         .resolved_by()
         .and_then(|linked| linked.commit.as_ref())
@@ -242,8 +273,10 @@ pub fn ThreadView(thread: Thread) -> Element {
                     div { class: "reef-app-comment-head",
                         span { class: "reef-app-comment-number", "#{comment.number}" }
                         " · {when(comment.at)}"
-                        if comment.by == reef_api::Writer::Claude {
-                            " · Claude"
+                        // who wrote it: the user signed in, Claude for them, or Claude
+                        if let Some(who) = comment.author.describe() {
+                            " · "
+                            span { class: "reef-app-author", "{who}" }
                         }
                         // a reply pending in a review, in a thread already published
                         if comment.review.is_some() && !pending {
@@ -335,6 +368,9 @@ pub fn ThreadView(thread: Thread) -> Element {
             }
             if let Some(resolution) = resolution {
                 p { class: "reef-app-thread-resolution", title: "{commit}", "{resolution}" }
+            }
+            if let Some(marked) = marked {
+                p { class: "reef-app-thread-marked", "{marked}" }
             }
             if let Some(problem) = problem.read().clone() {
                 p { class: "reef-app-error", "{problem}" }

@@ -20,7 +20,7 @@ Build the app first, from central/reef-app, with no `RUSTFLAGS` exported:
 
 then, with Playwright installed:
 
-    python check.py [screenshot dir] [--release] [--only=c33,c35,c36,c56,c73]
+    python check.py [screenshot dir] [--release] [--only=c33,c35,c36,c50,c56,c73]
 
 `--release` runs the server `dx build ... --release` built instead, which the timings in the
 plan's figures are taken on. `--only` runs the checks whose names start with one of those given.
@@ -36,6 +36,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import tomllib
 import time
 import urllib.error
 import urllib.request
@@ -78,6 +79,9 @@ ACCOUNT_URL = "https://127.0.0.1:12196"
 TABS_WORK = WORK / "tabs"
 TABS_URL = "https://127.0.0.1:12197"
 TABS_TLS = "https://127.0.0.1:12198"
+# C50's server, where two users each write and the app says who did what
+AUTHOR_WORK = WORK / "authors"
+AUTHOR_URL = "https://127.0.0.1:12199"
 
 
 # the check's own calls take each server's certificate unchecked, as its browser contexts do: the
@@ -2031,6 +2035,136 @@ def c77_the_account_page_manages_passwords_and_tokens(browser):
         stop(server)
 
 
+def author_reef(who, *args):
+    """Runs the reef CLI against C50's server as one user, each with a credentials file of their own."""
+    line = [REEF / "target/debug/reef", "--conf", AUTHOR_WORK / "reef.toml",
+            "--credentials", AUTHOR_WORK / f"{who}.toml", *args]
+    done = subprocess.run(line, cwd=AUTHOR_WORK / "repo", capture_output=True, text=True)
+    if done.returncode != 0:
+        raise RuntimeError(f"{' '.join(map(str, line))} failed: {done.stderr}")
+    return done.stdout + done.stderr
+
+
+def author_git(*args):
+    """Runs git in C50's repo as its own author, with no one's config."""
+    run("git", "-C", AUTHOR_WORK / "repo", "-c", "user.name=reef", "-c", "user.email=reef@example.invalid",
+        "-c", "init.defaultBranch=main", *args)
+
+
+def author_api(who, method, path, body=None):
+    """Calls C50's JSON API with one user's token, as their terminal's reef would."""
+    kept = tomllib.loads((AUTHOR_WORK / f"{who}.toml").read_text())
+    token = next(iter(kept["servers"].values()))["token"]
+    data = None if body is None else json.dumps(body).encode()
+    request = urllib.request.Request(f"{AUTHOR_URL}{path}", data=data, method=method,
+                                     headers={"content-type": "application/json",
+                                              "authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(request, timeout=10, context=UNCHECKED) as answer:
+        return answer.status, json.load(answer)
+
+
+def c50_the_app_says_who_did_what(browser):
+    """C50: a comment's head names who wrote it, a thread's foot who resolved it, the Changes tab who
+    captured a revision, the Decisions tab whose session asked, the History tab who made each edit
+    of the node and what it changed, and a queue entry who placed it."""
+    # a server of its own that asks every caller to sign in, with ada and bob each logged in at a terminal
+    if AUTHOR_WORK.exists():
+        shutil.rmtree(AUTHOR_WORK)
+    repo = AUTHOR_WORK / "repo"
+    repo.mkdir(parents=True)
+    author_git("init", "-q")
+    author_git("commit", "-q", "--allow-empty", "-m", "start")
+    (AUTHOR_WORK / "reef.toml").write_text(
+        f'{api_section(AUTHOR_URL, AUTHOR_WORK)}'
+        f'[shoal]\ndata = "{AUTHOR_WORK / "shoal"}"\ncores = 1\n\n[auth]\nrequired = true\n'
+    )
+    server = start(AUTHOR_WORK / "reef.toml", AUTHOR_URL, AUTHOR_WORK / "server.log")
+    try:
+        password = AUTHOR_WORK / "password"
+        password.write_text(PASSWORD + "\n")
+        author_reef("ada", "user", "add", "ada", "--password-file", password)
+        author_reef("ada", "login", "--user", "ada", "--password-file", password)
+        author_reef("ada", "user", "add", "bob", "--password-file", password)
+        author_reef("bob", "login", "--user", "bob", "--password-file", password)
+        # ada registers the project and puts A1, bob sets it in progress and queues it
+        author_reef("ada", "project", "add", "authors")
+        author_reef("ada", "plan", "new", "central")
+        node = AUTHOR_WORK / "a1.yaml"
+        node.write_text(node_yaml("A1", "A1 Who did it"))
+        author_reef("ada", "node", "put", node)
+        author_reef("bob", "status", "A1", "in-progress")
+        author_reef("bob", "queue", "add", "A1")
+        # bob starts A1 and captures a change, and ada's session asks a question about it
+        author_reef("bob", "start", "A1")
+        (repo / "a.txt").write_text("one\n")
+        author_git("add", "a.txt")
+        author_git("commit", "-q", "-m", "A change")
+        author_reef("bob", "node", "capture")
+        question = {"question": "Which?", "header": "Which", "multiSelect": False,
+                    "options": [{"label": "This", "description": "This one"}]}
+        author_api("ada", "POST", "/api/v1/projects/authors/plans/central/nodes/A1/decisions", {"decisions": [
+            {"call": "q1", "session": "s1", "via": "terminal", "asked_at": 1795400000000,
+             "answered_at": 1795400005000, "kind": "question", "questions": [question],
+             "outcome": {"outcome": "answered", "answers": {"Which?": "This"}},
+             "author": {"user": "mallory"}}]})
+        # ada signs in in a browser and opens A1
+        context = browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
+        page = context.new_page()
+        page.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+        page.goto(AUTHOR_URL + "/plans/authors/central")
+        page.fill("#name", "ada")
+        page.fill("#password", PASSWORD)
+        page.click("button[type=submit]")
+        wait_drawn(page)
+        page.locator(".reef-viewport .reef-node", has_text="A1 Who did it").click()
+        page.wait_for_selector(".reef-side", timeout=5000)
+        # the queue names who placed A1
+        page.wait_for_selector(".reef-app-queue-placed", timeout=10000)
+        placed = page.inner_text(".reef-app-queue-placed")
+        # she comments on A1, and resolves her thread
+        page.click(".reef-side .reef-app-tab:nth-child(3)")
+        page.fill(".reef-app-comments > .reef-app-composer textarea", "Who set this in progress?")
+        page.click(".reef-app-comments > .reef-app-composer .reef-app-send")
+        page.wait_for_selector(".reef-app-comments .reef-app-thread .reef-app-author", timeout=10000)
+        wrote = page.inner_text(".reef-app-comments .reef-app-thread .reef-app-author")
+        page.click(".reef-app-comments .reef-app-thread [data-act=resolve]")
+        page.wait_for_selector(".reef-app-thread-marked", timeout=10000)
+        marked = page.inner_text(".reef-app-thread-marked")
+        page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-authors.png"))
+        # the Changes tab names who captured the revision, and the Decisions tab whose session asked
+        page.click(".reef-side .reef-app-tab:nth-child(2)")
+        page.wait_for_selector(".reef-app-revision-sum .reef-app-author", timeout=10000)
+        captured = page.inner_text(".reef-app-revision-sum .reef-app-author")
+        page.click("button[data-tab=decisions]")
+        page.wait_for_selector(".reef-app-decision-when .reef-app-author", timeout=10000)
+        asked = page.inner_text(".reef-app-decision-when .reef-app-author")
+        # the History tab says who made each edit, newest first, and a new one shows up live
+        page.click("button[data-tab=history]")
+        page.wait_for_selector(".reef-app-history-entry", timeout=10000)
+        history = page.locator(".reef-app-history-entry").evaluate_all(
+            "es => es.map(e => [e.querySelector('.reef-app-author')?.textContent ?? null, "
+            "e.querySelector('.reef-app-history-what').textContent])")
+        author_reef("bob", "status", "A1", "done")
+        page.wait_for_function("() => document.querySelectorAll('.reef-app-history-entry').length === 3",
+                               timeout=10000)
+        newest = page.inner_text(".reef-app-history-entry:first-child")
+        page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-history.png"))
+        page.emulate_media(color_scheme="dark")
+        page.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-history-dark.png"))
+        page.emulate_media(color_scheme="light")
+        context.close()
+        check("C50 the app says who wrote a comment, resolved it, captured a revision, asked a decision, placed a queue "
+          "entry and made each edit",
+              placed == "queued by bob" and wrote == "ada" and marked == "resolved by ada"
+              and captured == "bob" and asked == "ada"
+              and history == [["bob", "status unset → in-progress"], ["ada", "added"]]
+              and "bob" in newest and "status in-progress → done" in newest,
+              {"placed": placed, "wrote": wrote, "marked": marked, "captured": captured, "asked": asked,
+               "history": history, "newest": newest})
+    finally:
+        stop(server)
+
+
 def main():
     setup()
     server = start()
@@ -2087,6 +2221,8 @@ def main():
                 c85_many_tabs_over_tls_each_read_a_session(browser)
             if not ONLY or any("c77_the_account_page_manages_passwords_and_tokens".startswith(name) for name in ONLY):
                 c77_the_account_page_manages_passwords_and_tokens(browser)
+            if not ONLY or any("c50_the_app_says_who_did_what".startswith(name) for name in ONLY):
+                c50_the_app_says_who_did_what(browser)
             browser.close()
     finally:
         stop(server)

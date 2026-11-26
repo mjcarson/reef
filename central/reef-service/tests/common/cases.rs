@@ -15,6 +15,8 @@ use super::{Fx, Reopen, git, ids, node};
 pub use super::comment_cases::*;
 pub use super::decision_cases::*;
 #[allow(unused_imports)]
+pub use super::history_cases::*;
+#[allow(unused_imports)]
 pub use super::loop_cases::*;
 #[allow(unused_imports)]
 pub use super::page_cases::*;

@@ -74,6 +74,11 @@ fn merged(kept: &Decided, read: Decided) -> Decided {
         answered_at,
         kind: read.kind,
         outcome,
+        // the first author known stands, as where and when it was asked does
+        author: match kept.author.is_unknown() {
+            true => read.author,
+            false => kept.author.clone(),
+        },
     }
 }
 

@@ -84,6 +84,7 @@ code { font-size: 0.92em; }
 .reef-app-queue-state.s-in-progress { color: var(--reef-progress); }
 .reef-app-queue-title { margin-top: 0.1rem; overflow-wrap: anywhere; }
 .reef-app-queue-needs { margin-top: 0.1rem; color: var(--muted); font-size: 0.78rem; }
+.reef-app-queue-placed { margin-top: 0.1rem; color: var(--muted); font-size: 0.72rem; font-style: italic; }
 .reef-app-queue-off { flex: none; font: inherit; line-height: 1; color: var(--muted); background: none; border: 0; cursor: pointer; padding: 0 0.15rem; }
 .reef-app-queue-off:hover { color: var(--fg); }
 .reef-app-queue-problem { margin: 0 0 0.5rem; }
@@ -142,6 +143,7 @@ code { font-size: 0.92em; }
 .reef-app-comment + .reef-app-comment { margin-top: 0.4rem; padding-top: 0.4rem; border-top: 1px dashed var(--line); }
 .reef-app-comment-head { color: var(--muted); font-size: 0.75rem; }
 .reef-app-comment-number { font-family: monospace; }
+.reef-app-author { color: var(--fg); font-weight: 600; }
 .reef-app-comment-body { overflow-wrap: anywhere; }
 .reef-app-comment-body > :first-child { margin-top: 0.15rem; }
 .reef-app-comment-body > :last-child { margin-bottom: 0.15rem; }
@@ -151,6 +153,13 @@ code { font-size: 0.92em; }
 .reef-app-thread-state.open { color: var(--links); }
 .reef-app-thread-state.resolved { color: var(--reef-done); }
 .reef-app-thread-resolution { margin: 0.25rem 0 0; font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; }
+.reef-app-thread-marked { margin: 0.15rem 0 0; font-size: 0.75rem; color: var(--muted); }
+.reef-app-history { list-style: none; margin: 0; padding: 0; }
+.reef-app-history-entry { padding: 0.35rem 0; border-bottom: 1px dashed var(--line); }
+.reef-app-history-entry:last-child { border-bottom: none; }
+.reef-app-history-head { font-size: 0.75rem; color: var(--muted); }
+.reef-app-history-version { font-family: monospace; }
+.reef-app-history-what { overflow-wrap: anywhere; }
 .reef-app-composer { margin-top: 0.35rem; }
 .reef-app-compose { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.45rem; }
 .reef-app-composer .reef-app-actions { margin: 0.3rem 0 0; }

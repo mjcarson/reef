@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::{
-    CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow,
+    ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 use crate::schema::{LOOPS, PROJECTS, REMOTES, TOKENS, USERS};
 
@@ -23,6 +23,9 @@ type RevisionFilesKey = (String, String, u64);
 
 /// A plan's partition of comments: its project and its name
 type PlanPartition = (String, String);
+
+/// A subject's partition of edits: its project and the subject
+type SubjectPartition = (String, String);
 
 /// Every table's partitions, each sorted by its rows' sort keys
 #[derive(Debug, Default)]
@@ -55,6 +58,8 @@ struct Tables {
     tokens: BTreeMap<String, BTreeMap<String, TokenRow>>,
     /// Every project's git remote, by the partition it is kept in and then by project
     remotes: BTreeMap<String, BTreeMap<String, RemoteRow>>,
+    /// Each subject's edits, by their keys, which count down so the newest sorts first
+    edits: BTreeMap<SubjectPartition, BTreeMap<String, EditRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -98,6 +103,22 @@ impl MemoryBackend {
             .entry(partition.clone())
             .or_default()
             .insert(row.id.clone(), row);
+    }
+
+    /// Stores an edit row in a subject's partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project of the partition the row lands in
+    /// * `subject` - The subject of the partition the row lands in
+    /// * `row` - The row, keyed by its own sort key as any other
+    pub fn plant_edit(&self, project: &str, subject: &str, row: EditRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .edits
+            .entry((project.to_string(), subject.to_string()))
+            .or_default()
+            .insert(row.key.clone(), row);
     }
 
     /// Stores a page row in a partition other than its own, as a hash collision would
@@ -1059,5 +1080,47 @@ impl Backend for MemoryBackend {
         }
         partition.insert(row.project.clone(), row);
         Ok(Written::Applied)
+    }
+
+    /// Reads a subject's edit rows, newest first, at most a number of them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the subject belongs to
+    /// * `subject` - What was edited
+    /// * `limit` - The most rows to read
+    async fn edits(
+        &self,
+        project: &str,
+        subject: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<EditRow>> {
+        let tables = self.tables();
+        // the subject's partition in sort order, which is newest first, cut at the limit
+        let key = (project.to_string(), subject.to_string());
+        Ok(tables
+            .edits
+            .get(&key)
+            .map(|partition| partition.values().take(limit).cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Writes edit rows over whatever is stored under their keys
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    async fn write_edits(&self, rows: Vec<EditRow>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        // each into its own partition, as its keys hash
+        for row in rows {
+            let key = (row.project.clone(), row.subject.clone());
+            tables
+                .edits
+                .entry(key)
+                .or_default()
+                .insert(row.key.clone(), row);
+        }
+        Ok(())
     }
 }

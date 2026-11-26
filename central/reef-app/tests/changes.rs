@@ -6,11 +6,11 @@
 
 use dioxus::prelude::*;
 use reef_api::{
-    Anchor, Comment, FileDiff, FileStatus, Hunk, Line, LineKind, Resolution, ResolvingCommit, Side,
-    Target, Thread, ThreadState,
+    Anchor, Author, Comment, FileDiff, FileStatus, Hunk, Line, LineKind, Resolution,
+    ResolvingCommit, Side, Target, Thread, ThreadMark, ThreadState, Writer,
 };
 use reef_app::side::diff::Diff;
-use reef_app::side::threads::{ThreadView, excerpt, place_label, resolution_label};
+use reef_app::side::threads::{ThreadView, excerpt, mark_label, place_label, resolution_label};
 
 /// A line of a kind, numbered on the sides that kind is on
 ///
@@ -225,10 +225,11 @@ fn thread_on(number: u32, side: Side, line: u32, body: &str) -> Thread {
         outdated: None,
         state: ThreadState::Open,
         resolutions: Vec::new(),
+        marks: Vec::new(),
         comments: vec![Comment {
             number,
             at: 0,
-            by: reef_api::Writer::User,
+            author: Author::default(),
             body: body.to_string(),
             html: format!("<p>{body}</p>"),
             review: None,
@@ -391,6 +392,7 @@ fn resolved_threads_name_the_change_that_answered_them() {
         revision: 4,
         at: 1,
         commit: Some(commit.clone()),
+        author: Author::default(),
     });
     assert_eq!(
         resolution_label(&thread).as_deref(),
@@ -418,6 +420,7 @@ fn resolved_threads_name_the_change_that_answered_them() {
         revision: 1,
         at: 2,
         commit: None,
+        author: Author::default(),
     });
     assert_eq!(
         resolution_label(&thread).as_deref(),
@@ -435,4 +438,132 @@ fn resolved_threads_name_the_change_that_answered_them() {
         ThreadView { thread: plain }
     });
     assert!(!html.contains("reef-app-thread-resolution"), "{html}");
+}
+
+/// The author of a write by a user signed in, or Claude for them
+///
+/// # Arguments
+///
+/// * `name` - The user's name
+/// * `by` - Whether the user or Claude wrote it
+fn by(name: &str, by: Writer) -> Author {
+    Author {
+        user: Some(name.to_string()),
+        since: Some(1),
+        by,
+    }
+}
+
+/// Each comment's head names who wrote it: the user signed in, Claude for them, or Claude, and
+/// nobody for a comment kept before reef knew its users
+#[test]
+fn a_comment_shows_its_author() {
+    // ada's comment, Claude's reply for her, Claude's with no user, and one by nobody
+    let mut thread = thread_on(3, Side::New, 3, "Why?");
+    let said = |number: u32, author: Author| Comment {
+        number,
+        author,
+        ..thread.comments[0].clone()
+    };
+    thread.comments = vec![
+        said(3, by("ada", Writer::User)),
+        said(4, by("ada", Writer::Claude)),
+        said(
+            5,
+            Author {
+                by: Writer::Claude,
+                ..Author::default()
+            },
+        ),
+        said(6, Author::default()),
+    ];
+    let html = dioxus_ssr::render_element(rsx! {
+        ThreadView { thread: thread.clone() }
+    });
+    let doc = roxmltree::Document::parse(&html).expect("the thread is well formed");
+    // each comment's head, in order, by who wrote it
+    let heads: Vec<Option<String>> = doc
+        .root_element()
+        .descendants()
+        .filter(|n| class(*n) == "reef-app-comment-head")
+        .map(|head| {
+            head.descendants()
+                .find(|n| class(*n) == "reef-app-author")
+                .map(text)
+        })
+        .collect();
+    assert_eq!(
+        heads,
+        vec![
+            Some("ada".to_string()),
+            Some("Claude, for ada".to_string()),
+            Some("Claude".to_string()),
+            None,
+        ],
+        "{html}"
+    );
+}
+
+/// A thread's foot names who marked it last, by hand or by the change that resolved it, and a
+/// thread nobody known marked names nobody
+#[test]
+fn a_thread_names_who_marked_it() {
+    // resolved by bob by hand, then reopened by Claude for ada
+    let mut thread = thread_on(7, Side::New, 3, "Lock?");
+    assert_eq!(mark_label(&thread), None);
+    thread.state = ThreadState::Resolved;
+    thread.marks.push(ThreadMark {
+        state: ThreadState::Resolved,
+        at: 10,
+        author: by("bob", Writer::User),
+    });
+    assert_eq!(mark_label(&thread).as_deref(), Some("resolved by bob"));
+    thread.state = ThreadState::Open;
+    thread.marks.push(ThreadMark {
+        state: ThreadState::Open,
+        at: 20,
+        author: by("ada", Writer::Claude),
+    });
+    assert_eq!(
+        mark_label(&thread).as_deref(),
+        Some("reopened by Claude, for ada")
+    );
+    // drawn under the foot
+    let html = dioxus_ssr::render_element(rsx! {
+        ThreadView { thread: thread.clone() }
+    });
+    let doc = roxmltree::Document::parse(&html).expect("the thread is well formed");
+    let marked: Vec<String> = doc
+        .root_element()
+        .descendants()
+        .filter(|n| class(*n) == "reef-app-thread-marked")
+        .map(text)
+        .collect();
+    assert_eq!(
+        marked,
+        vec!["reopened by Claude, for ada".to_string()],
+        "{html}"
+    );
+    // a capture's trailer that resolved it later names who sent the capture
+    thread.state = ThreadState::Resolved;
+    thread.resolutions.push(Resolution {
+        node: thread.node.clone(),
+        revision: 2,
+        at: 30,
+        commit: None,
+        author: by("cy", Writer::User),
+    });
+    assert_eq!(mark_label(&thread).as_deref(), Some("resolved by cy"));
+    // and marks by nobody known name nobody
+    let mut nobody = thread_on(8, Side::New, 3, "Lock?");
+    nobody.marks.push(ThreadMark {
+        state: ThreadState::Resolved,
+        at: 1,
+        author: Author::default(),
+    });
+    assert_eq!(mark_label(&nobody), None);
+    let html = dioxus_ssr::render_element(rsx! {
+        ThreadView { thread: nobody }
+    });
+    assert!(!html.contains("reef-app-thread-marked"), "{html}");
 }

@@ -25,7 +25,7 @@ use super::http::{Ax, Client};
 use reef_api::{NodePut, NodeWrite, Puts};
 
 /// The password every case's users sign in with
-const PASSWORD: &str = "correct horse battery";
+pub const PASSWORD: &str = "correct horse battery";
 
 /// A node that says why and what, for a put to write
 ///
@@ -56,7 +56,7 @@ fn work(id: &str) -> Puts {
 ///
 /// * `name` - Their name
 /// * `admin` - Whether they are to be an admin
-fn new_user(name: &str, admin: bool) -> NewUser {
+pub fn new_user(name: &str, admin: bool) -> NewUser {
     NewUser {
         name: name.to_string(),
         password: PASSWORD.to_string(),
@@ -70,7 +70,7 @@ fn new_user(name: &str, admin: bool) -> NewUser {
 ///
 /// * `ax` - The served service
 /// * `name` - The admin's name
-async fn first_admin<B: Backend + 'static>(ax: &Ax<B>, name: &str) -> anyhow::Result<User> {
+pub async fn first_admin<B: Backend + 'static>(ax: &Ax<B>, name: &str) -> anyhow::Result<User> {
     // the first user, from the service's own host
     let asker = Asker {
         user: None,
@@ -89,7 +89,7 @@ async fn first_admin<B: Backend + 'static>(ax: &Ax<B>, name: &str) -> anyhow::Re
 ///
 /// * `ax` - The served service
 /// * `name` - The user's name
-async fn signed_in<B: Backend + 'static>(ax: &Ax<B>, name: &str) -> anyhow::Result<Client> {
+pub async fn signed_in<B: Backend + 'static>(ax: &Ax<B>, name: &str) -> anyhow::Result<Client> {
     let request = SignIn {
         name: name.to_string(),
         password: PASSWORD.to_string(),

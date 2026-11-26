@@ -119,4 +119,8 @@ suite!(
     decisions_are_kept_by_call,
     users_and_tokens_are_kept_by_key,
     users_are_removed_with_their_tokens,
+    a_nodes_history_says_who_changed_what,
+    writes_log_only_what_they_changed,
+    pages_and_the_queue_keep_histories,
+    an_unkept_history_leaves_its_edit,
 );

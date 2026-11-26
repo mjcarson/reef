@@ -165,11 +165,16 @@ pub async fn node_batch_leaves_pages_in_place<B: Reopen>(fx: Fx<B>) -> anyhow::R
         NodePut::new(node("C2", 1), None),
         NodePut::new(node("C3", 2), None),
     ]);
-    let checked = fx.store.batch_checked(&fx.plan, puts, no_problems).await?;
+    let checked = fx
+        .store
+        .batch_checked(&fx.plan, puts, &reef_api::NOBODY, no_problems)
+        .await?;
     assert!(matches!(checked, Checked::Applied { .. }), "{checked:?}");
     // and a single put, which is one row's write
     let one = Puts::new(vec![NodePut::new(node("C4", 3), None)]);
-    fx.store.batch_checked(&fx.plan, one, no_problems).await?;
+    fx.store
+        .batch_checked(&fx.plan, one, &reef_api::NOBODY, no_problems)
+        .await?;
     // the nodes moved to a revision of their own, and the pages stayed in theirs, as they were
     let row = plan_row(&fx).await?;
     assert_ne!(row.current, first.revision);
@@ -244,7 +249,7 @@ pub async fn next_write_prunes_killed_pages<B: Reopen>(fx: Fx<B>) -> anyhow::Res
     };
     let edited = fx
         .store
-        .edit_page_checked(&fx.plan, edit, no_problems)
+        .edit_page_checked(&fx.plan, edit, &reef_api::NOBODY, no_problems)
         .await?;
     assert_eq!(edited, PageEdited::Applied { version: Some(1) });
     // and prunes both tables, leaving the plan as that edit left it
@@ -325,12 +330,22 @@ pub async fn page_edit_lands_in_place<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()
     };
     let edited = fx
         .store
-        .edit_page_checked(&fx.plan, put("# App\n", None), no_problems)
+        .edit_page_checked(
+            &fx.plan,
+            put("# App\n", None),
+            &reef_api::NOBODY,
+            no_problems,
+        )
         .await?;
     assert_eq!(edited, PageEdited::Applied { version: Some(1) });
     let edited = fx
         .store
-        .edit_page_checked(&fx.plan, put("# App, again\n", Some(1)), no_problems)
+        .edit_page_checked(
+            &fx.plan,
+            put("# App, again\n", Some(1)),
+            &reef_api::NOBODY,
+            no_problems,
+        )
         .await?;
     assert_eq!(edited, PageEdited::Applied { version: Some(2) });
     let page = fx
@@ -348,7 +363,7 @@ pub async fn page_edit_lands_in_place<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()
     };
     let edited = fx
         .store
-        .edit_page_checked(&fx.plan, remove, no_problems)
+        .edit_page_checked(&fx.plan, remove, &reef_api::NOBODY, no_problems)
         .await?;
     assert_eq!(edited, PageEdited::Applied { version: None });
     assert!(fx.store.page(&fx.plan, "design/app.md").await?.is_none());
@@ -371,7 +386,7 @@ pub async fn stale_page_edit_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<
         read,
     };
     fx.store
-        .edit_page_checked(&fx.plan, put(None), no_problems)
+        .edit_page_checked(&fx.plan, put(None), &reef_api::NOBODY, no_problems)
         .await?;
     // a new page over it, an edit of another version, and edits of a page that isn't there
     let cases = [
@@ -396,7 +411,7 @@ pub async fn stale_page_edit_is_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Result<
         let path = edit.path().to_string();
         let edited = fx
             .store
-            .edit_page_checked(&fx.plan, edit, no_problems)
+            .edit_page_checked(&fx.plan, edit, &reef_api::NOBODY, no_problems)
             .await?;
         assert_eq!(edited, PageEdited::Stale { path, refusal });
     }
@@ -431,7 +446,9 @@ pub async fn page_edit_during_import_waits_and_is_refused<B: Reopen>(
     let racer = async {
         pause.reached.notified().await;
         // the edit waits on the plan's lock, rather than writing into the old pages
-        let edited = fx.store.edit_page_checked(&fx.plan, edit, no_problems);
+        let edited = fx
+            .store
+            .edit_page_checked(&fx.plan, edit, &reef_api::NOBODY, no_problems);
         tokio::pin!(edited);
         let waited = tokio::time::timeout(Duration::from_millis(200), &mut edited)
             .await
@@ -498,7 +515,7 @@ pub async fn pages_it_cant_keep_are_refused<B: Reopen>(fx: Fx<B>) -> anyhow::Res
     };
     let error = fx
         .store
-        .edit_page_checked(&fx.plan, edit, no_problems)
+        .edit_page_checked(&fx.plan, edit, &reef_api::NOBODY, no_problems)
         .await
         .expect_err("a summary was kept as a page");
     assert!(error.downcast_ref::<Unkeepable>().is_some(), "{error:#}");
@@ -522,7 +539,7 @@ pub async fn page_write_refused_in_place_is_an_error<B: Reopen>(fx: Fx<B>) -> an
     };
     let error = fx
         .store
-        .edit_page_checked(&fx.plan, edit, no_problems)
+        .edit_page_checked(&fx.plan, edit, &reef_api::NOBODY, no_problems)
         .await
         .expect_err("a refused write was taken as written");
     assert!(

@@ -20,5 +20,6 @@ import:
 4. **Register each project again**, by the same URL, then `reef import DIR --plan P` each plan.
 
 **What doesn't carry over:** users and their tokens, the queue, work records, captured
-revisions, comment threads, loops, and the plans and questions kept from Claude sessions. Nodes
-keep their status and their criteria, since those are part of each node.
+revisions, comment threads, loops, the plans and questions kept from Claude sessions, and every
+node's, page's and queue's history of who edited it. Nodes keep their status and their criteria,
+since those are part of each node.

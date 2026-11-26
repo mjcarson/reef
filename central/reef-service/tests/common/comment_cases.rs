@@ -157,7 +157,7 @@ async fn started<B: Backend>(
         by: Writer::User,
         review: false,
     };
-    match fx.store.start_thread(node, new).await? {
+    match fx.store.start_thread(node, new, &reef_api::NOBODY).await? {
         Commented::Added { thread, comment } => Ok((thread, comment)),
         other => panic!("a thread on `{node}` was not kept: {other:?}"),
     }
@@ -176,7 +176,11 @@ async fn replied<B: Backend>(fx: &Fx<B>, thread: u32, body: &str) -> anyhow::Res
         by: Writer::User,
         review: false,
     };
-    match fx.store.reply(&fx.plan, thread, reply).await? {
+    match fx
+        .store
+        .reply(&fx.plan, thread, reply, &reef_api::NOBODY)
+        .await?
+    {
         Commented::Added { thread, comment } => Ok((thread, comment)),
         other => panic!("a reply in thread {thread} was not kept: {other:?}"),
     }
@@ -197,7 +201,9 @@ async fn mark<B: Backend>(
     read: u64,
 ) -> anyhow::Result<Marked> {
     let mark = MarkThread { state, read };
-    fx.store.mark_thread(&fx.plan, thread, mark).await
+    fx.store
+        .mark_thread(&fx.plan, thread, mark, &reef_api::NOBODY)
+        .await
 }
 
 /// Comments on a line and on a node, their replies and a thread's mark all read back the same
@@ -307,7 +313,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
             by: Writer::User,
             review: false,
         };
-        let answer = fx.store.start_thread(&a, new).await?;
+        let answer = fx.store.start_thread(&a, new, &reef_api::NOBODY).await?;
         assert_eq!(answer, Commented::NoLine { target });
     }
     // a node with no revisions holds no line at all
@@ -319,7 +325,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         review: false,
     };
     assert!(matches!(
-        fx.store.start_thread(&b, new).await?,
+        fx.store.start_thread(&b, new, &reef_api::NOBODY).await?,
         Commented::NoLine { .. }
     ));
     // a reply in a thread that isn't there
@@ -328,7 +334,10 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         by: Writer::User,
         review: false,
     };
-    let answer = fx.store.reply(&fx.plan, 1, reply.clone()).await?;
+    let answer = fx
+        .store
+        .reply(&fx.plan, 1, reply.clone(), &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, Commented::NoThread { thread: 1 });
     // a body with nothing in it, or more than a comment may hold
     for body in ["", "  \n\t", &"x".repeat(COMMENT_BODY_MAX + 1)] {
@@ -340,7 +349,7 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
         };
         let error = fx
             .store
-            .start_thread(&a, new)
+            .start_thread(&a, new, &reef_api::NOBODY)
             .await
             .expect_err("a body it can't keep was kept");
         assert!(error.downcast_ref::<Unkeepable>().is_some(), "{error:#}");
@@ -358,7 +367,10 @@ pub async fn a_line_comment_off_its_revision_is_refused<B: Reopen>(
     }
     // and a reply naming a reply's number replies in no thread
     let (_, number) = replied(&fx, 1, "Yes").await?;
-    let answer = fx.store.reply(&fx.plan, number, reply).await?;
+    let answer = fx
+        .store
+        .reply(&fx.plan, number, reply, &reef_api::NOBODY)
+        .await?;
     assert_eq!(answer, Commented::NoThread { thread: number });
     Ok(())
 }
@@ -564,7 +576,7 @@ pub async fn drafts_hold_no_thread_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow:
         by: Writer::User,
         review: false,
     };
-    let refused = fx.store.start_thread(&a, new).await?;
+    let refused = fx.store.start_thread(&a, new, &reef_api::NOBODY).await?;
     assert!(matches!(refused, Commented::NoLine { .. }), "{refused:?}");
     // the thread on revision 1 stays there, since no sealed revision follows it
     assert_eq!(fx.store.follow_threads(&a).await?, None);
@@ -575,7 +587,7 @@ pub async fn drafts_hold_no_thread_until_sealed<B: Reopen>(fx: Fx<B>) -> anyhow:
     // once the draft is sealed, both follow to their lines in it
     let sealed = fx
         .store
-        .add_capture(&a, capture(&pinned, 'd', Vec::new()))
+        .add_capture(&a, capture(&pinned, 'd', Vec::new()), &reef_api::NOBODY)
         .await?;
     assert!(
         matches!(sealed, reef_service::Captured::Replaced { .. }),
@@ -636,7 +648,7 @@ async fn trailed<B: Backend>(
         .collect();
     let read = fx
         .store
-        .resolve_by_trailers(node, revision, resolves)
+        .resolve_by_trailers(node, revision, resolves, &reef_api::NOBODY)
         .await?;
     Ok(read.into_iter().map(|(read, _)| read.outcome).collect())
 }
@@ -690,6 +702,7 @@ pub async fn trailers_resolve_each_thread_once_a_change<B: Reopen>(
         revision: 1,
         at: one.resolutions[0].at,
         commit: Some(first.clone()),
+        author: reef_api::Author::default(),
     };
     assert_eq!(one.resolutions, std::slice::from_ref(&linked));
     assert_eq!(one.resolved_by(), Some(&linked));
@@ -769,7 +782,7 @@ pub async fn resolving_by_hand_is_over_the_version_read<B: Reopen>(
     // over the version read, it is resolved, the revision linked with no commit
     let Resolved::Resolved { thread: resolved } = fx
         .store
-        .resolve_thread(&fx.plan, 1, resolve(thread.version))
+        .resolve_thread(&fx.plan, 1, resolve(thread.version), &reef_api::NOBODY)
         .await?
     else {
         panic!("a resolve over the version read was refused");
@@ -784,7 +797,10 @@ pub async fn resolving_by_hand_is_over_the_version_read<B: Reopen>(
         (&b, 1, &None)
     );
     // over the version it was at before, it is stale, and nothing changes
-    let stale = fx.store.resolve_thread(&fx.plan, 1, resolve(1)).await?;
+    let stale = fx
+        .store
+        .resolve_thread(&fx.plan, 1, resolve(1), &reef_api::NOBODY)
+        .await?;
     assert_eq!(
         stale,
         Resolved::Stale {
@@ -793,10 +809,16 @@ pub async fn resolving_by_hand_is_over_the_version_read<B: Reopen>(
     );
     // one another writer beat to the row is stale too
     fx.faults.refuse_next_comment_write();
-    let beaten = fx.store.resolve_thread(&fx.plan, 1, resolve(2)).await?;
+    let beaten = fx
+        .store
+        .resolve_thread(&fx.plan, 1, resolve(2), &reef_api::NOBODY)
+        .await?;
     assert_eq!(beaten, Resolved::Stale { thread: resolved });
     // and a thread that isn't there is named
-    let missing = fx.store.resolve_thread(&fx.plan, 9, resolve(1)).await?;
+    let missing = fx
+        .store
+        .resolve_thread(&fx.plan, 9, resolve(1), &reef_api::NOBODY)
+        .await?;
     assert_eq!(missing, Resolved::NoThread { thread: 9 });
     Ok(())
 }
@@ -827,7 +849,10 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
     let Commented::Added {
         thread: pending,
         comment,
-    } = fx.store.start_thread(&node, in_review("Later")).await?
+    } = fx
+        .store
+        .start_thread(&node, in_review("Later"), &reef_api::NOBODY)
+        .await?
     else {
         panic!("a thread in a review wasn't kept");
     };
@@ -843,8 +868,10 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         (2, ReviewState::Open, 1)
     );
     // a second thread joins the same review, #4
-    let Commented::Added { comment: four, .. } =
-        fx.store.start_thread(&node, in_review("And this")).await?
+    let Commented::Added { comment: four, .. } = fx
+        .store
+        .start_thread(&node, in_review("And this"), &reef_api::NOBODY)
+        .await?
     else {
         panic!("a second thread in the review wasn't kept");
     };
@@ -855,17 +882,25 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         by: Writer::User,
         review,
     };
-    let in_published = fx.store.reply(&fx.plan, 1, reply("Also", true)).await?;
+    let in_published = fx
+        .store
+        .reply(&fx.plan, 1, reply("Also", true), &reef_api::NOBODY)
+        .await?;
     assert!(
         matches!(&in_published, Commented::Added { thread, comment: 5 } if !thread.pending
             && thread.comments[1].review == Some(2)),
         "{in_published:?}"
     );
     assert_eq!(
-        fx.store.reply(&fx.plan, 3, reply("Now?", false)).await?,
+        fx.store
+            .reply(&fx.plan, 3, reply("Now?", false), &reef_api::NOBODY)
+            .await?,
         Commented::NoThread { thread: 3 }
     );
-    let in_pending = fx.store.reply(&fx.plan, 3, reply("Yes", true)).await?;
+    let in_pending = fx
+        .store
+        .reply(&fx.plan, 3, reply("Yes", true), &reef_api::NOBODY)
+        .await?;
     assert!(
         matches!(in_pending, Commented::Added { comment: 6, .. }),
         "{in_pending:?}"
@@ -901,7 +936,9 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         read: pending.version,
     };
     assert_eq!(
-        fx.store.resolve_thread(&fx.plan, 3, resolve).await?,
+        fx.store
+            .resolve_thread(&fx.plan, 3, resolve, &reef_api::NOBODY)
+            .await?,
         Resolved::Pending { thread: 3 }
     );
     let commit = ResolvingCommit {
@@ -914,7 +951,10 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         thread: 3,
         commit: commit.clone(),
     }];
-    let read = fx.store.resolve_by_trailers(&node, 1, trailed).await?;
+    let read = fx
+        .store
+        .resolve_by_trailers(&node, 1, trailed, &reef_api::NOBODY)
+        .await?;
     assert_eq!(read.len(), 1);
     assert_eq!(read[0].0.outcome, TrailerOutcome::Pending);
     assert!(read[0].1.is_none());
@@ -925,14 +965,20 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         read: review.version + 1,
     };
     assert!(matches!(
-        fx.store.mark_review(&node, stale).await?,
+        fx.store
+            .mark_review(&node, stale, &reef_api::NOBODY)
+            .await?,
         Reviewed::Stale { .. }
     ));
     let reopen = MarkReview {
         state: ReviewState::Open,
         read: review.version,
     };
-    let refused = fx.store.mark_review(&node, reopen).await.unwrap_err();
+    let refused = fx
+        .store
+        .mark_review(&node, reopen, &reef_api::NOBODY)
+        .await
+        .unwrap_err();
     assert!(
         refused.downcast_ref::<Unkeepable>().is_some(),
         "{refused:#}"
@@ -941,7 +987,11 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         state: ReviewState::Submitted,
         read: review.version,
     };
-    let Reviewed::Marked { review: submitted } = fx.store.mark_review(&node, submit).await? else {
+    let Reviewed::Marked { review: submitted } = fx
+        .store
+        .mark_review(&node, submit, &reef_api::NOBODY)
+        .await?
+    else {
         panic!("the review wasn't submitted");
     };
     assert_eq!(
@@ -967,14 +1017,20 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         Marked::Marked { .. }
     ));
     // a second review, discarded, drops its thread, its thread's reply, and its reply elsewhere
-    let Commented::Added { thread: scrap, .. } =
-        fx.store.start_thread(&node, in_review("Scrap")).await?
+    let Commented::Added { thread: scrap, .. } = fx
+        .store
+        .start_thread(&node, in_review("Scrap"), &reef_api::NOBODY)
+        .await?
     else {
         panic!("a thread in a second review wasn't kept");
     };
     assert_eq!(scrap.number, 8);
-    fx.store.reply(&fx.plan, 8, reply("Gone", true)).await?;
-    fx.store.reply(&fx.plan, 1, reply("Gone too", true)).await?;
+    fx.store
+        .reply(&fx.plan, 8, reply("Gone", true), &reef_api::NOBODY)
+        .await?;
+    fx.store
+        .reply(&fx.plan, 1, reply("Gone too", true), &reef_api::NOBODY)
+        .await?;
     let second = fx
         .store
         .node_review(&node)
@@ -986,7 +1042,9 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         read: second.version,
     };
     assert!(matches!(
-        fx.store.mark_review(&node, discard).await?,
+        fx.store
+            .mark_review(&node, discard, &reef_api::NOBODY)
+            .await?,
         Reviewed::Marked { .. }
     ));
     let kept = fx.store.threads(&fx.plan, Pending::Include).await?;
@@ -996,7 +1054,9 @@ pub async fn a_review_holds_its_comments_until_submitted<B: Reopen>(
         .collect();
     assert_eq!(read, [(1, 2), (3, 2), (4, 1)]);
     assert_eq!(
-        fx.store.reply(&fx.plan, 8, reply("Back?", true)).await?,
+        fx.store
+            .reply(&fx.plan, 8, reply("Back?", true), &reef_api::NOBODY)
+            .await?,
         Commented::NoThread { thread: 8 }
     );
     assert_eq!(

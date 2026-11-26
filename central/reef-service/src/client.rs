@@ -14,14 +14,14 @@ use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
     CommentRow, CommentRowFilter, CommentRowGet, DecisionRow, DecisionRowFilter, DecisionRowGet,
-    LOOPS, LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey, NodeRow, NodeRowDelete,
-    NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter,
-    PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet,
-    QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES, ReefClient, ReefQueryKinds,
-    RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow, RevisionFileRowGet, RevisionRow,
-    RevisionRowFilter, RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter,
-    TokenRowGet, USERS, UserRow, UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowFilter,
-    WorkRowGet,
+    EditRow, EditRowGet, LOOPS, LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey,
+    NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete,
+    PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow,
+    ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES, ReefClient,
+    ReefQueryKinds, RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow, RevisionFileRowGet,
+    RevisionRow, RevisionRowFilter, RevisionRowGet, TOKENS, TokenRow, TokenRowDelete,
+    TokenRowFilter, TokenRowGet, USERS, UserRow, UserRowDelete, UserRowFilter, UserRowGet, WorkRow,
+    WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -1013,6 +1013,49 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Reads a subject's edit rows, newest first, at most a number of them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the subject belongs to
+    /// * `subject` - What was edited
+    /// * `limit` - The most rows to read
+    #[instrument(name = "ShoalBackend::edits", skip_all, err(Debug))]
+    async fn edits(
+        &self,
+        project: &str,
+        subject: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<EditRow>> {
+        // a subject's edits sit in its partition, newest first, so the limit stops at the oldest
+        // wanted
+        let get = EditRowGet::new(vec![(project.to_string(), subject.to_string())]).limit(limit);
+        self.read::<_, EditRow>(get).await
+    }
+
+    /// Writes edit rows over whatever is stored under their keys, every answer checked
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    #[instrument(name = "ShoalBackend::write_edits", skip_all, err(Debug))]
+    async fn write_edits(&self, rows: Vec<EditRow>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // one bundle, whose every answer `exec` checks, which draining its stream would not
+        let mut bundle = self.client.query();
+        for row in rows {
+            bundle.add_mut(row);
+        }
+        self.client
+            .exec(bundle)
+            .await
+            .map_err(|error| anyhow::anyhow!("writing edit rows failed: {error:?}"))?;
+        Ok(())
     }
 }
 

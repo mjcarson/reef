@@ -15,6 +15,7 @@
 //! | `POST …/projects/{project}/plans` | `add_plan` | [`AddedPlan`]: 201, or 200 if listed |
 //! | `GET …/projects/{project}/queue` | `queue` | its [`QueueListing`] |
 //! | `POST …/projects/{project}/queue` | `edit_queue` | [`Queued`]: 200, 409 if not queued, 422 if not in its plan |
+//! | `GET …/projects/{project}/queue/history` | `queue_history` | its queue's edits, newest first: every [`Logged`] |
 //! | `GET …/projects/{project}/next` | `project_next` | its plans' ready work, the queue's first: [`Next`] |
 //! | `GET …/projects/{project}/work` | `work` | every [`WorkRecord`] of its nodes, by node |
 //! | `GET …/plans/{plan}` | `plans` | its [`PlanInfo`], or 404 |
@@ -29,6 +30,7 @@
 //! | `GET …/plans/{plan}/pages` | `pages` | its own pages: [`PageListing`] |
 //! | `POST …/plans/{plan}/pages` | `edit_page` | [`PageEdited`]: 200, 409 if stale, 422 if refused |
 //! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
+//! | `GET …/plans/{plan}/page-history/{*path}` | `page_history` | the page's edits, newest first: every [`Logged`] |
 //! | `GET …/plans/{plan}/work/{id}` | `work_of` | the node's [`WorkRecord`], or 404 |
 //! | `POST …/plans/{plan}/work/{id}` | `start_work` | [`Started`]: 200, 409 if stale, 422 if not in its plan |
 //! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200 if kept or unchanged, its trailers' threads resolved, 409 if started again since, 422 if not started |
@@ -40,6 +42,7 @@
 //! | `POST …/plans/{plan}/nodes/{id}/comments` | `start_thread` | [`Commented`]: 200, 422 if not in its plan or on no line of its revisions |
 //! | `GET …/plans/{plan}/nodes/{id}/review` | `node_review` | the node's open [`Review`], or `null` |
 //! | `PUT …/plans/{plan}/nodes/{id}/review` | `mark_review` | [`Reviewed`]: 200, 409 if stale, 422 if the node has no open review |
+//! | `GET …/plans/{plan}/nodes/{id}/history` | `node_history` | the node's edits, newest first, a node removed included: every [`Logged`] |
 //! | `GET …/plans/{plan}/comments/{thread}?pending=true` | `thread` | the [`Thread`], or 404, as a pending one is unless asked for |
 //! | `POST …/plans/{plan}/comments/{thread}/replies` | `reply` | [`Commented`]: 200, or 422 if no thread starts there |
 //! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there or it is pending in a review |
@@ -58,6 +61,9 @@
 //! | `DELETE /api/v1/users/{name}` | `remove_user` | [`UserRemoved`]: 200, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
 //! | `PUT /api/v1/users/{name}/password` | `change_password` | [`PasswordChanged`]: 200, 403 if the current password doesn't match or another's is set by no admin, 404 if no user has the name, 429 if too many failed lately |
 //!
+//! - **Every write names its author.** Each write route takes its [`Caller`] and hands the service
+//!   [`Caller::author`]: the user the token signs in, Claude's for them if the `reef-writer`
+//!   header says so, and never a name a body gives.
 //! - **A refusal is an answer.** A stale or refused write comes back as its outcome, with a
 //!   status that says which, so a client reads one type whatever the status.
 //! - **An error names its kind.** A project that isn't registered, a plan that isn't listed, a
@@ -106,7 +112,7 @@ use reef_api::{
     Started, StoredNode, StoredPage, Thread, TokenKind, Transcript, User, UserAdded,
     WRITE_BODY_MAX, WorkRecord, paths,
 };
-use reef_api::{PasswordChange, PasswordChanged, TokenInfo, UserRemoved};
+use reef_api::{Logged, PasswordChange, PasswordChanged, TokenInfo, UserRemoved};
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -183,6 +189,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PROJECT_FETCH, axum::routing::post(fetch::<S>))
         .route(paths::PLANS, get(plans::<S>).post(add_plan::<S>))
         .route(paths::QUEUE, get(queue::<S>).post(edit_queue::<S>))
+        .route(paths::QUEUE_HISTORY, get(queue_history::<S>))
         .route(paths::PROJECT_NEXT, get(project_next::<S>))
         .route(paths::WORK, get(work::<S>))
         .route(paths::PLAN, get(plan::<S>))
@@ -203,6 +210,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
                 .layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
         )
         .route(paths::PAGE, get(page::<S>))
+        .route(paths::PAGE_HISTORY, get(page_history::<S>))
         .route(paths::NODE_WORK, get(work_of::<S>).post(start_work::<S>))
         .route(
             paths::CAPTURES,
@@ -220,6 +228,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
             paths::NODE_REVIEW,
             get(node_review::<S>).put(mark_review::<S>),
         )
+        .route(paths::NODE_HISTORY, get(node_history::<S>))
         .route(
             paths::NODE_DECISIONS,
             get(node_decisions::<S>)
@@ -1085,16 +1094,21 @@ async fn queue<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The project's name
 /// * `edit` - The edit
 #[instrument(name = "api::edit_queue", skip_all, err(Debug))]
 async fn edit_queue<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<ProjectSegments>,
     Body(edit): Body<QueueEdit>,
 ) -> Result<(StatusCode, Json<Queued>), Failure> {
     // one row written, under the queue's lock
-    let queued = serves.service().edit_queue(&segments.project, edit).await?;
+    let queued = serves
+        .service()
+        .edit_queue(&segments.project, edit, &caller.author())
+        .await?;
     let status = match queued {
         Queued::Applied { .. } => StatusCode::OK,
         Queued::NotQueued { .. } => StatusCode::CONFLICT,
@@ -1185,17 +1199,22 @@ async fn list<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The plan's project and name
 /// * `batch` - The nodes to write and to remove, each with the version its writer read
 #[instrument(name = "api::put", skip_all, err(Debug))]
 async fn put<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<PlanSegments>,
     Body(batch): Body<Puts>,
 ) -> Result<(StatusCode, Json<Checked>), Failure> {
     let plan = segments.name()?;
     // checked against the whole plan, under its write lock
-    let checked = serves.service().batch(&plan, batch).await?;
+    let checked = serves
+        .service()
+        .batch(&plan, batch, &caller.author())
+        .await?;
     let status = match checked {
         Checked::Applied { .. } => StatusCode::OK,
         Checked::Stale(_) => StatusCode::CONFLICT,
@@ -1233,17 +1252,22 @@ async fn node<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The plan's project and name
 /// * `write` - Every node of the plan, and its pages if they change
 #[instrument(name = "api::write_plan", skip_all, err(Debug))]
 async fn write_plan<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<PlanSegments>,
     Body(write): Body<PlanWrite>,
 ) -> Result<(StatusCode, Json<Rewrite>), Failure> {
     let plan = segments.name()?;
     // checked against the plan it replaces, under its write lock
-    let rewrite = serves.service().write_plan(&plan, write).await?;
+    let rewrite = serves
+        .service()
+        .write_plan(&plan, write, &caller.author())
+        .await?;
     let status = match rewrite {
         Rewrite::Applied(_) => StatusCode::OK,
         Rewrite::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -1351,17 +1375,22 @@ async fn pages<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The plan's project and name
 /// * `edit` - The page to write or take out, with the version its writer read
 #[instrument(name = "api::edit_page", skip_all, err(Debug))]
 async fn edit_page<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<PlanSegments>,
     Body(edit): Body<PageEdit>,
 ) -> Result<(StatusCode, Json<PageEdited>), Failure> {
     let plan = segments.name()?;
     // checked against the whole plan, under its write lock
-    let edited = serves.service().edit_page(&plan, edit).await?;
+    let edited = serves
+        .service()
+        .edit_page(&plan, edit, &caller.author())
+        .await?;
     let status = match edited {
         PageEdited::Applied { .. } => StatusCode::OK,
         PageEdited::Stale { .. } => StatusCode::CONFLICT,
@@ -1390,6 +1419,59 @@ async fn page<S: Serves>(
             format!("no page `{}` in `{plan}`", segments.path),
         )),
     }
+}
+
+/// Reads one of a plan's own pages' history: who edited it, what the edit did and when, newest
+/// first, a page taken out included
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name, and the page's path
+#[instrument(name = "api::page_history", skip_all, err(Debug))]
+async fn page_history<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PageSegments>,
+) -> Result<Json<Vec<Logged>>, Failure> {
+    let plan = PlanName::new(segments.project, segments.plan)?;
+    // none for a page never edited
+    let history = serves.service().page_history(&plan, &segments.path).await?;
+    Ok(Json(history))
+}
+
+/// Reads a node's history: who made each edit, what it changed and when, newest first, a node
+/// removed included
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The node's project, plan and id
+#[instrument(name = "api::node_history", skip_all, err(Debug))]
+async fn node_history<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<NodeSegments>,
+) -> Result<Json<Vec<Logged>>, Failure> {
+    let node = segments.name()?;
+    // none for a node never edited since histories were kept
+    let history = serves.service().node_history(&node).await?;
+    Ok(Json(history))
+}
+
+/// Reads a project's queue's history: who queued, moved or took off each entry, and when,
+/// newest first
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::queue_history", skip_all, err(Debug))]
+async fn queue_history<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<Logged>>, Failure> {
+    // none for a queue never edited since histories were kept
+    let history = serves.service().queue_history(&segments.project).await?;
+    Ok(Json(history))
 }
 
 /// Lists the work records of a project's nodes, by node, across its plans
@@ -1436,17 +1518,22 @@ async fn work_of<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The node's project, plan and id
 /// * `start` - What the start read, and the version of the record it replaces
 #[instrument(name = "api::start_work", skip_all, err(Debug))]
 async fn start_work<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<NodeSegments>,
     Body(start): Body<StartWork>,
 ) -> Result<(StatusCode, Json<Started>), Failure> {
     let node = segments.name()?;
     // one row written, under the project's work lock
-    let started = serves.service().start_work(&node, start).await?;
+    let started = serves
+        .service()
+        .start_work(&node, start, &caller.author())
+        .await?;
     let status = match started {
         Started::Recorded { .. } => StatusCode::OK,
         Started::Stale { .. } => StatusCode::CONFLICT,
@@ -1461,17 +1548,22 @@ async fn start_work<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The node's project, plan and id
 /// * `add` - The start the capture was taken from, and what it read
 #[instrument(name = "api::add_capture", skip_all, err(Debug))]
 async fn add_capture<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<NodeSegments>,
     Body(add): Body<AddCapture>,
 ) -> Result<(StatusCode, Json<Captured>), Failure> {
     let node = segments.name()?;
     // one row written, under the project's work lock
-    let captured = serves.service().add_capture(&node, add).await?;
+    let captured = serves
+        .service()
+        .add_capture(&node, add, &caller.author())
+        .await?;
     let status = match captured {
         Captured::Added { .. } | Captured::Replaced { .. } | Captured::Unchanged { .. } => {
             StatusCode::OK
@@ -1616,17 +1708,22 @@ async fn node_decisions<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The node's project, plan and id
 /// * `record` - The decisions a hook read from a session's transcript
 #[instrument(name = "api::record_decisions", skip_all, err(Debug))]
 async fn record_decisions<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<NodeSegments>,
     Body(record): Body<RecordDecisions>,
 ) -> Result<(StatusCode, Json<DecisionsRecorded>), Failure> {
     let node = segments.name()?;
     // under the project's decisions' lock, told to the change stream if anything was new
-    let recorded = serves.service().record_decisions(&node, record).await?;
+    let recorded = serves
+        .service()
+        .record_decisions(&node, record, &caller.author())
+        .await?;
     let status = match recorded {
         DecisionsRecorded::Recorded { .. } => StatusCode::OK,
         DecisionsRecorded::NotInPlan { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -1640,17 +1737,22 @@ async fn record_decisions<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The node's project, plan and id
 /// * `new` - What the thread is on, and its first comment's body
 #[instrument(name = "api::start_thread", skip_all, err(Debug))]
 async fn start_thread<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<NodeSegments>,
     Body(new): Body<NewThread>,
 ) -> Result<(StatusCode, Json<Commented>), Failure> {
     let node = segments.name()?;
     // one row written, under the project's comment lock
-    let commented = serves.service().start_thread(&node, new).await?;
+    let commented = serves
+        .service()
+        .start_thread(&node, new, &caller.author())
+        .await?;
     Ok((commented_status(&commented), Json(commented)))
 }
 
@@ -1685,11 +1787,13 @@ async fn thread<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The plan's project and name, and the thread's number
 /// * `reply` - The reply's body
 #[instrument(name = "api::reply", skip_all, err(Debug))]
 async fn reply<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<ThreadSegments>,
     Body(reply): Body<NewReply>,
 ) -> Result<(StatusCode, Json<Commented>), Failure> {
@@ -1697,7 +1801,7 @@ async fn reply<S: Serves>(
     // one row written, under the project's comment lock
     let commented = serves
         .service()
-        .reply(&plan, segments.thread, reply)
+        .reply(&plan, segments.thread, reply, &caller.author())
         .await?;
     Ok((commented_status(&commented), Json(commented)))
 }
@@ -1708,11 +1812,13 @@ async fn reply<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The plan's project and name, and the thread's number
 /// * `mark` - The state to mark it, and the version it was marked against
 #[instrument(name = "api::mark_thread", skip_all, err(Debug))]
 async fn mark_thread<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<ThreadSegments>,
     Body(mark): Body<MarkThread>,
 ) -> Result<(StatusCode, Json<Marked>), Failure> {
@@ -1720,7 +1826,7 @@ async fn mark_thread<S: Serves>(
     // the thread's first row written again, under the project's comment lock
     let marked = serves
         .service()
-        .mark_thread(&plan, segments.thread, mark)
+        .mark_thread(&plan, segments.thread, mark, &caller.author())
         .await?;
     let status = match marked {
         Marked::Marked { .. } => StatusCode::OK,
@@ -1753,17 +1859,22 @@ async fn node_review<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The node's project, plan and id
 /// * `mark` - Whether it is submitted or discarded, and the version it was marked against
 #[instrument(name = "api::mark_review", skip_all, err(Debug))]
 async fn mark_review<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<NodeSegments>,
     Body(mark): Body<MarkReview>,
 ) -> Result<(StatusCode, Json<Reviewed>), Failure> {
     let node = segments.name()?;
     // the review's row written again, under the project's comment lock
-    let reviewed = serves.service().mark_review(&node, mark).await?;
+    let reviewed = serves
+        .service()
+        .mark_review(&node, mark, &caller.author())
+        .await?;
     let status = match reviewed {
         Reviewed::Marked { .. } => StatusCode::OK,
         Reviewed::Stale { .. } => StatusCode::CONFLICT,
@@ -1778,11 +1889,13 @@ async fn mark_review<S: Serves>(
 /// # Arguments
 ///
 /// * `serves` - The service
+/// * `caller` - Who is calling, whom the write names as its author
 /// * `segments` - The plan's project and name, and the thread's number
 /// * `resolve` - The revision that answered it, and the version it was resolved against
 #[instrument(name = "api::resolve_thread", skip_all, err(Debug))]
 async fn resolve_thread<S: Serves>(
     State(serves): State<S>,
+    caller: Caller,
     Segments(segments): Segments<ThreadSegments>,
     Body(resolve): Body<ResolveThread>,
 ) -> Result<(StatusCode, Json<Resolved>), Failure> {
@@ -1790,7 +1903,7 @@ async fn resolve_thread<S: Serves>(
     // the thread's first row written again, under the project's comment lock
     let resolved = serves
         .service()
-        .resolve_thread(&plan, segments.thread, resolve)
+        .resolve_thread(&plan, segments.thread, resolve, &caller.author())
         .await?;
     let status = match resolved {
         Resolved::Resolved { .. } => StatusCode::OK,

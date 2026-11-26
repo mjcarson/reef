@@ -235,6 +235,89 @@ fn names(out: &str) -> Vec<&str> {
         .collect()
 }
 
+/// `reef node log`, `page log` and `queue log` print who made each edit and what it changed, and
+/// `reef comment ls` and `queue ls` name the user signed in
+#[tokio::test]
+async fn histories_name_their_authors() -> anyhow::Result<()> {
+    let cx = Cx::signing_in("histories").await?;
+    let repo = cx.ax.repo.clone();
+    let password = cx.ax.dir.join("password");
+    std::fs::write(&password, "correct horse battery\n")?;
+    let password = password.to_str().expect("the case's dir is utf-8");
+    // ada, the first user, logged in
+    cx.reef(&repo, &["user", "add", "ada", "--password-file", password])
+        .await?;
+    cx.reef(
+        &repo,
+        &["login", "--user", "ada", "--password-file", password],
+    )
+    .await?;
+    // a node never edited says so
+    let log = cx.reef(&repo, &["node", "log", "C1"]).await?;
+    assert_eq!(log, "no edit of `reef/central/C1` is kept\n");
+    // ada puts C1 and sets it in progress
+    cx.put("c1.yaml", &work("C1", &[])).await?;
+    cx.reef(&repo, &["status", "C1", "in-progress"]).await?;
+    let log = cx.reef(&repo, &["node", "log", "C1"]).await?;
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(lines[0].starts_with("v2 "), "{log}");
+    assert!(
+        lines[0].ends_with("  ada: status unset → in-progress"),
+        "{log}"
+    );
+    assert!(
+        lines[1].starts_with("v1 ") && lines[1].ends_with("  ada: added"),
+        "{log}"
+    );
+    // a page, and the queue, keep theirs
+    let page = cx.yaml("a.md", "# A\n")?;
+    cx.reef(&repo, &["page", "put", "design/a.md", &page])
+        .await?;
+    let log = cx.reef(&repo, &["page", "log", "design/a.md"]).await?;
+    assert!(log.trim_end().ends_with("  ada: added"), "{log}");
+    cx.reef(&repo, &["queue", "add", "C1"]).await?;
+    let log = cx.reef(&repo, &["queue", "log"]).await?;
+    assert!(
+        log.trim_end()
+            .ends_with("  ada: queued reef/central/C1 at the bottom"),
+        "{log}"
+    );
+    let listed = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert!(listed.contains("queued by ada"), "{listed}");
+    // a thread ada starts, listed with her name, and her reply too
+    let node = cx.ax.plan.node("C1")?;
+    let ada = reef_api::Author {
+        user: Some("ada".to_string()),
+        since: None,
+        by: reef_api::Writer::User,
+    };
+    let new = reef_api::NewThread {
+        target: reef_api::Target::Node,
+        body: "Why?".to_string(),
+        by: reef_api::Writer::User,
+        review: false,
+    };
+    let reef_api::Commented::Added { thread, .. } =
+        cx.ax.service.start_thread(&node, new, &ada).await?
+    else {
+        anyhow::bail!("the thread wasn't kept");
+    };
+    let number = thread.number.to_string();
+    cx.reef(&repo, &["comment", "reply", &number, "Because."])
+        .await?;
+    let listed = cx.reef(&repo, &["comment", "ls"]).await?;
+    assert!(
+        listed.contains(&format!("    #{number} by ada:")),
+        "{listed}"
+    );
+    assert!(listed.contains("by ada:\n        Because."), "{listed}");
+    // and a history with nothing kept says so
+    let log = cx.reef(&repo, &["page", "log", "design/none.md"]).await?;
+    assert_eq!(log, "no edit of page `design/none.md` is kept\n");
+    Ok(())
+}
+
 /// A token from `reef login` lets the CLI write, until `reef logout` revokes it
 #[tokio::test]
 async fn login_lets_the_cli_write_until_logout() -> anyhow::Result<()> {

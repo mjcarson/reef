@@ -9,8 +9,8 @@ use reef_model::PlanName;
 use std::future::Future;
 
 use crate::schema::{
-    CommentRow, DecisionRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow, ProjectRow,
-    QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow,
+    ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -536,4 +536,27 @@ pub trait Backend: Send + Sync {
         row: RemoteRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads a subject's edit rows, newest first, at most a number of them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project the subject belongs to
+    /// * `subject` - What was edited: `node/<plan>/<id>`, `page/<plan>/<path>` or `queue`
+    /// * `limit` - The most rows to read
+    fn edits(
+        &self,
+        project: &str,
+        subject: &str,
+        limit: usize,
+    ) -> impl Future<Output = anyhow::Result<Vec<EditRow>>> + Send;
+
+    /// Writes edit rows over whatever is stored under their keys, every answer checked
+    ///
+    /// The writes are not atomic: one that fails partway leaves the rows before it written.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to write
+    fn write_edits(&self, rows: Vec<EditRow>) -> impl Future<Output = anyhow::Result<()>> + Send;
 }

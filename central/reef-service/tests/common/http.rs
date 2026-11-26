@@ -38,6 +38,8 @@ pub struct Client {
     pub base: String,
     /// The token every request sends as `Authorization: Bearer`, if it sends one
     token: Option<String>,
+    /// Whether every request says it writes as Claude, as reef's MCP server does
+    claude: bool,
 }
 
 impl Client {
@@ -55,6 +57,7 @@ impl Client {
                 .expect("a plain HTTP client builds"),
             base,
             token: None,
+            claude: false,
         }
     }
 
@@ -77,6 +80,7 @@ impl Client {
             http,
             base,
             token: None,
+            claude: false,
         })
     }
 
@@ -92,6 +96,14 @@ impl Client {
         }
     }
 
+    /// The same client, every request saying it writes as Claude, as reef's MCP server's do
+    pub fn as_claude(&self) -> Client {
+        Client {
+            claude: true,
+            ..self.clone()
+        }
+    }
+
     /// A request to a route, sending this client's token if it has one, for a case to add
     /// headers or a body of its own
     ///
@@ -101,9 +113,14 @@ impl Client {
     /// * `path` - The route's path, from `reef_api::paths`
     pub fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
         let request = self.http.request(method, format!("{}{path}", self.base));
-        match &self.token {
+        // its token, and Claude's word that it writes for the token's user, if it says so
+        let request = match &self.token {
             Some(token) => request.bearer_auth(token),
             None => request,
+        };
+        match self.claude {
+            true => request.header(reef_api::WRITER_HEADER, "claude"),
+            false => request,
         }
     }
 

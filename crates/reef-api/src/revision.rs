@@ -20,6 +20,7 @@ use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 
 use crate::comment::ResolvingCommit;
+use crate::user::Author;
 use crate::work::CaptureShas;
 
 /// What happened to one file between a node's base and its worktree
@@ -240,6 +241,9 @@ pub struct Revision {
     /// seal keeps it, so no comment names its lines yet
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draft: bool,
+    /// Who sent the capture it was kept from: the latest, for a draft rewritten
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
 }
 
 impl Revision {
@@ -320,6 +324,7 @@ impl Anchor {
 #[cfg(test)]
 mod tests {
     use super::{Anchor, FileDiff, FileStatus, Hunk, Line, LineKind, Revision, Side};
+    use crate::user::Author;
     use crate::work::CaptureShas;
 
     /// A line of a kind, numbered on the sides that kind is on
@@ -389,6 +394,7 @@ mod tests {
             commits: Vec::new(),
             files: vec![summary.clone(), summary],
             draft: false,
+            author: Author::default(),
         };
         assert_eq!(revision.counts(), (4, 2));
     }
@@ -421,6 +427,7 @@ mod tests {
             commits: Vec::new(),
             files: vec![file.summary()],
             draft: false,
+            author: Author::default(),
         };
         let json = serde_json::to_value(&revision).unwrap();
         assert_eq!(json["node"], "reef/central/C32");

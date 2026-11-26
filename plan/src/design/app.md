@@ -112,7 +112,9 @@ sidebar. [C55](../milestones/m4.md) draws all of it with Dioxus.
   `Handle::swap_plan` did.
 - **One sidebar, with tabs.** The node's header, then **Details**, which is what reef-view's
   sidebar shows, **Changes**, which is the node's captured revisions ([C33](../milestones/m7.md)),
-  **Comments**, which is its threads ([C35](../milestones/m7.md)), and **Edit**, which is C20's editor.
+  **Comments**, which is its threads ([C35](../milestones/m7.md)), **Decisions** ([C76](../milestones/m9.md)),
+  **History**, which is who made each edit of it ([C50](../milestones/m10.md)), and **Edit**, which is C20's
+  editor.
 - **The boxes say what was hit.** Each box, group head and toggle writes what a press or a move
   landed on to a signal, as the event bubbles, and the SVG's own handler takes it. Nothing reads
   the DOM to find the target, and nothing stops the event.
@@ -241,6 +243,8 @@ The user orders a project's ready work, and the terminal sets that order first
   arrow keys move a focused entry a place, Home and End to either end, and Delete takes it off.
 - **The sidebar queues the selected node** first or last, moving it if it is queued already, and
   takes it off. A sidebar drawn outside a plan's page has no queue, and no buttons.
+- **Each entry says who placed it,** "queued by ada" or "moved by Claude, for ada", from the
+  queue's history ([C50](../milestones/m10.md)), and nothing for an entry nobody known placed.
 
 ## The Changes tab
 
@@ -306,6 +310,9 @@ diff, and on the node as a whole ([C35](../milestones/m7.md)), over the threads 
   are pending in it, *Submit review*, which publishes them all at once, and *Discard*. Each is
   sent over the version read. The open counts, in the tab and the toolbar, leave pending threads
   out until they are published.
+- **Who wrote it, in each comment's head** ([C50](../milestones/m10.md)): "ada", "Claude, for ada" or
+  "Claude", and nothing for a comment kept before reef knew its users. A thread's foot says who
+  marked it last, "resolved by bob", by hand or by the capture whose trailer resolved it.
 
 ## The Decisions tab
 
@@ -328,6 +335,20 @@ and comments ([C76](../milestones/m9.md)).
 - **A question shows every choice it offered,** the ones picked ticked. Several picks are
   joined by `, ` as Claude Code joins them, so an answer whose parts are all labels is read as
   those picks, and any other as the user's own words, shown as written.
+
+## The History tab
+
+Who made each edit of the node, what it changed and when ([C50](../milestones/m10.md)).
+
+### Design choices
+
+- **A tab of the node's sidebar,** after Decisions, since a node's edits are the plan's changes,
+  however they were made: in the app, the terminal or Claude's tools.
+- **Read again on each change to the plan,** as the editor reads the node, so an edit made
+  while the tab is open shows up there.
+- **A line an edit, newest first:** when, who if anyone known, the version it left the node at,
+  and what it changed, as `reef node log` says it. A whole plan's write is tagged, so an
+  import reads apart from an edit of the node alone.
 
 ## The sessions panel
 
