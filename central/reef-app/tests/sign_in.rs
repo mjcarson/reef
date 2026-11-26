@@ -106,7 +106,10 @@ async fn authored_by_the_browser(
         threads[0].comments[0].author.describe().as_deref(),
         Some("ada")
     );
-    let history = service.node_history(&named).await?;
+    let history = service
+        .node_history(&named, &reef_api::HistoryQuery::default())
+        .await?
+        .edits;
     assert_eq!(history[0].author.describe().as_deref(), Some("ada"));
     assert_eq!(history[0].version, Some(2));
     // and nobody, for the put the suite made itself

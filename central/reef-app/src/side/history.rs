@@ -6,11 +6,14 @@
 //!   it changed, as `reef node log` says it.
 //! - **A whole plan's write is marked,** as an import's is, so it reads apart from an edit of the
 //!   node alone.
+//! - **The newest 200 first, older ones on asking.** "Older edits" reads 200 more, from the
+//!   newest each time, so a change while older ones are shown leaves no gap among them. Another
+//!   node's history starts at its newest 200 again.
 
 use crate::calls;
 use crate::side::when;
 use dioxus::prelude::*;
-use reef_api::Logged;
+use reef_api::{HISTORY_MAX, Logged};
 
 /// The node's history, read again after each change to its plan
 ///
@@ -27,10 +30,16 @@ pub fn History(
     id: ReadSignal<String>,
     changes: ReadSignal<u64>,
 ) -> Element {
-    // read in the client alone, after each change to the plan
+    // how many edits to show, and of which node, so another node starts at its newest again
+    let mut shown = use_signal(|| (id(), HISTORY_MAX));
+    let count = move || {
+        let (node, count) = shown();
+        if node == id() { count } else { HISTORY_MAX }
+    };
+    // read in the client alone, after each change to the plan or ask for older edits
     let history = use_resource(move || async move {
         let _ = changes();
-        calls::node_history(project(), plan(), id()).await
+        calls::node_history(project(), plan(), id(), count()).await
     });
     let read = history.read();
     match &*read {
@@ -40,9 +49,32 @@ pub fn History(
         Some(Err(error)) => rsx! {
             p { class: "reef-app-error", "Reading the history failed: {error}" }
         },
-        Some(Ok(entries)) => rsx! {
-            HistoryList { entries: entries.clone() }
+        Some(Ok(page)) => rsx! {
+            HistoryList { entries: page.edits.clone() }
+            if page.older.is_some() {
+                OlderButton { on_older: move |_| shown.set((id(), count() + HISTORY_MAX)) }
+            }
         },
+    }
+}
+
+/// The button under a history that has older entries kept, which shows the next 200 of them
+///
+/// # Arguments
+///
+/// * `on_older` - Asks for the older entries
+#[component]
+pub fn OlderButton(on_older: EventHandler<()>) -> Element {
+    rsx! {
+        p { class: "reef-app-actions reef-app-history-more",
+            button {
+                class: "reef-button reef-app-history-older",
+                r#type: "button",
+                title: "Show the next 200 edits, older than these",
+                onclick: move |_| on_older.call(()),
+                "Older edits"
+            }
+        }
     }
 }
 

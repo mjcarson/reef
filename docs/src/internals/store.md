@@ -49,6 +49,9 @@ is the twin's oracle.
   so does each revision linked to it as one that answered it, which a resolve writes.
 - **Each node's, page's and queue's edits are a row each** (`Store::node_history`), in a
   partition of the subject's own, keyed newest first, so a read with a limit takes the newest.
+  A page of it reads one row past its limit, to know whether an older one is kept, and names its
+  last row's key as the cursor onto the next page, which reads past that key in the partition;
+  keys are unique, so no page skips or repeats an edit.
   A write's entries are kept once it has landed, under its lock, with one stamp from the store's
   clock, always past the last it took; its key ends with a number the store drew when it opened,
   so a store opened again never takes a key the last one wrote. A history that fails to keep is

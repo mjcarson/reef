@@ -52,7 +52,8 @@
 //! pool would find the data directory locked.
 
 use reef_api::{
-    Author, Change, Edited, Listed, Placed, PutNode, PutPage, QueueListing, check_page_path, paths,
+    Author, Change, Edited, HistoryQuery, Listed, Placed, PutNode, PutPage, QueueListing,
+    check_page_path, paths,
 };
 use reef_model::{
     Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record, nodes_from_records,
@@ -647,10 +648,14 @@ impl<B: Backend> Service<B> {
                 problems: problems.len(),
             });
         }
-        // who put each entry where it is: the newest edit of the queue that queued or moved it
-        let history = self.store.queue_history(project).await?;
+        // who put each entry where it is: the newest edit of the queue that queued or moved it,
+        // among its newest page
+        let history = self
+            .store
+            .queue_history(project, &HistoryQuery::default())
+            .await?;
         let placed = |node: &NodeName| {
-            history.iter().find_map(|logged| {
+            history.edits.iter().find_map(|logged| {
                 logged.edits.iter().find_map(|edit| match edit {
                     Edited::Queued { node: placed, .. } | Edited::Moved { node: placed, .. }
                         if placed == node =>

@@ -6,6 +6,7 @@
 
 use reef_model::PlanName;
 use std::collections::BTreeMap;
+use std::ops::Bound;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
@@ -1082,27 +1083,38 @@ impl Backend for MemoryBackend {
         Ok(Written::Applied)
     }
 
-    /// Reads a subject's edit rows, newest first, at most a number of them
+    /// Reads a subject's edit rows, newest first, after a key if one is named, at most a number
+    /// of them
     ///
     /// # Arguments
     ///
     /// * `project` - The project the subject belongs to
     /// * `subject` - What was edited
+    /// * `older` - The key to read the rows after, not including it, or `None` for the newest
     /// * `limit` - The most rows to read
     async fn edits(
         &self,
         project: &str,
         subject: &str,
+        older: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<EditRow>> {
         let tables = self.tables();
-        // the subject's partition in sort order, which is newest first, cut at the limit
+        // the subject's partition in sort order, which is newest first
         let key = (project.to_string(), subject.to_string());
-        Ok(tables
-            .edits
-            .get(&key)
-            .map(|partition| partition.values().take(limit).cloned().collect())
-            .unwrap_or_default())
+        let Some(partition) = tables.edits.get(&key) else {
+            return Ok(Vec::new());
+        };
+        // past the cursor if one is named, as shoal's range after it is, cut at the limit
+        let start = match older {
+            Some(older) => Bound::Excluded(older.to_string()),
+            None => Bound::Unbounded,
+        };
+        Ok(partition
+            .range((start, Bound::Unbounded))
+            .map(|(_, row)| row.clone())
+            .take(limit)
+            .collect())
     }
 
     /// Writes edit rows over whatever is stored under their keys

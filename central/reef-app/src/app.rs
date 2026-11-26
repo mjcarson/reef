@@ -160,6 +160,7 @@ code { font-size: 0.92em; }
 .reef-app-history-head { font-size: 0.75rem; color: var(--muted); }
 .reef-app-history-version { font-family: monospace; }
 .reef-app-history-what { overflow-wrap: anywhere; }
+.reef-app-history-more { margin: 0.5rem 0 0; }
 .reef-app-composer { margin-top: 0.35rem; }
 .reef-app-compose { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.35rem 0.45rem; }
 .reef-app-composer .reef-app-actions { margin: 0.3rem 0 0; }

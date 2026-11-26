@@ -235,6 +235,57 @@ fn names(out: &str) -> Vec<&str> {
         .collect()
 }
 
+/// `reef node log` prints a node's newest 200 edits and ends naming the cursor onto the rest,
+/// which `--older` prints, and `--all` prints every edit
+#[tokio::test]
+async fn logs_page_back() -> anyhow::Result<()> {
+    let cx = Cx::new("logs-page-back").await?;
+    let repo = cx.ax.repo.clone();
+    // C1 added, then its body edited 204 times, through the JSON API
+    let nodes = reef_api::paths::nodes(&cx.ax.plan);
+    let total = reef_api::HISTORY_MAX as u64 + 5;
+    let mut c1 = common::work("C1", 0);
+    for read in 0..total {
+        c1.body = format!("# C1\n\nEdit {read}.\n");
+        let read = (read > 0).then_some(read);
+        let puts = reef_api::Puts::new(vec![reef_api::NodePut::new(c1.clone(), read)]);
+        let (status, _): (_, reef_api::Checked) = cx.ax.client.post(&nodes, &puts).await?;
+        anyhow::ensure!(status.is_success(), "put {read:?}: {status}");
+    }
+    // the newest 200, newest first, then the cursor onto the other five
+    let log = cx.reef(&repo, &["node", "log", "C1"]).await?;
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 201, "{log}");
+    assert!(lines[0].starts_with(&format!("v{total} ")), "{log}");
+    assert!(lines[199].starts_with("v6 "), "{log}");
+    let cursor = lines[200]
+        .strip_prefix("older edits are kept: pass --older ")
+        .expect("the page names its cursor");
+    // `--older` prints those five, C1's addition last, and names no cursor
+    let older = cx
+        .reef(&repo, &["node", "log", "C1", "--older", cursor])
+        .await?;
+    let lines: Vec<&str> = older.lines().collect();
+    assert_eq!(lines.len(), 5, "{older}");
+    assert!(lines[0].starts_with("v5 "), "{older}");
+    assert!(
+        lines[4].starts_with("v1 ") && lines[4].ends_with(": added"),
+        "{older}"
+    );
+    // `--all` prints every edit, newest first, and no cursor
+    let all = cx.reef(&repo, &["node", "log", "C1", "--all"]).await?;
+    let lines: Vec<&str> = all.lines().collect();
+    assert_eq!(lines.len(), total as usize, "{all}");
+    assert!(lines[0].starts_with(&format!("v{total} ")) && lines[204].starts_with("v1 "));
+    assert!(!all.contains("--older"), "{all}");
+    // and a cursor no page named is refused, saying where one comes from
+    let (_, error) = cx
+        .failing(&repo, &["node", "log", "C1", "--older", "nope"])
+        .await?;
+    assert!(error.contains("no history's cursor"), "{error}");
+    Ok(())
+}
+
 /// `reef node log`, `page log` and `queue log` print who made each edit and what it changed, and
 /// `reef comment ls` and `queue ls` name the user signed in
 #[tokio::test]

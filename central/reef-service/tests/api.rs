@@ -64,6 +64,7 @@ suite!(
     loop_routes_answer_with_their_status,
     a_pushed_doc_change_appears_after_a_fetch,
     remote_registrations_answer_with_their_status,
+    a_bad_cursor_is_refused,
 );
 
 /// A config listening on this host's loopback port alone, over HTTPS, with reef's own

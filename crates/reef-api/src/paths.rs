@@ -12,6 +12,7 @@
 //! | `POST` | [`PROJECT_FETCH`] |
 //! | `GET`, `POST` | [`PLANS`] |
 //! | `GET`, `POST` | [`QUEUE`] |
+//! | `GET ?older=&limit=` | [`QUEUE_HISTORY`] |
 //! | `GET` | [`PROJECT_NEXT`] |
 //! | `GET` | [`WORK`] |
 //! | `GET` | [`PLAN`] |
@@ -24,6 +25,7 @@
 //! | `GET` | [`DOC`] |
 //! | `GET`, `POST` | [`PAGES`] |
 //! | `GET` | [`PAGE`] |
+//! | `GET ?older=&limit=` | [`PAGE_HISTORY`] |
 //! | `GET`, `POST` | [`NODE_WORK`] |
 //! | `POST` | [`CAPTURES`] |
 //! | `GET` | [`REVISIONS`] |
@@ -33,6 +35,7 @@
 //! | `GET`, `POST` | [`NODE_COMMENTS`] |
 //! | `GET`, `PUT` | [`NODE_REVIEW`] |
 //! | `GET`, `POST` | [`NODE_DECISIONS`] |
+//! | `GET ?older=&limit=` | [`NODE_HISTORY`] |
 //! | `GET` | [`THREAD`] |
 //! | `POST` | [`REPLIES`] |
 //! | `PUT` | [`THREAD_STATE`] |
@@ -69,7 +72,8 @@ pub const PLANS: &str = "/api/v1/projects/{project}/plans";
 /// A project's queue: listed by `GET`, edited an entry at a time by `POST`
 pub const QUEUE: &str = "/api/v1/projects/{project}/queue";
 
-/// A project's queue's history: who queued, moved or took off each entry, newest first
+/// A project's queue's history: who queued, moved or took off each entry, newest first, a page
+/// at a time ([`history_page`])
 pub const QUEUE_HISTORY: &str = "/api/v1/projects/{project}/queue/history";
 
 /// The work ready to start across a project's plans, in the user's order first, and what the
@@ -113,7 +117,8 @@ pub const PAGES: &str = "/api/v1/projects/{project}/plans/{plan}/pages";
 /// One of a plan's own pages, by its path: `design/app.md`
 pub const PAGE: &str = "/api/v1/projects/{project}/plans/{plan}/pages/{*path}";
 
-/// One of a plan's own pages' history, by its path: who edited it and when, newest first
+/// One of a plan's own pages' history, by its path: who edited it and when, newest first, a page
+/// at a time ([`history_page`])
 ///
 /// It sits beside the pages, not under one, since a page's path is the route's last part.
 pub const PAGE_HISTORY: &str = "/api/v1/projects/{project}/plans/{plan}/page-history/{*path}";
@@ -149,7 +154,8 @@ pub const NODE_REVIEW: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id
 /// `POST`
 pub const NODE_DECISIONS: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/decisions";
 
-/// A node's history: who made each edit of it, what it changed and when, newest first
+/// A node's history: who made each edit of it, what it changed and when, newest first, a page at
+/// a time ([`history_page`])
 pub const NODE_HISTORY: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}/history";
 
 /// The query a thread's routes take to serve threads pending in a review too, which they leave
@@ -249,6 +255,39 @@ pub fn encode(text: &str) -> String {
         }
     }
     out
+}
+
+/// A history's path, asking for the page older than a cursor, or its newest page
+///
+/// A history route answers a [`HistoryPage`](crate::HistoryPage) of at most
+/// [`HISTORY_MAX`](crate::HISTORY_MAX) entries, newest first, and its `older` cursor when older
+/// entries are kept. `?older=` hands that cursor back for the next page, and `?limit=` asks for
+/// fewer entries a page.
+///
+/// # Arguments
+///
+/// * `path` - The history's path, as [`node_history`], [`page_history`] or [`queue_history`]
+///   build it
+/// * `older` - The cursor a page named, or `None` for the newest page
+///
+/// # Examples
+///
+/// ```
+/// use reef_api::paths;
+///
+/// let path = paths::queue_history("reef");
+/// assert_eq!(paths::history_page(&path, None), path);
+/// assert_eq!(
+///     paths::history_page(&path, Some("00001.0a")),
+///     "/api/v1/projects/reef/queue/history?older=00001.0a"
+/// );
+/// ```
+pub fn history_page(path: &str, older: Option<&str>) -> String {
+    // the newest page needs no query, and a cursor is encoded as any query value is
+    match older {
+        Some(older) => format!("{path}?older={}", encode(older)),
+        None => path.to_string(),
+    }
 }
 
 /// The path of the project a directory belongs to, or one of its checkout's remotes

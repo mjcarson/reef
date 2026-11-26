@@ -17,7 +17,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/nodes` | its `Listing` |
 | `POST …/plans/{plan}/nodes` `Puts` | `Checked`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/nodes/{id}` | the `StoredNode` |
-| `GET …/plans/{plan}/nodes/{id}/history` | every `Logged` edit of the node, newest first, at most 200, a node removed included |
+| `GET …/plans/{plan}/nodes/{id}/history?older=&limit=` | a `HistoryPage` of the node's `Logged` edits, newest first, a node removed included |
 | `PUT …/plans/{plan}/revision` `PlanWrite` | `Rewrite`: 200, or 422 if it would add a problem |
 | `GET …/plans/{plan}/payload` | the viewer's `Payload` |
 | `GET …/plans/{plan}/check` | its problems, as check prints them |
@@ -25,8 +25,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/pages` | its own pages: a `PageListing` |
 | `POST …/plans/{plan}/pages` `PageEdit` | `PageEdited`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/pages/{*path}` | the `StoredPage`, or 404 |
-| `GET …/plans/{plan}/page-history/{*path}` | every `Logged` edit of the page, newest first |
-| `GET /api/v1/projects/{project}/queue/history` | every `Logged` edit of its queue, newest first |
+| `GET …/plans/{plan}/page-history/{*path}?older=&limit=` | a `HistoryPage` of the page's `Logged` edits, newest first |
+| `GET /api/v1/projects/{project}/queue/history?older=&limit=` | a `HistoryPage` of its queue's `Logged` edits, newest first |
 | `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
 | `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
 | `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
@@ -67,6 +67,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
   must be an absolute directory on the service's host. A `dir` must be absolute, and is matched
   against local projects only if the service's host has it, so a checkout on another host finds
   its project by its `remote`s alone.
+- **A history is read a page at a time.** A `HistoryPage` holds at most 200 edits, newest first,
+  and `older`, a cursor, when older ones are kept. `?older=` hands the cursor back for the next
+  page, which starts past the last's last edit, and `?limit=` asks for fewer a page. A cursor no
+  page named is `bad-request`.
 - **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,

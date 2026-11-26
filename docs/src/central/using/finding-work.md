@@ -21,7 +21,7 @@ reef queue add L2 --top            # take L2 first; also --bottom, --before ID, 
 reef queue move L2 --after L5
 reef queue rm L2
 reef queue ls                      # each entry ready, waiting, in progress, blocked or done, and who queued it
-reef queue log                     # who queued, moved or took off each entry, newest first
+reef queue log                     # who queued, moved or took off each entry, newest first, 200 at a time
 ```
 
 The queue is the project's, one for all its plans, and `next` follows it before plan order. An

@@ -4,7 +4,7 @@
 //! connects to the address it bound, while external connects to the address it was given.
 
 use reef_model::PlanName;
-use shoal::shared::queries::{ConditionRefusal, ConditionalInsert, ConditionalWrite};
+use shoal::shared::queries::{ConditionRefusal, ConditionalInsert, ConditionalWrite, SortRange};
 use shoal::{Errors, FromShoal, Shoal};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -1015,23 +1015,31 @@ impl Backend for ShoalBackend {
         written(sent)
     }
 
-    /// Reads a subject's edit rows, newest first, at most a number of them
+    /// Reads a subject's edit rows, newest first, after a key if one is named, at most a number
+    /// of them
     ///
     /// # Arguments
     ///
     /// * `project` - The project the subject belongs to
     /// * `subject` - What was edited
+    /// * `older` - The key to read the rows after, not including it, or `None` for the newest
     /// * `limit` - The most rows to read
     #[instrument(name = "ShoalBackend::edits", skip_all, err(Debug))]
     async fn edits(
         &self,
         project: &str,
         subject: &str,
+        older: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<EditRow>> {
         // a subject's edits sit in its partition, newest first, so the limit stops at the oldest
         // wanted
-        let get = EditRowGet::new(vec![(project.to_string(), subject.to_string())]).limit(limit);
+        let mut get =
+            EditRowGet::new(vec![(project.to_string(), subject.to_string())]).limit(limit);
+        // a cursor starts the walk past the last row of the page before
+        if let Some(older) = older {
+            get = get.sort_range(SortRange::after(older.to_string()));
+        }
         self.read::<_, EditRow>(get).await
     }
 

@@ -1554,6 +1554,66 @@ def c76_a_nodes_decisions_show_in_its_sidebar(page):
            "where": where, "own words": own})
 
 
+def c88_history_pages_back(page):
+    """C88: a node's History tab shows its newest 200 edits, the older ones on asking, and keeps
+    them shown as a new edit appears live."""
+    reef("plan", "new", "paging")
+    put("paging", node_yaml("H1", "H1 Edited often"))
+    nodes = "/api/v1/projects/check/plans/paging/nodes"
+    _, node = api("GET", f"{nodes}/H1")
+
+    def edit(n, read):
+        """Puts H1 with another body over the version read, through the JSON API."""
+        body = {"node": {"spec": node["spec"], "body": f"# H1\n\nEdit {n}.\n", "order": node["order"]},
+                "read": read}
+        status, answer = api("POST", nodes, {"puts": [body]})
+        if status != 200:
+            raise RuntimeError(f"edit {n} of H1: {status} {answer}")
+
+    # 204 edits of its body, so its history holds 205
+    for n in range(204):
+        edit(n, node["version"] + n)
+    page.goto(URL + "/plans/check/paging")
+    wait_drawn(page)
+    page.locator(".reef-viewport .reef-node", has_text="H1 Edited often").click()
+    page.wait_for_selector(".reef-side", timeout=5000)
+    page.click("button[data-tab=history]")
+    page.wait_for_selector(".reef-app-history-older", timeout=10000)
+    page.evaluate("() => { window.__kept = 'same page'; }")
+
+    def shown():
+        """How many edits the tab shows."""
+        return page.locator(".reef-app-history-entry").count()
+
+    def wait_shown(count):
+        """Waits for the tab to show a number of edits, saying whether it did."""
+        try:
+            page.wait_for_function(
+                f"() => document.querySelectorAll('.reef-app-history-entry').length === {count}", timeout=10000)
+            return True
+        except Exception:
+            return False
+
+    first = shown()
+    # the older five, on asking, C1's addition last and no more to ask for
+    page.click(".reef-app-history-older")
+    wait_shown(205)
+    older = shown()
+    more = page.locator(".reef-app-history-older").count()
+    oldest = page.locator(".reef-app-history-entry .reef-app-history-what").last.inner_text()
+    # a new edit shows live, above the older ones still shown
+    edit(204, node["version"] + 204)
+    wait_shown(206)
+    after = shown()
+    newest = page.locator(".reef-app-history-entry .reef-app-history-version").first.inner_text()
+    page.screenshot(path=str(SHOTS / "reef-app-history-older.png"))
+    check("C88 the History tab shows older edits on asking, and keeps them as a new one shows live",
+          first == 200 and older == 205 and more == 0 and oldest == "added" and after == 206
+          and newest == f"v{node['version'] + 205}" and page.evaluate("() => window.__kept") == "same page",
+          {"first": first, "on asking": older, "older button": more, "oldest": oldest, "after an edit": after,
+           "newest": newest})
+
+
 def c87_http_lands_on_https(page):
     """C87: a server that names no certificate serves reef's own, made under its `certs`, over HTTPS and HTTP/2, and
     a page asked for over http:// lands there, its path kept."""
@@ -2206,6 +2266,7 @@ def main():
                 c47_a_rejected_plan_comes_back_revised,
                 c84_an_attached_session_streams_its_transcript,
                 c76_a_nodes_decisions_show_in_its_sidebar,
+                c88_history_pages_back,
             ]
             for step in checks:
                 # every check, or those `--only` names

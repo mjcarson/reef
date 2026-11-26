@@ -15,7 +15,7 @@
 //! | `POST …/projects/{project}/plans` | `add_plan` | [`AddedPlan`]: 201, or 200 if listed |
 //! | `GET …/projects/{project}/queue` | `queue` | its [`QueueListing`] |
 //! | `POST …/projects/{project}/queue` | `edit_queue` | [`Queued`]: 200, 409 if not queued, 422 if not in its plan |
-//! | `GET …/projects/{project}/queue/history` | `queue_history` | its queue's edits, newest first: every [`Logged`] |
+//! | `GET …/projects/{project}/queue/history?older=&limit=` | `queue_history` | a page of its queue's edits, newest first: a [`HistoryPage`] |
 //! | `GET …/projects/{project}/next` | `project_next` | its plans' ready work, the queue's first: [`Next`] |
 //! | `GET …/projects/{project}/work` | `work` | every [`WorkRecord`] of its nodes, by node |
 //! | `GET …/plans/{plan}` | `plans` | its [`PlanInfo`], or 404 |
@@ -30,7 +30,7 @@
 //! | `GET …/plans/{plan}/pages` | `pages` | its own pages: [`PageListing`] |
 //! | `POST …/plans/{plan}/pages` | `edit_page` | [`PageEdited`]: 200, 409 if stale, 422 if refused |
 //! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
-//! | `GET …/plans/{plan}/page-history/{*path}` | `page_history` | the page's edits, newest first: every [`Logged`] |
+//! | `GET …/plans/{plan}/page-history/{*path}?older=&limit=` | `page_history` | a page of the page's edits, newest first: a [`HistoryPage`] |
 //! | `GET …/plans/{plan}/work/{id}` | `work_of` | the node's [`WorkRecord`], or 404 |
 //! | `POST …/plans/{plan}/work/{id}` | `start_work` | [`Started`]: 200, 409 if stale, 422 if not in its plan |
 //! | `POST …/plans/{plan}/work/{id}/captures` | `add_capture` | [`Captured`]: 200 if kept or unchanged, its trailers' threads resolved, 409 if started again since, 422 if not started |
@@ -42,7 +42,7 @@
 //! | `POST …/plans/{plan}/nodes/{id}/comments` | `start_thread` | [`Commented`]: 200, 422 if not in its plan or on no line of its revisions |
 //! | `GET …/plans/{plan}/nodes/{id}/review` | `node_review` | the node's open [`Review`], or `null` |
 //! | `PUT …/plans/{plan}/nodes/{id}/review` | `mark_review` | [`Reviewed`]: 200, 409 if stale, 422 if the node has no open review |
-//! | `GET …/plans/{plan}/nodes/{id}/history` | `node_history` | the node's edits, newest first, a node removed included: every [`Logged`] |
+//! | `GET …/plans/{plan}/nodes/{id}/history?older=&limit=` | `node_history` | a page of the node's edits, newest first, a node removed included: a [`HistoryPage`] |
 //! | `GET …/plans/{plan}/comments/{thread}?pending=true` | `thread` | the [`Thread`], or 404, as a pending one is unless asked for |
 //! | `POST …/plans/{plan}/comments/{thread}/replies` | `reply` | [`Commented`]: 200, or 422 if no thread starts there |
 //! | `PUT …/plans/{plan}/comments/{thread}/state` | `mark_thread` | [`Marked`]: 200, 409 if stale, 422 if no thread starts there or it is pending in a review |
@@ -112,7 +112,9 @@ use reef_api::{
     Started, StoredNode, StoredPage, Thread, TokenKind, Transcript, User, UserAdded,
     WRITE_BODY_MAX, WorkRecord, paths,
 };
-use reef_api::{Logged, PasswordChange, PasswordChanged, TokenInfo, UserRemoved};
+use reef_api::{
+    HistoryPage, HistoryQuery, PasswordChange, PasswordChanged, TokenInfo, UserRemoved,
+};
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -133,7 +135,7 @@ use crate::certs::Own;
 use crate::conf::Conf;
 use crate::remote::{BadRemote, FetchFailed};
 use crate::service::{NoSession, NoUser, NotAllowed, NotSignedIn, Service, TooManyTries};
-use crate::store::{NotListed, NotRegistered, Pending, Unkeepable};
+use crate::store::{BadCursor, NotListed, NotRegistered, Pending, Unkeepable};
 use crate::tls::{self, TlsListener};
 
 /// A handle on a service that a router holds and clones into every request
@@ -537,6 +539,7 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::BadName
         } else if error.downcast_ref::<Unkeepable>().is_some()
             || error.downcast_ref::<BadRemote>().is_some()
+            || error.downcast_ref::<BadCursor>().is_some()
         {
             ErrorCode::BadRequest
         } else if error.downcast_ref::<FetchFailed>().is_some() {
@@ -1428,14 +1431,19 @@ async fn page<S: Serves>(
 ///
 /// * `serves` - The service
 /// * `segments` - The plan's project and name, and the page's path
+/// * `query` - Which page of the history to read: the newest, or the one older than a cursor
 #[instrument(name = "api::page_history", skip_all, err(Debug))]
 async fn page_history<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<PageSegments>,
-) -> Result<Json<Vec<Logged>>, Failure> {
+    Params(query): Params<HistoryQuery>,
+) -> Result<Json<HistoryPage>, Failure> {
     let plan = PlanName::new(segments.project, segments.plan)?;
     // none for a page never edited
-    let history = serves.service().page_history(&plan, &segments.path).await?;
+    let history = serves
+        .service()
+        .page_history(&plan, &segments.path, &query)
+        .await?;
     Ok(Json(history))
 }
 
@@ -1446,14 +1454,16 @@ async fn page_history<S: Serves>(
 ///
 /// * `serves` - The service
 /// * `segments` - The node's project, plan and id
+/// * `query` - Which page of the history to read: the newest, or the one older than a cursor
 #[instrument(name = "api::node_history", skip_all, err(Debug))]
 async fn node_history<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<NodeSegments>,
-) -> Result<Json<Vec<Logged>>, Failure> {
+    Params(query): Params<HistoryQuery>,
+) -> Result<Json<HistoryPage>, Failure> {
     let node = segments.name()?;
     // none for a node never edited since histories were kept
-    let history = serves.service().node_history(&node).await?;
+    let history = serves.service().node_history(&node, &query).await?;
     Ok(Json(history))
 }
 
@@ -1464,13 +1474,18 @@ async fn node_history<S: Serves>(
 ///
 /// * `serves` - The service
 /// * `segments` - The project's name
+/// * `query` - Which page of the history to read: the newest, or the one older than a cursor
 #[instrument(name = "api::queue_history", skip_all, err(Debug))]
 async fn queue_history<S: Serves>(
     State(serves): State<S>,
     Segments(segments): Segments<ProjectSegments>,
-) -> Result<Json<Vec<Logged>>, Failure> {
+    Params(query): Params<HistoryQuery>,
+) -> Result<Json<HistoryPage>, Failure> {
     // none for a queue never edited since histories were kept
-    let history = serves.service().queue_history(&segments.project).await?;
+    let history = serves
+        .service()
+        .queue_history(&segments.project, &query)
+        .await?;
     Ok(Json(history))
 }
 
@@ -2423,7 +2438,7 @@ async fn change_password<S: Serves>(
 mod tests {
     use super::{ChangesQuery, Failure, FindQuery, Query};
     use crate::remote::{BadRemote, FetchFailed};
-    use crate::store::{NotListed, NotRegistered, Unkeepable};
+    use crate::store::{BadCursor, NotListed, NotRegistered, Unkeepable};
     use reef_api::{Change, ErrorCode, Project};
     use reef_model::PlanName;
 
@@ -2538,6 +2553,10 @@ mod tests {
             ),
             (
                 anyhow::Error::from(Unkeepable("no".to_string())),
+                ErrorCode::BadRequest,
+            ),
+            (
+                anyhow::Error::from(BadCursor("no".to_string())),
                 ErrorCode::BadRequest,
             ),
             (

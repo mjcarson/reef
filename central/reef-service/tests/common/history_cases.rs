@@ -6,8 +6,8 @@
 //! changed, newest first.
 
 use reef_api::{
-    Author, Edited, NodePut, NodeRemove, PageEdit, PageWrite, Place, PlanWrite, Puts, QueueEdit,
-    Writer,
+    Author, Edited, HISTORY_MAX, HistoryQuery, NodePut, NodeRemove, PageEdit, PageWrite, Place,
+    PlanWrite, Puts, QueueEdit, Writer,
 };
 use reef_model::accept::{Criterion, Kind};
 use reef_model::{Diagnostic, Met, Status};
@@ -96,7 +96,13 @@ pub async fn a_nodes_history_says_who_changed_what<B: Reopen>(fx: Fx<B>) -> anyh
         by("ada", Writer::Claude),
     );
     // a node never edited has no history
-    assert!(fx.store.node_history(&node).await?.is_empty());
+    assert!(
+        fx.store
+            .node_history(&node, &HistoryQuery::default())
+            .await?
+            .edits
+            .is_empty()
+    );
     // ada adds C1 with a criterion, bob sets it in progress, Claude for ada meets the criterion
     // naming its test, and ada edits its title and body
     let mut c1 = work("C1", 0);
@@ -115,7 +121,11 @@ pub async fn a_nodes_history_says_who_changed_what<B: Reopen>(fx: Fx<B>) -> anyh
     c1.body = "# C1\n\nAnother body.\n".to_string();
     put(&fx, c1.clone(), Some(3), &ada).await?;
     // newest first, each with its author and the version it left
-    let history = fx.store.node_history(&node).await?;
+    let history = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?
+        .edits;
     let told: Vec<(Option<u64>, Option<String>)> = history
         .iter()
         .map(|logged| (logged.version, logged.author.describe()))
@@ -163,8 +173,23 @@ pub async fn a_nodes_history_says_who_changed_what<B: Reopen>(fx: Fx<B>) -> anyh
     // stores' edits within one millisecond sort by each store's own number, and a restart, which
     // takes longer than that, sorts its edits after the last store's
     let fx = fx.reopen().await?;
-    assert_eq!(fx.store.node_history(&node).await?, history);
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    assert_eq!(
+        fx.store
+            .node_history(&node, &HistoryQuery::default())
+            .await?
+            .edits,
+        history
+    );
+    // a restart outlasts the last store's stamps, which writes within one millisecond push ahead
+    // of the clock, so the twin, reopened at once, waits for its clock to pass them
+    let newest = history[0].at;
+    while std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis()
+        <= u128::from(newest)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
     // and a node removed keeps its history, its removal newest
     let removal = Puts {
         puts: Vec::new(),
@@ -175,7 +200,11 @@ pub async fn a_nodes_history_says_who_changed_what<B: Reopen>(fx: Fx<B>) -> anyh
         .batch_checked(&fx.plan, removal, &bob, no_problems)
         .await?;
     assert!(matches!(removed, Checked::Applied { .. }), "{removed:?}");
-    let history = fx.store.node_history(&node).await?;
+    let history = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?
+        .edits;
     assert_eq!(history.len(), 5);
     assert_eq!(
         (
@@ -198,7 +227,15 @@ pub async fn writes_log_only_what_they_changed<B: Reopen>(fx: Fx<B>) -> anyhow::
     let node = |id: &str| fx.plan.node(id);
     let length = |id: &'static str| {
         let fx = &fx;
-        async move { anyhow::Ok(fx.store.node_history(&fx.plan.node(id)?).await?.len()) }
+        async move {
+            anyhow::Ok(
+                fx.store
+                    .node_history(&fx.plan.node(id)?, &HistoryQuery::default())
+                    .await?
+                    .edits
+                    .len(),
+            )
+        }
     };
     // an import of C1 and C2 with a page, each added, as a whole plan's write
     let page = PageWrite::new("design/a.md", "# A\n");
@@ -208,19 +245,31 @@ pub async fn writes_log_only_what_they_changed<B: Reopen>(fx: Fx<B>) -> anyhow::
     };
     write_plan(&fx, import.clone()).await?;
     for id in ["C1", "C2"] {
-        let history = fx.store.node_history(&node(id)?).await?;
+        let history = fx
+            .store
+            .node_history(&node(id)?, &HistoryQuery::default())
+            .await?
+            .edits;
         assert_eq!(history.len(), 1, "{id}: {history:?}");
         assert_eq!(history[0].edits, vec![Edited::Added]);
         assert!(history[0].whole_plan && history[0].author.is_unknown());
     }
-    let pages = fx.store.page_history(&fx.plan, "design/a.md").await?;
+    let pages = fx
+        .store
+        .page_history(&fx.plan, "design/a.md", &HistoryQuery::default())
+        .await?
+        .edits;
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0].edits, vec![Edited::Added]);
     // the same import again changes nothing, so it logs nothing, though versions move on
     write_plan(&fx, import).await?;
     assert_eq!((length("C1").await?, length("C2").await?), (1, 1));
     assert_eq!(
-        fx.store.page_history(&fx.plan, "design/a.md").await?.len(),
+        fx.store
+            .page_history(&fx.plan, "design/a.md", &HistoryQuery::default())
+            .await?
+            .edits
+            .len(),
         1
     );
     // a batch that puts C1 as it is and retitles C2 logs C2 alone
@@ -259,7 +308,11 @@ pub async fn writes_log_only_what_they_changed<B: Reopen>(fx: Fx<B>) -> anyhow::
     let newest = |id: &'static str| {
         let fx = &fx;
         async move {
-            let history = fx.store.node_history(&fx.plan.node(id)?).await?;
+            let history = fx
+                .store
+                .node_history(&fx.plan.node(id)?, &HistoryQuery::default())
+                .await?
+                .edits;
             anyhow::Ok(history.first().map(|logged| logged.edits.clone()))
         }
     };
@@ -271,7 +324,11 @@ pub async fn writes_log_only_what_they_changed<B: Reopen>(fx: Fx<B>) -> anyhow::
     );
     assert_eq!(newest("C2").await?, Some(vec![Edited::Removed]));
     assert_eq!(newest("C3").await?, Some(vec![Edited::Added]));
-    let pages = fx.store.page_history(&fx.plan, "design/a.md").await?;
+    let pages = fx
+        .store
+        .page_history(&fx.plan, "design/a.md", &HistoryQuery::default())
+        .await?
+        .edits;
     assert_eq!(pages[0].edits, vec![Edited::Removed]);
     assert_eq!(pages[0].version, None);
     Ok(())
@@ -323,7 +380,11 @@ pub async fn pages_and_the_queue_keep_histories<B: Reopen>(fx: Fx<B>) -> anyhow:
             .await?;
         assert!(matches!(edited, PageEdited::Applied { .. }), "{edited:?}");
     }
-    let history = fx.store.page_history(&fx.plan, "design/a.md").await?;
+    let history = fx
+        .store
+        .page_history(&fx.plan, "design/a.md", &HistoryQuery::default())
+        .await?
+        .edits;
     let told: Vec<(Option<u64>, Option<String>, Vec<Edited>)> = history
         .iter()
         .map(|logged| {
@@ -380,7 +441,11 @@ pub async fn pages_and_the_queue_keep_histories<B: Reopen>(fx: Fx<B>) -> anyhow:
         let queued = fx.store.edit_queue("reef", edit, author).await?;
         assert!(matches!(queued, Queued::Applied { .. }), "{queued:?}");
     }
-    let history = fx.store.queue_history("reef").await?;
+    let history = fx
+        .store
+        .queue_history("reef", &HistoryQuery::default())
+        .await?
+        .edits;
     let told: Vec<(Option<String>, Vec<Edited>)> = history
         .iter()
         .map(|logged| (logged.author.describe(), logged.edits.clone()))
@@ -432,13 +497,101 @@ pub async fn an_unkept_history_leaves_its_edit<B: Reopen>(fx: Fx<B>) -> anyhow::
     put(&fx, work("C1", 0), None, &ada).await?;
     let stored = fx.store.get(&fx.plan, "C1").await?.expect("the put stands");
     assert_eq!(stored.version, 1);
-    assert!(fx.store.node_history(&node).await?.is_empty());
+    assert!(
+        fx.store
+            .node_history(&node, &HistoryQuery::default())
+            .await?
+            .edits
+            .is_empty()
+    );
     // and the next edit's is kept, a gap where the first's would be
     let mut c1 = work("C1", 0);
     c1.spec.status = Some(Status::Done);
     put(&fx, c1, Some(1), &ada).await?;
-    let history = fx.store.node_history(&node).await?;
+    let history = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?
+        .edits;
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].version, Some(2));
+    Ok(())
+}
+
+/// A history pages back past its newest 200: each page starts after the one before's cursor, so
+/// together they hold every edit once, newest first, and the oldest page names no cursor
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_history_pages_past_its_newest<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    let node = fx.plan.node("C1")?;
+    let ada = by("ada", Writer::User);
+    // 205 edits of C1: its addition, then 204 of its body
+    let total = HISTORY_MAX as u64 + 5;
+    let mut c1 = work("C1", 0);
+    put(&fx, c1.clone(), None, &ada).await?;
+    for version in 1..total {
+        c1.body = format!("# C1\n\nEdit {version}.\n");
+        put(&fx, c1.clone(), Some(version), &ada).await?;
+    }
+    // the versions a page's entries left, newest first
+    let versions = |edits: &[reef_api::Logged]| -> Vec<Option<u64>> {
+        edits.iter().map(|logged| logged.version).collect()
+    };
+    let newest_first =
+        |from: u64, to: u64| -> Vec<Option<u64>> { (from..=to).rev().map(Some).collect() };
+    // the newest page holds 200 of them, and names the cursor onto the rest
+    let newest = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?;
+    assert_eq!(versions(&newest.edits), newest_first(6, total));
+    let older = newest.older.clone().expect("older edits are kept");
+    // the page older than it holds the other five, ending with C1's addition, and names none
+    let rest = fx
+        .store
+        .node_history(&node, &HistoryQuery::older(older.clone()))
+        .await?;
+    assert_eq!(versions(&rest.edits), newest_first(1, 5));
+    assert_eq!(rest.edits[4].edits, vec![Edited::Added]);
+    assert_eq!(rest.older, None);
+    // a page its limit fills exactly names none either, since nothing older is kept
+    let exact = HistoryQuery {
+        older: Some(older),
+        limit: Some(5),
+    };
+    let exact = fx.store.node_history(&node, &exact).await?;
+    assert_eq!((exact.edits.len(), exact.older), (5, None));
+    // smaller pages walk the same history, every edit once and in order
+    let mut walked = Vec::new();
+    let mut query = HistoryQuery {
+        older: None,
+        limit: Some(7),
+    };
+    loop {
+        let page = fx.store.node_history(&node, &query).await?;
+        assert!(page.edits.len() <= 7, "{}", page.edits.len());
+        walked.extend(versions(&page.edits));
+        match page.older {
+            Some(older) => query.older = Some(older),
+            None => break,
+        }
+    }
+    assert_eq!(walked, newest_first(1, total));
+    // a page asking for more than 200 gets 200
+    let greedy = HistoryQuery {
+        older: None,
+        limit: Some(5000),
+    };
+    let greedy = fx.store.node_history(&node, &greedy).await?;
+    assert_eq!(greedy.edits.len(), HISTORY_MAX);
+    // and the same pages read back once the store is reopened
+    let fx = fx.reopen().await?;
+    let reread = fx
+        .store
+        .node_history(&node, &HistoryQuery::default())
+        .await?;
+    assert_eq!(reread, newest);
     Ok(())
 }

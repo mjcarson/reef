@@ -338,10 +338,17 @@ own.
   history.
 - **Keys count down, so a read takes the newest first.** A key is `u64::MAX` less the edit's
   stamp, padded to twenty digits, so a get with a limit reads the newest edits and stops: 200 of
-  them, which [C88](../milestones/m10.md) pages past. The stamp is the time in milliseconds, but always past the
-  last one the store took, so one store's edits to a subject never share a key and need no read
-  first. The key ends with a number each store draws when it opens, so a store opened again after
-  a restart never writes over the last one's edit of the same millisecond.
+  them, a page. The stamp is the time in milliseconds, but always past the last one the store
+  took, so one store's edits to a subject never share a key and need no read first. The key ends
+  with a number each store draws when it opens, so a store opened again after a restart never
+  writes over the last one's edit of the same millisecond.
+- **A page's last key is the cursor onto the next** ([C88](../milestones/m10.md)). A page reads one row past
+  its limit, to know whether an older one is kept, and if one is, names its last row's key as
+  `older`. The next page reads the partition past that key, shoal's `SortRange::after`, so it
+  costs a page however far back it is. Keys are unique where times aren't, so no page skips or
+  repeats an edit two stores made in one millisecond. A cursor not shaped as a key is refused
+  rather than read. The CLI's `--all` and the app's **Older edits** read page after page; the app
+  reads from the newest each time, so an edit while older ones are shown leaves no gap.
 - **Written once, after the write it records, under the same lock.** An entry is kept once its
   write has landed and before the change is published, so a client that reads again on the change
   finds it. A history that fails to keep is warned of and leaves its write standing, with a gap:

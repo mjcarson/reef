@@ -9,7 +9,8 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   - **Comments**: its threads; click a diff line's number to start one there;
   - **Decisions**: every plan its Claude sessions asked approval for, and every question they
     asked, with what was answered;
-  - **History**: who made each edit of the node, what it changed and when, newest first.
+  - **History**: who made each edit of the node, what it changed and when, newest first, 200
+    at a time: **Older edits** shows the next 200.
 
   Each comment says who wrote it, "Claude, for ada" where Claude wrote it with ada's login, and
   each thread who marked it last. A revision says who captured it, a decision whose session

@@ -537,17 +537,20 @@ pub trait Backend: Send + Sync {
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 
-    /// Reads a subject's edit rows, newest first, at most a number of them
+    /// Reads a subject's edit rows, newest first, after a key if one is named, at most a number
+    /// of them
     ///
     /// # Arguments
     ///
     /// * `project` - The project the subject belongs to
     /// * `subject` - What was edited: `node/<plan>/<id>`, `page/<plan>/<path>` or `queue`
+    /// * `older` - The key to read the rows after, not including it, or `None` for the newest
     /// * `limit` - The most rows to read
     fn edits(
         &self,
         project: &str,
         subject: &str,
+        older: Option<&str>,
         limit: usize,
     ) -> impl Future<Output = anyhow::Result<Vec<EditRow>>> + Send;
 

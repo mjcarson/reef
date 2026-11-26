@@ -722,20 +722,22 @@ impl<B: Backend> Backend for Faulty<B> {
         self.inner.write_remote(row, expect).await
     }
 
-    /// Reads a subject's edit rows, newest first
+    /// Reads a subject's edit rows, newest first, after a key if one is named
     ///
     /// # Arguments
     ///
     /// * `project` - The project the subject belongs to
     /// * `subject` - What was edited
+    /// * `older` - The key to read the rows after, or `None` for the newest
     /// * `limit` - The most rows to read
     async fn edits(
         &self,
         project: &str,
         subject: &str,
+        older: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<EditRow>> {
-        self.inner.edits(project, subject, limit).await
+        self.inner.edits(project, subject, older, limit).await
     }
 
     /// Writes edit rows, failing first if asked to

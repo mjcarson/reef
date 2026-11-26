@@ -7,12 +7,13 @@
 
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, Anchor, ApiError, CaptureShas, Captured, Change, Checked,
-    Commented, EditLoop, ErrorCode, Fetched, FileDiff, FollowedThread, Listing, Loop, LoopEdit,
-    LoopEdited, LoopState, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread, NodePut,
-    NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Pane, Place, PlanInfo, PlanWrite,
-    Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, ResolveThread, Resolved,
-    Resolves, ResolvingCommit, Revision, Rewrite, Side, StalePut, StartWork, Started, StoredNode,
-    StoredPage, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord, paths,
+    Commented, EditLoop, ErrorCode, Fetched, FileDiff, FollowedThread, HistoryPage, Listing, Loop,
+    LoopEdit, LoopEdited, LoopState, MarkThread, Marked, NewPlan, NewProject, NewReply, NewThread,
+    NodePut, NodeWrite, PageEdit, PageEdited, PageListing, PageWrite, Pane, Place, PlanInfo,
+    PlanWrite, Project, PutNode, Puts, QueueEdit, QueueListing, Queued, Refusal, ResolveThread,
+    Resolved, Resolves, ResolvingCommit, Revision, Rewrite, Side, StalePut, StartWork, Started,
+    StoredNode, StoredPage, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord,
+    paths,
 };
 use reef_api::{MarkReview, Review, ReviewState, Reviewed, Writer};
 use reef_model::{
@@ -2018,5 +2019,68 @@ pub async fn remote_registrations_answer_with_their_status<B: Backend + 'static>
         (status, error.code),
         (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
     );
+    Ok(())
+}
+
+/// A history route pages by the cursor its page names, and refuses a cursor no page named, or a
+/// limit that isn't a number, as a bad request
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn a_bad_cursor_is_refused<B: Backend + 'static>(ax: Ax<B>) -> anyhow::Result<()> {
+    // C1 added and edited twice, so its history is three edits
+    let nodes = paths::nodes(&ax.plan);
+    let mut c1 = work("C1", &[], 0);
+    for read in [None, Some(1), Some(2)] {
+        c1.body = format!("# C1\n\nAs of {read:?}.\n");
+        let (status, _): (_, Checked) = ax.client.post(&nodes, &one(c1.clone(), read)).await?;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // two a page, the newest first, then the one left, past the first page's cursor
+    let node = ax.plan.node("C1")?;
+    let history = paths::node_history(&node);
+    let (status, first): (_, HistoryPage) = ax.client.get(&format!("{history}?limit=2")).await?;
+    assert_eq!(status, StatusCode::OK);
+    let versions = |page: &HistoryPage| -> Vec<Option<u64>> {
+        page.edits.iter().map(|logged| logged.version).collect()
+    };
+    assert_eq!(versions(&first), vec![Some(3), Some(2)]);
+    let older = first.older.clone().expect("an older edit is kept");
+    let next = format!("{}&limit=2", paths::history_page(&history, Some(&older)));
+    let (status, last): (_, HistoryPage) = ax.client.get(&next).await?;
+    assert_eq!(
+        (status, versions(&last), last.older),
+        (StatusCode::OK, vec![Some(1)], None)
+    );
+    // a cursor no page named is refused on each history's route, saying where one comes from
+    let routes = [
+        history.clone(),
+        paths::page_history(&ax.plan, "design/a.md"),
+        paths::queue_history(&ax.plan.project),
+    ];
+    for route in &routes {
+        for bad in ["nope", "00000000000000000001", "1.2", &format!("{older}0")] {
+            let path = paths::history_page(route, Some(bad));
+            let (status, error): (_, ApiError) = ax.client.get(&path).await?;
+            assert_eq!(
+                (status, error.code),
+                (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+                "{path}"
+            );
+            assert!(
+                error.message.contains("no history's cursor"),
+                "{}",
+                error.message
+            );
+        }
+        // and so is a limit that isn't a number
+        let (status, error): (_, ApiError) = ax.client.get(&format!("{route}?limit=many")).await?;
+        assert_eq!(
+            (status, error.code),
+            (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+            "{route}"
+        );
+    }
     Ok(())
 }

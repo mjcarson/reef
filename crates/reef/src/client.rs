@@ -16,7 +16,7 @@
 //! the caller to sign in answers 401, which comes back as an `unauthorized` error saying to run
 //! `reef login`.
 
-use reef_api::Logged;
+use reef_api::HistoryPage;
 use reef_api::{
     AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
     DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing, Loop,
@@ -475,34 +475,52 @@ impl Client {
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
-    /// Reads a project's queue's history: who queued, moved or took off each entry, newest first
+    /// Reads a page of a project's queue's history: who queued, moved or took off each entry,
+    /// newest first
     ///
     /// # Arguments
     ///
     /// * `project` - The project's name
-    pub async fn queue_history(&self, project: &str) -> anyhow::Result<Vec<Logged>> {
-        let path = paths::queue_history(project);
+    /// * `older` - The cursor a page named, to read the one older than it, or `None` for the newest
+    pub async fn queue_history(
+        &self,
+        project: &str,
+        older: Option<&str>,
+    ) -> anyhow::Result<HistoryPage> {
+        let path = paths::history_page(&paths::queue_history(project), older);
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
-    /// Reads a node's history: who made each edit, what it changed and when, newest first
+    /// Reads a page of a node's history: who made each edit, what it changed and when, newest
+    /// first
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
-    pub async fn node_history(&self, node: &NodeName) -> anyhow::Result<Vec<Logged>> {
-        let path = paths::node_history(node);
+    /// * `older` - The cursor a page named, to read the one older than it, or `None` for the newest
+    pub async fn node_history(
+        &self,
+        node: &NodeName,
+        older: Option<&str>,
+    ) -> anyhow::Result<HistoryPage> {
+        let path = paths::history_page(&paths::node_history(node), older);
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
-    /// Reads one of a plan's own pages' history, newest first
+    /// Reads a page of one of a plan's own pages' history, newest first
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     /// * `path` - The page's path
-    pub async fn page_history(&self, plan: &PlanName, path: &str) -> anyhow::Result<Vec<Logged>> {
-        let path = paths::page_history(plan, path);
+    /// * `older` - The cursor a page named, to read the one older than it, or `None` for the newest
+    pub async fn page_history(
+        &self,
+        plan: &PlanName,
+        path: &str,
+        older: Option<&str>,
+    ) -> anyhow::Result<HistoryPage> {
+        let path = paths::history_page(&paths::page_history(plan, path), older);
         self.send(self.http.get(self.url(&path)), &path).await
     }
 

@@ -60,6 +60,7 @@ mod users;
 mod work;
 
 pub use comment::{Followed, Pending};
+pub use history::BadCursor;
 pub use remotes::{KeptRemote, StoredRemote};
 pub use users::{StoredToken, StoredUser, UserDropped, UserKept};
 

@@ -541,13 +541,17 @@ pub enum NodeCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
-    /// Print a node's history: who made each edit, what it changed and when, newest first
+    /// Print a node's history: who made each edit, what it changed and when, newest first, 200
+    /// edits at a time
     Log {
         /// The node's id
         id: String,
         /// The plan it is in, if not the project's only plan
         #[command(flatten)]
         pick: PlanPick,
+        /// How far back to print
+        #[command(flatten)]
+        paging: Paging,
     },
 }
 
@@ -833,13 +837,16 @@ pub enum PageCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
-    /// Print a page's history: who edited it and when, newest first
+    /// Print a page's history: who edited it and when, newest first, 200 edits at a time
     Log {
         /// The page's path
         path: String,
         /// The plan it is in, if not the project's only plan
         #[command(flatten)]
         pick: PlanPick,
+        /// How far back to print
+        #[command(flatten)]
+        paging: Paging,
     },
 }
 
@@ -883,11 +890,15 @@ pub enum QueueCommand {
         #[command(flatten)]
         pick: Pick,
     },
-    /// Print the queue's history: who queued, moved or took off each entry, newest first
+    /// Print the queue's history: who queued, moved or took off each entry, newest first, 200
+    /// edits at a time
     Log {
         /// The project whose queue's history to print, if not the working directory's
         #[command(flatten)]
         pick: Pick,
+        /// How far back to print
+        #[command(flatten)]
+        paging: Paging,
     },
 }
 
@@ -915,6 +926,18 @@ pub struct Pick {
     /// The project to use, instead of the one the working directory belongs to
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
+}
+
+/// How far back a history is printed: its newest 200 edits, the 200 older than a cursor, or
+/// every one
+#[derive(Debug, Clone, Default, Args)]
+pub struct Paging {
+    /// Print the edits older than this cursor, which a page with older edits ends by naming
+    #[arg(long, value_name = "CURSOR", conflicts_with = "all")]
+    pub older: Option<String>,
+    /// Print every edit kept, not only the newest 200
+    #[arg(long)]
+    pub all: bool,
 }
 
 /// A plan named on the command line, else the picked project's only plan
@@ -1008,9 +1031,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Node(NodeCommand::Capture { id, pick }) => {
             capture::capture(&client, cwd, id.as_deref(), &pick, out).await
         }
-        Command::Node(NodeCommand::Log { id, pick }) => {
+        Command::Node(NodeCommand::Log { id, pick, paging }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
-            history::node(&client, &plan.node(id)?, out).await
+            let older = paging.older.as_deref();
+            history::node(&client, &plan.node(id)?, older, paging.all, out).await
         }
         Command::Page(PageCommand::Ls { pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
@@ -1030,9 +1054,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let plan = picked_plan(&client, cwd, &pick).await?;
             page::rm(&client, &plan, &path, out).await
         }
-        Command::Page(PageCommand::Log { path, pick }) => {
+        Command::Page(PageCommand::Log { path, pick, paging }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
-            history::page(&client, &plan, &path, out).await
+            let older = paging.older.as_deref();
+            history::page(&client, &plan, &path, older, paging.all, out).await
         }
         Command::Start {
             id,
@@ -1124,9 +1149,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             let project = picked(&client, cwd, &pick).await?;
             queue::ls(&client, &project.name, out).await
         }
-        Command::Queue(QueueCommand::Log { pick }) => {
+        Command::Queue(QueueCommand::Log { pick, paging }) => {
             let project = picked(&client, cwd, &pick).await?;
-            history::queue(&client, &project.name, out).await
+            let older = paging.older.as_deref();
+            history::queue(&client, &project.name, older, paging.all, out).await
         }
         Command::Import {
             book,

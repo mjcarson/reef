@@ -222,8 +222,9 @@ async fn claudes_writes_are_marked_for_its_user() -> anyhow::Result<()> {
     // each is Claude's, for ada, in the node's history
     let client = signed_client_of(&ax, "ada", &issued.token)?;
     let node = ax.plan.node("C1")?;
-    let history = client.node_history(&node).await?;
+    let history = client.node_history(&node, None).await?;
     let authors: Vec<Option<String>> = history
+        .edits
         .iter()
         .map(|logged| logged.author.describe())
         .collect();

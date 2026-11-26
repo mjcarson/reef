@@ -16,12 +16,17 @@
 //!   after a restart, whose clock starts over, never writes over an edit the last one kept in
 //!   the same millisecond; two stores' edits within one millisecond sort by those numbers. One
 //!   write's entries share a key, each in a partition of its own.
+//! - **Read a page at a time, by key.** A page reads one row past its limit, so it knows whether
+//!   any older one is kept, and names the key of its last row as the cursor onto the next page,
+//!   which reads past it. Keys are unique, so a page never skips or repeats an edit, as a time
+//!   could when two stores' edits share a millisecond.
 //! - **What changed, rather than the node again.** A node's entry tells its status changed, a
 //!   criterion was met or named another test, other keys were edited, or its body was. A put that
 //!   left a node as it was keeps none, and nor does a whole-plan write for the nodes it left so.
 
 use reef_api::{
-    Author, Edited, HISTORY_MAX, Logged, NodePut, NodeRemove, NodeWrite, PageEdit, PageWrite,
+    Author, Edited, HistoryPage, HistoryQuery, Logged, NodePut, NodeRemove, NodeWrite, PageEdit,
+    PageWrite,
 };
 use reef_model::accept::Criterion;
 use reef_model::{Description, NodeName, NodeSpec, PlanName};
@@ -90,6 +95,42 @@ pub fn page_subject(plan: &PlanName, path: &str) -> String {
 /// * `nonce` - The store's random number
 fn edit_key(stamp: u64, nonce: u64) -> String {
     format!("{:020}.{nonce:016x}", u64::MAX - stamp)
+}
+
+/// A cursor this store never handed out, which a history page can't be read past
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BadCursor(pub String);
+
+impl std::fmt::Display for BadCursor {
+    /// Says which cursor was refused, and where a good one comes from
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` is no history's cursor: hand back the `older` a page named",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for BadCursor {}
+
+/// Whether some text is shaped as [`edit_key`] makes a key: twenty digits, a dot, and sixteen
+/// lowercase hex digits
+///
+/// # Arguments
+///
+/// * `text` - The text a client sent as a cursor
+fn is_cursor(text: &str) -> bool {
+    // the stamp's part, then the store's number's
+    let Some((stamp, nonce)) = text.split_once('.') else {
+        return false;
+    };
+    stamp.len() == 20
+        && stamp.bytes().all(|byte| byte.is_ascii_digit())
+        && nonce.len() == 16
+        && nonce
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// What a put changed of a node: added if it is new, else each part it changed, or nothing for
@@ -480,16 +521,43 @@ impl<B: Backend> Store<B> {
         }
     }
 
-    /// Reads a subject's history, newest first, at most [`HISTORY_MAX`] entries
+    /// Reads a page of a subject's history, newest first: the newest, or the one older than a
+    /// cursor, with the cursor onto the page after it when older entries are kept
     ///
     /// # Arguments
     ///
     /// * `project` - The project the subject belongs to
     /// * `subject` - The subject's partition
+    /// * `query` - Which page to read, and how many entries it may hold
     #[instrument(name = "Store::history", skip_all, err(Debug))]
-    async fn history(&self, project: &str, subject: &str) -> anyhow::Result<Vec<Logged>> {
-        let rows = self.backend.edits(project, subject, HISTORY_MAX).await?;
-        rows.into_iter()
+    async fn history(
+        &self,
+        project: &str,
+        subject: &str,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        // a cursor this store never handed out is refused, rather than read as a key
+        let older = query.older.as_deref();
+        if let Some(older) = older
+            && !is_cursor(older)
+        {
+            return Err(BadCursor(older.to_string()).into());
+        }
+        // one row past the page, which says whether any older one is kept
+        let limit = query.page_size();
+        let mut rows = self
+            .backend
+            .edits(project, subject, older, limit + 1)
+            .await?;
+        let more = rows.len() > limit;
+        rows.truncate(limit);
+        // the page's last key is the cursor onto the next, if there is a next
+        let older = match more {
+            true => rows.last().map(|row| row.key.clone()),
+            false => None,
+        };
+        let edits = rows
+            .into_iter()
             .map(|row| {
                 // a row of another subject whose key hashed the same is a collision, not an edit
                 anyhow::ensure!(
@@ -504,44 +572,63 @@ impl<B: Backend> Store<B> {
                     anyhow::anyhow!("edit `{}` of `{project}/{subject}`: {error}", row.key)
                 })
             })
-            .collect()
+            .collect::<anyhow::Result<Vec<Logged>>>()?;
+        Ok(HistoryPage { edits, older })
     }
 
-    /// Reads a node's history, newest first, a node removed included
+    /// Reads a page of a node's history, newest first, a node removed included
     ///
     /// # Arguments
     ///
     /// * `node` - The node's full name
+    /// * `query` - Which page to read
     #[instrument(name = "Store::node_history", skip_all, err(Debug))]
-    pub async fn node_history(&self, node: &NodeName) -> anyhow::Result<Vec<Logged>> {
-        self.history(&node.plan.project, &node_subject(node)).await
+    pub async fn node_history(
+        &self,
+        node: &NodeName,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        self.history(&node.plan.project, &node_subject(node), query)
+            .await
     }
 
-    /// Reads a page's history, newest first, a page removed included
+    /// Reads a page of a page's history, newest first, a page removed included
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan the page is one of
     /// * `path` - The page's path
+    /// * `query` - Which page of its history to read
     #[instrument(name = "Store::page_history", skip_all, err(Debug))]
-    pub async fn page_history(&self, plan: &PlanName, path: &str) -> anyhow::Result<Vec<Logged>> {
-        self.history(&plan.project, &page_subject(plan, path)).await
+    pub async fn page_history(
+        &self,
+        plan: &PlanName,
+        path: &str,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        self.history(&plan.project, &page_subject(plan, path), query)
+            .await
     }
 
-    /// Reads a project's queue's history, newest first
+    /// Reads a page of a project's queue's history, newest first
     ///
     /// # Arguments
     ///
     /// * `project` - The project's name
+    /// * `query` - Which page to read
     #[instrument(name = "Store::queue_history", skip_all, err(Debug))]
-    pub async fn queue_history(&self, project: &str) -> anyhow::Result<Vec<Logged>> {
-        self.history(project, QUEUE_SUBJECT).await
+    pub async fn queue_history(
+        &self,
+        project: &str,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        self.history(project, QUEUE_SUBJECT, query).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{edit_key, node_edits, page_edit};
+    use super::{edit_key, is_cursor, node_edits, page_edit};
     use reef_api::{Edited, NodeWrite};
     use reef_model::accept::{Criterion, Kind};
     use reef_model::{Description, Met, NodeSpec, Status};
@@ -676,5 +763,26 @@ mod tests {
         assert!(newer < older);
         assert_eq!(older.len(), 37);
         assert_ne!(edit_key(5, 1), edit_key(5, 2));
+    }
+
+    /// Only a key shaped as the store makes one is a cursor
+    #[test]
+    fn only_keys_are_cursors() {
+        // every key the store makes is one
+        assert!(is_cursor(&edit_key(1_700_000_000_000, 0xab)));
+        assert!(is_cursor(&edit_key(0, u64::MAX)));
+        // anything else is not
+        for bad in [
+            "",
+            "nope",
+            "00000000000000000001",
+            "00000000000000000001.",
+            "0000000000000000001.00000000000000ab",
+            "00000000000000000001.00000000000000AB",
+            "00000000000000000001.00000000000000ab.",
+            "0000000000000000000x.00000000000000ab",
+        ] {
+            assert!(!is_cursor(bad), "{bad}");
+        }
     }
 }

@@ -7,11 +7,12 @@
 //! token signs in, whatever its body says.
 
 use reef_api::{
-    Author, Checked, Commented, Decided, DecisionKind, DecisionsRecorded, Edited, Logged,
-    MarkReview, MarkThread, Marked, NewReply, NewThread, NodePut, NodeWrite, PageEdit, PageEdited,
-    PageWrite, Place, Puts, QueueEdit, QueueListing, Queued, RecordDecisions, ResolveThread,
-    Resolved, Resolves, ResolvingCommit, Review, ReviewState, Reviewed, Revision, StartWork,
-    Started, Target, Thread, ThreadState, User, UserAdded, Via, WorkRecord, Writer, paths,
+    Author, Checked, Commented, Decided, DecisionKind, DecisionsRecorded, Edited, HistoryPage,
+    Logged, MarkReview, MarkThread, Marked, NewReply, NewThread, NodePut, NodeWrite, PageEdit,
+    PageEdited, PageWrite, Place, Puts, QueueEdit, QueueListing, Queued, RecordDecisions,
+    ResolveThread, Resolved, Resolves, ResolvingCommit, Review, ReviewState, Reviewed, Revision,
+    StartWork, Started, Target, Thread, ThreadState, User, UserAdded, Via, WorkRecord, Writer,
+    paths,
 };
 use reef_model::{Description, NodeSpec, PlanName, Status};
 use reef_service::{Asker, Backend};
@@ -178,7 +179,7 @@ pub async fn every_write_names_the_tokens_user<B: Backend + 'static>(
     // ada puts C1, and bob sets it in progress
     put(&ada, &plan, work("C1", None), None).await?;
     put(&bob, &plan, work("C1", Some(Status::InProgress)), Some(1)).await?;
-    let (_, history): (_, Vec<Logged>) = ada.get(&paths::node_history(&node)).await?;
+    let (_, HistoryPage { edits: history, .. }) = ada.get(&paths::node_history(&node)).await?;
     assert_eq!(
         authors(&history),
         vec![Some("bob".to_string()), Some("ada".to_string())]
@@ -200,7 +201,7 @@ pub async fn every_write_names_the_tokens_user<B: Backend + 'static>(
         status == StatusCode::OK && matches!(edited, PageEdited::Applied { .. }),
         "{edited:?}"
     );
-    let (_, history): (_, Vec<Logged>) =
+    let (_, HistoryPage { edits: history, .. }) =
         ada.get(&paths::page_history(&plan, "design/a.md")).await?;
     assert_eq!(authors(&history), vec![Some("ada".to_string())]);
     let queue = QueueEdit::Add {
@@ -212,7 +213,7 @@ pub async fn every_write_names_the_tokens_user<B: Backend + 'static>(
         status == StatusCode::OK && matches!(queued, Queued::Applied { .. }),
         "{queued:?}"
     );
-    let (_, history): (_, Vec<Logged>) = ada.get(&paths::queue_history("reef")).await?;
+    let (_, HistoryPage { edits: history, .. }) = ada.get(&paths::queue_history("reef")).await?;
     assert_eq!(authors(&history), vec![Some("bob".to_string())]);
     let (_, listing): (_, QueueListing) = ada.get(&paths::queue("reef")).await?;
     let placed = listing.entries[0].placed.as_ref().expect("bob placed C1");
@@ -282,7 +283,8 @@ pub async fn writes_with_sign_in_off_name_a_token_or_nobody<B: Backend + 'static
     // ada puts C1, and a client with no token sets it done
     put(&ada, &plan, work("C1", None), None).await?;
     put(&ax.client, &plan, work("C1", Some(Status::Done)), Some(1)).await?;
-    let (_, history): (_, Vec<Logged>) = ax.client.get(&paths::node_history(&node)).await?;
+    let (_, HistoryPage { edits: history, .. }) =
+        ax.client.get(&paths::node_history(&node)).await?;
     assert_eq!(authors(&history), vec![None, Some("ada".to_string())]);
     assert!(history[0].author.is_unknown());
     // and Claude with no token is Claude for nobody known
@@ -293,7 +295,8 @@ pub async fn writes_with_sign_in_off_name_a_token_or_nobody<B: Backend + 'static
         Some(2),
     )
     .await?;
-    let (_, history): (_, Vec<Logged>) = ax.client.get(&paths::node_history(&node)).await?;
+    let (_, HistoryPage { edits: history, .. }) =
+        ax.client.get(&paths::node_history(&node)).await?;
     assert_eq!(history[0].author.describe().as_deref(), Some("Claude"));
     Ok(())
 }

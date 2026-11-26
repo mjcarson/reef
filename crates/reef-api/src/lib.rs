@@ -72,7 +72,7 @@ pub use decision::{
     Decided, Decision, DecisionKind, DecisionsRecorded, Outcome, RecordDecisions, Via,
 };
 pub use error::{ApiError, ErrorCode};
-pub use history::{Edited, HISTORY_MAX, Logged};
+pub use history::{Edited, HISTORY_MAX, HistoryPage, HistoryQuery, Logged};
 pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
 pub use node::{
     Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,

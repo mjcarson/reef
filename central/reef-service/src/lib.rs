@@ -47,10 +47,10 @@ pub use conf::{ApiSettings, AuthSettings, Conf, RemoteSettings, ShoalSettings, T
 pub use memory::MemoryBackend;
 pub use service::{Asker, NoUser, NotAllowed, NotSignedIn, Recovered, Service, TooManyTries};
 pub use store::{
-    AddCapture, AddedProject, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX, FileDiff,
-    FileSummary, Followed, KeptRemote, Listing, NodePut, NodeRemove, NodeWrite, NotListed,
-    NotRegistered, PageEdit, PageEdited, PageListing, PageWrite, Pending, Place, PlanInfo,
-    PlanWrite, Project, Proposal, Put, Puts, QueueEdit, Queued, Ranked, Revision, Rewrite,
-    Rewritten, StalePut, StartWork, Started, Store, StoredNode, StoredPage, StoredRemote,
+    AddCapture, AddedProject, BadCursor, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX,
+    FileDiff, FileSummary, Followed, KeptRemote, Listing, NodePut, NodeRemove, NodeWrite,
+    NotListed, NotRegistered, PageEdit, PageEdited, PageListing, PageWrite, Pending, Place,
+    PlanInfo, PlanWrite, Project, Proposal, Put, Puts, QueueEdit, Queued, Ranked, Revision,
+    Rewrite, Rewritten, StalePut, StartWork, Started, Store, StoredNode, StoredPage, StoredRemote,
     StoredToken, StoredUser, Unkeepable, UserDropped, UserKept, WorkRecord, WorkStart,
 };

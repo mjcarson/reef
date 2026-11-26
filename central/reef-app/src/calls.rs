@@ -7,13 +7,13 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
 use reef_api::{
-    Commented, Decision, FileDiff, Logged, Loop, Marked, Me, PasswordChange, PasswordChanged,
-    PlanInfo, Project, QueueEdit, QueueListing, Queued, Review, ReviewState, Reviewed, Revision,
-    Session, SessionAct, SessionActed, SignedOut, Target, Thread, ThreadState, TokenInfo,
-    Transcript, User, UserRemoved,
+    Commented, Decision, FileDiff, HISTORY_MAX, HistoryPage, Loop, Marked, Me, PasswordChange,
+    PasswordChanged, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review, ReviewState,
+    Reviewed, Revision, Session, SessionAct, SessionActed, SignedOut, Target, Thread, ThreadState,
+    TokenInfo, Transcript, User, UserRemoved,
 };
 #[cfg(feature = "server")]
-use reef_api::{MarkReview, MarkThread, NewReply, NewThread, Writer};
+use reef_api::{HistoryQuery, MarkReview, MarkThread, NewReply, NewThread, Writer};
 use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
@@ -292,14 +292,22 @@ pub async fn node_decisions(
         .map_err(failed)
 }
 
-/// A node's history: who made each edit of it, what it changed and when, newest first
+/// The most edits of a node the app reads at once, however far back it is asked to show
+pub const HISTORY_SHOWN_MAX: usize = 50 * HISTORY_MAX;
+
+/// A node's history: who made each edit of it, what it changed and when, newest first, as many
+/// pages as hold a number of edits, with the cursor onto the older ones if any are kept
+///
+/// Each read starts from the newest, so a read again after an edit shows what was shown before
+/// and the edit too, with nothing between them left out.
 ///
 /// # Arguments
 ///
 /// * `project` - The project the node's plan belongs to
 /// * `plan` - The plan's name within it
 /// * `id` - The node's id
-#[get("/app/history?project&plan&id")]
+/// * `count` - How many edits to read, a page at the least and [`HISTORY_SHOWN_MAX`] at most
+#[get("/app/history?project&plan&id&count")]
 #[cfg_attr(
     feature = "server",
     tracing::instrument(name = "calls::node_history", skip_all, err(Debug))
@@ -308,15 +316,31 @@ pub async fn node_history(
     project: String,
     plan: String,
     id: String,
-) -> Result<Vec<Logged>, ServerFnError> {
+    count: usize,
+) -> Result<HistoryPage, ServerFnError> {
     // a name that breaks the naming rule is refused before the store is read
     let node = plan_name(project, plan)?
         .node(id)
         .map_err(|error| ServerFnError::new(error.to_string()))?;
-    crate::server::service()
-        .node_history(&node)
+    let service = crate::server::service();
+    // a page at the least, and never more than the most the app reads
+    let count = count.clamp(HISTORY_MAX, HISTORY_SHOWN_MAX);
+    let mut page = service
+        .node_history(&node, &HistoryQuery::default())
         .await
-        .map_err(failed)
+        .map_err(failed)?;
+    // then each older page in turn, until it holds as many as asked or none is left
+    while page.edits.len() < count
+        && let Some(older) = page.older.take()
+    {
+        let next = service
+            .node_history(&node, &HistoryQuery::older(older))
+            .await
+            .map_err(failed)?;
+        page.edits.extend(next.edits);
+        page.older = next.older;
+    }
+    Ok(page)
 }
 
 /// A project's runners' sessions, and every loop feeding it, a terminal's or a runner's

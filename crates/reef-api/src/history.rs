@@ -3,7 +3,8 @@
 //! Every write to a node, a page or a project's queue keeps an entry in that one's history: who
 //! made it, when, the version it left it at, and what it changed. A node's entry says its status
 //! went from one to another, a criterion was met, keys were edited or its body was, rather than
-//! holding the node again. A history is read newest first, at most [`HISTORY_MAX`] entries.
+//! holding the node again. A history is read newest first, a page of at most [`HISTORY_MAX`]
+//! entries at a time: a [`HistoryPage`] with older entries kept names the cursor that reads them.
 //!
 //! An entry is kept once its write is, so a write whose entry failed to keep still stands, and
 //! its history has a gap where it would be.
@@ -14,8 +15,63 @@ use serde::{Deserialize, Serialize};
 use crate::queue::Place;
 use crate::user::Author;
 
-/// The most entries a history is read with, newest first
+/// The most entries one page of a history holds, newest first
 pub const HISTORY_MAX: usize = 200;
+
+/// Which page of a history to read: the newest, or the one older than a cursor a page named
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryQuery {
+    /// The cursor a page named, to read the entries older than its own, or `None` for the newest
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older: Option<String>,
+    /// The most entries the page may hold, `None` for [`HISTORY_MAX`], which is also the most
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+impl HistoryQuery {
+    /// The page of a history older than a cursor, as full as a page may be
+    ///
+    /// # Arguments
+    ///
+    /// * `older` - The cursor the page before named
+    pub fn older<T: Into<String>>(older: T) -> Self {
+        HistoryQuery {
+            older: Some(older.into()),
+            limit: None,
+        }
+    }
+
+    /// The most entries the page holds: its limit, from 1 to [`HISTORY_MAX`]
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{HISTORY_MAX, HistoryQuery};
+    ///
+    /// assert_eq!(HistoryQuery::default().page_size(), HISTORY_MAX);
+    /// let query = HistoryQuery { older: None, limit: Some(0) };
+    /// assert_eq!(query.page_size(), 1);
+    /// let query = HistoryQuery { older: None, limit: Some(5000) };
+    /// assert_eq!(query.page_size(), HISTORY_MAX);
+    /// ```
+    pub fn page_size(&self) -> usize {
+        // none asks for a whole page, and none may ask for more, or for nothing
+        self.limit.unwrap_or(HISTORY_MAX).clamp(1, HISTORY_MAX)
+    }
+}
+
+/// One page of a history: its entries, newest first, and the cursor onto the older ones
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPage {
+    /// The page's entries, newest first
+    pub edits: Vec<Logged>,
+    /// The cursor that reads the entries older than these, if any are kept
+    ///
+    /// It is opaque: hand it back as `older` to read the next page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub older: Option<String>,
+}
 
 /// One write a history kept: who made it, when, and what it changed
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,7 +250,7 @@ impl Edited {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edited, Logged};
+    use super::{Edited, HistoryPage, Logged};
     use crate::comment::Writer;
     use crate::queue::Place;
     use crate::user::Author;
@@ -257,6 +313,35 @@ mod tests {
             serde_json::to_value(&nobody).unwrap(),
             json!({"at": 5, "edits": [{"edit": "removed"}]})
         );
+    }
+
+    /// A page leaves out a cursor when no older entry is kept, and reads back as written
+    #[test]
+    fn pages_name_their_cursor_only_when_older_edits_remain() {
+        let page = HistoryPage {
+            edits: vec![Logged {
+                at: 2,
+                author: Author::default(),
+                version: Some(1),
+                whole_plan: false,
+                edits: vec![Edited::Added],
+            }],
+            older: None,
+        };
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!(
+            value,
+            json!({"edits": [{"at": 2, "version": 1, "edits": [{"edit": "added"}]}]})
+        );
+        assert_eq!(serde_json::from_value::<HistoryPage>(value).unwrap(), page);
+        // one with older entries names the cursor onto them
+        let paged = HistoryPage {
+            older: Some("cursor".to_string()),
+            ..page
+        };
+        let value = serde_json::to_value(&paged).unwrap();
+        assert_eq!(value["older"], "cursor");
+        assert_eq!(serde_json::from_value::<HistoryPage>(value).unwrap(), paged);
     }
 
     /// An edit a newer reef kept reads as one this reef can't, rather than failing the history
