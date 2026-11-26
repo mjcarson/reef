@@ -74,12 +74,13 @@ use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
 use crate::store::{
-    AddedProject, Checked, Listing, NodePut, NotListed, NotRegistered, PageEdit, PageEdited,
-    PageListing, PageWrite, PlanInfo, PlanWrite, Project, Proposal, Puts, QueueEdit, Queued,
-    Rewrite, Store, StoredNode, StoredPage,
+    AddedProject, BranchProposal, Checked, Listing, NodePut, NotListed, NotRegistered, PageEdit,
+    PageEdited, PageListing, PageWrite, PlanInfo, PlanWrite, Project, Proposal, Puts, QueueEdit,
+    Queued, Rewrite, Store, StoredNode, StoredPage,
 };
 use crate::tree::Docs;
 
+mod branches;
 mod comments;
 mod decisions;
 mod history;
@@ -445,8 +446,8 @@ impl<B: Backend> Service<B> {
         batch: Puts,
         author: &Author,
     ) -> anyhow::Result<Checked> {
-        // the plan's docs are its project's working tree, or its clone at the commit fetched
-        let docs = self.docs(plan).await?;
+        // the plan's docs are its project's, at the branch it follows as its write lock reads it
+        let project = self.project_named(&plan.project).await?;
         let sections = self.sections.clone();
         // the ids put and removed, for the change the batch makes if it is written
         let ids: Vec<String> = batch
@@ -463,7 +464,7 @@ impl<B: Backend> Service<B> {
         let checked = self
             .store
             .batch_checked(plan, batch, author, move |proposal| {
-                added(docs, sections, proposal)
+                added_at(project, sections, proposal)
             })
             .await?;
         // tell the change stream of each node written, at its new version, and each removed
@@ -499,14 +500,14 @@ impl<B: Backend> Service<B> {
         write: PlanWrite,
         author: &Author,
     ) -> anyhow::Result<Rewrite> {
-        // the plan's docs are its pages over its project's repo
-        let docs = self.docs(plan).await?;
+        // the plan's docs are its pages over its project's repo, at the branch it follows
+        let project = self.project_named(&plan.project).await?;
         let sections = self.sections.clone();
         // judged under the plan's write lock, against the plan it replaces
         let rewrite = self
             .store
             .write_plan_checked(plan, write, author, move |proposal| {
-                added(docs, sections, proposal)
+                added_at(project, sections, proposal)
             })
             .await?;
         // tell the change stream of the revision readers now load
@@ -563,15 +564,15 @@ impl<B: Backend> Service<B> {
         edit: PageEdit,
         author: &Author,
     ) -> anyhow::Result<PageEdited> {
-        // the plan's docs are its pages over its project's repo
-        let docs = self.docs(plan).await?;
+        // the plan's docs are its pages over its project's repo, at the branch it follows
+        let project = self.project_named(&plan.project).await?;
         let sections = self.sections.clone();
         let path = edit.path().to_string();
         // judged under the plan's write lock, against the plan the edit lands on
         let edited = self
             .store
             .edit_page_checked(plan, edit, author, move |proposal| {
-                added(docs, sections, proposal)
+                added_at(project, sections, proposal)
             })
             .await?;
         // tell the change stream of the page written, at its new version, or taken out
@@ -760,18 +761,19 @@ impl<B: Backend> Service<B> {
     /// * `plans` - The plans to read, in the order their work is taken
     #[instrument(name = "Service::next_over", skip_all, err(Debug))]
     async fn next_over(&self, project: &str, plans: Vec<PlanName>) -> anyhow::Result<Next> {
-        // the repo the plans' docs are read from, refused if it isn't registered
-        let project_read = self
-            .store
-            .project(project)
-            .await?
-            .ok_or_else(|| NotRegistered(project.to_string()))?;
-        let docs = Docs::of(&project_read);
-        // each plan and its pages as they stand
+        // the repo the plans' docs are read from, refused if it isn't registered, and the branch
+        // each plan follows
+        let project_read = self.project_named(project).await?;
+        let branches = self.store.plan_branches(project).await?;
+        // each plan, its pages as they stand, and where its docs are read
         let mut read = Vec::with_capacity(plans.len());
         for plan in &plans {
             let (records, pages, _) = self.snapshot(plan).await?;
-            read.push((plan.clone(), records, pages));
+            let branch = branches
+                .get(&plan.plan)
+                .and_then(|stored| stored.kept.branch.as_deref());
+            let docs = Docs::of(&project_read, branch)?;
+            read.push((plan.clone(), records, pages, docs));
         }
         // and the queue's entries of those plans, in its order
         let queue: Vec<NodeName> = self
@@ -784,13 +786,24 @@ impl<B: Backend> Service<B> {
             .collect();
         let sections = self.sections.clone();
         // build them off the async threads, since their docs are files or git's objects, each
-        // over its own pages and every one over the same read of the repo
+        // over its own pages, and the plans that follow one branch over one read of it
         let next = tokio::task::spawn_blocking(move || {
-            let repo = Cached::new(docs.source()?);
+            // each distinct source opened once, before any plan borrows one
+            let mut sources: Vec<(Docs, Cached<_>)> = Vec::new();
+            for (_, _, _, docs) in &read {
+                if !sources.iter().any(|(opened, _)| opened == docs) {
+                    sources.push((docs.clone(), Cached::new(docs.source()?)));
+                }
+            }
             let graphs: Vec<PlanGraph> = read
                 .into_iter()
-                .map(|(name, records, pages)| {
-                    let renderer = Renderer::new(Layered::new(&pages, &repo), sections.clone());
+                .map(|(name, records, pages, docs)| {
+                    // the source its branch was opened as, which is always there
+                    let repo = sources
+                        .iter()
+                        .find_map(|(opened, repo)| (*opened == docs).then_some(repo))
+                        .expect("every plan's source was opened");
+                    let renderer = Renderer::new(Layered::new(&pages, repo), sections.clone());
                     let (graph, problems) = checked(&renderer, records, &pages);
                     PlanGraph {
                         name,
@@ -891,21 +904,33 @@ impl<B: Backend> Service<B> {
         Ok((records, pages, docs))
     }
 
-    /// Where a plan's docs are read from: its project's working tree, or for a remote project
-    /// its clone at the commit last fetched
+    /// Where a plan's docs are read from, at the branch it follows: for a remote project its
+    /// clone at the commit last fetched of that branch, and for a local one a worktree with it
+    /// checked out, its tip, or for a plan that follows none the working tree
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::docs", skip_all, err(Debug))]
     async fn docs(&self, plan: &PlanName) -> anyhow::Result<Docs> {
-        // a plan belongs to a project that is registered
-        let project = self
-            .store
-            .project(&plan.project)
+        // a plan belongs to a project that is registered, and follows its branch or its own
+        let project = self.project_named(&plan.project).await?;
+        let branch = self.store.plan_branch(plan).await?;
+        Docs::of(&project, branch.as_deref())
+    }
+
+    /// A registered project, refused if it isn't registered
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Service::project_named", skip_all, err(Debug))]
+    async fn project_named(&self, project: &str) -> anyhow::Result<Project> {
+        // every project sits in one listing, which says if it isn't there
+        self.store
+            .project(project)
             .await?
-            .ok_or_else(|| NotRegistered(plan.project.clone()))?;
-        Ok(Docs::of(&project))
+            .ok_or_else(|| NotRegistered(project.to_string()).into())
     }
 }
 
@@ -969,6 +994,7 @@ async fn added(
         after,
         pages,
         pages_after,
+        ..
     } = proposal;
     // its docs are files or git's objects, so build both sides off the async threads
     let added = tokio::task::spawn_blocking(move || {
@@ -1042,6 +1068,64 @@ fn page_of<S: DocSource>(source: &S, page: &str) -> Option<String> {
         let text = source.read(&md)?;
         Some(render_page(doc_body(&text), &md))
     })
+}
+
+/// The problems a write would add to a plan, its docs read at the branch the plan follows as
+/// its write lock read it
+///
+/// # Arguments
+///
+/// * `project` - The plan's project, whose repo the docs are read from
+/// * `sections` - The doc sections a node's why, what and design choices are taken from
+/// * `proposal` - The plan as it stands and as the write would leave it, and its branch
+async fn added_at(
+    project: Project,
+    sections: Sections,
+    proposal: Proposal,
+) -> anyhow::Result<Vec<Diagnostic>> {
+    // where the plan's docs are read, at the branch read under its lock
+    let docs = Docs::of(&project, proposal.branch.as_deref())?;
+    added(docs, sections, proposal).await
+}
+
+/// The problems a plan's docs at one branch would add to its problems at another, the plan
+/// itself as it stands
+///
+/// The docs it reads now that can't be opened, such as a local branch since deleted, count as
+/// none found there, so every problem at the new branch is one it adds.
+///
+/// # Arguments
+///
+/// * `from` - Where the plan's docs are read now
+/// * `to` - Where they would be read
+/// * `sections` - The doc sections a node's why, what and design choices are taken from
+/// * `proposal` - The plan as it stands, and both branches
+pub(crate) async fn added_across(
+    from: Docs,
+    to: Docs,
+    sections: Sections,
+    proposal: BranchProposal,
+) -> anyhow::Result<Vec<Diagnostic>> {
+    let BranchProposal { records, pages, .. } = proposal;
+    // both sides are files or git's objects, so build them off the async threads
+    let added = tokio::task::spawn_blocking(move || {
+        let pages = page_source(pages);
+        // the plan as it reads now, if its docs open there
+        let before = match from.source() {
+            Ok(source) => {
+                let renderer =
+                    Renderer::new(Layered::new(&pages, Cached::new(source)), sections.clone());
+                checked(&renderer, records.clone(), &pages).1
+            }
+            Err(_) => Vec::new(),
+        };
+        // and as it would read at the new branch
+        let renderer = Renderer::new(Layered::new(&pages, Cached::new(to.source()?)), sections);
+        let after = checked(&renderer, records, &pages).1;
+        anyhow::Ok(new_problems(&before, after))
+    })
+    .await??;
+    Ok(added)
 }
 
 /// The problems found after a write that weren't found before it, in the order found after

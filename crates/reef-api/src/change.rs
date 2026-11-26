@@ -52,19 +52,35 @@ pub enum Change {
         /// The project, its repo located
         project: Project,
     },
-    /// A remote project was fetched and its branch moved, so its docs are read at a new commit
+    /// A remote project was fetched and a branch of it moved, so the plans that follow that
+    /// branch read their docs at a new commit
     ///
-    /// Every plan of the project reads its docs there, so each plan's followers hear of it.
+    /// Only those plans' followers hear of it. One from a service before plans followed
+    /// branches names no plans, and reaches every plan of the project.
     ProjectFetched {
         /// The project's name
         project: String,
-        /// The commit its docs are now read at
+        /// The commit the branch is now at
         commit: String,
+        /// The branch that moved, or `None` from a service that fetched one branch alone
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+        /// The plans whose docs are read at that branch, or `None` for every plan
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plans: Option<Vec<String>>,
     },
     /// A plan was listed in its project
     PlanAdded {
         /// The plan's full name
         plan: PlanName,
+    },
+    /// The branch a plan follows was set, changed or dropped, so its docs are read elsewhere
+    PlanBranched {
+        /// The plan's full name
+        plan: PlanName,
+        /// The branch it follows now, or `None` for its project's own
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
     },
     /// A batch of puts and removals was written to a plan as one change, every node it didn't
     /// touch at the version it was at
@@ -189,6 +205,7 @@ impl Change {
             Change::ProjectAdded { .. } => "project-added",
             Change::ProjectFetched { .. } => "project-fetched",
             Change::PlanAdded { .. } => "plan-added",
+            Change::PlanBranched { .. } => "plan-branched",
             Change::NodesPut { .. } => "nodes-put",
             Change::PagesPut { .. } => "pages-put",
             Change::PlanWritten { .. } => "plan-written",
@@ -211,6 +228,7 @@ impl Change {
         match self {
             Change::ProjectAdded { project } => Some(project.name.as_str()),
             Change::PlanAdded { plan }
+            | Change::PlanBranched { plan, .. }
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
@@ -235,6 +253,7 @@ impl Change {
     pub fn plan(&self) -> Option<&PlanName> {
         match self {
             Change::PlanAdded { plan }
+            | Change::PlanBranched { plan, .. }
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
@@ -254,12 +273,39 @@ impl Change {
         }
     }
 
-    /// Whether this change is its project's but concerns each of its plans, so a follower of
-    /// any one plan of the project hears of it
+    /// Whether this change is its project's but concerns one of its plans, so a follower of
+    /// that plan alone hears of it
     ///
-    /// A fetch moves the commit every plan of the project reads its docs at.
-    pub fn reaches_every_plan(&self) -> bool {
-        matches!(self, Change::ProjectFetched { .. })
+    /// A fetch moves the commit the plans that follow its branch read their docs at, or every
+    /// plan's, from a service that names none.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's name within the change's project
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::Change;
+    ///
+    /// let fetched = Change::ProjectFetched {
+    ///     project: "reef".to_string(),
+    ///     commit: "0123456".to_string(),
+    ///     branch: Some("dev".to_string()),
+    ///     plans: Some(vec!["app".to_string()]),
+    /// };
+    /// assert!(fetched.reaches("app"));
+    /// assert!(!fetched.reaches("central"));
+    /// ```
+    pub fn reaches(&self, plan: &str) -> bool {
+        match self {
+            // the plans the fetch names, or every plan where it names none
+            Change::ProjectFetched { plans, .. } => plans
+                .as_ref()
+                .is_none_or(|plans| plans.iter().any(|name| name == plan)),
+            // no other project's change concerns a plan
+            _ => false,
+        }
     }
 }
 
@@ -329,8 +375,14 @@ mod tests {
             Change::ProjectFetched {
                 project: "reef".to_string(),
                 commit: "0123456".to_string(),
+                branch: None,
+                plans: None,
             },
             Change::PlanAdded { plan: plan.clone() },
+            Change::PlanBranched {
+                plan: plan.clone(),
+                branch: Some("dev".to_string()),
+            },
             Change::NodesPut {
                 plan: plan.clone(),
                 nodes: Vec::new(),
@@ -392,21 +444,50 @@ mod tests {
         }
     }
 
-    /// A fetch is its project's change, and reaches every plan of it
+    /// A fetch is its project's change, and reaches the plans it names, or every plan of its
+    /// project from a service that names none
     #[test]
-    fn a_fetch_reaches_every_plan_of_its_project() {
-        // a fetch names its project and no plan
+    fn a_fetch_reaches_the_plans_that_follow_its_branch() {
+        // a fetch from a service that fetched one branch names no plan, and reaches every one
         let fetched = Change::ProjectFetched {
             project: "reef".to_string(),
             commit: "0123456".to_string(),
+            branch: None,
+            plans: None,
         };
         assert_eq!(fetched.project(), Some("reef"));
         assert_eq!(fetched.plan(), None);
-        assert!(fetched.reaches_every_plan());
+        assert!(fetched.reaches("central"));
+        // and it reads back from that service's body, which has neither key
+        let old = json!({"kind": "project-fetched", "project": "reef", "commit": "0123456"});
+        assert_eq!(serde_json::from_value::<Change>(old).unwrap(), fetched);
+        // one that names its branch's plans reaches only those
+        let narrowed = Change::ProjectFetched {
+            project: "reef".to_string(),
+            commit: "0123456".to_string(),
+            branch: Some("dev".to_string()),
+            plans: Some(vec!["app".to_string()]),
+        };
+        assert!(narrowed.reaches("app"));
+        assert!(!narrowed.reaches("central"));
+        // and one that names none reaches none
+        let none = Change::ProjectFetched {
+            project: "reef".to_string(),
+            commit: "0123456".to_string(),
+            branch: Some("gone".to_string()),
+            plans: Some(Vec::new()),
+        };
+        assert!(!none.reaches("central"));
         // a queue's change is its project's too, but no plan's
         let queue = Change::QueueChanged {
             project: "reef".to_string(),
         };
-        assert!(!queue.reaches_every_plan());
+        assert!(!queue.reaches("central"));
+        // and a plan's branch changing is that plan's
+        let branched = Change::PlanBranched {
+            plan: PlanName::new("reef", "app").unwrap(),
+            branch: None,
+        };
+        assert_eq!(branched.plan().map(|plan| plan.plan.as_str()), Some("app"));
     }
 }

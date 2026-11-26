@@ -651,6 +651,7 @@ fn kept<B>(fx: &Fx<B>, url: &str, clone: &str) -> KeptRemote {
         clone: fx.dir.join("clones").join(clone),
         commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
         fetched_at: 1,
+        branches: Default::default(),
     }
 }
 

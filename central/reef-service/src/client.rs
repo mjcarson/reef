@@ -16,12 +16,12 @@ use crate::schema::{
     CommentRow, CommentRowFilter, CommentRowGet, DecisionRow, DecisionRowFilter, DecisionRowGet,
     EditRow, EditRowGet, LOOPS, LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey,
     NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete,
-    PageRowFilter, PageRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow,
-    ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES, ReefClient,
-    ReefQueryKinds, RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow, RevisionFileRowGet,
-    RevisionRow, RevisionRowFilter, RevisionRowGet, TOKENS, TokenRow, TokenRowDelete,
-    TokenRowFilter, TokenRowGet, USERS, UserRow, UserRowDelete, UserRowFilter, UserRowGet, WorkRow,
-    WorkRowFilter, WorkRowGet,
+    PageRowFilter, PageRowGet, PlanBranchRow, PlanBranchRowFilter, PlanBranchRowGet, PlanRow,
+    PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete,
+    QueueRowFilter, QueueRowGet, REMOTES, ReefClient, ReefQueryKinds, RemoteRow, RemoteRowFilter,
+    RemoteRowGet, RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter,
+    RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter, TokenRowGet, USERS, UserRow,
+    UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -1007,6 +1007,44 @@ impl Backend for ShoalBackend {
             Expect::Version(read) => {
                 // only over the version read
                 let filter = RemoteRowFilter {
+                    version: Some(vec![read]),
+                };
+                self.client.send_one(row.if_matches(filter)).await
+            }
+        };
+        written(sent)
+    }
+
+    /// Reads the branch rows of a project's plans, in plan order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "ShoalBackend::plan_branches", skip_all, err(Debug))]
+    async fn plan_branches(&self, project: &str) -> anyhow::Result<Vec<PlanBranchRow>> {
+        // a project's plans' branches sit in that project's partition
+        let get = PlanBranchRowGet::new(vec![project.to_string()]);
+        self.read::<_, PlanBranchRow>(get).await
+    }
+
+    /// Writes one plan's branch row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    #[instrument(name = "ShoalBackend::write_plan_branch", skip_all, err(Debug))]
+    async fn write_plan_branch(
+        &self,
+        row: PlanBranchRow,
+        expect: Expect,
+    ) -> anyhow::Result<Written> {
+        // each write is sent alone and its answer checked, never drained from a stream
+        let sent = match expect {
+            Expect::Absent => self.client.send_one(row.if_absent()).await,
+            Expect::Version(read) => {
+                // only over the version read
+                let filter = PlanBranchRowFilter {
                     version: Some(vec![read]),
                 };
                 self.client.send_one(row.if_matches(filter)).await

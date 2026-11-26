@@ -11,14 +11,16 @@
 //!   that name writes over it.
 //! - **One repo, one project.** A remote is refused if another project was registered by a URL
 //!   with the same [`key`](crate::remote::key), under the lock every registration holds.
+//! - **Each branch a plan follows is kept beside the registered one**, as a map in the same
+//!   record, so a row written before plans followed branches reads back with none.
 //! - **A fetch writes over the version read**, so two writers' fetches can't both land.
 //! - **Every row is checked against its full key on read**, so a hash collision is caught rather
 //!   than read as another project's remote.
 
-use reef_api::{AddedProject, Author, Project, Remote};
+use reef_api::{AddedProject, Author, Project, Remote, Tip};
 use reef_model::PlanName;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use tracing::instrument;
 
@@ -40,6 +42,9 @@ pub struct KeptRemote {
     pub commit: String,
     /// When it was last fetched, in milliseconds since the Unix epoch
     pub fetched_at: u64,
+    /// Each other branch a plan follows, where it was when it was last fetched
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branches: BTreeMap<String, Tip>,
 }
 
 impl KeptRemote {
@@ -50,6 +55,7 @@ impl KeptRemote {
             branch: self.branch.clone(),
             commit: self.commit.clone(),
             fetched_at: self.fetched_at,
+            branches: self.branches.clone(),
         }
     }
 }
@@ -204,19 +210,23 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `read` - The remote as it was read before the fetch
-    /// * `commit` - The commit its branch is at now
+    /// * `commit` - The commit the branch it was registered by is at now
+    /// * `branches` - Each other branch a plan follows, where it is now: one that couldn't be
+    ///   fetched is left where it was last fetched, and one no plan follows any more is let go
     /// * `at` - When it was fetched, in milliseconds since the Unix epoch
     #[instrument(name = "Store::fetched", skip_all, err(Debug))]
     pub async fn fetched(
         &self,
         read: &StoredRemote,
         commit: &str,
+        branches: BTreeMap<String, Tip>,
         at: u64,
     ) -> anyhow::Result<StoredRemote> {
-        // the same remote at its new commit, a version on
+        // the same remote at its new commits, a version on
         let mut kept = read.kept.clone();
         kept.commit = commit.to_string();
         kept.fetched_at = at;
+        kept.branches = branches;
         let row = remote_row(&read.project, &kept, read.version + 1)?;
         // only over the version read, so a fetch elsewhere since isn't written over
         if let Written::Refused(refusal) = self

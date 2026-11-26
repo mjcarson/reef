@@ -2,11 +2,13 @@
 //!
 //! A project names a repo, located at its main worktree's root, so a linked worktree is its main
 //! repo. A project registered by its git URL instead is a remote one: the service keeps a clone
-//! of one branch of it, and reads its docs at the commit it last fetched. A plan is listed in its
+//! of the branch it was registered by, and of each branch a plan of it follows, and reads each
+//! plan's docs at the commit it last fetched of that plan's branch. A plan is listed in its
 //! project with an empty current revision, so a put always has somewhere to go.
 
-use reef_model::PlanName;
+use reef_model::{Diagnostic, PlanName};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::user::Author;
@@ -53,20 +55,75 @@ impl Project {
 pub struct Remote {
     /// The URL the service fetches from
     pub url: String,
-    /// The branch whose docs it reads
+    /// The branch it was registered by, whose docs a plan that follows no branch of its own reads
     pub branch: String,
     /// The commit the branch was at when it was last fetched, which its docs are read at
     pub commit: String,
     /// When it was last fetched, in milliseconds since the Unix epoch
     pub fetched_at: u64,
+    /// Each other branch a plan follows, where it was when it was last fetched
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branches: BTreeMap<String, Tip>,
 }
 
 impl Remote {
     /// The fetched commit's first seven hex digits, as git abbreviates it
     pub fn short(&self) -> &str {
-        // a commit is hex, so any byte is a char boundary
-        &self.commit[..self.commit.len().min(7)]
+        short(&self.commit)
     }
+
+    /// The commit a branch was at when it was last fetched, if it was fetched
+    ///
+    /// # Arguments
+    ///
+    /// * `branch` - The branch, or `None` for the one the project was registered by
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{Remote, Tip};
+    ///
+    /// let mut remote = Remote {
+    ///     url: "https://example.com/reef.git".to_string(),
+    ///     branch: "main".to_string(),
+    ///     commit: "a".repeat(40),
+    ///     fetched_at: 5,
+    ///     branches: Default::default(),
+    /// };
+    /// remote.branches.insert("dev".to_string(), Tip { commit: "b".repeat(40), fetched_at: 6 });
+    /// assert_eq!(remote.commit_of(None), Some("a".repeat(40).as_str()));
+    /// assert_eq!(remote.commit_of(Some("main")), Some("a".repeat(40).as_str()));
+    /// assert_eq!(remote.commit_of(Some("dev")), Some("b".repeat(40).as_str()));
+    /// assert_eq!(remote.commit_of(Some("gone")), None);
+    /// ```
+    pub fn commit_of(&self, branch: Option<&str>) -> Option<&str> {
+        match branch {
+            // the branch it was registered by is kept beside the URL
+            None => Some(self.commit.as_str()),
+            Some(branch) if branch == self.branch => Some(self.commit.as_str()),
+            // and each other branch in the map
+            Some(branch) => self.branches.get(branch).map(|tip| tip.commit.as_str()),
+        }
+    }
+}
+
+/// A commit's first seven hex digits, as git abbreviates it
+///
+/// # Arguments
+///
+/// * `commit` - The commit's id, in hex
+pub fn short(commit: &str) -> &str {
+    // a commit is hex, so any byte is a char boundary
+    &commit[..commit.len().min(7)]
+}
+
+/// Where a branch was when the service last fetched it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tip {
+    /// The commit it was at
+    pub commit: String,
+    /// When it was fetched there, in milliseconds since the Unix epoch
+    pub fetched_at: u64,
 }
 
 /// What came of registering a project
@@ -94,6 +151,10 @@ pub struct PlanInfo {
     /// When it was listed and by whom, where its history says, and a listing reads it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registered: Option<Registered>,
+    /// The branch it follows, whose docs it reads, or `None` for its project's own: the branch
+    /// a remote project was registered by, or a local project's working tree
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// A request to register a project, for a repo on the service's host or by its git URL
@@ -163,20 +224,67 @@ pub struct NewRemote {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Fetched {
-    /// Its branch moved, and its docs are now read at the new commit
+    /// The branch it was registered by moved, and its docs are now read at the new commit
     Moved {
         /// The commit its docs were read at before
         from: String,
         /// The commit they are read at now
         to: String,
+        /// What came of fetching each other branch a plan follows
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        branches: Vec<BranchFetched>,
     },
-    /// Its branch is where it was
+    /// The branch it was registered by is where it was
     Unchanged {
         /// The commit its docs are read at
         commit: String,
+        /// What came of fetching each other branch a plan follows
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        branches: Vec<BranchFetched>,
     },
     /// It is a local project, whose docs are its working tree as it stands, so nothing is fetched
     Local,
+}
+
+impl Fetched {
+    /// What came of fetching each branch past the one the project was registered by
+    pub fn branches(&self) -> &[BranchFetched] {
+        match self {
+            Fetched::Moved { branches, .. } | Fetched::Unchanged { branches, .. } => branches,
+            Fetched::Local => &[],
+        }
+    }
+}
+
+/// What came of fetching one branch a plan follows, past the one its project was registered by
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "fetched", rename_all = "kebab-case")]
+pub enum BranchFetched {
+    /// It moved, or was fetched for the first time, and its plans' docs are read at its new commit
+    Moved {
+        /// The branch
+        branch: String,
+        /// The commit it was at before, or `None` for a branch fetched for the first time
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The commit it is at now
+        to: String,
+    },
+    /// It is where it was
+    Unchanged {
+        /// The branch
+        branch: String,
+        /// The commit it is at
+        commit: String,
+    },
+    /// It couldn't be fetched, such as one deleted from the remote, so its plans read their docs
+    /// where it was last fetched
+    Failed {
+        /// The branch
+        branch: String,
+        /// Why
+        error: String,
+    },
 }
 
 /// A request to list a plan in a project
@@ -184,6 +292,48 @@ pub enum Fetched {
 pub struct NewPlan {
     /// The plan's name within its project
     pub name: String,
+}
+
+impl NewPlan {
+    /// A request to list a plan
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The plan's name within its project
+    pub fn new<N: Into<String>>(name: N) -> NewPlan {
+        NewPlan { name: name.into() }
+    }
+}
+
+/// A request to set the branch a plan follows, or to drop it so the plan follows its project's
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanBranch {
+    /// The branch to follow, without `refs/heads/`, or `None` for the project's own
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// What came of setting the branch a plan follows
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Branched {
+    /// The plan follows the branch now, its docs read there
+    Applied {
+        /// The plan as its listing names it now
+        plan: PlanInfo,
+        /// Whether that changed what it followed; a plan set to the branch it follows already
+        /// is left as it is
+        changed: bool,
+    },
+    /// The repo has no such branch, or the remote couldn't be fetched for it, so nothing changed
+    NoBranch {
+        /// The branch asked for
+        branch: String,
+        /// Why it can't be followed
+        reason: String,
+    },
+    /// The plan's docs at the branch would add problems, so nothing changed
+    Refused(Vec<Diagnostic>),
 }
 
 /// What came of listing a plan
@@ -195,7 +345,10 @@ pub struct AddedPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddedProject, Fetched, NewProject, PlanInfo, Project, Remote};
+    use super::{
+        AddedProject, BranchFetched, Branched, Fetched, NewProject, PlanBranch, PlanInfo, Project,
+        Remote, Tip,
+    };
     use reef_model::PlanName;
     use serde_json::json;
 
@@ -235,11 +388,52 @@ mod tests {
             registered: None,
             name: PlanName::new("reef", "central").unwrap(),
             revision: 3,
+            branch: None,
         };
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value, json!({"name": "reef/central", "revision": 3}));
         // and it reads back as itself
         assert_eq!(serde_json::from_value::<PlanInfo>(value).unwrap(), info);
+        // a plan that follows a branch names it
+        let follows = PlanInfo {
+            branch: Some("dev".to_string()),
+            ..info
+        };
+        let value = serde_json::to_value(&follows).unwrap();
+        assert_eq!(
+            value,
+            json!({"name": "reef/central", "revision": 3, "branch": "dev"})
+        );
+        assert_eq!(serde_json::from_value::<PlanInfo>(value).unwrap(), follows);
+    }
+
+    /// A request to set a plan's branch names it, or leaves it out to follow the project's, and
+    /// each answer is pinned, since clients match on it
+    #[test]
+    fn plan_branch_names_its_branch_or_none() {
+        // a branch named, and none
+        let set = PlanBranch {
+            branch: Some("dev".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            json!({"branch": "dev"})
+        );
+        let clear = PlanBranch { branch: None };
+        assert_eq!(serde_json::to_value(&clear).unwrap(), json!({}));
+        assert_eq!(
+            serde_json::from_value::<PlanBranch>(json!({})).unwrap(),
+            clear
+        );
+        // a branch the repo hasn't names it and why
+        let missing = Branched::NoBranch {
+            branch: "gone".to_string(),
+            reason: "no such branch".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&missing).unwrap(),
+            json!({"no-branch": {"branch": "gone", "reason": "no such branch"}})
+        );
     }
 
     /// A remote project names its URL, branch and commit, and a local one's JSON is as it was
@@ -255,11 +449,14 @@ mod tests {
                 branch: "main".to_string(),
                 commit: "0123456789abcdef0123456789abcdef01234567".to_string(),
                 fetched_at: 5,
+                branches: Default::default(),
             }),
         };
         let value = serde_json::to_value(&project).unwrap();
         assert_eq!(value["remote"]["url"], "https://example.com/reef.git");
         assert_eq!(value["remote"]["branch"], "main");
+        // a remote with no other branch leaves the key out, so it reads as it was written before
+        assert!(value["remote"].get("branches").is_none());
         assert_eq!(serde_json::from_value::<Project>(value).unwrap(), project);
         assert_eq!(project.remote.as_ref().unwrap().short(), "0123456");
         assert_eq!(project.shown_repo(), "https://example.com/reef.git");
@@ -286,6 +483,7 @@ mod tests {
         let moved = Fetched::Moved {
             from: "a".to_string(),
             to: "b".to_string(),
+            branches: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&moved).unwrap(),
@@ -294,10 +492,45 @@ mod tests {
         // one that didn't names where it is, and a local project is a bare tag
         let unchanged = Fetched::Unchanged {
             commit: "a".to_string(),
+            branches: Vec::new(),
         };
         assert_eq!(
             serde_json::to_value(&unchanged).unwrap(),
             json!({"unchanged": {"commit": "a"}})
+        );
+        // each other branch a plan follows says what came of its own fetch
+        let others = Fetched::Unchanged {
+            commit: "a".to_string(),
+            branches: vec![
+                BranchFetched::Moved {
+                    branch: "dev".to_string(),
+                    from: None,
+                    to: "c".to_string(),
+                },
+                BranchFetched::Failed {
+                    branch: "gone".to_string(),
+                    error: "no such ref".to_string(),
+                },
+            ],
+        };
+        let value = serde_json::to_value(&others).unwrap();
+        assert_eq!(
+            value,
+            json!({"unchanged": {"commit": "a", "branches": [
+                {"fetched": "moved", "branch": "dev", "to": "c"},
+                {"fetched": "failed", "branch": "gone", "error": "no such ref"},
+            ]}})
+        );
+        assert_eq!(serde_json::from_value::<Fetched>(value).unwrap(), others);
+        assert_eq!(others.branches().len(), 2);
+        // and a tip is a commit and when it was fetched
+        let tip = Tip {
+            commit: "c".to_string(),
+            fetched_at: 9,
+        };
+        assert_eq!(
+            serde_json::to_value(&tip).unwrap(),
+            json!({"commit": "c", "fetched_at": 9})
         );
         assert_eq!(
             serde_json::to_value(Fetched::Local).unwrap(),

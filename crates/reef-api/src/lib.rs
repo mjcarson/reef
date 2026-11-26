@@ -83,8 +83,8 @@ pub use page::{
     check_page_path,
 };
 pub use project::{
-    AddedPlan, AddedProject, Fetched, NewPlan, NewProject, NewRemote, PlanInfo, Project,
-    Registered, Remote,
+    AddedPlan, AddedProject, BranchFetched, Branched, Fetched, NewPlan, NewProject, NewRemote,
+    PlanBranch, PlanInfo, Project, Registered, Remote, Tip,
 };
 pub use queue::{Listed, Place, Placed, QueueEdit, QueueListing, Queued, Ranked};
 pub use revision::{

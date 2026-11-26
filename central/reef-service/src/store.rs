@@ -49,6 +49,7 @@
 //!   name with their password's hash, added under one lock and judged against every user, and a
 //!   token under its hash alone, so no token is ever stored.
 
+mod branches;
 mod comment;
 mod decision;
 mod follow;
@@ -59,6 +60,7 @@ mod revision;
 mod users;
 mod work;
 
+pub use branches::{BranchProposal, BranchSet, KeptBranch, StoredBranch};
 pub use comment::{Followed, Pending};
 pub use history::BadCursor;
 pub use remotes::{KeptRemote, StoredRemote};
@@ -120,6 +122,9 @@ pub struct Proposal {
     /// The plan's pages as the write would leave them, or `None` for a write that leaves them
     /// as they stand
     pub pages_after: Option<Vec<PageWrite>>,
+    /// The branch the plan follows, read under its write lock, whose docs the check reads, or
+    /// `None` for its project's own
+    pub branch: Option<String>,
 }
 
 /// What came of a put
@@ -453,8 +458,9 @@ impl<B: Backend> Store<B> {
     /// * `project` - The project's name
     #[instrument(name = "Store::plans", skip_all, err(Debug))]
     pub async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanInfo>> {
-        // a project's plans sit in that project's partition
+        // a project's plans sit in that project's partition, and their branches in another
         let rows = self.backend.plans(project).await?;
+        let mut branches = self.plan_branches(project).await?;
         rows.into_iter()
             .map(|row| {
                 // a row of another project whose key hashed the same is a collision
@@ -465,10 +471,15 @@ impl<B: Backend> Store<B> {
                     row.project,
                     row.name
                 );
+                // the branch it follows, if it has one of its own
+                let branch = branches
+                    .remove(&row.name)
+                    .and_then(|stored| stored.kept.branch);
                 Ok(PlanInfo {
                     name: PlanName::new(row.project, row.name)?,
                     revision: row.current,
                     registered: None,
+                    branch,
                 })
             })
             .collect()
@@ -911,6 +922,8 @@ impl<B: Backend> Store<B> {
             after: records(plan, nodes.clone())?,
             pages: stood_pages.clone(),
             pages_after: pages.clone(),
+            // the branch it follows, read under the same lock, so it is judged where it lands
+            branch: self.plan_branch(plan).await?,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
@@ -1169,6 +1182,8 @@ impl<B: Backend> Store<B> {
             after: records(plan, judged)?,
             pages: pages.into_iter().map(PageWrite::from).collect(),
             pages_after: None,
+            // the branch it follows, read under the same lock, so it is judged where it lands
+            branch: self.plan_branch(plan).await?,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
@@ -1340,6 +1355,8 @@ impl<B: Backend> Store<B> {
             after: nodes,
             pages: before,
             pages_after: Some(after),
+            // the branch it follows, read under the same lock, so it is judged where it lands
+            branch: self.plan_branch(plan).await?,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {

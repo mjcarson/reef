@@ -2,8 +2,10 @@
 
 ## By its git URL
 
-On a team server, register a project by its URL. The service keeps a clone of one branch of it
-and reads docs from the commit it last fetched, so it needs nobody's disk:
+On a team server, register a project by its URL. The service keeps a clone of the branch it was
+registered by, and of each other branch a plan follows ([Making a plan](plans.md#a-plan-follows-a-branch)),
+and reads each plan's docs from the commit it last fetched of that plan's branch, so it needs
+nobody's disk:
 
 ```sh
 reef project add shop --url git@github.com:acme/shop.git              # its default branch
@@ -29,9 +31,11 @@ reef project show                  # from a checkout: the project it belongs to
 - **On request:** run `reef project fetch` from a checkout, or `reef project fetch --project
   shop` from anywhere.
 - **A doc link is checked against what was fetched.** Before linking a new doc, push it to the
-  project's branch, then `reef project fetch`. Until then a node linking it is refused. A doc
-  that isn't merged yet can be a [page](pages.md) of the plan instead.
-- **The app reloads** a plan's page when its project's branch moves.
+  branch the plan follows, then `reef project fetch`. Until then a node linking it is refused. A
+  doc that isn't merged yet can be a [page](pages.md) of the plan instead.
+- **Each branch is fetched on its own.** `reef project fetch` says where each branch a plan
+  follows moved to, and one deleted from the remote keeps where it was last fetched.
+- **The app reloads** a plan's page when the branch it follows moves.
 
 ## By a directory on the server
 
@@ -43,6 +47,8 @@ reef project add reef                         # the repo that holds the working 
 reef project add shop --repo /srv/git/shop    # or a directory named
 ```
 
-The service reads its docs from that working tree as it stands, so nothing needs pushing. With
+The service reads its docs from that working tree as it stands, so nothing needs pushing. A plan
+that follows another branch reads a worktree with that branch checked out, or else the branch's
+last commit. With
 sign-in required, only an admin may do this. A checkout on another host can't find a project
 registered this way, since that project has no URL to match.

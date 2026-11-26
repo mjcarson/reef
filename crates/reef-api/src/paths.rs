@@ -88,6 +88,9 @@ pub const WORK: &str = "/api/v1/projects/{project}/work";
 /// One plan, and the revision readers load
 pub const PLAN: &str = "/api/v1/projects/{project}/plans/{plan}";
 
+/// The branch a plan follows, set, changed or dropped by `PUT`
+pub const PLAN_BRANCH: &str = "/api/v1/projects/{project}/plans/{plan}/branch";
+
 /// A plan's nodes: listed by `GET`, put and removed in batches by `POST`
 pub const NODES: &str = "/api/v1/projects/{project}/plans/{plan}/nodes";
 
@@ -381,6 +384,15 @@ pub fn work(project: &str) -> String {
 /// * `plan` - The plan's full name
 pub fn plan(plan: &PlanName) -> String {
     format!("{}/{}", plans(&plan.project), encode(&plan.plan))
+}
+
+/// The path of the branch a plan follows
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn plan_branch(plan: &PlanName) -> String {
+    format!("{}/branch", self::plan(plan))
 }
 
 /// The path of a plan's nodes

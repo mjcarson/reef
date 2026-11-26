@@ -15,6 +15,7 @@ use reef_api::{
     StoredNode, StoredPage, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord,
     paths,
 };
+use reef_api::{BranchFetched, Branched, PlanBranch};
 use reef_api::{MarkReview, Review, ReviewState, Reviewed, Writer};
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -1864,6 +1865,7 @@ pub async fn a_pushed_doc_change_appears_after_a_fetch<B: Backend + 'static>(
     let moved = Fetched::Moved {
         from: pushed,
         to: tip.clone(),
+        branches: Vec::new(),
     };
     assert_eq!((status, fetched), (StatusCode::OK, moved));
     // the follower hears its project's docs moved
@@ -1873,6 +1875,8 @@ pub async fn a_pushed_doc_change_appears_after_a_fetch<B: Backend + 'static>(
     let expected = Change::ProjectFetched {
         project: "up".to_string(),
         commit: tip.clone(),
+        branch: Some("main".to_string()),
+        plans: Some(vec!["main".to_string()]),
     };
     assert_eq!(change, expected);
     // the page shows the new words, the new section can be linked, and the project names its tip
@@ -1894,7 +1898,13 @@ pub async fn a_pushed_doc_change_appears_after_a_fetch<B: Backend + 'static>(
     let (status, again): (_, Fetched) = ax.client.post(&paths::fetch("up"), &()).await?;
     assert_eq!(
         (status, again),
-        (StatusCode::OK, Fetched::Unchanged { commit: tip })
+        (
+            StatusCode::OK,
+            Fetched::Unchanged {
+                commit: tip,
+                branches: Vec::new()
+            }
+        )
     );
     Ok(())
 }
@@ -2094,5 +2104,344 @@ pub async fn a_bad_cursor_is_refused<B: Backend + 'static>(ax: Ax<B>) -> anyhow:
             "{route}"
         );
     }
+    Ok(())
+}
+
+/// A node that links one doc, saying why and what
+///
+/// # Arguments
+///
+/// * `id` - The node's id
+/// * `doc` - The doc it links, from the repo's root
+fn linking(id: &str, doc: &str) -> NodeWrite {
+    let mut node = work(id, &[], 0);
+    node.spec.docs = vec![doc.to_string()];
+    node
+}
+
+/// Sets the branch a plan follows through the route, answering its status and outcome
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+/// * `plan` - The plan's full name
+/// * `branch` - The branch to follow, or `None` for its project's own
+async fn follow<B: Backend + 'static>(
+    ax: &Ax<B>,
+    plan: &PlanName,
+    branch: Option<&str>,
+) -> anyhow::Result<(StatusCode, Branched)> {
+    let request = PlanBranch {
+        branch: branch.map(str::to_string),
+    };
+    ax.client.put(&paths::plan_branch(plan), &request).await
+}
+
+/// Two plans of one remote project follow two branches: each links a doc only its own branch
+/// holds, a push to one branch moves only the plan that follows it once fetched, and only that
+/// plan's followers hear of the fetch
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+pub async fn two_plans_follow_two_branches_of_one_remote<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // a repo published to a bare remote, `main` holding one doc, and `b2` another in its place
+    let main_doc = "# Main\n\n## Only main\n\nMain's words.\n";
+    let (bare, checkout) = git::published(&ax.dir.join("two"), &[("docs/main.md", main_doc)])?;
+    let main_tip = git::run(&checkout, &["rev-parse", "HEAD"])?;
+    git::run(&checkout, &["checkout", "-q", "-b", "b2"])?;
+    git::run(&checkout, &["rm", "-q", "docs/main.md"])?;
+    let b2_doc = "# B2\n\n## Only b2\n\nB2's words.\n";
+    git::write(&checkout, "docs/b2.md", b2_doc)?;
+    git::run(&checkout, &["add", "docs/b2.md"])?;
+    git::run(&checkout, &["commit", "-q", "-m", "b2's doc"])?;
+    let b2_first = git::run(&checkout, &["rev-parse", "HEAD"])?;
+    git::run(&checkout, &["push", "-q", "origin", "b2"])?;
+    // registered by its URL, its default branch `main`, with two plans, `p2` following `b2`
+    let url = format!("file://{}", bare.display());
+    let new = NewProject::remote("two", url, None);
+    let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
+    assert_eq!(status, StatusCode::CREATED, "{added:?}");
+    for name in ["p1", "p2"] {
+        let (_, _): (_, AddedPlan) = ax
+            .client
+            .post(&paths::plans("two"), &NewPlan::new(name))
+            .await?;
+    }
+    let p1 = PlanName::new("two", "p1")?;
+    let p2 = PlanName::new("two", "p2")?;
+    let (status, branched) = follow(&ax, &p2, Some("b2")).await?;
+    assert_eq!(status, StatusCode::OK, "{branched:?}");
+    let Branched::Applied { plan, changed } = branched else {
+        anyhow::bail!("following `b2`: {branched:?}");
+    };
+    assert!(changed);
+    assert_eq!(plan.branch.as_deref(), Some("b2"));
+    // each plan's listing names what it follows, and the remote where `b2` was fetched
+    let (_, plans): (_, Vec<PlanInfo>) = ax.client.get(&paths::plans("two")).await?;
+    let follows: Vec<(&str, Option<&str>)> = plans
+        .iter()
+        .map(|info| (info.name.plan.as_str(), info.branch.as_deref()))
+        .collect();
+    assert_eq!(follows, vec![("p1", None), ("p2", Some("b2"))]);
+    let (_, projects): (_, Vec<Project>) = ax.client.get(paths::PROJECTS).await?;
+    let remote = projects
+        .into_iter()
+        .find(|project| project.name == "two")
+        .and_then(|project| project.remote)
+        .expect("the remote project names its remote");
+    assert_eq!(remote.commit_of(Some("b2")), Some(b2_first.as_str()));
+    assert_eq!(remote.commit_of(None), Some(main_tip.as_str()));
+    // each plan links the doc only its own branch holds, and refuses the other's
+    let puts = [
+        (&p1, "A", "docs/main.md#only-main", StatusCode::OK),
+        (
+            &p1,
+            "B",
+            "docs/b2.md#only-b2",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (&p2, "B", "docs/b2.md#only-b2", StatusCode::OK),
+        (
+            &p2,
+            "A",
+            "docs/main.md#only-main",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ];
+    for (plan, id, doc, expected) in puts {
+        let (status, checked): (_, Checked) = ax
+            .client
+            .post(&paths::nodes(plan), &one(linking(id, doc), None))
+            .await?;
+        assert_eq!(status, expected, "{plan} linking {doc}: {checked:?}");
+    }
+    // and each plan's doc page is its own branch's
+    let html = ax
+        .client
+        .open(&format!("{}docs/b2.html", paths::docs(&p2)))
+        .await?
+        .text()
+        .await?;
+    assert!(html.contains("B2's words"), "{html}");
+    let response = ax
+        .client
+        .open(&format!("{}docs/b2.html", paths::docs(&p1)))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // a follower of each plan
+    let mut p1_events = Events::new(
+        ax.client
+            .open(&paths::changes(Some("two"), Some("p1")))
+            .await?,
+    );
+    let mut p2_events = Events::new(
+        ax.client
+            .open(&paths::changes(Some("two"), Some("p2")))
+            .await?,
+    );
+    // a push to `b2` alone is unseen until a fetch, which moves `b2` and leaves `main`
+    let later = "# B2\n\n## Only b2\n\nB2's words.\n\n## Later\n\nPushed after.\n";
+    let b2_tip = git::commit(&checkout, "docs/b2.md", later, "later")?;
+    git::run(&checkout, &["push", "-q", "origin", "b2"])?;
+    let (status, fetched): (_, Fetched) = ax.client.post(&paths::fetch("two"), &()).await?;
+    let expected = Fetched::Unchanged {
+        commit: main_tip.clone(),
+        branches: vec![BranchFetched::Moved {
+            branch: "b2".to_string(),
+            from: Some(b2_first),
+            to: b2_tip.clone(),
+        }],
+    };
+    assert_eq!((status, fetched), (StatusCode::OK, expected));
+    // only `p2`'s follower hears of it, naming the branch and the plan that follows it
+    let event = p2_events.next().await?.expect("the stream sent the fetch");
+    assert_eq!(event.event, "project-fetched");
+    let change: Change = serde_json::from_str(&event.data)?;
+    let expected = Change::ProjectFetched {
+        project: "two".to_string(),
+        commit: b2_tip,
+        branch: Some("b2".to_string()),
+        plans: Some(vec!["p2".to_string()]),
+    };
+    assert_eq!(change, expected);
+    // `p1`'s next change is its own put, the fetch never sent to it
+    let (status, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&p1), &one(work("C", &[], 1), None))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let event = p1_events.next().await?.expect("the stream sent the put");
+    assert_eq!(event.event, "nodes-put");
+    // and `p2` links the section pushed since
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(
+            &paths::nodes(&p2),
+            &one(linking("D", "docs/b2.md#later"), None),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    Ok(())
+}
+
+/// A local project's plan that follows a branch reads that branch's tip while another is
+/// checked out, and a worktree's files as they stand once one has the branch checked out
+///
+/// # Arguments
+///
+/// * `ax` - The served service, its project `reef` a local repo
+pub async fn a_local_plan_reads_its_branch_where_it_is_checked_out_or_at_its_tip<
+    B: Backend + 'static,
+>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // the project's repo: its checked-out branch holds one doc, and `b2` another in its place
+    let repo = ax.repo.clone();
+    let here = "# Here\n\n## Only here\n\nHere's words.\n";
+    git::write(&repo, "docs/here.md", here)?;
+    git::run(&repo, &["add", "docs/here.md"])?;
+    git::run(&repo, &["commit", "-q", "-m", "here"])?;
+    git::run(&repo, &["checkout", "-q", "-b", "b2"])?;
+    git::run(&repo, &["rm", "-q", "docs/here.md"])?;
+    git::write(&repo, "docs/b2.md", "# B2\n\n## Only b2\n\nB2's words.\n")?;
+    git::run(&repo, &["add", "docs/b2.md"])?;
+    git::run(&repo, &["commit", "-q", "-m", "b2"])?;
+    git::run(&repo, &["checkout", "-q", "-"])?;
+    // a plan that follows `b2`, which no worktree has checked out
+    let (_, _): (_, AddedPlan) = ax
+        .client
+        .post(&paths::plans("reef"), &NewPlan::new("side"))
+        .await?;
+    let side = PlanName::new("reef", "side")?;
+    let (status, branched) = follow(&ax, &side, Some("b2")).await?;
+    assert_eq!(status, StatusCode::OK, "{branched:?}");
+    // it links `b2`'s doc, at its tip, and not the working tree's, which `central` reads
+    let puts = [
+        (&side, "A", "docs/b2.md#only-b2", StatusCode::OK),
+        (
+            &side,
+            "B",
+            "docs/here.md#only-here",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (&ax.plan, "B", "docs/here.md#only-here", StatusCode::OK),
+        (
+            &ax.plan,
+            "A",
+            "docs/b2.md#only-b2",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ];
+    for (plan, id, doc, expected) in puts {
+        let (status, checked): (_, Checked) = ax
+            .client
+            .post(&paths::nodes(plan), &one(linking(id, doc), None))
+            .await?;
+        assert_eq!(status, expected, "{plan} linking {doc}: {checked:?}");
+    }
+    // once a linked worktree has `b2` checked out, its files are read as they stand
+    let linked = ax.dir.join("b2-linked");
+    let linked_path = linked.to_str().expect("a utf-8 path");
+    git::run(&repo, &["worktree", "add", "-q", linked_path, "b2"])?;
+    git::write(
+        &linked,
+        "docs/draft.md",
+        "# Draft\n\n## Not yet committed\n\nWords.\n",
+    )?;
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(
+            &paths::nodes(&side),
+            &one(linking("C", "docs/draft.md#not-yet-committed"), None),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    Ok(())
+}
+
+/// A branch change that would break a plan's links is refused and changes nothing, as is a
+/// branch the repo hasn't, a name git can't keep, and a plan that isn't listed
+///
+/// # Arguments
+///
+/// * `ax` - The served service, its project `reef` a local repo
+pub async fn a_branch_change_that_breaks_a_link_is_refused<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // the working tree holds a doc that branch `old`, made before it, lacks
+    let repo = ax.repo.clone();
+    git::run(&repo, &["branch", "old"])?;
+    let current = git::run(&repo, &["branch", "--show-current"])?;
+    git::write(&repo, "docs/here.md", "# Here\n\n## Only here\n\nWords.\n")?;
+    git::run(&repo, &["add", "docs/here.md"])?;
+    git::run(&repo, &["commit", "-q", "-m", "here"])?;
+    // `central` links it
+    let (status, checked): (_, Checked) = ax
+        .client
+        .post(
+            &paths::nodes(&ax.plan),
+            &one(linking("A", "docs/here.md#only-here"), None),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    // so it can't follow `old`, which says why, and it follows what it did
+    let (status, branched) = follow(&ax, &ax.plan, Some("old")).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let Branched::Refused(problems) = branched else {
+        anyhow::bail!("following `old`: {branched:?}");
+    };
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.to_string().contains("docs/here.md")),
+        "{problems:?}"
+    );
+    let (_, info): (_, PlanInfo) = ax.client.get(&paths::plan(&ax.plan)).await?;
+    assert_eq!(info.branch, None);
+    // a branch the repo hasn't is no branch, and a name git can't keep is a bad request
+    let (status, branched) = follow(&ax, &ax.plan, Some("nope")).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        matches!(&branched, Branched::NoBranch { branch, .. } if branch == "nope"),
+        "{branched:?}"
+    );
+    let request = PlanBranch {
+        branch: Some("-x".to_string()),
+    };
+    let (status, error): (_, ApiError) = ax
+        .client
+        .put(&paths::plan_branch(&ax.plan), &request)
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
+    );
+    // and a plan that isn't listed says so
+    let ghost = PlanName::new("reef", "ghost")?;
+    let (status, error): (_, ApiError) = ax
+        .client
+        .put(&paths::plan_branch(&ghost), &PlanBranch { branch: None })
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    // following the branch the working tree has checked out reads the working tree, so it holds
+    let (status, branched) = follow(&ax, &ax.plan, Some(&current)).await?;
+    assert_eq!(status, StatusCode::OK, "{branched:?}");
+    assert!(
+        matches!(&branched, Branched::Applied { changed: true, .. }),
+        "{branched:?}"
+    );
+    // and setting it again changes nothing
+    let (status, branched) = follow(&ax, &ax.plan, Some(&current)).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(&branched, Branched::Applied { changed: false, .. }),
+        "{branched:?}"
+    );
     Ok(())
 }

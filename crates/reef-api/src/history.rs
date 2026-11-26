@@ -213,6 +213,16 @@ pub enum Edited {
         /// What was done
         act: UserAct,
     },
+    /// The branch the plan follows was set, changed or dropped, each side `None` for its
+    /// project's own
+    Branched {
+        /// The branch it followed
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The branch it follows now
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
     /// A kind of edit a newer reef kept, which this one can't read
     #[serde(other)]
     Other,
@@ -237,6 +247,8 @@ impl Edited {
     /// assert_eq!(met.describe(), "criterion 2 met, by tests/store.rs::rows");
     /// let keys = Edited::Keys { keys: vec!["needs".to_string(), "title".to_string()] };
     /// assert_eq!(keys.describe(), "edited needs, title");
+    /// let branched = Edited::Branched { from: None, to: Some("dev".to_string()) };
+    /// assert_eq!(branched.describe(), "follows dev, not its project's branch");
     /// ```
     pub fn describe(&self) -> String {
         // a side left unsaid reads as unset
@@ -294,6 +306,14 @@ impl Edited {
                 let short: String = start.chars().take(7).collect();
                 said.push_str(&format!(" at {short}"));
                 said
+            }
+            Edited::Branched { from, to } => {
+                // the branch it follows now, then the one it followed
+                let side = |branch: &Option<String>| match branch {
+                    Some(branch) => branch.clone(),
+                    None => "its project's branch".to_string(),
+                };
+                format!("follows {}, not {}", side(to), side(from))
             }
             Edited::Other => "an edit this reef can't read".to_string(),
         }

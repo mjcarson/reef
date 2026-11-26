@@ -15,6 +15,7 @@
 - [M8 Claude fed from the terminal](milestones/m8.md)
 - [M9 Questions and approval in the app](milestones/m9.md)
 - [M10 A shared server](milestones/m10.md)
+- [M11 Branches side by side](milestones/m11.md)
 
 # Design
 

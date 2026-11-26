@@ -6,8 +6,9 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow,
-    ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanBranchRow,
+    PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
+    WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -720,6 +721,29 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `expect` - What must be stored under its key
     async fn write_remote(&self, row: RemoteRow, expect: Expect) -> anyhow::Result<Written> {
         self.inner.write_remote(row, expect).await
+    }
+
+    /// Reads the branch rows of a project's plans
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn plan_branches(&self, project: &str) -> anyhow::Result<Vec<PlanBranchRow>> {
+        self.inner.plan_branches(project).await
+    }
+
+    /// Writes one plan's branch row, if its condition holds
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key
+    async fn write_plan_branch(
+        &self,
+        row: PlanBranchRow,
+        expect: Expect,
+    ) -> anyhow::Result<Written> {
+        self.inner.write_plan_branch(row, expect).await
     }
 
     /// Reads a subject's edit rows, newest first, after a key if one is named

@@ -1,7 +1,8 @@
 //! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
 //! its nodes' work records, each node's captured revisions and their files, each plan's
 //! comments, the terminal loops, the users and the tokens they sign in with, the git remotes
-//! projects were registered by, and who made each edit of a node, a page or a queue
+//! projects were registered by, who made each edit of a node, a page or a queue, and the branch
+//! each plan follows
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
@@ -501,6 +502,32 @@ pub struct RemoteRow {
     pub record: String,
 }
 
+/// The branch a plan follows: its docs are read at that branch
+///
+/// A project's plans' branches share its partition, sorted by plan name, so every plan's branch
+/// is read with one partition, as the plans themselves are. A plan with no row follows its
+/// project's own branch, as every plan did before this table, so `PlanRow` needed no new field.
+/// Its record is one JSON field, so what it keeps can change without changing this table. A
+/// branch is set `if_absent` for a plan that has none and over the version read to change it.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct PlanBranchRow {
+    /// The project the plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The plan's name within its project, which sorts the partition
+    #[shoal(sort)]
+    pub plan: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// What the plan follows as JSON: its branch, or none
+    pub record: String,
+}
+
 /// One edit kept in a history: who made it, when, and what it changed of a node, a page or a
 /// project's queue
 ///
@@ -574,6 +601,8 @@ pub struct Reef {
     pub remotes: PersistentSortedTable<RemoteRow, FileSystem>,
     /// Each node's, page's and queue's edits, newest first
     pub edits: PersistentSortedTable<EditRow, FileSystem>,
+    /// Each project's plans' branches, by plan
+    pub plan_branches: PersistentSortedTable<PlanBranchRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -582,7 +611,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 12512966910162319123;
+    const SCHEMA_ID: u64 = 13509127152932721421;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -601,6 +630,7 @@ mod tests {
         ("TokenRow", 10275253647765591281),
         ("RemoteRow", 9724887961174009599),
         ("EditRow", 1157834751091248219),
+        ("PlanBranchRow", 17338340728770613526),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

@@ -105,14 +105,14 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Change, Checked, Commented,
-    Decision, DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing,
-    Loop, LoopEdited, MarkReview, MarkThread, Marked, Me, NewPlan, NewProject, NewReply, NewThread,
-    NewUser, Ordered, PageEdit, PageEdited, PageListing, PlanInfo, PlanWrite, Project, Puts,
-    QueueEdit, QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Review,
-    Reviewed, Revision, Rewrite, Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork,
-    Started, StoredNode, StoredPage, Thread, TokenKind, Transcript, User, UserAdded,
-    WRITE_BODY_MAX, WorkRecord, paths,
+    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Branched, Captured, Change, Checked,
+    Commented, Decision, DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken,
+    Listing, Loop, LoopEdited, MarkReview, MarkThread, Marked, Me, NewPlan, NewProject, NewReply,
+    NewThread, NewUser, Ordered, PageEdit, PageEdited, PageListing, PlanBranch, PlanInfo,
+    PlanWrite, Project, Puts, QueueEdit, QueueListing, Queued, RecordDecisions, Report,
+    ResolveThread, Resolved, Review, Reviewed, Revision, Rewrite, Session, SessionAct,
+    SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode, StoredPage, Thread, TokenKind,
+    Transcript, User, UserAdded, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_api::{
     HistoryPage, HistoryQuery, PasswordChange, PasswordChanged, TokenInfo, UserRemoved,
@@ -139,6 +139,7 @@ use crate::remote::{BadRemote, FetchFailed};
 use crate::service::{NoSession, NoUser, NotAllowed, NotSignedIn, Service, TooManyTries};
 use crate::store::{BadCursor, NotListed, NotRegistered, Pending, Unkeepable};
 use crate::tls::{self, TlsListener};
+use crate::tree::NotFetched;
 
 /// A handle on a service that a router holds and clones into every request
 ///
@@ -197,6 +198,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PROJECT_NEXT, get(project_next::<S>))
         .route(paths::WORK, get(work::<S>))
         .route(paths::PLAN, get(plan::<S>))
+        .route(paths::PLAN_BRANCH, axum::routing::put(set_plan_branch::<S>))
         .route(paths::NODES, get(list::<S>).post(put::<S>))
         .route(paths::NODE, get(node::<S>))
         .route(
@@ -537,6 +539,7 @@ impl From<anyhow::Error> for Failure {
             ErrorCode::NotListed
         } else if error.downcast_ref::<NoSession>().is_some()
             || error.downcast_ref::<NoUser>().is_some()
+            || error.downcast_ref::<NotFetched>().is_some()
         {
             ErrorCode::NotFound
         } else if error.downcast_ref::<NameError>().is_some() {
@@ -906,8 +909,8 @@ impl ChangesQuery {
             (None, _) => true,
             // or one plan of it
             (Some(wanted), Some(plan)) => &plan.plan == wanted,
-            // and a project's own change is no plan's, unless it concerns each of them
-            (Some(_), None) => change.reaches_every_plan(),
+            // and a project's own change is no plan's, unless it concerns that one
+            (Some(wanted), None) => change.reaches(wanted),
         }
     }
 }
@@ -1184,6 +1187,36 @@ async fn plan<S: Serves>(
         Some(info) => Ok(Json(info)),
         None => Err(anyhow::Error::from(NotListed(plan)).into()),
     }
+}
+
+/// Sets the branch a plan follows, or drops it: 200 if it follows it now, 422 if the repo has
+/// no such branch or the plan's docs there would add a problem
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, whom the plan's history names as changing it
+/// * `segments` - The plan's project and name
+/// * `branch` - The branch to follow, or none for its project's own
+#[instrument(name = "api::set_plan_branch", skip_all, err(Debug))]
+async fn set_plan_branch<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Segments(segments): Segments<PlanSegments>,
+    Body(branch): Body<PlanBranch>,
+) -> Result<(StatusCode, Json<Branched>), Failure> {
+    let plan = segments.name()?;
+    // checked at both branches, under the plan's write lock
+    let asker = caller.asker();
+    let branched = serves
+        .service()
+        .set_plan_branch(&plan, branch.branch, &asker)
+        .await?;
+    let status = match branched {
+        Branched::Applied { .. } => StatusCode::OK,
+        Branched::NoBranch { .. } | Branched::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(branched)))
 }
 
 /// Lists a plan's nodes, in the order the plan was written in
@@ -2539,6 +2572,8 @@ mod tests {
         let fetched = Change::ProjectFetched {
             project: "reef".to_string(),
             commit: "0123456".to_string(),
+            branch: None,
+            plans: None,
         };
         let queue = Change::QueueChanged {
             project: "reef".to_string(),
@@ -2561,11 +2596,37 @@ mod tests {
         assert!(!one.follows(&other));
         assert!(!one.follows(&project));
         assert!(!one.follows(&queue));
-        // a fetch is the project's, but moves every plan's docs, so it reaches each plan's
+        // a fetch from a service that names no plans moves every plan's docs, so it reaches
+        // each plan's
         assert!(one.follows(&fetched));
         assert!(!query(Some("shoal"), Some("central")).follows(&fetched));
         // and a gap reaches everyone
         assert!(one.follows(&gap));
+    }
+
+    /// A fetch that names the plans following its branch reaches only those plans' followers,
+    /// and its project's
+    #[test]
+    fn a_fetch_reaches_only_the_plans_that_follow_its_branch() {
+        // `dev` moved, which `app` follows and `central` doesn't
+        let fetched = Change::ProjectFetched {
+            project: "reef".to_string(),
+            commit: "0123456".to_string(),
+            branch: Some("dev".to_string()),
+            plans: Some(vec!["app".to_string()]),
+        };
+        assert!(query(Some("reef"), Some("app")).follows(&fetched));
+        assert!(!query(Some("reef"), Some("central")).follows(&fetched));
+        // the project's own followers hear of every fetch of it
+        assert!(query(Some("reef"), None).follows(&fetched));
+        assert!(!query(Some("shoal"), None).follows(&fetched));
+        // and a plan's branch changing is that plan's
+        let branched = Change::PlanBranched {
+            plan: PlanName::new("reef", "app").unwrap(),
+            branch: Some("dev".to_string()),
+        };
+        assert!(query(Some("reef"), Some("app")).follows(&branched));
+        assert!(!query(Some("reef"), Some("central")).follows(&branched));
     }
 
     /// The query that finds a project takes one directory and any number of remotes, in order

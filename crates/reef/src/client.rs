@@ -18,12 +18,12 @@
 
 use reef_api::HistoryPage;
 use reef_api::{
-    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Captured, Checked, Commented, Decision,
-    DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing, Loop,
-    LoopEdited, Me, NewPlan, NewProject, NewReply, NewUser, Ordered, PageEdit, PageEdited,
-    PageListing, PasswordChange, PasswordChanged, PlanInfo, PlanWrite, Project, Puts, QueueEdit,
-    QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Revision, Rewrite,
-    Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode,
+    AddCapture, AddedPlan, AddedProject, ApiError, Attach, Branched, Captured, Checked, Commented,
+    Decision, DecisionsRecorded, EditLoop, ErrorCode, Fetched, FileDiff, IssuedToken, Listing,
+    Loop, LoopEdited, Me, NewPlan, NewProject, NewReply, NewUser, Ordered, PageEdit, PageEdited,
+    PageListing, PasswordChange, PasswordChanged, PlanBranch, PlanInfo, PlanWrite, Project, Puts,
+    QueueEdit, QueueListing, Queued, RecordDecisions, Report, ResolveThread, Resolved, Revision,
+    Rewrite, Session, SessionAct, SessionActed, SignIn, SignedOut, StartWork, Started, StoredNode,
     StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
     WorkRecord, Writer, paths,
 };
@@ -360,10 +360,27 @@ impl Client {
     pub async fn add_plan(&self, plan: &PlanName) -> anyhow::Result<AddedPlan> {
         // the plan's name within its project, posted to the project's plans
         let path = paths::plans(&plan.project);
-        let new = NewPlan {
-            name: plan.plan.clone(),
-        };
+        let new = NewPlan::new(plan.plan.clone());
         let request = self.http.post(self.url(&path)).json(&new);
+        self.send(request, &path).await
+    }
+
+    /// Sets the branch a plan follows, or drops it so the plan follows its project's
+    ///
+    /// A service older than plans that follow branches has no route for it, and says so.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `branch` - The branch to follow, or `None` for its project's own
+    pub async fn set_plan_branch(
+        &self,
+        plan: &PlanName,
+        branch: Option<String>,
+    ) -> anyhow::Result<Branched> {
+        // put to the plan's own branch route, which an older service doesn't have
+        let path = paths::plan_branch(plan);
+        let request = self.http.put(self.url(&path)).json(&PlanBranch { branch });
         self.send(request, &path).await
     }
 

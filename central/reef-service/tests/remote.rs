@@ -173,3 +173,82 @@ fn tree_source_refuses_paths_that_leave_and_links_out() -> anyhow::Result<()> {
     assert_eq!(tree.read("binary.md"), None);
     Ok(())
 }
+
+/// Several branches fetch into one shallow clone, each over its own ref, so each plan's docs
+/// read at its own branch's tip, and a branch the remote hasn't fails alone
+#[tokio::test]
+async fn several_branches_fetch_into_one_clone() -> anyhow::Result<()> {
+    // a repo whose `main` and `b2` each hold a doc of their own
+    let (work, clone) = cloned("branches")?;
+    let main = git::run(&work, &["branch", "--show-current"])?;
+    git::write(&work, "docs/main.md", "# Main\n")?;
+    git::run(&work, &["add", "."])?;
+    git::run(&work, &["commit", "-q", "-m", "main"])?;
+    let main_tip = git::run(&work, &["rev-parse", "HEAD"])?;
+    git::run(&work, &["checkout", "-q", "-b", "b2"])?;
+    git::run(&work, &["rm", "-q", "docs/main.md"])?;
+    git::write(&work, "docs/b2.md", "# B2\n")?;
+    git::run(&work, &["add", "."])?;
+    git::run(&work, &["commit", "-q", "-m", "b2"])?;
+    let b2_tip = git::run(&work, &["rev-parse", "HEAD"])?;
+    // a clone made as the service makes one, fetching `main`, then `b2` beside it
+    if clone.exists() {
+        std::fs::remove_dir_all(&clone)?;
+    }
+    let url = format!("file://{}", work.display());
+    reef_service::remote::make(&clone, &main).await?;
+    for branch in [main.as_str(), "b2"] {
+        reef_service::remote::fetch(&clone, &url, branch).await?;
+    }
+    assert_eq!(reef_service::remote::tip(&clone, &main).await?, main_tip);
+    assert_eq!(reef_service::remote::tip(&clone, "b2").await?, b2_tip);
+    // each branch's tip reads its own docs, and not the other's
+    let at_main = TreeSource::open(&clone, &main_tip)?;
+    let at_b2 = TreeSource::open(&clone, &b2_tip)?;
+    assert_eq!(at_main.read("docs/main.md").as_deref(), Some("# Main\n"));
+    assert_eq!(at_main.read("docs/b2.md"), None);
+    assert_eq!(at_b2.read("docs/b2.md").as_deref(), Some("# B2\n"));
+    assert_eq!(at_b2.read("docs/main.md"), None);
+    // a branch the remote hasn't fails, and leaves the others where they were
+    assert!(
+        reef_service::remote::fetch(&clone, &url, "nope")
+            .await
+            .is_err()
+    );
+    assert_eq!(reef_service::remote::tip(&clone, "b2").await?, b2_tip);
+    Ok(())
+}
+
+/// A local project's plan reads a worktree with its branch checked out, else the branch's tip
+/// from the repo's objects, and a branch since deleted says how to follow another
+#[test]
+fn a_local_branch_reads_its_worktree_else_its_tip() -> anyhow::Result<()> {
+    // a repo on its first branch, and `b2` beside it with a doc of its own
+    let (work, _) = cloned("local-branch")?;
+    git::run(&work, &["checkout", "-q", "-b", "b2"])?;
+    git::write(&work, "docs/b2.md", "# B2\n")?;
+    git::run(&work, &["add", "."])?;
+    git::run(&work, &["commit", "-q", "-m", "b2"])?;
+    git::run(&work, &["checkout", "-q", "-"])?;
+    // `b2` isn't checked out, so its tip is read, and an uncommitted file is no doc of it
+    git::write(&work, "docs/loose.md", "# Loose\n")?;
+    let docs = Docs::LocalBranch {
+        repo: work.clone(),
+        branch: "b2".to_string(),
+    };
+    let source = docs.source()?;
+    assert_eq!(source.read("docs/b2.md").as_deref(), Some("# B2\n"));
+    assert_eq!(source.read("docs/loose.md"), None);
+    // checked out in the main worktree, its files are read as they stand
+    git::run(&work, &["checkout", "-q", "b2"])?;
+    let source = docs.source()?;
+    assert_eq!(source.read("docs/loose.md").as_deref(), Some("# Loose\n"));
+    // and a branch since deleted names how to follow another
+    let gone = Docs::LocalBranch {
+        repo: work,
+        branch: "gone".to_string(),
+    };
+    let error = gone.source().err().expect("a deleted branch can't be read");
+    assert!(error.to_string().contains("reef plan branch"), "{error}");
+    Ok(())
+}

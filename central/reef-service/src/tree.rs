@@ -2,10 +2,16 @@
 //! those and a local project's working tree
 //!
 //! A remote project's clone is bare, so its docs are blobs of the tree of the commit its row says
-//! was last fetched. Every read of one snapshot names that commit, so a fetch that lands while a
-//! write is checked changes nothing the check reads, and readers never see half of a fetch. The
-//! rules a working tree's docs keep hold here too: no path that climbs out or starts from the
-//! root is read, and a symlink is followed only while it stays inside the tree.
+//! was last fetched of the branch a plan follows. Every read of one snapshot names that commit,
+//! so a fetch that lands while a write is checked changes nothing the check reads, and readers
+//! never see half of a fetch. The rules a working tree's docs keep hold here too: no path that
+//! climbs out or starts from the root is read, and a symlink is followed only while it stays
+//! inside the tree.
+//!
+//! A local project's plan that follows a branch reads a worktree that has that branch checked
+//! out, the main one first, so its uncommitted docs link as a working tree's do. With none, it
+//! reads the branch's tip from the repo's objects, as a remote project's commit is read. Which
+//! of those it is is found as the docs are opened, so one read sees one of them.
 
 use gix::ObjectId;
 use reef_api::Project;
@@ -154,34 +160,77 @@ impl DocSource for TreeSource {
     }
 }
 
-/// Where a project's docs are read from, which a blocking read opens
+/// A branch a remote project's plan follows that its clone hasn't fetched yet
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotFetched {
+    /// The project's name
+    pub project: String,
+    /// The branch
+    pub branch: String,
+}
+
+impl std::fmt::Display for NotFetched {
+    /// Names the branch, and how to fetch it
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "branch `{}` of project `{}` isn't fetched yet: run `reef project fetch`, or follow \
+             another with `reef plan branch`",
+            self.branch, self.project
+        )
+    }
+}
+
+impl std::error::Error for NotFetched {}
+
+/// Where a plan's docs are read from, which a blocking read opens
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Docs {
     /// A local project's working tree, as it stands
     WorkingTree(PathBuf),
-    /// A remote project's clone, at the commit last fetched
+    /// A remote project's clone, at the commit last fetched of its plan's branch
     Commit {
         /// The bare clone
         clone: PathBuf,
         /// The commit to read at
         commit: String,
     },
+    /// A local project's plan that follows a branch: a worktree with it checked out, else its tip
+    LocalBranch {
+        /// The root of the repo's main worktree
+        repo: PathBuf,
+        /// The branch, without `refs/heads/`
+        branch: String,
+    },
 }
 
 impl Docs {
-    /// Where a project's docs are read from
+    /// Where a plan's docs are read from, by its project and the branch it follows
     ///
     /// # Arguments
     ///
-    /// * `project` - The project, as the store lists it
-    pub fn of(project: &Project) -> Docs {
-        match &project.remote {
-            // a remote project's repo is its clone, read at its row's commit
-            Some(remote) => Docs::Commit {
-                clone: project.repo.clone(),
-                commit: remote.commit.clone(),
-            },
-            None => Docs::WorkingTree(project.repo.clone()),
+    /// * `project` - The plan's project, as the store lists it
+    /// * `branch` - The branch the plan follows, or `None` for its project's own
+    pub fn of(project: &Project, branch: Option<&str>) -> anyhow::Result<Docs> {
+        match (&project.remote, branch) {
+            // a remote project's repo is its clone, read at the commit its branch was fetched at
+            (Some(remote), branch) => {
+                let commit = remote.commit_of(branch).ok_or_else(|| NotFetched {
+                    project: project.name.clone(),
+                    branch: branch.unwrap_or(&remote.branch).to_string(),
+                })?;
+                Ok(Docs::Commit {
+                    clone: project.repo.clone(),
+                    commit: commit.to_string(),
+                })
+            }
+            // a local project's own is its working tree, as it stands
+            (None, None) => Ok(Docs::WorkingTree(project.repo.clone())),
+            // and a branch of it is found as it is opened
+            (None, Some(branch)) => Ok(Docs::LocalBranch {
+                repo: project.repo.clone(),
+                branch: branch.to_string(),
+            }),
         }
     }
 
@@ -192,8 +241,83 @@ impl Docs {
             Docs::Commit { clone, commit } => {
                 Ok(RepoDocs::Commit(Box::new(TreeSource::open(clone, commit)?)))
             }
+            Docs::LocalBranch { repo, branch } => {
+                // a worktree with the branch checked out, the main one first, else its tip
+                let opened = open_repo(repo)?;
+                if let Some(worktree) = checked_out(&opened, branch)? {
+                    return Ok(RepoDocs::WorkingTree(RepoSource::new(&worktree)));
+                }
+                let commit = branch_tip(&opened, branch)?;
+                Ok(RepoDocs::Commit(Box::new(TreeSource::open(repo, &commit)?)))
+            }
         }
     }
+}
+
+/// Opens a local project's repo, reading no config but its own
+///
+/// # Arguments
+///
+/// * `repo` - The root of its main worktree
+fn open_repo(repo: &Path) -> anyhow::Result<gix::Repository> {
+    gix::open_opts(repo, gix::open::Options::isolated())
+        .map_err(|error| anyhow::anyhow!("the repo at {} can't be read: {error}", repo.display()))
+}
+
+/// The worktree of a repo that has a branch checked out, the main one first, if one has
+///
+/// # Arguments
+///
+/// * `repo` - The repo, opened
+/// * `branch` - The branch, without `refs/heads/`
+fn checked_out(repo: &gix::Repository, branch: &str) -> anyhow::Result<Option<PathBuf>> {
+    // the full name each worktree's HEAD would name
+    let wanted = format!("refs/heads/{branch}");
+    for worktree in repo.worktrees_including_main()? {
+        // one that can't be read, or whose checkout is gone, has nothing checked out
+        let Ok(worktree) = worktree else {
+            continue;
+        };
+        let Some(dir) = worktree.workdir().filter(|dir| dir.is_dir()) else {
+            continue;
+        };
+        let head = worktree.head_name().ok().flatten();
+        if head.is_some_and(|head| head.as_bstr() == wanted.as_bytes()) {
+            return Ok(Some(dir.to_path_buf()));
+        }
+    }
+    Ok(None)
+}
+
+/// The commit a local branch is at, as its full hex id
+///
+/// # Arguments
+///
+/// * `repo` - The repo, opened
+/// * `branch` - The branch, without `refs/heads/`
+fn branch_tip(repo: &gix::Repository, branch: &str) -> anyhow::Result<String> {
+    // a branch since deleted says how to follow another
+    let name = format!("refs/heads/{branch}");
+    let Some(mut found) = repo.try_find_reference(name.as_str())? else {
+        anyhow::bail!(
+            "the repo at {} has no branch `{branch}`: follow another with `reef plan branch`",
+            repo.workdir().unwrap_or(repo.git_dir()).display()
+        );
+    };
+    Ok(found.peel_to_id()?.detach().to_string())
+}
+
+/// Whether a local project's repo has a branch, for a plan to follow it
+///
+/// # Arguments
+///
+/// * `repo` - The root of its main worktree
+/// * `branch` - The branch, without `refs/heads/`
+pub fn has_branch(repo: &Path, branch: &str) -> anyhow::Result<bool> {
+    // a branch is a ref under `refs/heads/`
+    let opened = open_repo(repo)?;
+    let name = format!("refs/heads/{branch}");
+    Ok(opened.try_find_reference(name.as_str())?.is_some())
 }
 
 /// A project's docs, opened: its working tree, or its clone at a commit

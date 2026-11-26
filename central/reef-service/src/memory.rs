@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
 use crate::schema::{
-    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanRow,
-    ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow, WorkRow,
+    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanBranchRow,
+    PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
+    WorkRow,
 };
 use crate::schema::{LOOPS, PROJECTS, REMOTES, TOKENS, USERS};
 
@@ -61,6 +62,8 @@ struct Tables {
     remotes: BTreeMap<String, BTreeMap<String, RemoteRow>>,
     /// Each subject's edits, by their keys, which count down so the newest sorts first
     edits: BTreeMap<SubjectPartition, BTreeMap<String, EditRow>>,
+    /// Each project's plans' branches, by plan name
+    plan_branches: BTreeMap<String, BTreeMap<String, PlanBranchRow>>,
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -1080,6 +1083,44 @@ impl Backend for MemoryBackend {
             return Ok(Written::Refused(refusal));
         }
         partition.insert(row.project.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Reads the branch rows of a project's plans, in plan order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn plan_branches(&self, project: &str) -> anyhow::Result<Vec<PlanBranchRow>> {
+        let tables = self.tables();
+        // the project's own partition, whole
+        Ok(tables
+            .plan_branches
+            .get(project)
+            .map(|partition| partition.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Writes one plan's branch row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_plan_branch(
+        &self,
+        row: PlanBranchRow,
+        expect: Expect,
+    ) -> anyhow::Result<Written> {
+        let mut tables = self.tables();
+        // the row's own partition, as its key hashes
+        let partition = tables.plan_branches.entry(row.project.clone()).or_default();
+        // judge the condition against the row stored under its sort key
+        let stored = partition.get(&row.plan).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        partition.insert(row.plan.clone(), row);
         Ok(Written::Applied)
     }
 

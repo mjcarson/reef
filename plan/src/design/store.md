@@ -322,6 +322,30 @@ partition, as projects, loops and users are.
   Two registrations of it are judged under the lock every registration holds.
 - **A fetch writes over the version read**, whether its branch moved or not, so the row says
   when it was last fetched, and two fetches can't both land.
+- **Each other branch a plan follows is kept in the same record** ([C92](../milestones/m11.md)), a map of
+  each branch to the commit last fetched and when, so a row written before reads back with none.
+  A branch that fails to fetch keeps its last tip, and one no plan follows any more is left in
+  the map rather than taken out, so a fetch running beside a branch being set never drops it.
+
+## Plans' branches
+
+The branch each plan follows ([C92](../milestones/m11.md)), a row each in its project's partition, sorted by
+plan, as the plans themselves are.
+
+### Design choices
+
+- **A table of its own, not a field of `PlanRow`.** `PlanRow` has no JSON field, so a branch in
+  it would change the row and need a fresh data directory. A plan with no row follows its
+  project's own branch, as every plan did before.
+- **A change is judged under the plan's write lock.** The store hands the caller's check the
+  plan as it stands and both branches, and writes the row only if the plan's docs at the new
+  branch add no problem. The row is written `if_absent` for a plan with none, else over the
+  version read.
+- **Every checked write reads the branch under the same lock.** A put, a whole-plan write and a
+  page edit each read the plan's branch row inside the lock their check runs under, so none is
+  judged at a branch a change replaced meanwhile.
+- **Kept in the plan's history**, under `plan/<plan>`, as an `Edited::Branched` naming both
+  sides.
 
 ## History
 

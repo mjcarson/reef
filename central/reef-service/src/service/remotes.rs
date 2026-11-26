@@ -10,15 +10,20 @@
 //! - **Docs are read at the commit the store keeps** ([`crate::tree`]), so a fetch lands for
 //!   readers only once its commit is written to the project's remote.
 //! - **A fetch is one project's at a time**, under its own lock, so one slow remote holds up no
-//!   other. Each is written to the remote's row, whether its branch moved or not, so the row says
-//!   when it was last fetched. A branch that moved is a change, [`Change::ProjectFetched`], which
-//!   reaches every follower of any of its project's plans.
+//!   other. Each is written to the remote's row, whether its branches moved or not, so the row
+//!   says when it was last fetched.
+//! - **A fetch takes every branch a plan follows**, beside the one the project was registered
+//!   by, one branch at a time, so a branch deleted from the remote holds up no other: it keeps
+//!   where it was last fetched, and says it failed. The registered branch failing fails the fetch.
+//! - **A branch that moved is a change**, [`Change::ProjectFetched`], naming the plans that read
+//!   their docs there, so only those plans' followers hear of it.
 //! - **Every remote project is fetched on an interval**, when the service was given one, by
 //!   [`Service::follow_remotes`], which a server runs beside its routes. A fetch that fails is
 //!   logged and the rest go on.
 
-use reef_api::{AddedProject, Change, Fetched, Project};
+use reef_api::{AddedProject, BranchFetched, Change, Fetched, PlanInfo, Project, Tip};
 use reef_model::PlanName;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -155,6 +160,7 @@ impl<B: Backend> Service<B> {
             clone: clone.clone(),
             commit,
             fetched_at: now_ms(),
+            branches: BTreeMap::new(),
         };
         let added = match self
             .store
@@ -177,10 +183,12 @@ impl<B: Backend> Service<B> {
         Ok(added)
     }
 
-    /// Fetches a remote project's branch, so its docs are read at its tip
+    /// Fetches a remote project's branches, so each plan's docs are read at its branch's tip
     ///
-    /// A local project's docs are its working tree as it stands, so it is [`Fetched::Local`],
-    /// and nothing is fetched.
+    /// The branch the project was registered by is fetched first, and its failure fails the
+    /// fetch. Each other branch a plan follows is fetched after it, one at a time, and one that
+    /// fails keeps where it was last fetched. A local project's docs are its working tree as it
+    /// stands, so it is [`Fetched::Local`], and nothing is fetched.
     ///
     /// # Arguments
     ///
@@ -199,29 +207,145 @@ impl<B: Backend> Service<B> {
         if project.remote.is_none() {
             return Ok(Fetched::Local);
         }
-        let read = self
-            .store
-            .remotes()
-            .await?
-            .remove(name)
-            .filter(|read| read.kept.clone == project.repo)
-            .ok_or_else(|| anyhow::anyhow!("project `{name}`'s remote is no longer kept"))?;
-        // the branch's tip, fetched into the clone
+        let read = self.kept_remote(&project).await?;
+        // the registered branch's tip, fetched into the clone
         let kept = &read.kept;
         remote::fetch(&kept.clone, &kept.url, &kept.branch).await?;
         let commit = remote::tip(&kept.clone, &kept.branch).await?;
-        // kept whether it moved or not, so the row says when it was fetched
-        let from = kept.commit.clone();
-        self.store.fetched(&read, &commit, now_ms()).await?;
-        if commit == from {
-            return Ok(Fetched::Unchanged { commit });
+        // then each other branch a plan follows, one at a time, each tip kept where one was
+        let plans = self.store.plans(name).await?;
+        let followed: BTreeSet<String> = plans
+            .iter()
+            .filter_map(|info| info.branch.clone())
+            .filter(|branch| *branch != kept.branch)
+            .collect();
+        let at = now_ms();
+        let mut tips = kept.branches.clone();
+        let mut outcomes = Vec::with_capacity(followed.len());
+        for branch in followed {
+            let before = kept.branches.get(&branch).map(|tip| tip.commit.clone());
+            let fetched = async {
+                remote::fetch(&kept.clone, &kept.url, &branch).await?;
+                remote::tip(&kept.clone, &branch).await
+            };
+            match fetched.await {
+                Ok(to) => {
+                    // where it is now, and whether that moved it
+                    tips.insert(
+                        branch.clone(),
+                        Tip {
+                            commit: to.clone(),
+                            fetched_at: at,
+                        },
+                    );
+                    outcomes.push(match before {
+                        Some(from) if from == to => BranchFetched::Unchanged { branch, commit: to },
+                        from => BranchFetched::Moved { branch, from, to },
+                    });
+                }
+                Err(error) => {
+                    // one that failed is left where it was, and says why
+                    tracing::warn!(
+                        project = name,
+                        %branch,
+                        error = %format!("{error:#}"),
+                        "fetching a branch a plan follows failed"
+                    );
+                    outcomes.push(BranchFetched::Failed {
+                        branch,
+                        error: format!("{error:#}"),
+                    });
+                }
+            }
         }
-        // a branch that moved moves every plan of the project's docs
-        self.publish(Change::ProjectFetched {
-            project: name.to_string(),
-            commit: commit.clone(),
-        });
-        Ok(Fetched::Moved { from, to: commit })
+        // kept whether anything moved or not, so the row says when it was fetched
+        let from = kept.commit.clone();
+        let registered = kept.branch.clone();
+        self.store.fetched(&read, &commit, tips, at).await?;
+        // each branch that moved moves the docs of the plans that follow it
+        if commit != from {
+            self.publish(Change::ProjectFetched {
+                project: name.to_string(),
+                commit: commit.clone(),
+                branch: Some(registered.clone()),
+                plans: Some(following(&plans, &registered, None)),
+            });
+        }
+        for outcome in &outcomes {
+            if let BranchFetched::Moved { branch, to, .. } = outcome {
+                self.publish(Change::ProjectFetched {
+                    project: name.to_string(),
+                    commit: to.clone(),
+                    branch: Some(branch.clone()),
+                    plans: Some(following(&plans, &registered, Some(branch))),
+                });
+            }
+        }
+        Ok(match commit == from {
+            true => Fetched::Unchanged {
+                commit,
+                branches: outcomes,
+            },
+            false => Fetched::Moved {
+                from,
+                to: commit,
+                branches: outcomes,
+            },
+        })
+    }
+
+    /// Fetches one branch of a remote project into its clone, for a plan about to follow it
+    ///
+    /// It holds the project's fetch lock, so no fetch running meanwhile writes over it.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The project's name
+    /// * `branch` - The branch, its name checked already
+    #[instrument(name = "Service::fetch_branch", skip_all, err(Debug))]
+    pub(crate) async fn fetch_branch(&self, name: &str, branch: &str) -> anyhow::Result<()> {
+        // one fetch of a project at a time
+        let lock = self.fetch_lock(name);
+        let _fetching = lock.lock().await;
+        let project = self
+            .store
+            .project(name)
+            .await?
+            .ok_or_else(|| NotRegistered(name.to_string()))?;
+        let read = self.kept_remote(&project).await?;
+        // the branch's tip, fetched into the clone, beside every tip kept already
+        let kept = &read.kept;
+        remote::fetch(&kept.clone, &kept.url, branch).await?;
+        let commit = remote::tip(&kept.clone, branch).await?;
+        let at = now_ms();
+        let mut tips = kept.branches.clone();
+        tips.insert(
+            branch.to_string(),
+            Tip {
+                commit,
+                fetched_at: at,
+            },
+        );
+        // the registered branch where it was, and the row's time where it was too
+        self.store
+            .fetched(&read, &kept.commit, tips, kept.fetched_at)
+            .await?;
+        Ok(())
+    }
+
+    /// The remote a project was registered by, as its row keeps it, refused if it is gone
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project, as the store lists it
+    async fn kept_remote(&self, project: &Project) -> anyhow::Result<crate::store::StoredRemote> {
+        // the row whose clone the project's row names
+        self.store
+            .remotes()
+            .await?
+            .remove(&project.name)
+            .filter(|read| read.kept.clone == project.repo)
+            .ok_or_else(|| anyhow::anyhow!("project `{}`'s remote is no longer kept", project.name))
     }
 
     /// Fetches every remote project, one at a time, logging each fetch that fails
@@ -288,6 +412,24 @@ impl<B: Backend> Service<B> {
             .or_default()
             .clone()
     }
+}
+
+/// The plans of a remote project that read their docs at a branch: those that follow it, and
+/// for the branch the project was registered by, those that follow no branch of their own too
+///
+/// # Arguments
+///
+/// * `plans` - The project's plans
+/// * `registered` - The branch the project was registered by
+/// * `branch` - The branch, or `None` for the registered one
+fn following(plans: &[PlanInfo], registered: &str, branch: Option<&str>) -> Vec<String> {
+    // the registered branch is the one a plan with none follows
+    let wanted = branch.unwrap_or(registered);
+    plans
+        .iter()
+        .filter(|info| info.branch.as_deref().unwrap_or(registered) == wanted)
+        .map(|info| info.name.plan.clone())
+        .collect()
 }
 
 /// What a registration would be refused as, by the projects already registered, if anything

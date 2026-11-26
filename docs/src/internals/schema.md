@@ -15,8 +15,10 @@
 | `DecisionRow` | (project, `plan/id`) | number, padded | a `version`, and the decision as JSON: its call, session, where and when it was asked and answered, what it asked, what came of it, and whose session asked it |
 | `UserRow` | the constant `"users"` | name | a `version`, and the user as JSON: their password's argon2id hash, whether they are an admin, when they were added and by whom |
 | `TokenRow` | the constant `"tokens"` | the token's SHA-256 | a `version`, and what it signs in as JSON: its user, kind, label, and when it was issued and expires |
-| `RemoteRow` | the constant `"remotes"` | the project's name | a `version`, and the remote as JSON: its URL, branch, clone's path and the commit last fetched |
+| `RemoteRow` | the constant `"remotes"` | the project's name | a `version`, and the remote as JSON: its URL, branch, clone's path and the commit last fetched, and each other branch a plan follows with its commit last fetched |
 | `EditRow` | (project, subject: `node/<plan>/<id>`, `page/<plan>/<path>`, `plan/<plan>`, `queue`, `project` or `loops`; or the empty project's `users`) | `u64::MAX` less the edit's stamp, padded, then the store's random number | the edit or act as JSON: who made it, when, the version it left and what it changed |
+
+| `PlanBranchRow` | project | plan name | a `version`, and what the plan follows as JSON: its branch, or none for its project's own |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

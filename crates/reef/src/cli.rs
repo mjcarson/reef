@@ -84,7 +84,9 @@
 //! else the file `$REEF_CREDENTIALS` names, else `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
 use clap::{Args, Parser, Subcommand};
-use reef_api::{AddedProject, Attach, Fetched, Pane, Project, SessionState, Writer};
+use reef_api::{
+    AddedProject, Attach, BranchFetched, Branched, Fetched, Pane, Project, SessionState, Writer,
+};
 use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
 use std::io::Write;
@@ -483,13 +485,31 @@ pub enum PlanCommand {
     New {
         /// The plan's name within its project
         name: String,
+        /// The branch of the project's repo it follows, whose docs it reads, if not the
+        /// project's own
+        #[arg(long)]
+        branch: Option<String>,
         /// The project to list it in, if not the working directory's
         #[command(flatten)]
         pick: Pick,
     },
-    /// List the project's plans and the revision each is at
+    /// List the project's plans, the revision each is at and the branch each follows
     Ls {
         /// The project whose plans to list, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+    /// Set the branch a plan follows, whose docs it reads, unless its links break there
+    Branch {
+        /// The plan's name within its project
+        name: String,
+        /// The branch to follow, without `refs/heads/`
+        #[arg(required_unless_present = "clear")]
+        branch: Option<String>,
+        /// Follow the project's own branch again instead
+        #[arg(long, conflicts_with = "branch")]
+        clear: bool,
+        /// The project the plan is in, if not the working directory's
         #[command(flatten)]
         pick: Pick,
     },
@@ -1028,10 +1048,13 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Project(ProjectCommand::Show { pick }) => {
             project_show(&client, cwd, &pick, out).await
         }
-        Command::Plan(PlanCommand::New { name, pick }) => {
-            plan_new(&client, cwd, &name, &pick, out).await
+        Command::Plan(PlanCommand::New { name, branch, pick }) => {
+            plan_new(&client, cwd, &name, branch, &pick, out).await
         }
         Command::Plan(PlanCommand::Ls { pick }) => plan_ls(&client, cwd, &pick, out).await,
+        Command::Plan(PlanCommand::Branch {
+            name, branch, pick, ..
+        }) => plan_branch(&client, cwd, &name, branch, &pick, out).await,
         Command::Node(NodeCommand::Put { file, pick }) => {
             // the YAML first, so a file that can't be read asks nothing of the service
             let text = node::read_input(cwd, file.as_deref())?;
@@ -1540,19 +1563,20 @@ async fn project_fetch<W: Write>(
         .as_ref()
         .map(|remote| remote.branch.clone())
         .unwrap_or_default();
-    match client.fetch_project(&project.name).await? {
-        Fetched::Moved { from, to } => writeln!(
+    let fetched = client.fetch_project(&project.name).await?;
+    match &fetched {
+        Fetched::Moved { from, to, .. } => writeln!(
             out,
             "`{}`'s `{branch}` moved from {} to {}",
             project.name,
-            short(&from),
-            short(&to)
+            short(from),
+            short(to)
         )?,
-        Fetched::Unchanged { commit } => writeln!(
+        Fetched::Unchanged { commit, .. } => writeln!(
             out,
             "`{}`'s `{branch}` is still at {}",
             project.name,
-            short(&commit)
+            short(commit)
         )?,
         Fetched::Local => anyhow::bail!(
             "project `{}` reads its docs from {} on the service's host as they stand, so there is \
@@ -1560,6 +1584,43 @@ async fn project_fetch<W: Write>(
             project.name,
             project.repo.display()
         ),
+    }
+    // then each other branch a plan follows, in the order the service fetched them
+    for each in fetched.branches() {
+        match each {
+            BranchFetched::Moved {
+                branch,
+                from: Some(from),
+                to,
+            } => writeln!(
+                out,
+                "`{}`'s `{branch}` moved from {} to {}",
+                project.name,
+                short(from),
+                short(to)
+            )?,
+            BranchFetched::Moved {
+                branch,
+                from: None,
+                to,
+            } => writeln!(
+                out,
+                "`{}`'s `{branch}` was fetched at {}",
+                project.name,
+                short(to)
+            )?,
+            BranchFetched::Unchanged { branch, commit } => writeln!(
+                out,
+                "`{}`'s `{branch}` is still at {}",
+                project.name,
+                short(commit)
+            )?,
+            BranchFetched::Failed { branch, error } => writeln!(
+                out,
+                "`{}`'s `{branch}` couldn't be fetched, so its plans read it where it was: {error}",
+                project.name
+            )?,
+        }
     }
     Ok(())
 }
@@ -1653,18 +1714,122 @@ async fn plan_new<W: Write>(
     client: &Client,
     cwd: &Path,
     name: &str,
+    branch: Option<String>,
     pick: &Pick,
     out: &mut W,
 ) -> anyhow::Result<()> {
     // the plan's full name keeps the rule names share
     let project = picked(client, cwd, pick).await?;
-    let plan = PlanName::new(project.name, name)?;
+    let plan = PlanName::new(project.name.clone(), name)?;
     // a plan already listed is left as it is, which is no failure
     match client.add_plan(&plan).await?.added {
         true => writeln!(out, "listed `{plan}`")?,
         false => writeln!(out, "`{plan}` is already listed")?,
     }
+    // then the branch it follows, if one was named
+    if let Some(branch) = branch {
+        branched(client, &project, &plan, Some(branch), out).await?;
+    }
     Ok(())
+}
+
+/// Sets the branch a plan of the picked project follows, or drops it with `--clear`
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `name` - The plan's name within its project
+/// * `branch` - The branch to follow, or `None` for the project's own
+/// * `pick` - The project named, if one was
+/// * `out` - Where to print what came of it
+async fn plan_branch<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    name: &str,
+    branch: Option<String>,
+    pick: &Pick,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the plan's full name keeps the rule names share
+    let project = picked(client, cwd, pick).await?;
+    let plan = PlanName::new(project.name.clone(), name)?;
+    branched(client, &project, &plan, branch, out).await
+}
+
+/// Sets the branch a plan follows and says what it follows now, or why it can't
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `project` - The plan's project, whose remote says where each branch was fetched
+/// * `plan` - The plan's full name
+/// * `branch` - The branch to follow, or `None` for the project's own
+/// * `out` - Where to print what came of it
+async fn branched<W: Write>(
+    client: &Client,
+    project: &Project,
+    plan: &PlanName,
+    branch: Option<String>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    match client.set_plan_branch(plan, branch).await? {
+        Branched::Applied {
+            plan: info,
+            changed,
+        } => {
+            // the project again, since a remote one may have just fetched the branch
+            let project = client
+                .projects()
+                .await?
+                .into_iter()
+                .find(|listed| listed.name == project.name)
+                .unwrap_or_else(|| project.clone());
+            let follows = follows(&project, info.branch.as_deref());
+            match changed {
+                true => writeln!(out, "`{plan}` {follows}")?,
+                false => writeln!(out, "`{plan}` {follows} already")?,
+            }
+            Ok(())
+        }
+        Branched::NoBranch { branch, reason } => {
+            anyhow::bail!("`{plan}` can't follow `{branch}`: {reason}")
+        }
+        Branched::Refused(problems) => {
+            let lines: Vec<String> = problems
+                .iter()
+                .map(|problem| format!("  {problem}"))
+                .collect();
+            anyhow::bail!(
+                "`{plan}` follows what it did, since its docs at that branch would add these \
+                 problems:\n{}",
+                lines.join("\n")
+            )
+        }
+    }
+}
+
+/// What a plan follows, as a person is told: its branch and where it was fetched, or its
+/// project's own
+///
+/// # Arguments
+///
+/// * `project` - The plan's project
+/// * `branch` - The branch the plan follows, or `None` for its project's own
+fn follows(project: &Project, branch: Option<&str>) -> String {
+    match (&project.remote, branch) {
+        // a remote project's branch, where it was last fetched
+        (Some(remote), branch) => {
+            let name = branch.unwrap_or(&remote.branch);
+            match remote.commit_of(branch) {
+                Some(commit) => format!("follows `{name}` at {}", short(commit)),
+                None => format!("follows `{name}`, not fetched yet"),
+            }
+        }
+        // a local project's branch, read where it is checked out or at its tip
+        (None, Some(branch)) => format!("follows `{branch}`"),
+        (None, None) => "reads its project's working tree".to_string(),
+    }
 }
 
 /// Lists the picked project's plans and the revision each is at
@@ -1685,7 +1850,12 @@ async fn plan_ls<W: Write>(
     let project = picked(client, cwd, pick).await?;
     let plans = client.plans(&project.name).await?;
     let rows = plans.iter().map(|info| {
-        let mut line = format!("revision {}", info.revision);
+        // its revision, what it follows, and who listed it
+        let mut line = format!(
+            "revision {}, {}",
+            info.revision,
+            follows(&project, info.branch.as_deref())
+        );
         if let Some(listed) = info
             .registered
             .as_ref()
@@ -1881,12 +2051,32 @@ mod tests {
         // a plan's project is picked on the command line
         let new = Cli::try_parse_from(["reef", "plan", "new", "central", "--project", "reef"]);
         match new.unwrap().command {
-            Command::Plan(PlanCommand::New { name, pick }) => {
+            Command::Plan(PlanCommand::New { name, branch, pick }) => {
                 assert_eq!(name, "central");
+                assert_eq!(branch, None);
                 assert_eq!(pick.project.as_deref(), Some("reef"));
             }
             other => panic!("parsed as {other:?}"),
         }
+        // a plan's branch is named, or cleared, but not both, and one of them is needed
+        let branch = Cli::try_parse_from(["reef", "plan", "branch", "app", "dev"]);
+        match branch.unwrap().command {
+            Command::Plan(PlanCommand::Branch {
+                name,
+                branch,
+                clear,
+                ..
+            }) => {
+                assert_eq!(
+                    (name.as_str(), branch.as_deref(), clear),
+                    ("app", Some("dev"), false)
+                );
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["reef", "plan", "branch", "app", "--clear"]).is_ok());
+        assert!(Cli::try_parse_from(["reef", "plan", "branch", "app"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "plan", "branch", "app", "dev", "--clear"]).is_err());
         // a project added takes its repo, and `--project` means nothing there
         let add = Cli::try_parse_from(["reef", "project", "add", "reef", "--repo", "../reef"]);
         assert!(matches!(

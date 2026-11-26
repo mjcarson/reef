@@ -75,4 +75,5 @@ reef claude install                        # the MCP entry, the hooks and the sk
   schema's pin but needed none: its binary read back the nodes and comments C37's wrote. Nor did
   C48's `UserRow` and `TokenRow`: its binary read back a plan the one before it wrote. Nor did
   C49's `RemoteRow`, which keeps a remote project's URL beside its `ProjectRow` rather than in
-  it.
+  it, nor C92's `PlanBranchRow`, which keeps a plan's branch beside its `PlanRow`: its binary
+  read back a plan, a node and a queue entry the one before C87 wrote.

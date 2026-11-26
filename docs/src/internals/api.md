@@ -10,10 +10,11 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET /api/v1/projects` | every `Project`, each with its `registered`: when, and by whom, where its history says |
 | `POST /api/v1/projects` `NewProject` | `AddedProject`: 201, 409 if the name or repo is taken, or 502 if its `remote` can't be fetched |
 | `GET /api/v1/find-project?dir=&remote=` | the `Project` a directory belongs to, or one of its checkout's remotes was registered by, or 404 |
-| `POST /api/v1/projects/{project}/fetch` | `Fetched`: 200 whether its branch moved or not, 422 for a local project, or 502 if its remote can't be fetched |
+| `POST /api/v1/projects/{project}/fetch` | `Fetched`: 200 whether its branches moved or not, each other branch a plan follows saying what came of its own fetch, 422 for a local project, or 502 if its registered branch can't be fetched |
 | `GET /api/v1/projects/{project}/plans` | every `PlanInfo`, each with its `registered`, as a project |
 | `POST /api/v1/projects/{project}/plans` `NewPlan` | `AddedPlan`: 201, or 200 if it was listed |
-| `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load |
+| `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load and the branch it follows |
+| `PUT …/plans/{plan}/branch` `PlanBranch` | `Branched`: 200 if it follows the branch now, or 422 if the repo has no such branch or the plan's links would break there |
 | `GET …/plans/{plan}/nodes` | its `Listing` |
 | `POST …/plans/{plan}/nodes` `Puts` | `Checked`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/nodes/{id}` | the `StoredNode` |
@@ -76,11 +77,13 @@ that `Service::shared` opens. Every route is one service call, and every body an
 - **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,
-  `project-fetched`, `plan-added`, `nodes-put`, `pages-put`, `plan-written`, `queue-changed`,
-  `work-recorded`), its data the change as JSON. It is live only: a
-  client reads what it needs, then follows. One that falls behind by more than 256 changes is
-  sent `missed`, with how many, and should read again. `plan` narrows it within a `project`, and
-  a project's own changes reach it only if they concern every plan, as `project-fetched` does.
+  `project-fetched`, `plan-added`, `plan-branched`, `nodes-put`, `pages-put`, `plan-written`,
+  `queue-changed`, `work-recorded`), its data the change as JSON. It is live only: a client reads
+  what it needs, then follows. One that falls behind by more than 256 changes is sent `missed`,
+  with how many, and should read again. `plan` narrows it within a `project`, and a project's
+  own changes reach it only if they concern that plan: a `project-fetched` names the branch that
+  moved and the plans that follow it, and reaches only those. One from an older service names no
+  plans, and reaches every plan.
 - **One layer signs callers in.** `api::serve` wraps the router in `auth::guard`, as reef-app
   wraps its whole router. It reads a token from `Authorization: Bearer`, else the `reef_sign_in`
   cookie, and hands each route its `Caller`. With `[auth] required` off, the default, it lets

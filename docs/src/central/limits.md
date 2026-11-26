@@ -16,7 +16,8 @@ What central reef can't do yet, and the plan's node for each where there is one.
   (C78).
 - **Projects can't be removed** (C79), nor can a remote project's clone be cleaned up.
 - **Plans can't be removed or renamed.** Empty one with `reef node rm` instead.
-- **A project follows one branch.** Docs on other branches can't be linked until they reach it.
+- **A plan follows one branch.** A plan can't link docs on two branches at once: list a plan
+  for each line of work instead.
 - **No reverse proxy.** reef reads no forwarded headers
   ([What not to do](deploy/dont.md)).
 - **The loopback port trusts its host.** With sign-in off, anything on the host reaches it. A
