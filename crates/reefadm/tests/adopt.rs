@@ -174,6 +174,97 @@ fn adopt_keeps_the_config_and_data_and_swaps_in_reefadms_unit() {
     assert!(!said.contains("reef project add"), "{said}");
 }
 
+/// A unit made by hand with settings of its own, as europa's keeps reef off a benchmark's cores
+const EUROPA: &str = "# reef's central planner: reef-app, run as the `reef` account.\n#\n\
+                      # NOT a shoal benchmark or lab node: never wipe /var/lib/reef.\n[Unit]\n\
+                      Description=reef's central planner (not a shoal node)\n\
+                      Wants=network-online.target\nAfter=network-online.target\n\n[Service]\n\
+                      User=reef\nGroup=reef\nSlice=reef.slice\n\
+                      Environment=REEF_CONFIG=/etc/reef/config.toml\n\
+                      WorkingDirectory=/var/lib/reef\nExecStart=/opt/reef/app/server\n\
+                      Restart=on-failure\nTimeoutStopSec=10\n# glommio's rings and buffers\n\
+                      LimitMEMLOCK=infinity\n# core 15's first thread, which the config's \
+                      exclude_cores\n# leaves the shard\nCPUAffinity=15\nAllowedCPUs=15\n\
+                      # a bound, so a runaway reef can't take a benchmark's memory\n\
+                      MemoryHigh=768M\nMemoryMax=1G\n\n[Install]\nWantedBy=multi-user.target\n";
+
+/// The settings a unit made by hand has and reefadm's lacks are kept in a drop-in, with the
+/// comments that say why, and taken away again if the install goes back
+#[test]
+fn a_units_own_settings_are_kept_in_a_drop_in() {
+    let mut script = hand_made();
+    script.prints("cat /etc/systemd/system/reef.service", EUROPA);
+    run(&mut script, &["deploy", "--adopt"]).unwrap();
+    let steps = script.steps();
+    let at = |step: &str| {
+        steps
+            .iter()
+            .position(|taken| *taken == step)
+            .unwrap_or_else(|| panic!("{step}: {steps:#?}"))
+    };
+    let written = at("write: sudo write /etc/systemd/system/reef.service.d/adopted.conf (644)");
+    assert!(at("run: sudo install -d -m 0755 /etc/systemd/system/reef.service.d") < written);
+    assert!(written < at("run: sudo systemctl daemon-reload"));
+    assert!(written < at("run: sudo systemctl enable --now reef.service"));
+    let drop_in = &script
+        .files
+        .iter()
+        .find(|file| {
+            file.path.as_path()
+                == std::path::Path::new("/etc/systemd/system/reef.service.d/adopted.conf")
+        })
+        .unwrap()
+        .text;
+    for kept in [
+        "# NOT a shoal benchmark or lab node: never wipe /var/lib/reef.",
+        "[Unit]\nDescription=reef's central planner (not a shoal node)\n",
+        "Slice=reef.slice\nWorkingDirectory=/var/lib/reef\n",
+        "# core 15's first thread, which the config's exclude_cores\n# leaves the shard\nCPUAffinity=15\nAllowedCPUs=15\n",
+        "MemoryHigh=768M\nMemoryMax=1G\n",
+    ] {
+        assert!(drop_in.contains(kept), "{kept} isn't in:\n{drop_in}");
+    }
+    // what reefadm's unit says already, or says itself, stays out
+    for left in [
+        "ExecStart",
+        "REEF_CONFIG",
+        "LimitMEMLOCK",
+        "User=",
+        "WantedBy",
+        "[Install]",
+        "glommio's rings",
+    ] {
+        assert!(!drop_in.contains(left), "{left} is in:\n{drop_in}");
+    }
+    assert!(
+        script.said.iter().any(|line| line
+            == "  its unit's own settings are kept in /etc/systemd/system/reef.service.d/adopted.conf: \
+                Description, Slice, WorkingDirectory, CPUAffinity, AllowedCPUs, MemoryHigh, MemoryMax"),
+        "{:#?}",
+        script.said
+    );
+    // and an install put back loses the drop-in before systemd reloads
+    let mut script = hand_made();
+    script.prints("cat /etc/systemd/system/reef.service", EUROPA);
+    for _ in 0..180 {
+        script.mes.push_back(Err("connection refused".into()));
+    }
+    script.prints(
+        "sudo tar -xzOf /var/backups/reef/reef-2026-11-27T072258-adopted.tar.gz reefadm-backup.toml",
+        "cores = 2\npaths = []\n\n[release]\nname = \"adopted\"\nreef = \"unknown\"\nshoal = \"unknown\"\n\
+         glommio = \"unknown\"\ntoolchain = \"unknown\"\ndeployed = 0\n",
+    );
+    assert!(run(&mut script, &["deploy", "--adopt"]).is_err());
+    let steps = script.steps();
+    let removed = steps
+        .iter()
+        .rposition(|step| {
+            *step == "run: sudo rm -f /etc/systemd/system/reef.service.d/adopted.conf"
+        })
+        .unwrap_or_else(|| panic!("{steps:#?}"));
+    assert_eq!(steps[removed + 1], "run: sudo systemctl daemon-reload");
+}
+
 /// A release that doesn't come up puts the install back: its unit, its commands, its data
 #[test]
 fn adopt_puts_the_install_back_if_the_release_doesnt_come_up() {
@@ -252,8 +343,8 @@ fn a_config_leaving_paths_to_defaults_is_written_naming_them() {
     );
     script.prints(
         "sudo cat /etc/reef/reef.toml",
-        "[api]\naddress = \"127.0.0.1:12180\"\n\n[api.tls]\naddress = \"0.0.0.0:12443\"\n\n\
-         [auth]\nrequired = true\n",
+        "# reef on europa: never wipe /var/lib/reef\n[api] # loopback\naddress = \"127.0.0.1:12180\"\n\n\
+         [api.tls]\naddress = \"0.0.0.0:12443\"\n\n[auth]\nrequired = true\n",
     );
     let layout = layout();
     let found = adopt::find(&mut script, &layout, &Systemd::of(&layout)).unwrap();
@@ -280,9 +371,17 @@ fn a_config_leaving_paths_to_defaults_is_written_naming_them() {
             },
         ]
     );
-    // the paths reef found, named, and the install's own keys kept
+    // the paths reef found, named, and the install's own keys and comments kept
     let text = found.rewritten(&layout).unwrap().unwrap();
     assert!(text.starts_with("# Written by `reefadm deploy --adopt` from /etc/reef/reef.toml"));
+    assert!(
+        text.contains(
+            "# reef on europa: never wipe /var/lib/reef\n[api] # loopback\n\
+             certs = \"/var/lib/reef/.local/share/reef/certs\"\naddress = \"127.0.0.1:12180\"\n"
+        ),
+        "{text}"
+    );
+    assert!(text.ends_with("\n[shoal]\ndata = \"/var/lib/reef/.local/share/reef/shoal\"\n\n[remotes]\nclones = \"/var/lib/reef/.local/share/reef/clones\"\n"), "{text}");
     let served = Served::read(&text, &layout.config).unwrap();
     assert_eq!(served.data(&layout), home.join("shoal"));
     assert_eq!(served.clones(&layout), home.join("clones"));

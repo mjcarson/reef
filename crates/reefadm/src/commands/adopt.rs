@@ -59,6 +59,8 @@ pub struct Named {
 pub struct Found {
     /// Where systemd loads its unit from
     pub fragment: PathBuf,
+    /// The unit file's text
+    pub unit: String,
     /// The drop-ins systemd applies to it
     pub drop_ins: Vec<String>,
     /// The server it runs
@@ -101,29 +103,13 @@ impl Found {
         if !self.rewrites(layout) {
             return Ok(None);
         }
-        let mut table: toml::Table = match &self.text {
-            Some(text) => text
-                .parse()
-                .with_context(|| format!("reading reef's config {}", self.config.display()))?,
-            None => toml::Table::new(),
-        };
+        // its text as it is, comments and all, each path added as a line of its table
+        let mut text = self.text.clone().unwrap_or_default();
         for named in &self.named {
-            let section = table
-                .entry(named.table)
-                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-            let Some(section) = section.as_table_mut() else {
-                bail!(
-                    "{} has `{}` as a value, where reef reads a table",
-                    self.config.display(),
-                    named.table
-                );
-            };
-            section.insert(
-                named.key.to_string(),
-                toml::Value::String(named.path.display().to_string()),
-            );
+            let value = toml::Value::String(named.path.display().to_string());
+            text = with_key(&text, named.table, &format!("{} = {value}", named.key));
         }
-        // a line saying where it came from, then its keys
+        // a line saying where it came from, above it
         let from = match &self.text {
             Some(_) => format!("from {}", self.config.display()),
             None => "for an install that had no config".to_string(),
@@ -140,12 +126,76 @@ impl Found {
                 names.join(", ")
             ),
         };
-        let keys = toml::to_string(&table).context("writing reef's config")?;
-        Ok(Some(format!(
+        let written = format!(
             "# Written by `reefadm deploy --adopt` {from}{naming}.\n# reefadm keeps it as it is \
-             from here on: edit it as you like, then restart reef.\n\n{keys}"
-        )))
+             from here on: edit it as you like, then restart reef.\n\n{text}"
+        );
+        // a table spelt so that a line can't be added to it, such as an inline one, is the
+        // admin's to name
+        if let Err(error) = written.parse::<toml::Table>() {
+            bail!(
+                "reefadm can't add {} to {} as reef reads it: name {} there yourself, then adopt \
+                 again ({error})",
+                names.join(", "),
+                self.config.display(),
+                match names.len() {
+                    1 => "it",
+                    _ => "them",
+                }
+            );
+        }
+        Ok(Some(written))
     }
+}
+
+/// A config's text with a line added to one of its tables, right under the table's header, or
+/// under a header of its own at the end when it has none
+///
+/// # Arguments
+///
+/// * `text` - The config's text
+/// * `table` - The table, such as `api`
+/// * `line` - The line, such as `certs = "/var/lib/reef/certs"`
+///
+/// # Examples
+///
+/// ```
+/// use reefadm::commands::adopt::with_key;
+///
+/// let text = "# reef on europa\n[api] # loopback\naddress = \"127.0.0.1:11180\"\n\n[api.tls]\n";
+/// assert_eq!(
+///     with_key(text, "api", "certs = \"/c\""),
+///     "# reef on europa\n[api] # loopback\ncerts = \"/c\"\naddress = \"127.0.0.1:11180\"\n\n[api.tls]\n"
+/// );
+/// assert_eq!(with_key("[shoal]\ncores = 1", "api", "certs = \"/c\""), "[shoal]\ncores = 1\n\n[api]\ncerts = \"/c\"\n");
+/// ```
+pub fn with_key(text: &str, table: &str, line: &str) -> String {
+    let header = format!("[{table}]");
+    let mut out = String::new();
+    let mut added = false;
+    for each in text.split_inclusive('\n') {
+        out.push_str(each);
+        // the table's own header, a comment after it or not, and never a table under it
+        let bare = each.split('#').next().unwrap_or_default().trim();
+        if !added && bare == header {
+            if !each.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(line);
+            out.push('\n');
+            added = true;
+        }
+    }
+    if !added {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("{header}\n{line}\n"));
+    }
+    out
 }
 
 /// What adopt changed so far, which putting the install back undoes
@@ -157,6 +207,8 @@ struct Kept {
     unit: bool,
     /// Whether reefadm's unit was written
     wrote_unit: bool,
+    /// Whether the drop-in keeping the unit's own settings was written
+    drop_in: bool,
     /// Whether reefadm's config was written, and if so, whether one was there before it
     config: Option<bool>,
     /// Whether the new release was made current
@@ -351,8 +403,8 @@ pub fn find(runner: &mut dyn Runner, layout: &Layout, systemd: &Systemd) -> Resu
             "there is no {which} {UNIT} to take over: `reefadm deploy{flag}` deploys reef afresh"
         );
     }
-    let text = exec::read(runner, &fragment, As::Me)?.unwrap_or_default();
-    if unit::ours(&text) {
+    let unit = exec::read(runner, &fragment, As::Me)?.unwrap_or_default();
+    if unit::ours(&unit) {
         bail!(
             "reefadm wrote {} already: `reefadm upgrade{flag}` moves it to a later commit",
             fragment.display()
@@ -440,6 +492,7 @@ pub fn find(runner: &mut dyn Runner, layout: &Layout, systemd: &Systemd) -> Resu
     }
     Ok(Found {
         fragment,
+        unit,
         drop_ins: get("DropInPaths")
             .split_whitespace()
             .map(str::to_string)
@@ -813,16 +866,161 @@ fn take_over(
             owner: None,
         })?;
     }
-    // the new release, reefadm's unit on it, and its start
+    // the new release, made current
     kept.activated = true;
     release::activate(runner, layout, release)?;
-    kept.wrote_unit = true;
+    // the settings its unit had and reefadm's lacks, in a drop-in of their own
     let low = super::low_port(&found.served);
-    super::write_unit(runner, layout, systemd, found.kind, low)?;
+    if let Some((text, _)) = carried(&found.unit, &unit::text(layout, found.kind, low)) {
+        let path = drop_in(layout);
+        if let Some(dir) = path.parent() {
+            runner.run(
+                &Cmd::new("install")
+                    .args(["-d", "-m", "0755"])
+                    .arg(dir)
+                    .by(owner),
+            )?;
+        }
+        kept.drop_in = true;
+        runner.write(&File {
+            path,
+            text,
+            mode: 0o644,
+            runs_as: owner,
+            owner: None,
+        })?;
+    }
+    // reefadm's unit, written as deploy writes it, then started
+    kept.wrote_unit = true;
     kept.started = true;
     deploy::start(cx, layout, systemd, found.kind, low)?;
     health::wait(cx.runner, layout, &found.served, hostname)?;
     Ok(found.served.clone())
+}
+
+/// The drop-in adopt keeps the install's own unit settings in
+///
+/// # Arguments
+///
+/// * `layout` - The deployment's paths
+pub fn drop_in(layout: &Layout) -> PathBuf {
+    let name = layout
+        .unit
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    layout
+        .unit
+        .with_file_name(format!("{name}.d"))
+        .join("adopted.conf")
+}
+
+/// The settings a unit made by hand has and reefadm's lacks, as a drop-in that keeps them with
+/// the comments above each, and their names, or none if it has none
+///
+/// ExecStart is reefadm's, on its current release, and so is `REEF_CONFIG`, where it reads the
+/// config; `[Install]` is left out, since systemd reads it from the unit alone.
+///
+/// # Arguments
+///
+/// * `old` - The unit made by hand
+/// * `ours` - The unit reefadm writes in its place
+///
+/// # Examples
+///
+/// ```
+/// use reefadm::commands::adopt::carried;
+///
+/// let ours = "[Service]\nUser=reef\nExecStart=/opt/reef/current/app/server\n";
+/// let old = "# europa's\n[Service]\nUser=reef\nExecStart=/opt/reef/app/server\n# off the benchmarks\nAllowedCPUs=15\n";
+/// let (text, keys) = carried(old, ours).unwrap();
+/// assert!(text.ends_with("# europa's\n\n[Service]\n# off the benchmarks\nAllowedCPUs=15\n"));
+/// assert_eq!(keys, ["AllowedCPUs"]);
+/// assert_eq!(carried(ours, ours), None);
+/// ```
+pub fn carried(old: &str, ours: &str) -> Option<(String, Vec<String>)> {
+    // reefadm's own settings, by section, a line each
+    let mut theirs = std::collections::BTreeSet::new();
+    let mut section = String::new();
+    for line in ours.lines().map(str::trim) {
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            section = name.to_string();
+        } else if line.contains('=') && !line.starts_with('#') {
+            theirs.insert((section.clone(), line.to_string()));
+        }
+    }
+    // the old unit's, a directive at a time, with the comments just above it
+    let mut preamble = Vec::new();
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    let mut comments: Vec<String> = Vec::new();
+    let mut keys = Vec::new();
+    let mut section = String::new();
+    let mut lines = old.lines();
+    while let Some(line) = lines.next() {
+        let mut line = line.trim().to_string();
+        // a directive continued on the next line, joined
+        while line.ends_with('\\') {
+            line.pop();
+            match lines.next() {
+                Some(next) => line.push_str(next.trim()),
+                None => break,
+            }
+        }
+        if line.is_empty() {
+            comments.clear();
+        } else if line.starts_with('#') || line.starts_with(';') {
+            match section.is_empty() {
+                true => preamble.push(line),
+                false => comments.push(line),
+            }
+        } else if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            section = name.to_string();
+            comments.clear();
+        } else if let Some((key, value)) = line.split_once('=') {
+            let (key, value) = (key.trim(), value.trim());
+            let reefadms = key == "ExecStart"
+                || (key == "Environment" && value.trim_matches('"').starts_with("REEF_CONFIG="))
+                || section == "Install"
+                || theirs.contains(&(section.clone(), line.clone()));
+            if !reefadms {
+                let at = match sections.iter().position(|(name, _)| *name == section) {
+                    Some(at) => at,
+                    None => {
+                        sections.push((section.clone(), Vec::new()));
+                        sections.len() - 1
+                    }
+                };
+                sections[at].1.append(&mut comments);
+                sections[at].1.push(line.clone());
+                keys.push(key.to_string());
+            }
+            comments.clear();
+        }
+    }
+    if keys.is_empty() {
+        return None;
+    }
+    // a line saying what it is, the unit's own opening comments, then each section's settings
+    let mut text = format!(
+        "# Written by `reefadm deploy --adopt`: what {UNIT} had, made by hand, that reefadm's unit\n\
+         # doesn't. reefadm never writes it again, so it is yours to change.\n"
+    );
+    if !preamble.is_empty() {
+        text.push('\n');
+        text.push_str(&preamble.join("\n"));
+        text.push('\n');
+    }
+    for (name, lines) in sections {
+        text.push_str(&format!("\n[{name}]\n{}\n", lines.join("\n")));
+    }
+    keys.dedup();
+    Some((text, keys))
 }
 
 /// A file's name with adopt's mark added, for the one it keeps beside what it writes
@@ -875,6 +1073,9 @@ fn put_back(
         )?;
     } else if kept.wrote_unit {
         runner.run(&Cmd::new("rm").arg("-f").arg(&layout.unit).by(owner))?;
+    }
+    if kept.drop_in {
+        runner.run(&Cmd::new("rm").arg("-f").arg(drop_in(layout)).by(owner))?;
     }
     runner.run(&systemd.daemon_reload())?;
     // its commands as they were, and none it didn't have
@@ -963,6 +1164,14 @@ fn notes(cx: &mut Cx, layout: &Layout, found: &Found, plain: bool, saved: Option
         lines.push(format!(
             "  {} isn't used any more, and is yours to remove",
             ran_from.display()
+        ));
+    }
+    let low = super::low_port(&found.served);
+    if let Some((_, keys)) = carried(&found.unit, &unit::text(layout, found.kind, low)) {
+        lines.push(format!(
+            "  its unit's own settings are kept in {}: {}",
+            drop_in(layout).display(),
+            keys.join(", ")
         ));
     }
     if !found.drop_ins.is_empty() {

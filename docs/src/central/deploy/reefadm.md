@@ -108,10 +108,16 @@ reefadm deploy --user --adopt                 # your own user unit, as localhost
   any more; it's yours to remove.
 - **The config is kept as it is,** unless reefadm wouldn't read it the same. A config elsewhere,
   or one that left a path such as `[shoal] data` to reef's default, is written to
-  `/etc/reef/config.toml` naming that path, since reefadm's unit sets no `XDG_*` variables. The
-  one that was there is kept as `config.toml.before-reefadm`.
-- **If the new release doesn't come up,** it puts the install back as it was: its unit, its
-  commands, its config, and its data from the backup. It starts it again if it was running.
+  `/etc/reef/config.toml` naming that path, since reefadm's unit sets no `XDG_*` variables. Only
+  the lines naming those paths are added: its other keys and its comments stay as they were.
+  The one that was there is kept as `config.toml.before-reefadm`.
+- **The unit's own settings are kept in a drop-in.** Anything the unit made by hand sets that
+  reefadm's unit doesn't, such as `CPUAffinity=`, `AllowedCPUs=` or `MemoryMax=`, goes into
+  `reef.service.d/adopted.conf`, with the comments above each, and still applies. reefadm never
+  writes that drop-in again, so it's yours to change. Its `ExecStart=` and `REEF_CONFIG` are
+  reefadm's own.
+- **If the new release doesn't come up,** it puts the install back as it was: its unit, with the
+  drop-in gone, its commands, its config, and its data from the backup. It starts it again if it was running.
 - **A server that served plain HTTP,** as reef did before it served HTTPS, now serves HTTPS.
   adopt says so. Each client's `url` needs `https://`, and a client on another host needs reef's CA
   as `ca` ([Certificates](certificates.md)).
