@@ -1,6 +1,7 @@
 # A systemd unit
 
-`/etc/systemd/system/reef.service`:
+`reefadm deploy` writes this unit, with ExecStart on its current release, and starts it
+([With reefadm](reefadm.md)). By hand, `/etc/systemd/system/reef.service`:
 
 ```ini
 [Unit]

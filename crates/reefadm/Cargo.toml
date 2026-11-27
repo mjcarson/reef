@@ -1,0 +1,22 @@
+[package]
+name = "reefadm"
+description = "Deploys, upgrades and runs central reef on a host with systemd, from one command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# where reef keeps its config and data on this host, and the password prompt the CLI asks with
+reef-api = { path = "../reef-api", features = ["prompt"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap = { version = "4", features = ["derive"] }
+# reef's config, central/sources.toml and reefadm's own record of what it deployed
+toml = "1"
+# the health check's `GET /api/v1/me`, trusting reef's own CA, at the version and TLS stack the
+# CLI uses, so no openssl and no new crates come in
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+# whether reefadm runs as root already, and so needs no sudo
+libc = "0.2"

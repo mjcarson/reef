@@ -1,5 +1,9 @@
 # Deploying
 
+**`reefadm deploy` does all of this in one command** ([With reefadm](reefadm.md)), and
+`reefadm deploy --user` sets up one person's server. The pages after it are the same steps by
+hand, and say what each part is.
+
 This chapter sets up a team server: reef-app as a system service under an account of its own,
 serving other hosts over HTTPS, with sign-in required. Running it for one person on one machine is
 much shorter; see [One person on localhost](localhost.md).

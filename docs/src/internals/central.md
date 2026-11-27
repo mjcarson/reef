@@ -45,7 +45,10 @@ when nothing answers there.
 ## Building
 
 It needs shoal's `ScanSupport` checkout and glommio's beside reef's, at `../shoal` and
-`../glommio` from reef's root (`central/Cargo.toml` names them from `central`). `.cargo/config.toml` sets `-Ctarget-cpu=native` for the host alone, which gxhash wants; never
+`../glommio` from reef's root (`central/Cargo.toml` names them from `central`).
+`central/sources.toml` pins the commit of each that this one builds against, and the nightly it
+builds on, which is what reefadm fetches and installs; move a `rev` there when the checkout
+beside reef moves. `.cargo/config.toml` sets `-Ctarget-cpu=native` for the host alone, which gxhash wants; never
 export it in `RUSTFLAGS`, where a wasm build would get it too.
 
 - **`embedded`** links shoal's engine into reef-service, which needs nightly.

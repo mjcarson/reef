@@ -1,5 +1,8 @@
 # Building and installing
 
+`reefadm deploy` runs these builds and installs them as a release ([With reefadm](reefadm.md)),
+from checkouts at the commits `central/sources.toml` pins. This page does the same by hand.
+
 ## Build
 
 From reef's checkout:

@@ -17,6 +17,7 @@
 
 - [What central reef is](central/overview.md)
 - [Deploying](central/deploy/index.md)
+  - [With reefadm](central/deploy/reefadm.md)
   - [Building and installing](central/deploy/build.md)
   - [Configuring](central/deploy/config.md)
   - [Certificates](central/deploy/certificates.md)

@@ -17,6 +17,7 @@
 - [M10 A shared server](milestones/m10.md)
 - [M11 Branches side by side](milestones/m11.md)
 - [M12 Test runs followed live](milestones/m12.md)
+- [M13 One command to deploy](milestones/m13.md)
 
 # Design
 

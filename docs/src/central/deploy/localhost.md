@@ -1,7 +1,8 @@
 # One person on localhost
 
 reef's own plan runs this way: reef-serve as a systemd user unit on `https://127.0.0.1:12180`,
-with no config file and no sign-in. Its data is in `~/.local/share/reef/shoal`, and the CA and
+with no config file and no sign-in. `reefadm deploy --user` sets it up in one command, with the
+app ([With reefadm](reefadm.md#one-person-on-localhost)); this page does it by hand. Its data is in `~/.local/share/reef/shoal`, and the CA and
 certificate it makes for itself in `~/.local/share/reef/certs` ([Certificates](certificates.md)).
 
 ```sh

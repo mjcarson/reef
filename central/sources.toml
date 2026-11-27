@@ -1,0 +1,30 @@
+# The checkouts this workspace builds against, beside reef's, and the toolchain it builds with.
+#
+# reefadm reads this from the reef commit it deploys, clones each checkout next to reef's at its
+# `rev`, and builds with these toolchains, so a commit that needs a newer shoal, glommio or
+# nightly says so here, as a lockfile would. Move a `rev` when the checkout beside reef moves.
+
+# the nightly the server builds on: shoal's engine needs it, and glommio's build reads its channel
+toolchain = "nightly-2026-08-21"
+# the oldest stable the CLI and reefadm build on: edition 2024 with let-chains
+stable_at_least = "1.98"
+
+# shoal, reef's store, from its branch with scans: central names `../../shoal/shoal`
+[shoal]
+url = "https://github.com/mjcarson/shoal.git"
+branch = "ScanSupport"
+rev = "dbfb82e25b8143aa8a6e3e8748022c5194990e5f"
+
+# glommio, shoal's runtime, from its branch with zero-copy DMA stream writes: shoal names
+# `../glommio/glommio`; its liburing is a submodule its build compiles
+[glommio]
+url = "https://github.com/mjcarson/glommio.git"
+branch = "ZeroCopyDmaStreamWriter"
+rev = "25d2c35240d0ef753cfdcd3a58078f3b17e132dd"
+submodules = true
+
+# where git fetches a URL a checkout names from instead, as git's `url.<to>.insteadOf`: glommio's
+# liburing submodule names git.kernel.dk over git://, which many networks block and which serves no
+# https, so it comes from its author's mirror on GitHub
+[rewrite]
+"git://git.kernel.dk/liburing" = "https://github.com/axboe/liburing.git"

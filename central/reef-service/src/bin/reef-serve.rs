@@ -25,13 +25,24 @@
 //! store holds the service's data already, so nobody else is asked. An in-process pool locks the
 //! data directory, so stop the service first; an external node can be reached while it runs, and
 //! the running service then trusts a revoked token for up to a minute.
+//!
+//! ```sh
+//! reef-serve version [--json]
+//! ```
+//!
+//! `version` prints the schema this binary reads and writes: its structural id, then each table's
+//! fingerprint, in the order the schema serves them, or the same as one JSON object. It reads no
+//! config and opens nothing, so reefadm can ask a binary it just built whether the data directory
+//! it is about to be given was written by a schema it reads.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
 use reef_service::api::{self, Listeners};
+use reef_service::schema::ReefClient;
 use reef_service::service::Recovered;
 use reef_service::{Conf, Mode, Service};
+use shoal::shared::traits::QuerySupport;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,7 +55,8 @@ const RELEASE_WAIT: Duration = Duration::from_secs(2);
 
 /// What a command line can ask for, and how
 const USAGE: &str = "usage: reef-serve [--conf PATH]\n       \
-                     reef-serve recover NAME [--password-file PATH] [--conf PATH]";
+                     reef-serve recover NAME [--password-file PATH] [--conf PATH]\n       \
+                     reef-serve version [--json]";
 
 /// What reef-serve is asked to do
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +69,11 @@ enum Command {
         name: String,
         /// Where to read their new password from instead of the terminal
         password_file: Option<PathBuf>,
+    },
+    /// Print the schema this binary reads and writes
+    Version {
+        /// Whether to print it as one JSON object
+        json: bool,
     },
 }
 
@@ -85,6 +102,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // the schema is known without a config, a runtime or the store
+    if let Command::Version { json } = args.command {
+        println!("{}", version(json));
+        return ExitCode::SUCCESS;
+    }
     // every request, and the service, on one tokio runtime
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -102,6 +124,8 @@ fn main() -> ExitCode {
             name,
             password_file,
         } => runtime.block_on(recover(args.conf, &name, password_file.as_deref())),
+        // printed above, before the runtime started
+        Command::Version { .. } => Ok(()),
     };
     match done {
         Ok(()) => ExitCode::SUCCESS,
@@ -195,6 +219,38 @@ async fn recover(
     Ok(())
 }
 
+/// The schema this binary reads and writes: its structural id, then each table's fingerprint
+///
+/// # Arguments
+///
+/// * `json` - Whether to say it as one JSON object rather than a line each
+fn version(json: bool) -> String {
+    // the id moves with any change to a row, a table or a projection
+    let schema = <ReefClient as QuerySupport>::SCHEMA_ID;
+    // and each table's own fingerprint says which one moved, in the order the schema serves them
+    let tables = <ReefClient as QuerySupport>::table_fingerprints();
+    match json {
+        // numbers past 2^53 stay exact, since serde_json keeps a u64 as written
+        true => serde_json::json!({
+            "schema": schema,
+            "tables": tables
+                .iter()
+                .map(|(name, fingerprint)| serde_json::json!([name, fingerprint]))
+                .collect::<Vec<_>>(),
+        })
+        .to_string(),
+        // a line for the schema, then one for each table
+        false => std::iter::once(format!("schema {schema}"))
+            .chain(
+                tables
+                    .iter()
+                    .map(|(name, fingerprint)| format!("{name} {fingerprint}")),
+            )
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 /// Says a store another process holds is the running service's, and to stop it first
 ///
 /// # Arguments
@@ -259,8 +315,8 @@ async fn released(mut service: Arc<Service>) -> Option<Service> {
     }
 }
 
-/// Reads a command line: `--conf PATH` alone to serve, or `recover NAME`, with
-/// `--password-file PATH` and `--conf PATH` in any order
+/// Reads a command line: `--conf PATH` alone to serve, `recover NAME`, with
+/// `--password-file PATH` and `--conf PATH` in any order, or `version`, with `--json` after it
 ///
 /// # Arguments
 ///
@@ -270,10 +326,12 @@ fn read_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let mut recover = false;
     let mut name = None;
     let mut password_file = None;
+    let mut version = false;
+    let mut json = false;
     while let Some(arg) = args.next() {
         let text = arg.to_str().unwrap_or_default();
         // `--conf X` or `--conf=X`, once
-        if let Some(path) = flag(&arg, "--conf", &mut args)? {
+        if !version && let Some(path) = flag(&arg, "--conf", &mut args)? {
             if conf.replace(path).is_some() {
                 return Err("`--conf` is given twice".to_string());
             }
@@ -282,8 +340,13 @@ fn read_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             if password_file.replace(path).is_some() {
                 return Err("`--password-file` is given twice".to_string());
             }
+        // `version` reads no config, so it takes only `--json`, once, after it
+        } else if text == "version" && !version && !recover && conf.is_none() {
+            version = true;
+        } else if version && text == "--json" && !json {
+            json = true;
         // the command comes first, then the name
-        } else if text == "recover" && !recover {
+        } else if text == "recover" && !recover && !version {
             recover = true;
         } else if recover && name.is_none() && !text.starts_with('-') && !text.is_empty() {
             name = Some(text.to_string());
@@ -292,6 +355,7 @@ fn read_args(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         }
     }
     let command = match (recover, name) {
+        (false, _) if version => Command::Version { json },
         (false, _) => Command::Serve,
         (true, Some(name)) => Command::Recover {
             name,
@@ -331,7 +395,7 @@ fn flag(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Command, read_args};
+    use super::{Args, Command, read_args, version};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -408,5 +472,45 @@ mod tests {
         );
         assert!(read(&["recover", "ada", "--admin"]).is_err());
         assert!(read(&["recover", "ada", "--password-file"]).is_err());
+    }
+
+    /// `version` takes `--json` after it, and nothing else
+    #[test]
+    fn version_reads_json_alone() {
+        // plain, or as JSON
+        let version = |json| Args {
+            conf: None,
+            command: Command::Version { json },
+        };
+        assert_eq!(read(&["version"]), Ok(version(false)));
+        assert_eq!(read(&["version", "--json"]), Ok(version(true)));
+        // a config, a flag twice, a flag before it or another command is refused
+        assert!(read(&["version", "--conf", "a.toml"]).is_err());
+        assert!(read(&["--conf", "a.toml", "version"]).is_err());
+        assert!(read(&["version", "--json", "--json"]).is_err());
+        assert!(read(&["--json", "version"]).is_err());
+        assert!(read(&["version", "recover", "ada"]).is_err());
+        assert!(read(&["recover", "ada", "version"]).is_err());
+    }
+
+    /// `version --json` prints the schema's id and each table's fingerprint, as its pin has them
+    #[test]
+    fn version_prints_the_schema_and_each_table() {
+        // one object, the id exact past 2^53
+        let printed: serde_json::Value = serde_json::from_str(&version(true)).unwrap();
+        assert_eq!(printed["schema"].as_u64(), Some(13509127152932721421));
+        // each table as a name and its fingerprint, in the schema's order
+        let tables = printed["tables"].as_array().unwrap();
+        assert_eq!(
+            tables[0],
+            serde_json::json!(["ProjectRow", 12832186597557680855u64])
+        );
+        assert_eq!(tables.len(), 16);
+        // and the plain form says the same a line each
+        let plain = version(false);
+        let mut lines = plain.lines();
+        assert_eq!(lines.next(), Some("schema 13509127152932721421"));
+        assert_eq!(lines.next(), Some("ProjectRow 12832186597557680855"));
+        assert_eq!(lines.count(), 15);
     }
 }
