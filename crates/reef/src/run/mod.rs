@@ -737,13 +737,18 @@ pub async fn run_until<W: Write>(
     // the project, its checkout, and a pane of the runner's own
     let project = cli::picked(client, cwd, &pick.project).await?;
     let root = drive::checkout_root(cwd)?;
+    // the plan named, else the one the checkout picks among several, which its loop is held to
+    let plan = match &pick.plan {
+        Some(plan) => Some(cli::named_plan(&project.name, plan)?.plan),
+        None => cli::held_plan(client, cwd, &project).await?,
+    };
     let id = runner_id();
     let pane = Pane::Reef { id: id.clone() };
     let attach = Attach {
         id: None,
         pane: pane.clone(),
         project: project.name.clone(),
-        plan: pick.plan.clone(),
+        plan: plan.clone(),
         host: host_name(),
         cwd: root.clone(),
         state: SessionState::Idle,
@@ -781,7 +786,7 @@ pub async fn run_until<W: Write>(
     if runs.start {
         let start = LoopEdit::Start {
             project: project.name.clone(),
-            plan: pick.plan.clone(),
+            plan,
             session: None,
             width: None,
             opens: Some(false),

@@ -3885,3 +3885,69 @@ async fn a_members_worktree_works_in_its_nodes_plan() -> anyhow::Result<()> {
     assert!(!next.contains("A "), "{next}");
     Ok(())
 }
+
+/// A loop started with no `--plan` in a checkout of one plan's branch is held to that plan, and
+/// takes only that plan's work, while one started in the main checkout is held to its own
+#[tokio::test]
+async fn a_loop_started_on_a_branch_takes_only_that_branchs_plan() -> anyhow::Result<()> {
+    let cx = Cx::new("loop-branch").await?;
+    let repo = cx.ax.repo.clone();
+    // `central`, reading the working tree, holds A, and `side`, following `b2`, holds S
+    cx.put("a.yml", &work("A", &[])).await?;
+    git::run(&repo, &["branch", "b2"])?;
+    let linked = cx.ax.dir.join("b2-loop");
+    let linked_path = linked.to_str().expect("a utf-8 path");
+    git::run(&repo, &["worktree", "add", "-q", linked_path, "b2"])?;
+    cx.reef(&repo, &["plan", "new", "side", "--branch", "b2"])
+        .await?;
+    let s = cx.yaml("s.yml", &work("S", &[]))?;
+    cx.reef(&linked, &["node", "put", &s]).await?;
+    // started in `b2`'s checkout, the loop feeds `side` alone
+    let pane = "claude:6001";
+    let out = cx.reef(&linked, &["loop", "start", "--pane", pane]).await?;
+    assert_eq!(
+        out,
+        "started a loop in Claude Code process 6001, feeding it `reef/side`\n"
+    );
+    // and takes S, passing over `central`'s A, which it doesn't feed
+    let took = cx.reef(&linked, &["loop", "take", "--pane", pane]).await?;
+    assert!(took.contains("S Some work"), "{took}");
+    assert!(!took.contains("A Some work"), "{took}");
+    // one started in the main checkout feeds `central`
+    let out = cx
+        .reef(&repo, &["loop", "start", "--pane", "claude:6002"])
+        .await?;
+    assert_eq!(
+        out,
+        "started a loop in Claude Code process 6002, feeding it `reef/central`\n"
+    );
+    Ok(())
+}
+
+/// A paused loop kept over every plan is resumed as it was kept, though the checkout it is
+/// started again in now picks one plan of several
+#[tokio::test]
+async fn a_paused_loop_is_resumed_as_it_was_kept() -> anyhow::Result<()> {
+    let cx = Cx::new("loop-kept").await?;
+    let repo = cx.ax.repo.clone();
+    // a loop over a project of one plan, which feeds every plan, paused
+    cx.put("a.yml", &work("A", &[])).await?;
+    let pane = "claude:7001";
+    let out = cx.reef(&repo, &["loop", "start", "--pane", pane]).await?;
+    assert_eq!(
+        out,
+        "started a loop in Claude Code process 7001, feeding it every plan of `reef`\n"
+    );
+    cx.reef(&repo, &["loop", "pause", "--pane", pane]).await?;
+    // a second plan, following `b2`, so the main checkout now picks `central`
+    git::run(&repo, &["branch", "b2"])?;
+    cx.reef(&repo, &["plan", "new", "side", "--branch", "b2"])
+        .await?;
+    // started again there, it resumes over every plan, rather than being busy with one
+    let out = cx.reef(&repo, &["loop", "start", "--pane", pane]).await?;
+    assert_eq!(
+        out,
+        "the loop in Claude Code process 7001 is running, feeding it every plan of `reef`\n"
+    );
+    Ok(())
+}

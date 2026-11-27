@@ -2166,6 +2166,32 @@ pub(crate) async fn next_plan(
     Ok((project, picked))
 }
 
+/// The plan a new loop started here is held to where none is named: among a project's several
+/// plans, the one the checkout picks, by its branch or the node its worktree is on
+///
+/// A project of one plan, or a checkout that picks none, holds it to none, so the loop takes
+/// from every plan, a plan listed later among them.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, whose checkout picks the plan
+/// * `project` - The project the loop feeds
+pub(crate) async fn held_plan(
+    client: &Client,
+    cwd: &Path,
+    project: &Project,
+) -> anyhow::Result<Option<String>> {
+    // one plan is every plan
+    let plans = client.plans(&project.name).await?;
+    if plans.len() < 2 {
+        return Ok(None);
+    }
+    // else the one the checkout picks, if it picks one
+    let picked = checkout_plan(client, cwd, project, &plans).await?;
+    Ok(picked.map(|plan| plan.plan))
+}
+
 /// The work record of the node started last in a worktree, narrowed to the plan the
 /// checkout's branch picks where the project has several plans
 ///

@@ -64,7 +64,8 @@ The full key reference is in [reference.md](reference.md). Read it before writin
 - **Take work from `next`**: the user's queue first, then ready work in plan order, then each
   piece of work that waits and the needs it waits on.
 - **In a terminal loop, take work from `next_task`.** Once the user starts a loop in the
-  session's pane (`! reef loop start`), reef feeds the session one node at a time:
+  session's pane (`! reef loop start`), reef feeds the session one node at a time, from the
+  plan the checkout picks where the project has several:
   1. **Call `mcp__reef__next_task` before plan mode,** since it writes. It takes the next node,
      the user's queue first, records its start in this checkout, marks it `in-progress`, and
      returns it whole, with its open comment threads and the queue's entries it passed over and

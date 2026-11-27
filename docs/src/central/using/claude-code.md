@@ -16,6 +16,9 @@ tools and skill:
 - **A terminal loop** feeds a session one node at a time. Type `! reef loop start` in the
   session. With zellij or tmux, reef clears the session and starts the next node itself.
   `--width 2` works two ready nodes at once, the second in a worktree and session of its own.
+  With no `--plan`, a new loop is held to the plan its checkout picks, by its branch or the
+  node its worktree is on, and takes from every plan where nothing picks one; a pane's loop
+  kept already resumes as it was.
   `reef loop pause`, `reef loop stop` and `reef loop ls` manage it, and `reef loop log` says who
   started, paused, stopped or handed off each loop, and what each took and let go of.
 - **A headless loop** runs on your machine and is driven from the app:

@@ -18,8 +18,10 @@
 //!   ran it, `CLAUDE_CODE_SESSION_ID`, and the SessionStart hook hands the pane's loop to each
 //!   session that starts there, a clear's included, so the loop follows its pane. A clear
 //!   between nodes is told which node is next ([`between`]).
-//! - **Every plan, or one.** A loop takes the project's ready work across its plans, unless
-//!   `--plan` names one.
+//! - **Its checkout's plan, else every plan.** A loop takes the ready work of the plan `--plan`
+//!   names, else, among a project's several plans, the one its checkout picks, by its branch or
+//!   the node its worktree is on. Where nothing picks one it takes from every plan. A pane's loop
+//!   kept already resumes on the plans it was kept with.
 //! - **A start between nodes moves on.** Stop acts on a node's end once, so after a paused
 //!   loop's node, or once the injector stepped aside, a start in the session's own pane hands off
 //!   as Stop did: in zellij or tmux it starts the injector, and elsewhere it says `/clear`, then
@@ -183,14 +185,29 @@ where
     W: Write,
     S: FnOnce(&Clear) -> anyhow::Result<()>,
 {
-    // the project the working directory belongs to, and a plan only if one was named
+    // the project the working directory belongs to
     let project = cli::picked(client, cwd, &pick.project).await?;
     if starts.width == Some(0) {
         anyhow::bail!("a loop works at least one node at a time: `--width` takes 1 or more");
     }
+    // the plan named, else the one the pane's loop of this project is held to, so it resumes
+    // as it was kept, else for a new loop the one the checkout picks
+    let plan = match &pick.plan {
+        Some(plan) => Some(cli::named_plan(&project.name, plan)?.plan),
+        None => {
+            let loops = client.loops().await?;
+            match loops
+                .into_iter()
+                .find(|kept| kept.pane == here.pane && kept.project == project.name)
+            {
+                Some(kept) => kept.plan,
+                None => cli::held_plan(client, cwd, &project).await?,
+            }
+        }
+    };
     let edit = LoopEdit::Start {
         project: project.name.clone(),
-        plan: pick.plan.clone(),
+        plan,
         session: starts.session.clone().or(here.session.clone()),
         width: starts.width,
         opens: starts.opens,

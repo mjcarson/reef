@@ -25,6 +25,9 @@ reef loop run --permission-mode auto -- --model sonnet --effort low
 - **The repo is set up as for the terminal loop,** by `reef claude install`, since each session
   runs its `.mcp.json` and hooks. They find the runner's loop through `REEF_PANE`, which names
   its pane, `reef:<id>`. Nothing of the runner's own `CLAUDE*`, `ZELLIJ*` or `TMUX*` reaches them.
+- **Held to its checkout's plan.** With no `--plan`, a runner of a project with several plans is
+  attached for, and its loop held to, the plan its checkout picks, by its branch or the node its
+  worktree is on, so the app's start takes that plan's work alone.
 - **One node at a time.** A loop on a runner's pane is one node wide. Once nothing else is ready,
   the runner ends its session and waits for the app to start the loop again.
 - **Every prompt waits for the app,** a tool's permission among them, since headless Claude Code
