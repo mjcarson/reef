@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::cli::{Pick, PlanPick, picked, picked_plan};
+use crate::cli::{Pick, PlanPick, next_plan, picked, picked_plan};
 use crate::client::Client;
 use crate::comment::{self, Answering};
 use crate::{history, node, open, task, work};
@@ -415,22 +415,23 @@ impl Tools {
     #[tool(
         description = "List the reef work ready to start, the user's queue first, then in plan \
                        order, then each piece of work that waits and the needs it waits on. It \
-                       spans the project's plans unless one is named.",
+                       looks in the plan named, else the one this session's loop is held to, \
+                       else the one the checkout's branch follows, and spans the project's \
+                       plans where none of those picks one.",
         annotations(read_only_hint = true)
     )]
     async fn next(&self, Parameters(args): Parameters<PlanArgs>) -> Result<String, String> {
-        // the report `reef next` prints, narrowed to a plan the call or the server names
+        // the report `reef next` prints, narrowed to a plan the call, the server, the pane's loop
+        // or the checkout picks
         let mut out = Vec::new();
         let done = async {
-            match args.plan.or_else(|| self.pick.plan.clone()) {
-                Some(plan) => {
-                    let plan = self.plan(Some(plan)).await?;
-                    work::next(&self.client, &plan, &mut out).await
-                }
-                None => {
-                    let project = picked(&self.client, &self.cwd, &self.pick.project).await?;
-                    work::project_next(&self.client, &project.name, &mut out).await
-                }
+            let mut pick = self.pick_of(args.plan);
+            if pick.plan.is_none() {
+                pick.plan = self.loop_plan(&pick.project).await?;
+            }
+            match next_plan(&self.client, &self.cwd, &pick, false).await? {
+                (_, Some(plan)) => work::next(&self.client, &plan, &mut out).await,
+                (project, None) => work::project_next(&self.client, &project.name, &mut out).await,
             }
         }
         .await;

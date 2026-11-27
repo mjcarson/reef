@@ -84,8 +84,10 @@
 //! else the file `$REEF_CREDENTIALS` names, else `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
 use clap::{Args, Parser, Subcommand};
+use reef_api::work::on_worktree;
 use reef_api::{
-    AddedProject, Attach, BranchFetched, Branched, Fetched, Pane, Project, SessionState, Writer,
+    AddedProject, Attach, BranchFetched, Branched, Fetched, Pane, PlanInfo, Project, SessionState,
+    WorkRecord, Writer,
 };
 use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
@@ -100,6 +102,7 @@ use crate::comment;
 use crate::conf::Conf;
 use crate::export;
 use crate::follow;
+use crate::git::Checkout;
 use crate::history;
 use crate::hook;
 use crate::import;
@@ -250,12 +253,16 @@ pub enum Command {
     /// Print the work ready to start, the queue's first, then in plan order, and what the rest
     /// waits on
     ///
-    /// Across the project's plans, unless `--plan` names one, which leaves the queue's entries
-    /// of other plans out.
+    /// In the plan `--plan` names, else the one the checkout picks, by its branch or the node
+    /// its worktree is on, leaving the queue's entries of other plans out. Across the project's
+    /// plans where nothing picks one, or with `--all`.
     Next {
-        /// The plan to look in, if not all of the project's
+        /// The plan to look in, if not the one the checkout picks
         #[command(flatten)]
         pick: PlanPick,
+        /// Look across every plan of the project, whichever the checkout picks
+        #[arg(long, conflicts_with = "plan")]
+        all: bool,
     },
     /// Order the work to take first: the project's queue, which next follows
     #[command(subcommand)]
@@ -1164,17 +1171,11 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             writeln!(out, "{}", work::problems(&plan, 0))?;
             Ok(())
         }
-        Command::Next { pick } => {
-            // one plan named, else every plan of the project
-            match pick.plan {
-                Some(_) => {
-                    let plan = picked_plan(&client, cwd, &pick).await?;
-                    work::next(&client, &plan, out).await
-                }
-                None => {
-                    let project = picked(&client, cwd, &pick.project).await?;
-                    work::project_next(&client, &project.name, out).await
-                }
+        Command::Next { pick, all } => {
+            // the plan named or picked, else every plan of the project
+            match next_plan(&client, cwd, &pick, all).await? {
+                (_, Some(plan)) => work::next(&client, &plan, out).await,
+                (project, None) => work::project_next(&client, &project.name, out).await,
             }
         }
         Command::Queue(QueueCommand::Add { id, at, pick }) => {
@@ -1952,7 +1953,8 @@ pub(crate) async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::
     })
 }
 
-/// The plan a node command works in: the one named in the picked project, else its only plan
+/// The plan a node command works in: the one named in the picked project, else its only plan,
+/// else the one the working directory's checkout picks
 ///
 /// # Arguments
 ///
@@ -1962,18 +1964,21 @@ pub(crate) async fn picked(client: &Client, cwd: &Path, pick: &Pick) -> anyhow::
 pub async fn picked_plan(client: &Client, cwd: &Path, pick: &PlanPick) -> anyhow::Result<PlanName> {
     // the plan is in the project named, else the working directory's
     let project = picked(client, cwd, &pick.project).await?;
-    plan_in(client, project, pick.plan.as_deref()).await
+    plan_in(client, cwd, project, pick.plan.as_deref()).await
 }
 
-/// The plan named in a project, else the project's only plan
+/// The plan named in a project, else the project's only plan, else the one a checkout picks:
+/// the one that follows its branch, else the plan of the node its worktree is on
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
+/// * `cwd` - The working directory, whose checkout picks a plan where none is named
 /// * `project` - The project the plan is in
 /// * `plan` - The plan named, if one was
 pub(crate) async fn plan_in(
     client: &Client,
+    cwd: &Path,
     project: Project,
     plan: Option<&str>,
 ) -> anyhow::Result<PlanName> {
@@ -1984,26 +1989,234 @@ pub(crate) async fn plan_in(
     // else the project's only plan
     let plans = client.plans(&project.name).await?;
     match plans.as_slice() {
-        [only] => Ok(only.name.clone()),
+        [only] => return Ok(only.name.clone()),
         [] => anyhow::bail!(
             "project `{}` lists no plans: list one with `reef plan new <name>`",
             project.name
         ),
-        many => {
-            let names: Vec<String> = many
-                .iter()
-                .map(|info| format!("`{}`", info.name.plan))
-                .collect();
-            anyhow::bail!(
-                "project `{}` lists {} plans, {}: name one by its name alone, such as `{}`, with \
-                 `--plan`, or a tool's `plan`",
-                project.name,
-                many.len(),
-                names.join(", "),
-                many[0].name.plan
-            )
-        }
+        _ => (),
     }
+    // else the one the checkout picks
+    if let Some(picked) = checkout_plan(client, cwd, &project, &plans).await? {
+        return Ok(picked);
+    }
+    // and nothing picking one, each plan is named with what it follows
+    let here = Here::read(cwd, &project);
+    anyhow::bail!("{}", unpicked(&project, &plans, here.as_ref()))
+}
+
+/// Where a checkout is: its worktree, the branch it has checked out, and, for a local project,
+/// the branch its main worktree has, which a plan that follows no branch reads
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Here {
+    /// The worktree's root
+    pub root: PathBuf,
+    /// The branch checked out, or `None` on a detached HEAD
+    pub branch: Option<String>,
+    /// The branch a local project's main worktree has checked out, if it is a local project's
+    pub main_branch: Option<String>,
+}
+
+impl Here {
+    /// Where the checkout holding a directory is, or `None` outside one
+    ///
+    /// Each read is done before it returns, so no git handle is held across a wait.
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The working directory
+    /// * `project` - The project it belongs to
+    pub(crate) fn read(cwd: &Path, project: &Project) -> Option<Here> {
+        // the checkout, its root and its branch
+        let checkout = Checkout::open(cwd).ok()?;
+        let root = checkout.root().to_path_buf();
+        let branch = checkout.branch().ok().flatten();
+        // a local project's own branch is the one its main worktree has
+        let main_branch = match &project.remote {
+            Some(_) => None,
+            None => Checkout::open(&project.repo)
+                .ok()
+                .and_then(|main| main.branch().ok().flatten()),
+        };
+        Some(Here {
+            root,
+            branch,
+            main_branch,
+        })
+    }
+}
+
+/// The branch a plan follows: its own, else its project's, the branch a remote project was
+/// registered by, or the one a local project's main worktree has
+///
+/// # Arguments
+///
+/// * `project` - The plan's project
+/// * `info` - The plan, as its listing names it
+/// * `main_branch` - The branch a local project's main worktree has checked out, if known
+pub(crate) fn followed<'a>(
+    project: &'a Project,
+    info: &'a PlanInfo,
+    main_branch: Option<&'a str>,
+) -> Option<&'a str> {
+    // its own, else its project's
+    info.branch.as_deref().or(match &project.remote {
+        Some(remote) => Some(remote.branch.as_str()),
+        None => main_branch,
+    })
+}
+
+/// The one plan that follows a branch, if exactly one does
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `plans` - Its plans
+/// * `here` - Where the checkout is
+pub(crate) fn branch_plan(project: &Project, plans: &[PlanInfo], here: &Here) -> Option<PlanName> {
+    // a detached HEAD is on no branch
+    let branch = here.branch.as_deref()?;
+    let following: Vec<&PlanInfo> = plans
+        .iter()
+        .filter(|info| followed(project, info, here.main_branch.as_deref()) == Some(branch))
+        .collect();
+    match following.as_slice() {
+        [one] => Some(one.name.clone()),
+        _ => None,
+    }
+}
+
+/// The plan a checkout picks among a project's plans: the one that follows its branch, else
+/// the plan of the node its worktree is on, such as a group member's worktree on `reef/<id>`
+///
+/// The branch comes first, so a checkout switched to another branch moves to its plan.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `project` - The project
+/// * `plans` - Its plans
+pub(crate) async fn checkout_plan(
+    client: &Client,
+    cwd: &Path,
+    project: &Project,
+    plans: &[PlanInfo],
+) -> anyhow::Result<Option<PlanName>> {
+    // outside a checkout, nothing picks one
+    let Some(here) = Here::read(cwd, project) else {
+        return Ok(None);
+    };
+    // the one plan that follows its branch
+    if let Some(plan) = branch_plan(project, plans, &here) {
+        return Ok(Some(plan));
+    }
+    // else the plan of the node started there last, if it is still listed
+    let records = client.work(&project.name).await?;
+    Ok(on_worktree(&records, &here.root)
+        .map(|record| record.node.plan.clone())
+        .filter(|plan| plans.iter().any(|info| info.name == *plan)))
+}
+
+/// The plan `next` looks in: the one named, else the only one, else the one the checkout
+/// picks, or `None` to look across every plan of the project, where nothing picks one or every
+/// plan is asked for
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, whose checkout picks a plan where none is named
+/// * `pick` - The project and plan named, if they were
+/// * `all` - Whether every plan is asked for
+pub(crate) async fn next_plan(
+    client: &Client,
+    cwd: &Path,
+    pick: &PlanPick,
+    all: bool,
+) -> anyhow::Result<(Project, Option<PlanName>)> {
+    // the project, then a plan named in it
+    let project = picked(client, cwd, &pick.project).await?;
+    if let Some(plan) = &pick.plan {
+        let plan = named_plan(&project.name, plan)?;
+        return Ok((project, Some(plan)));
+    }
+    if all {
+        return Ok((project, None));
+    }
+    // else the one the checkout picks among several, or every plan
+    let plans = client.plans(&project.name).await?;
+    if plans.len() < 2 {
+        return Ok((project, None));
+    }
+    let picked = checkout_plan(client, cwd, &project, &plans).await?;
+    Ok((project, picked))
+}
+
+/// The work record of the node started last in a worktree, narrowed to the plan the
+/// checkout's branch picks where the project has several plans
+///
+/// A commit on `main`, in a checkout whose last start was a node of another branch's plan, so
+/// isn't taken as that node's.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `project` - The project the worktree belongs to
+/// * `worktree` - The worktree's root
+pub(crate) async fn worktree_record(
+    client: &Client,
+    project: &Project,
+    worktree: &Path,
+) -> anyhow::Result<Option<WorkRecord>> {
+    // every record of the project, and the plan the checkout's branch picks among several
+    let records = client.work(&project.name).await?;
+    let plans = client.plans(&project.name).await?;
+    let narrowed = match (plans.len() > 1, Here::read(worktree, project)) {
+        (true, Some(here)) => branch_plan(project, &plans, &here),
+        _ => None,
+    };
+    // the node started there last, of that plan if one was picked
+    let kept: Vec<WorkRecord> = records
+        .into_iter()
+        .filter(|record| {
+            narrowed
+                .as_ref()
+                .is_none_or(|plan| record.node.plan == *plan)
+        })
+        .collect();
+    Ok(on_worktree(&kept, worktree).cloned())
+}
+
+/// Why no plan was picked: each plan named with what it follows, and how to name one
+///
+/// # Arguments
+///
+/// * `project` - The project
+/// * `plans` - Its plans, several of them
+/// * `here` - Where the checkout is, if the working directory is in one
+fn unpicked(project: &Project, plans: &[PlanInfo], here: Option<&Here>) -> String {
+    // each plan alone, with the branch it follows
+    let main_branch = here.and_then(|here| here.main_branch.as_deref());
+    let named: Vec<String> = plans
+        .iter()
+        .map(|info| match followed(project, info, main_branch) {
+            Some(branch) => format!("`{}` (follows `{branch}`)", info.name.plan),
+            None => format!("`{}` (its project's working tree)", info.name.plan),
+        })
+        .collect();
+    // and where the checkout is, if that says why it picked none
+    let on = match here.and_then(|here| here.branch.as_deref()) {
+        Some(branch) => format!(", and this checkout's `{branch}` picks none of them"),
+        None => String::new(),
+    };
+    format!(
+        "project `{}` lists {} plans, {}{on}: name one by its name alone, such as `{}`, with \
+         `--plan`, or a tool's `plan`, or check out a branch one follows",
+        project.name,
+        plans.len(),
+        named.join(", "),
+        plans[0].name.plan
+    )
 }
 
 /// A plan named within a project: its name alone, or written in full as `project/plan` for
@@ -2067,10 +2280,13 @@ pub(crate) fn columns<W: Write>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ClaudeCommand, Cli, Command, CommentCommand, HookCommand, LoopCommand, NodeCommand,
-        PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, columns, named_plan,
+        ClaudeCommand, Cli, Command, CommentCommand, Here, HookCommand, LoopCommand, NodeCommand,
+        PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, branch_plan, columns,
+        named_plan, unpicked,
     };
     use clap::{CommandFactory, Parser};
+    use reef_api::{PlanInfo, Project, Remote};
+    use reef_model::PlanName;
     use reef_model::{Met, Status};
     use std::path::{Path, PathBuf};
 
@@ -2096,6 +2312,120 @@ mod tests {
         );
         // and a name of three parts is no plan's
         assert!(named_plan("live", "live/allow/B").is_err());
+    }
+
+    /// One of a project's plans, following a branch or its project's own
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `plan` - The plan's name
+    /// * `branch` - The branch it follows, or `None` for its project's own
+    fn info(project: &str, plan: &str, branch: Option<&str>) -> PlanInfo {
+        PlanInfo {
+            name: PlanName::new(project, plan).unwrap(),
+            revision: 1,
+            registered: None,
+            branch: branch.map(str::to_string),
+        }
+    }
+
+    /// A checkout in a worktree, on a branch, of a local project whose main worktree is on
+    /// another
+    ///
+    /// # Arguments
+    ///
+    /// * `branch` - The branch the checkout has, or `None` for a detached HEAD
+    /// * `main_branch` - The branch the project's main worktree has
+    fn here(branch: Option<&str>, main_branch: Option<&str>) -> Here {
+        Here {
+            root: PathBuf::from("/src/reef"),
+            branch: branch.map(str::to_string),
+            main_branch: main_branch.map(str::to_string),
+        }
+    }
+
+    /// The one plan that follows a checkout's branch is picked, a plan following no branch
+    /// follows its project's, and two that follow one branch, or none, pick nothing
+    #[test]
+    fn a_checkout_picks_the_one_plan_that_follows_its_branch() {
+        // a local project whose main worktree is on `main`, with one plan reading it
+        let local = Project {
+            name: "reef".to_string(),
+            repo: "/src/reef".into(),
+            remote: None,
+            registered: None,
+        };
+        let plans = [
+            info("reef", "central", None),
+            info("reef", "side", Some("b2")),
+        ];
+        let picked = |branch| branch_plan(&local, &plans, &here(branch, Some("main")));
+        assert_eq!(
+            picked(Some("b2")).map(|plan| plan.plan),
+            Some("side".to_string())
+        );
+        assert_eq!(
+            picked(Some("main")).map(|plan| plan.plan),
+            Some("central".to_string())
+        );
+        assert_eq!(picked(Some("feature")), None);
+        assert_eq!(picked(None), None);
+        // a remote project's plan with no branch follows the one it was registered by
+        let remote = Project {
+            remote: Some(Remote {
+                url: "https://example.com/reef.git".to_string(),
+                branch: "trunk".to_string(),
+                commit: "a".repeat(40),
+                fetched_at: 1,
+                branches: Default::default(),
+            }),
+            ..local.clone()
+        };
+        let picked = branch_plan(&remote, &plans, &here(Some("trunk"), None));
+        assert_eq!(picked.map(|plan| plan.plan), Some("central".to_string()));
+        // and two plans on one branch pick neither
+        let twins = [info("reef", "a", Some("b2")), info("reef", "b", Some("b2"))];
+        assert_eq!(branch_plan(&local, &twins, &here(Some("b2"), None)), None);
+    }
+
+    /// With nothing to pick, the refusal names each plan alone and the branch it follows, says
+    /// the checkout's branch picks none, and says how to name one
+    #[test]
+    fn with_nothing_to_pick_the_refusal_names_each_plan_and_its_branch() {
+        // a remote project registered by `main`, a plan on it and one on `b2`
+        let project = Project {
+            name: "reef".to_string(),
+            repo: "/data/clones/reef.git".into(),
+            remote: Some(Remote {
+                url: "https://example.com/reef.git".to_string(),
+                branch: "main".to_string(),
+                commit: "a".repeat(40),
+                fetched_at: 1,
+                branches: Default::default(),
+            }),
+            registered: None,
+        };
+        let plans = [
+            info("reef", "central", None),
+            info("reef", "side", Some("b2")),
+        ];
+        let said = unpicked(&project, &plans, Some(&here(Some("feature"), None)));
+        assert!(said.contains("lists 2 plans"), "{said}");
+        assert!(said.contains("`central` (follows `main`)"), "{said}");
+        assert!(said.contains("`side` (follows `b2`)"), "{said}");
+        assert!(
+            said.contains("this checkout's `feature` picks none of them"),
+            "{said}"
+        );
+        assert!(
+            said.contains("by its name alone, such as `central`"),
+            "{said}"
+        );
+        assert!(said.contains("check out a branch one follows"), "{said}");
+        // outside a checkout, it says nothing of a branch
+        let said = unpicked(&project, &plans, None);
+        assert!(!said.contains("this checkout's"), "{said}");
     }
 
     /// clap's own checks of the command line's shape

@@ -21,7 +21,6 @@
 //!   made between the two is never undone unseen. A reply never moves the version on, so one
 //!   sent with a resolve goes first.
 
-use reef_api::work::on_worktree;
 use reef_api::{
     Commented, NewReply, ResolveThread, Resolved, Revision, Side, Target, Thread, Writer,
 };
@@ -312,7 +311,8 @@ fn named_node(plan: &PlanName, named: &str) -> anyhow::Result<NodeName> {
     }
 }
 
-/// The node started last in the worktree a command runs in, in any of the project's plans
+/// The node started last in the worktree a command runs in, in the plan its branch picks, else
+/// in any of the project's plans
 ///
 /// # Arguments
 ///
@@ -324,9 +324,13 @@ async fn here(client: &Client, cwd: &Path, plan: &PlanName) -> anyhow::Result<No
     let checkout = Checkout::open(cwd).map_err(|error| {
         anyhow::anyhow!("{error:#}: name the node whose revision answered the thread with `--node`")
     })?;
-    // and the node whose work was started there last
-    let records = client.work(&plan.project).await?;
-    on_worktree(&records, checkout.root())
+    // the thread's project, and the node whose work was started there last
+    let pick = cli::Pick {
+        project: Some(plan.project.clone()),
+    };
+    let project = cli::picked(client, cwd, &pick).await?;
+    cli::worktree_record(client, &project, checkout.root())
+        .await?
         .map(|record| record.node.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(

@@ -53,7 +53,6 @@
 //! - **Each line it prints starts `reef:`**, since git shows it among a commit's own output.
 
 use reef_api::loops::member_of;
-use reef_api::work::on_worktree;
 use reef_api::{Pane, RecordDecisions, Via, WorkRecord};
 use reef_model::{NodeName, Status};
 use serde::Deserialize;
@@ -214,11 +213,11 @@ pub async fn post_tool_use<W: Write>(
     let Some(record) = on_node(client, &checkout).await? else {
         return Ok(());
     };
+    // a plan named alone, or in full as the tools take it too
     let named = record.node.id == set.id
-        && set
-            .plan
-            .as_ref()
-            .is_none_or(|plan| *plan == record.node.plan.plan);
+        && set.plan.as_ref().is_none_or(|plan| {
+            *plan == record.node.plan.plan || *plan == record.node.plan.to_string()
+        });
     if !named {
         return Ok(());
     }
@@ -622,9 +621,8 @@ async fn on_node(client: &Client, checkout: &Checkout) -> anyhow::Result<Option<
     let Some(project) = client.find_project(checkout.root()).await? else {
         return Ok(None);
     };
-    // the node started there last, in any of the project's plans
-    let records = client.work(&project.name).await?;
-    Ok(on_worktree(&records, checkout.root()).cloned())
+    // the node started there last, in the plan the checkout's branch picks, else in any
+    crate::cli::worktree_record(client, &project, checkout.root()).await
 }
 
 /// Prints what a capture said, each line marked as reef's

@@ -1033,7 +1033,8 @@ async fn node_commands_take_the_only_plan_or_the_one_named() -> anyhow::Result<(
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("`central`, `other`"), "{error}");
+    assert!(error.contains("`central` (follows `"), "{error}");
+    assert!(error.contains("`other` (follows `"), "{error}");
     assert!(error.contains("by its name alone"), "{error}");
     assert!(error.contains("`--plan`"), "{error}");
     // and each plan named is its own
@@ -3793,5 +3794,85 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
         .failing(&repo, &["loop", "stop", "--pane", "screen:1"])
         .await?;
     assert!(bad.contains("`screen:1` is no pane"), "{bad}");
+    Ok(())
+}
+
+/// A checkout on each branch of a project with two plans works in the plan that follows its
+/// branch, with no `--plan`: its node commands, its check and its next
+#[tokio::test]
+async fn a_checkout_on_each_branch_works_in_its_plan() -> anyhow::Result<()> {
+    let cx = Cx::new("checkout-plans").await?;
+    let repo = cx.ax.repo.clone();
+    // `central`, which reads the working tree, holds A
+    cx.put("a.yml", &work("A", &[])).await?;
+    // `side` follows `b2`, which a linked worktree has checked out, and holds B
+    git::run(&repo, &["branch", "b2"])?;
+    let linked = cx.ax.dir.join("b2-checkout");
+    let linked_path = linked.to_str().expect("a utf-8 path");
+    git::run(&repo, &["worktree", "add", "-q", linked_path, "b2"])?;
+    let said = cx
+        .reef(&repo, &["plan", "new", "side", "--branch", "b2"])
+        .await?;
+    assert!(said.contains("`reef/side` follows `b2`"), "{said}");
+    let b = cx.yaml("b.yml", &work("B", &[]))?;
+    cx.reef(&linked, &["node", "put", &b]).await?;
+    // each checkout gets its own plan's node, and not the other's
+    let got = cx.reef(&repo, &["node", "get", "A"]).await?;
+    assert!(got.contains("id: A"), "{got}");
+    let got = cx.reef(&linked, &["node", "get", "B"]).await?;
+    assert!(got.contains("id: B"), "{got}");
+    let (_, error) = cx.failing(&linked, &["node", "get", "A"]).await?;
+    assert!(error.contains("reef/side/A"), "{error}");
+    // each is checked alone, and next looks in its own plan
+    let checked = cx.reef(&linked, &["check"]).await?;
+    assert!(checked.contains("`reef/side` has no problems"), "{checked}");
+    let next = cx.reef(&repo, &["next"]).await?;
+    assert!(next.contains("A ") && !next.contains("B "), "{next}");
+    let next = cx.reef(&linked, &["next"]).await?;
+    assert!(next.contains("B ") && !next.contains("A "), "{next}");
+    // and `--all` looks across both
+    let next = cx.reef(&linked, &["next", "--all"]).await?;
+    assert!(next.contains("A ") && next.contains("B "), "{next}");
+    // the plans list what each follows
+    let listed = cx.reef(&repo, &["plan", "ls"]).await?;
+    assert!(
+        listed.contains("reads its project's working tree"),
+        "{listed}"
+    );
+    assert!(listed.contains("follows `b2`"), "{listed}");
+    Ok(())
+}
+
+/// A worktree on a branch no plan follows, such as a group member's on `reef/<id>`, works in
+/// the plan of the node started there, and a checkout that picks nothing names each plan's
+/// branch
+#[tokio::test]
+async fn a_members_worktree_works_in_its_nodes_plan() -> anyhow::Result<()> {
+    let cx = Cx::new("member-plan").await?;
+    let repo = cx.ax.repo.clone();
+    // two plans: `central`, reading the working tree, and `side` following `b2`
+    cx.put("a.yml", &work("A", &[])).await?;
+    git::run(&repo, &["branch", "b2"])?;
+    cx.reef(&repo, &["plan", "new", "side", "--branch", "b2"])
+        .await?;
+    let b = cx.yaml("b.yml", &work("B", &[]))?;
+    cx.reef(&repo, &["node", "put", &b, "--plan", "side"])
+        .await?;
+    // a worktree on a branch of its own, which no plan follows, picks none yet
+    let member = git::worktree(&repo, &cx.ax.dir.join("reef-b"))?;
+    let (_, error) = cx.failing(&member, &["node", "get", "B"]).await?;
+    assert!(error.contains("`central` (follows `"), "{error}");
+    assert!(error.contains("`side` (follows `b2`)"), "{error}");
+    assert!(
+        error.contains("this checkout's `reef-b` picks none of them"),
+        "{error}"
+    );
+    // once B is started there, the worktree works in B's plan
+    cx.reef(&member, &["start", "B", "--plan", "side"]).await?;
+    let got = cx.reef(&member, &["node", "get", "B"]).await?;
+    assert!(got.contains("id: B"), "{got}");
+    // and next looks in that plan alone, where B is in progress and `central`'s A isn't listed
+    let next = cx.reef(&member, &["next"]).await?;
+    assert!(!next.contains("A "), "{next}");
     Ok(())
 }

@@ -2529,3 +2529,48 @@ async fn a_sessions_decisions_are_kept_with_its_nodes() -> anyhow::Result<()> {
     assert_eq!((on_b[1].number, on_b[1].decided.via), (2, Via::App));
     Ok(())
 }
+
+/// A commit is captured into the node of the plan its checkout's branch follows: a checkout
+/// moved to another plan's branch drafts nothing into the node it last started for the plan
+/// before
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_commit_is_captured_in_the_plan_its_branch_follows() -> anyhow::Result<()> {
+    // `docs`, following `d1`, holds A, and `side`, following `b2`, holds S
+    let hx = Hx::new("branch-plans", &["A"]).await?;
+    committed(&hx.repo, "base.txt", "base\n", "base").await?;
+    hooked(&hx.repo, &["branch", "d1"]).await?;
+    hooked(&hx.repo, &["branch", "b2"]).await?;
+    hx.reef(&hx.repo, &["plan", "branch", "docs", "d1"]).await?;
+    hx.reef(&hx.repo, &["plan", "new", "side", "--branch", "b2"])
+        .await?;
+    let file = hx.ax.dir.join("S.yml");
+    std::fs::write(&file, work("S"))?;
+    let file = file.to_str().expect("the case's dir is utf-8");
+    hx.reef(&hx.repo, &["node", "put", file, "--plan", "side"])
+        .await?;
+    // S worked in a linked worktree on `b2`, and its commit drafted into it
+    let w = hx.ax.dir.join("cli-w");
+    let w_path = w.to_str().expect("a utf-8 path");
+    hooked(&hx.repo, &["worktree", "add", "-q", w_path, "b2"]).await?;
+    let w = w.canonicalize()?;
+    hx.reef(&w, &["start", "S"]).await?;
+    committed(&w, "s.txt", "S's\n", "S one").await?;
+    let (_, said) = hx.logged()?.pop().expect("S's commit ran post-commit");
+    assert!(
+        said.starts_with("reef: drafted `S` as revision 1"),
+        "{said}"
+    );
+    // the worktree moved to `d1`, whose plan has no node started there, drafts nothing
+    hooked(&w, &["checkout", "-q", "d1"]).await?;
+    committed(&w, "d.txt", "d1's\n", "on d1").await?;
+    let (_, said) = hx
+        .logged()?
+        .pop()
+        .expect("the commit on d1 ran post-commit");
+    assert!(!said.contains("`S`"), "{said}");
+    let node = PlanName::new("cli", "side")?.node("S")?;
+    let revisions = hx.client()?.revisions(&node).await?;
+    assert_eq!(revisions.len(), 1);
+    assert_eq!(revisions[0].files.len(), 1, "{:?}", revisions[0].files);
+    Ok(())
+}

@@ -1017,7 +1017,7 @@ async fn write_book<W: Write>(
     let project = picked(client, &book, &pick.project).await?;
     let root = link_root(client, &project, &book).await?;
     let to_dir = paths::join(&prefix(&root, &book)?, "src");
-    let plan = plan_in(client, project, pick.plan.as_deref()).await?;
+    let plan = plan_in(client, &book, project, pick.plan.as_deref()).await?;
     // its nodes, in the order it was written in, and its pages, as the book's files
     let listing = client.list(&plan).await?;
     let pages = client.pages(&plan).await?.pages;
@@ -1078,7 +1078,7 @@ async fn write_over<W: Write>(
     let project = picked(client, &opened.dir, &pick.project).await?;
     let root = link_root(client, &project, &opened.src).await?;
     let src_dir = prefix(&root, &opened.src)?;
-    let plan = plan_in(client, project, pick.plan.as_deref()).await?;
+    let plan = plan_in(client, &opened.dir, project, pick.plan.as_deref()).await?;
     // the plan's files, placed as the book has them
     let listing = client.list(&plan).await?;
     let pages = client.pages(&plan).await?.pages;

@@ -610,7 +610,7 @@ pub async fn import<W: Write>(
     let prefix = prefix(&root, &opened.src)?;
     // the plan named, else the project's only plan
     let named = pick.plan.is_some();
-    let plan = plan_in(client, project, pick.plan.as_deref()).await?;
+    let plan = plan_in(client, &opened.dir, project, pick.plan.as_deref()).await?;
     // the rows the book makes, each id one the plan can name, and the pages its other files do
     let (files, _) = read_nodes(&opened.src, &opened.config.roots);
     let heads: Vec<(String, String)> = files

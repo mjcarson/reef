@@ -8,6 +8,9 @@ tools and skill:
   runs them without asking. `history` is `reef node log`: who made each edit of a node, and what
   it changed. `put`, `status`, `accept`, `reply`, `resolve` and `next_task` write, with your
   token; a reply or a resolve is marked as Claude's.
+- **The tools pick a plan as the CLI does:** the one a tool names, else the one the session's
+  loop is held to, else the one the checkout's branch follows, else the plan of the node its
+  worktree is on. So a session in a checkout of one plan's branch needs no `plan`.
 - **The skill** tells Claude to draw new work as a node before starting it, and to mark it done,
   with its criteria, in the change that finishes it.
 - **A terminal loop** feeds a session one node at a time. Type `! reef loop start` in the

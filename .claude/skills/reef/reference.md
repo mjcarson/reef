@@ -129,7 +129,7 @@ layout = "page"         # fill the page; at most one per page, no height
 Claude Code names reef's MCP tools `mcp__reef__<name>`. Each but next_task takes a `plan` where
 the project has several, the plan's name alone (`central`, not `reef/central`), and says what
 its command prints. In a session whose pane's loop is held to one plan, a bare id is that
-plan's, so `plan` can be left out. A write that is stale or adds a problem is a tool error
+plan's, so `plan` can be left out, and so it can in a checkout whose branch one plan follows. A write that is stale or adds a problem is a tool error
 carrying the message, and writes nothing.
 
 | Tool | Reads or writes | Takes | Its command |
@@ -148,12 +148,15 @@ carrying the message, and writes nothing.
 
 ## Commands
 
-Each picks the working directory's project, else `--project`, and its only plan, else `--plan`.
+Each picks the working directory's project, else `--project`, and its only plan, else the one
+the checkout picks (the plan that follows its branch, else the plan of the node its worktree is
+on), else `--plan`.
 
 ```sh
 reef project show                    # the project the working directory belongs to
-reef plan ls                         # its plans, each at its revision
+reef plan ls                         # its plans, each at its revision, and the branch each follows
 reef next                            # ready work, the queue's first, then what the rest waits on
+reef next --all                      # the same across every plan, whichever the checkout picks
 reef node get C38                    # a node's YAML, after its `# version:` line
 reef node get C38 --md               # as a node file: frontmatter, version inside, then its body
 reef node put c38.yml                # put YAML, or a node file to write its body too

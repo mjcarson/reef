@@ -61,7 +61,7 @@ pub async fn start<W: Write>(
 ) -> anyhow::Result<()> {
     // the checkout, which must be part of the project's repo
     let (checkout, project) = checkout_in(client, cwd, &pick.project, "start").await?;
-    let plan = cli::plan_in(client, project, pick.plan.as_deref()).await?;
+    let plan = cli::plan_in(client, cwd, project, pick.plan.as_deref()).await?;
     let node = plan.node(id)?;
     // the node must be in its plan, and be work, since a group's members are what is worked
     let listing = client.list(&plan).await?;
@@ -158,13 +158,12 @@ pub async fn work<W: Write>(
                 anyhow::anyhow!("`{id}` has not been started: `reef start {id}` starts it here")
             })?
         }
-        // else the one started last in this worktree, in any of the project's plans
+        // else the one started last in this worktree, in the plan its branch picks, else in any
         None => {
             let checkout = Checkout::open(cwd)?;
             let project = cli::picked(client, cwd, &pick.project).await?;
-            let records = client.work(&project.name).await?;
-            on_worktree(&records, checkout.root())
-                .cloned()
+            cli::worktree_record(client, &project, checkout.root())
+                .await?
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "no node of `{}` has been started in {}: `reef start <ID>` starts one",

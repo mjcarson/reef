@@ -28,7 +28,6 @@
 //!   number is said, and sent nowhere.
 
 use reef_api::comment::trailer_threads;
-use reef_api::work::on_worktree;
 use reef_api::{
     AddCapture, CaptureShas, Captured, ErrorCode, FileDiff, RESOLVES_TRAILER, Resolves,
     ResolvingCommit, Revision, TrailerOutcome, TrailerRead, WorkRecord, WorkStart,
@@ -115,7 +114,7 @@ pub async fn capture<W: Write>(
     let record = match id {
         // a node named is in the plan picked, and must be worked here
         Some(id) => {
-            let plan = cli::plan_in(client, project, pick.plan.as_deref()).await?;
+            let plan = cli::plan_in(client, cwd, project, pick.plan.as_deref()).await?;
             let node = plan.node(id)?;
             let record = client.work_of(&node).await?.ok_or_else(|| {
                 anyhow::anyhow!("`{id}` has not been started: `reef start {id}` starts it here")
@@ -128,19 +127,16 @@ pub async fn capture<W: Write>(
             }
             record
         }
-        // else the one started last in this worktree, in any of the project's plans
-        None => {
-            let records = client.work(&project.name).await?;
-            on_worktree(&records, checkout.root())
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "no node of `{}` has been started in {}: `reef start <ID>` starts one",
-                        project.name,
-                        checkout.root().display()
-                    )
-                })?
-        }
+        // else the one started last in this worktree, in the plan its branch picks, else in any
+        None => cli::worktree_record(client, &project, checkout.root())
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no node of `{}` has been started in {}: `reef start <ID>` starts one",
+                    project.name,
+                    checkout.root().display()
+                )
+            })?,
     };
     // what the node changed, read here, then sealed by the service
     capture_record(client, &checkout, &record, Keep::Seal, Report::Full, out).await?;

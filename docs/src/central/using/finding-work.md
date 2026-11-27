@@ -10,13 +10,15 @@ reef project show                  # shop  git@github.com:acme/shop.git (`main` 
 reef plan ls
 ```
 
-Anywhere else, name it with `--project shop`. Where a project has several plans, name one with
-`--plan`.
+Anywhere else, name it with `--project shop`. Where a project has several plans, the checkout
+picks one: the plan that follows its branch, else the plan of the node its worktree is on. A
+checkout that picks none, or a plan other than its own, is named with `--plan`.
 
 ## Find work
 
 ```sh
 reef next                          # the queue's first, then what is ready, then what waits and on what
+reef next --all                    # across every plan, whichever the checkout picks
 reef queue add L2 --top            # take L2 first; also --bottom, --before ID, --after ID
 reef queue move L2 --after L5
 reef queue rm L2

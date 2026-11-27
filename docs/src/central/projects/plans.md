@@ -8,9 +8,13 @@ reef plan branch launch --clear    # follow the project's own branch again
 reef plan ls                       # each plan, the revision it is at, what it follows, who listed it
 ```
 
-- **A project with one plan needs no `--plan`.** Once it has several, commands that read or
-  write one plan take `--plan launch`. `reef next` looks across every plan unless `--plan`
-  names one, and the project's queue holds every plan's entries.
+- **A project with one plan needs no `--plan`.** Once it has several, the checkout picks one:
+  the plan that follows its branch, else the plan of the node its worktree is on, such as a
+  group member's worktree on `reef/<id>`. Elsewhere, commands that read or write one plan take
+  `--plan launch`, and the refusal lists each plan and the branch it follows. A plan is named by
+  its name alone, or in full as `project/plan` in its own project.
+- **`reef next` looks in the checkout's plan,** and across every plan where nothing picks one,
+  or with `--all`. The project's queue holds every plan's entries.
 - **A plan's name** keeps to the same rule as a project's and a user's.
 
 ## A plan follows a branch
