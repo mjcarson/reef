@@ -648,3 +648,62 @@ async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()>
     assert!(missing.contains("has no comment thread 99"), "{missing}");
     Ok(())
 }
+
+/// In a project of several plans, a session's tools take a bare id in the plan its pane's loop
+/// is held to, a plan named in full in its own project, and a session with no loop is told
+/// which form `plan` takes
+#[tokio::test]
+async fn tools_take_a_bare_id_in_their_loops_plan() -> anyhow::Result<()> {
+    // a twin with `reef/central` listed, a second plan beside it, and a node in that plan
+    let ax = common::Fx::memory("mcp-loops-plan").await?.api().await?;
+    let client = client_of(&ax)?;
+    let other = PlanName::new("reef", "other")?;
+    client.add_plan(&other).await?;
+    let mut loose = Session::open(&ax).await?;
+    let yaml = "id: X\ntitle: X Some work\ndescription:\n  why: Without X, something is \
+                missing.\n  what: With X, it is there.\n";
+    let (put, failed) = loose
+        .call("put", json!({"yaml": yaml, "plan": "other"}))
+        .await?;
+    assert!(!failed, "{put}");
+    // with no loop, a bare id is refused, saying to name the plan by its name alone
+    let (refused, failed) = loose.call("get", json!({"id": "X"})).await?;
+    assert!(failed, "{refused}");
+    assert!(
+        refused.contains("by its name alone, such as `central`"),
+        "{refused}"
+    );
+    // the plan named in full, in its own project, is taken, and one of another isn't
+    let (got, failed) = loose
+        .call("get", json!({"id": "X", "plan": "reef/other"}))
+        .await?;
+    assert!(!failed, "{got}");
+    assert!(got.contains("id: X"), "{got}");
+    let (refused, failed) = loose
+        .call("get", json!({"id": "X", "plan": "shoal/other"}))
+        .await?;
+    assert!(failed, "{refused}");
+    // a session in a pane whose loop is held to `other` takes the bare id there
+    let pane = Pane::Claude { pid: 5150 };
+    let start = EditLoop {
+        pane: pane.clone(),
+        edit: LoopEdit::Start {
+            project: "reef".to_string(),
+            plan: Some("other".to_string()),
+            session: None,
+            width: None,
+            opens: None,
+            pid: None,
+        },
+    };
+    client.edit_loop(&start).await?;
+    let mut held = Session::open_in(&ax, Some(pane)).await?;
+    let (got, failed) = held.call("get", json!({"id": "X"})).await?;
+    assert!(!failed, "{got}");
+    assert!(got.contains("id: X"), "{got}");
+    let (status, failed) = held
+        .call("status", json!({"id": "X", "status": "in-progress"}))
+        .await?;
+    assert!(!failed, "{status}");
+    Ok(())
+}

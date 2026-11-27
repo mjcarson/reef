@@ -19,7 +19,8 @@ The full key reference is in [reference.md](reference.md). Read it before writin
 - **The working directory picks the project**: the registered project whose repo holds it, its
   main repo's in a linked worktree, or the one registered by the git URL its remotes name.
   `reef project show` names it, and `reef plan ls` lists its plans. Where it has several, name
-  one: `plan` on a tool, `--plan` on a command.
+  one by its name alone: `plan` on a tool, `--plan` on a command. A session whose loop is held
+  to one plan needs none on a tool.
 - **A project registered by its URL reads docs at the commit last fetched**, so a link to a doc
   that isn't pushed and fetched yet is refused. Ask the user to push it, then run
   `reef project fetch`; pushing is theirs to do.

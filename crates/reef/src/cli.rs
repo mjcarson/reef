@@ -1979,7 +1979,7 @@ pub(crate) async fn plan_in(
 ) -> anyhow::Result<PlanName> {
     // a plan named keeps the rule names share, and the service says if it isn't listed
     if let Some(plan) = plan {
-        return Ok(PlanName::new(project.name, plan)?);
+        return named_plan(&project.name, plan);
     }
     // else the project's only plan
     let plans = client.plans(&project.name).await?;
@@ -1990,15 +1990,55 @@ pub(crate) async fn plan_in(
             project.name
         ),
         many => {
-            let names: Vec<String> = many.iter().map(|info| format!("`{}`", info.name)).collect();
+            let names: Vec<String> = many
+                .iter()
+                .map(|info| format!("`{}`", info.name.plan))
+                .collect();
             anyhow::bail!(
-                "project `{}` lists {} plans, {}: name one with `--plan`",
+                "project `{}` lists {} plans, {}: name one by its name alone, such as `{}`, with \
+                 `--plan`, or a tool's `plan`",
                 project.name,
                 many.len(),
-                names.join(", ")
+                names.join(", "),
+                many[0].name.plan
             )
         }
     }
+}
+
+/// A plan named within a project: its name alone, or written in full as `project/plan` for
+/// that project
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+/// * `plan` - The plan as it was named
+///
+/// # Examples
+///
+/// ```
+/// use reef::cli::named_plan;
+///
+/// assert_eq!(named_plan("reef", "central").unwrap().to_string(), "reef/central");
+/// assert_eq!(named_plan("reef", "reef/central").unwrap().to_string(), "reef/central");
+/// assert!(named_plan("reef", "shoal/central").is_err());
+/// ```
+pub fn named_plan(project: &str, plan: &str) -> anyhow::Result<PlanName> {
+    // a name alone is the project's
+    if !plan.contains('/') {
+        return Ok(PlanName::new(project, plan)?);
+    }
+    // one written in full must be of this project
+    let full: PlanName = plan.parse()?;
+    if full.project != project {
+        anyhow::bail!(
+            "plan `{plan}` is project `{}`'s, not `{project}`'s: name a plan of `{project}` by its \
+             name alone, such as `{}`",
+            full.project,
+            full.plan
+        );
+    }
+    Ok(full)
 }
 
 /// Prints rows of two columns, the first padded to its widest
@@ -2028,11 +2068,35 @@ pub(crate) fn columns<W: Write>(
 mod tests {
     use super::{
         ClaudeCommand, Cli, Command, CommentCommand, HookCommand, LoopCommand, NodeCommand,
-        PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, columns,
+        PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, columns, named_plan,
     };
     use clap::{CommandFactory, Parser};
     use reef_model::{Met, Status};
     use std::path::{Path, PathBuf};
+
+    /// A plan written as `project/plan` is taken in its own project and refused in another,
+    /// which says to name it alone, and a name alone is the project's
+    #[test]
+    fn a_plan_named_in_full_is_taken_in_its_own_project() {
+        // its name alone, and in full, name one plan
+        assert_eq!(
+            named_plan("live", "allow").unwrap().to_string(),
+            "live/allow"
+        );
+        assert_eq!(
+            named_plan("live", "live/allow").unwrap().to_string(),
+            "live/allow"
+        );
+        // one of another project is refused, saying which form to take
+        let error = named_plan("live", "shoal/allow").unwrap_err().to_string();
+        assert!(error.contains("project `shoal`'s"), "{error}");
+        assert!(
+            error.contains("by its name alone, such as `allow`"),
+            "{error}"
+        );
+        // and a name of three parts is no plan's
+        assert!(named_plan("live", "live/allow/B").is_err());
+    }
 
     /// clap's own checks of the command line's shape
     #[test]

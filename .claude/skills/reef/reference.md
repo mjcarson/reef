@@ -127,8 +127,10 @@ layout = "page"         # fill the page; at most one per page, no height
 ## Tools
 
 Claude Code names reef's MCP tools `mcp__reef__<name>`. Each but next_task takes a `plan` where
-the project has several, and says what its command prints. A write that is stale or adds a
-problem is a tool error carrying the message, and writes nothing.
+the project has several, the plan's name alone (`central`, not `reef/central`), and says what
+its command prints. In a session whose pane's loop is held to one plan, a bare id is that
+plan's, so `plan` can be left out. A write that is stale or adds a problem is a tool error
+carrying the message, and writes nothing.
 
 | Tool | Reads or writes | Takes | Its command |
 |------|-----------------|-------|-------------|

@@ -27,7 +27,8 @@
 //!   than a protocol error, which it can't.
 //! - **Nothing else writes to standard output** while it serves, since the protocol runs there.
 
-use reef_api::Pane;
+use reef_api::loops::member_of;
+use reef_api::{Loop, Pane};
 use reef_model::{Met, PlanName, Status};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -57,10 +58,31 @@ pub struct Tools {
     pane: Option<Pane>,
 }
 
+/// The plan a pane's loop is held to, the pane's own loop's or the loop whose member it works,
+/// if that loop feeds the project and is held to one plan of it
+///
+/// # Arguments
+///
+/// * `loops` - Every loop
+/// * `pane` - The pane the session runs in
+/// * `project` - The project the session works in
+pub fn loop_plan(loops: &[Loop], pane: &Pane, project: &str) -> Option<String> {
+    // the pane's own loop, else the loop whose member the pane works
+    let feeding = loops
+        .iter()
+        .find(|feeding| feeding.pane == *pane)
+        .or_else(|| member_of(loops, pane).map(|(feeding, _)| feeding))?;
+    // only one of this project's, held to one plan
+    (feeding.project == project)
+        .then(|| feeding.plan.clone())
+        .flatten()
+}
+
 /// Names a plan, if not the one the server was started for
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct PlanArgs {
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -69,7 +91,8 @@ pub struct PlanArgs {
 pub struct NodeArgs {
     /// The node's id, such as C18
     pub id: String,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -78,7 +101,8 @@ pub struct NodeArgs {
 pub struct HistoryArgs {
     /// The node's id, such as C18
     pub id: String,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
     /// The cursor a page ended by naming, after `--older`, to read the 200 edits older than it;
     /// none for the newest 200
@@ -92,7 +116,8 @@ pub struct PutArgs {
     /// keeps its `# version:` line, so a put over another writer's change is refused; YAML
     /// without one is a new node. Inline `nodes:` go in as members of their own, with it.
     pub yaml: String,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -134,7 +159,8 @@ pub struct StatusArgs {
     pub id: String,
     /// Where its work now stands
     pub status: WorkStatus,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -146,7 +172,8 @@ pub struct CommentsArgs {
     /// Whether to list resolved threads too, rather than only the open ones
     #[serde(default)]
     pub all: bool,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -157,7 +184,8 @@ pub struct ReplyArgs {
     pub thread: u32,
     /// The reply, as markdown
     pub body: String,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -168,7 +196,8 @@ pub struct ResolveArgs {
     pub thread: u32,
     /// A reply to keep in it first, as markdown, saying how it was answered
     pub reply: Option<String>,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -211,7 +240,8 @@ pub struct AcceptArgs {
     pub status: CriterionStatus,
     /// The test that checks it, such as `tests/scan.rs::dropped_client`
     pub test: Option<String>,
-    /// The plan within the project, if the project has several and the server names none
+    /// The plan's name within the project, such as `central`, if the project has several and
+    /// neither the server nor this session's loop names one
     pub plan: Option<String>,
 }
 
@@ -257,13 +287,37 @@ impl Tools {
         self
     }
 
-    /// The plan a tool works in: the one it names, else the server's, else the project's only
+    /// The plan a tool works in: the one it names, else the server's, else the one its pane's
+    /// loop is held to, else the project's only
     ///
     /// # Arguments
     ///
     /// * `plan` - The plan the tool was given, if any
     async fn plan(&self, plan: Option<String>) -> anyhow::Result<PlanName> {
-        picked_plan(&self.client, &self.cwd, &self.pick_of(plan)).await
+        // a plan the call or the server names wins
+        let mut pick = self.pick_of(plan);
+        if pick.plan.is_none() {
+            // else the one the pane's loop takes nodes from, if it is held to one
+            pick.plan = self.loop_plan(&pick.project).await?;
+        }
+        picked_plan(&self.client, &self.cwd, &pick).await
+    }
+
+    /// The plan the loop of this session's pane is held to, if the pane has a loop of the
+    /// picked project held to one, or works a member of one
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project named, if one was
+    async fn loop_plan(&self, project: &Pick) -> anyhow::Result<Option<String>> {
+        // a session in no pane has no loop
+        let Some(pane) = &self.pane else {
+            return Ok(None);
+        };
+        // the loops, and the project this session works in
+        let loops = self.client.loops().await?;
+        let project = picked(&self.client, &self.cwd, project).await?;
+        Ok(loop_plan(&loops, pane, &project.name))
     }
 
     /// The project and plan a tool works in, as a command would be given them
@@ -608,4 +662,67 @@ where
     let service = tools.serve((reader, writer)).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loop_plan;
+    use reef_api::{Author, Loop, LoopState, Member, Pane};
+
+    /// A running loop in a pane, feeding a project, held to a plan or none
+    ///
+    /// # Arguments
+    ///
+    /// * `pane` - The pane's key
+    /// * `project` - The project it feeds
+    /// * `plan` - The one plan it is held to, or `None` for every plan
+    fn feeding(pane: &str, project: &str, plan: Option<&str>) -> Loop {
+        Loop {
+            changed_by: Author::default(),
+            started_by: Author::default(),
+            pane: pane.parse::<Pane>().unwrap(),
+            project: project.to_string(),
+            plan: plan.map(str::to_string),
+            session: None,
+            node: None,
+            acted: None,
+            state: LoopState::Running,
+            version: 1,
+            started_at: 1,
+            width: 1,
+            opens: true,
+            pid: None,
+            members: Vec::new(),
+        }
+    }
+
+    /// A bare id resolves in the plan the pane's loop narrows to, its own loop's or the loop
+    /// whose member it works, and in none where the loop feeds every plan or another project
+    #[test]
+    fn a_bare_id_resolves_in_the_plan_the_panes_loop_narrows_to() {
+        // a loop held to `allow`, one over every plan, and one of another project
+        let mut held = feeding("zellij:work:1", "live", Some("allow"));
+        let member: Pane = "zellij:work:4".parse().unwrap();
+        held.members.push(Member {
+            node: "live/allow/B".parse().unwrap(),
+            pane: Some(member.clone()),
+        });
+        let loops = vec![
+            held,
+            feeding("zellij:work:2", "live", None),
+            feeding("zellij:work:3", "shoal", Some("engine")),
+        ];
+        // the pane's own loop narrows to its plan, and so does the loop whose member it works
+        let own: Pane = "zellij:work:1".parse().unwrap();
+        assert_eq!(loop_plan(&loops, &own, "live").as_deref(), Some("allow"));
+        assert_eq!(loop_plan(&loops, &member, "live").as_deref(), Some("allow"));
+        // a loop over every plan narrows to none, and nor does one of another project
+        let every: Pane = "zellij:work:2".parse().unwrap();
+        assert_eq!(loop_plan(&loops, &every, "live"), None);
+        let other: Pane = "zellij:work:3".parse().unwrap();
+        assert_eq!(loop_plan(&loops, &other, "live"), None);
+        // and a pane with no loop has none
+        let none: Pane = "zellij:work:9".parse().unwrap();
+        assert_eq!(loop_plan(&loops, &none, "live"), None);
+    }
 }

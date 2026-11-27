@@ -1033,7 +1033,8 @@ async fn node_commands_take_the_only_plan_or_the_one_named() -> anyhow::Result<(
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("`reef/central`, `reef/other`"), "{error}");
+    assert!(error.contains("`central`, `other`"), "{error}");
+    assert!(error.contains("by its name alone"), "{error}");
     assert!(error.contains("`--plan`"), "{error}");
     // and each plan named is its own
     let got = cx
