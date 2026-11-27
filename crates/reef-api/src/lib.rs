@@ -18,6 +18,8 @@
 //!   `reef start` read it from the node's checkout, and the SHAs each capture since read.
 //! - **Revisions** ([`revision`]): each capture of a node's changes, its files, hunks and lines,
 //!   and the anchor a comment names a line by.
+//! - **Outlines** ([`outline`]): the items of a file's code a revision changed, which item each
+//!   line is, and the groups the app draws them in.
 //! - **Comments** ([`comment`]): threads on a line of a node's revision or on the node as a
 //!   whole, each open or resolved, where a line's thread followed it to in later revisions, the
 //!   changes that resolved it, and what came of a comment, a mark or a resolve.
@@ -50,6 +52,7 @@ pub mod error;
 pub mod history;
 pub mod loops;
 pub mod node;
+pub mod outline;
 pub mod page;
 pub mod paths;
 pub mod project;
@@ -78,6 +81,7 @@ pub use node::{
     Checked, Listing, MoveNodes, Moved, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal,
     Renumbered, Rewrite, Rewritten, StalePut, StoredNode, lift, puts_for, records,
 };
+pub use outline::{Group, Item, ItemChange, ItemKind, Outline, Owner, Segment, Span};
 pub use page::{
     PLAN_PAGES_MAX_BYTES, PageEdit, PageEdited, PageListing, PageWrite, StoredPage, WRITE_BODY_MAX,
     check_page_path,

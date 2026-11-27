@@ -53,6 +53,7 @@ fn modified() -> FileDiff {
         new_id: Some("2".repeat(40)),
         binary: false,
         too_large: false,
+        outline: None,
         hunks: vec![Hunk {
             old_start: 1,
             old_lines: 2,

@@ -3187,8 +3187,29 @@ async fn a_capture_matches_git_diff_when_taken() -> anyhow::Result<()> {
         field(&out, "head"),
         git::run(&repo, &["rev-parse", "HEAD"])?
     );
+    // the outline is reef's, not git's: only the Rust file has one, and the rest is git's
+    let outlined: Vec<&str> = files
+        .iter()
+        .filter(|file| file.outline.is_some())
+        .map(|file| file.path())
+        .collect();
+    assert_eq!(outlined, ["src/new.rs"]);
+    let new_rs = files.iter().find(|file| file.path() == "src/new.rs");
+    let items = &new_rs.and_then(|file| file.outline.as_ref()).unwrap().items;
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (items[0].label(), items[0].change),
+        ("fn main".to_string(), reef_api::ItemChange::Added)
+    );
+    let unoutlined: Vec<reef_api::FileDiff> = files
+        .iter()
+        .map(|file| reef_api::FileDiff {
+            outline: None,
+            ..file.clone()
+        })
+        .collect();
     let expected = oracle::git_diff(&repo, &revision.shas.base, &revision.shas.tree);
-    assert_eq!(files, &expected);
+    assert_eq!(unoutlined, expected);
     let paths: Vec<&str> = files.iter().map(|file| file.path()).collect();
     assert_eq!(
         paths,
@@ -3220,6 +3241,107 @@ async fn a_capture_matches_git_diff_when_taken() -> anyhow::Result<()> {
     let lines: Vec<&str> = status.lines().map(str::trim).collect();
     assert!(lines.contains(&"A  src/new.rs"), "{status}");
     assert!(lines.contains(&"M blob.bin"), "{status}");
+    Ok(())
+}
+
+/// A capture outlines each Rust file from both of its sides, and the service keeps the outline
+/// with the file and in its revision's listing: a struct's field and its impl's methods under
+/// the struct, a fn removed and a struct added alone, and a file with no grammar has none
+#[tokio::test]
+async fn a_capture_outlines_its_rust_files() -> anyhow::Result<()> {
+    use reef_api::ItemChange::{Added, Changed, Removed};
+    let cx = Cx::new("capture-outline").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    // a base with a struct, its impl and a loose fn, and a file no grammar reads
+    let base = "\
+pub struct Scaler {
+    count: u32,
+}
+
+impl Scaler {
+    pub fn run(&self) -> u32 {
+        self.count
+    }
+}
+
+fn gone() {}
+";
+    write_files_in(
+        &repo,
+        &[
+            ("src/scaler.rs", base.as_bytes()),
+            ("notes.md", b"# Notes\n"),
+        ],
+    )?;
+    commit_all(&repo, "base")?;
+    git::run(&repo, &["checkout", "-q", "-b", "work"])?;
+    cx.reef(&repo, &["start", "A"]).await?;
+    // a field added, a method changed and one added, the fn removed and a struct added
+    let edited = "\
+pub struct Scaler {
+    count: u32,
+    rate: u32,
+}
+
+impl Scaler {
+    pub fn run(&self) -> u32 {
+        self.count * self.rate
+    }
+
+    pub fn stop(&self) {}
+}
+
+struct Fresh;
+";
+    write_files_in(
+        &repo,
+        &[
+            ("src/scaler.rs", edited.as_bytes()),
+            ("notes.md", b"# Notes\n\nMore.\n"),
+        ],
+    )?;
+    cx.reef(&repo, &["node", "capture"]).await?;
+    // the file as served holds its outline, and its revision's listing the same
+    let changes = changes_of(&cx, "A").await?;
+    let (revision, files) = &changes[0];
+    let scaler = files
+        .iter()
+        .find(|file| file.path() == "src/scaler.rs")
+        .unwrap();
+    let outline = scaler.outline.as_ref().expect("the Rust file is outlined");
+    assert_eq!(outline.language, "rust");
+    let items: Vec<(String, Option<&str>, reef_api::ItemChange, u32, u32)> = outline
+        .items
+        .iter()
+        .map(|item| {
+            (
+                item.label(),
+                item.owner.as_ref().map(|owner| owner.name.as_str()),
+                item.change,
+                item.added,
+                item.removed,
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            ("struct Scaler".to_string(), None, Changed, 1, 0),
+            ("fn run".to_string(), Some("Scaler"), Changed, 1, 1),
+            ("fn stop".to_string(), Some("Scaler"), Added, 2, 0),
+            ("fn gone".to_string(), None, Removed, 0, 1),
+            ("struct Fresh".to_string(), None, Added, 1, 0),
+        ]
+    );
+    let listed = revision
+        .files
+        .iter()
+        .find(|file| file.path() == "src/scaler.rs")
+        .unwrap();
+    assert_eq!(listed.outline.as_ref(), Some(outline));
+    // and the markdown has none
+    let notes = files.iter().find(|file| file.path() == "notes.md").unwrap();
+    assert!(notes.outline.is_none());
     Ok(())
 }
 

@@ -1,6 +1,11 @@
 //! The Changes tab: a node's captured revisions, one revision's files, and each file's diff once
 //! it is opened
 //!
+//! A toggle at its top right picks how files are drawn, which the browser keeps. The semantic
+//! view, the default, draws each file the capture outlined by the types and functions its
+//! changes touch ([`outline`](super::outline)), and every other file as the classic view does:
+//! its path, opening to its hunks.
+//!
 //! The revisions are read again after each capture the plan's stream announces, so a node
 //! worked on shows its newest revision without a reload. A revision lists its files without
 //! their hunks, and a file's hunks are fetched only when it is opened, so a node with a large
@@ -8,9 +13,11 @@
 //! under its number while it is worked on: it says so, an open file's hunks are fetched again
 //! each time it is rewritten, and its lines take no comment until it is sealed.
 
-use super::Review;
 use super::diff::FileView;
+use super::outline::OutlineFile;
+use super::{DiffMode, Review};
 use crate::calls;
+use crate::canvas::View;
 use crate::live::use_work_changes;
 use dioxus::prelude::*;
 use reef_api::{FileStatus, FileSummary, Revision};
@@ -73,21 +80,50 @@ pub fn Changes(
     let mut revision_signal = review.revision;
     rsx! {
         div { class: "reef-app-changes",
-            label { class: "reef-app-revision-pick",
-                "Revision "
-                select {
-                    class: "reef-app-revision",
-                    onchange: move |event| revision_signal.set(event.value().parse().ok()),
-                    for (number, label) in options {
-                        option {
-                            value: "{number}",
-                            selected: number == shown.revision,
-                            "{label}"
+            div { class: "reef-app-revision-bar",
+                label { class: "reef-app-revision-pick",
+                    "Revision "
+                    select {
+                        class: "reef-app-revision",
+                        onchange: move |event| revision_signal.set(event.value().parse().ok()),
+                        for (number, label) in options {
+                            option {
+                                value: "{number}",
+                                selected: number == shown.revision,
+                                "{label}"
+                            }
                         }
                     }
                 }
+                ModeToggle {}
             }
             RevisionView { project, plan, id, revision: shown }
+        }
+    }
+}
+
+/// The toggle at the top right of the Changes tab between the semantic view and the classic one
+#[component]
+fn ModeToggle() -> Element {
+    let view = use_context::<View>();
+    let mode = *view.diff_mode.read();
+    // a button a mode, pressed when it is the one drawn
+    let button = move |shown: DiffMode, label: &'static str, title: &'static str| {
+        rsx! {
+            button {
+                class: "reef-app-mode-pick",
+                "data-mode": "{shown.key()}",
+                "aria-pressed": "{mode == shown}",
+                title: "{title}",
+                onclick: move |_| view.set_diff_mode(shown),
+                "{label}"
+            }
+        }
+    };
+    rsx! {
+        div { class: "reef-app-mode", role: "group", "aria-label": "How changes are drawn",
+            {button(DiffMode::Semantic, "Semantic", "Group each file's changes by the types and functions they change")}
+            {button(DiffMode::Classic, "Classic", "Each file's hunks, as git draws them")}
         }
     }
 }
@@ -108,6 +144,8 @@ fn RevisionView(
     revision: Revision,
 ) -> Element {
     let review = use_context::<Review>();
+    // outlined files are drawn by their groups unless the classic view is picked
+    let semantic = *use_context::<View>().diff_mode.read() == DiffMode::Semantic;
     let (added, removed) = revision.counts();
     let files = revision.files.len();
     let number = revision.revision;
@@ -161,17 +199,33 @@ fn RevisionView(
                     let path = file.path().to_string();
                     let open = review.open.read().contains(&path);
                     let conflicted = revision.conflicts.contains(&path);
+                    let outlined = file.outline.is_some() && !file.binary && !file.too_large;
                     rsx! {
-                        FileRow {
-                            project,
-                            plan,
-                            id,
-                            revision: number,
-                            stamp,
-                            draft,
-                            file: file.clone(),
-                            open,
-                            conflicted,
+                        if semantic && outlined {
+                            OutlineFile {
+                                key: "{path}",
+                                project,
+                                plan,
+                                id,
+                                revision: number,
+                                stamp,
+                                draft,
+                                file: file.clone(),
+                                conflicted,
+                            }
+                        } else {
+                            FileRow {
+                                key: "{path}",
+                                project,
+                                plan,
+                                id,
+                                revision: number,
+                                stamp,
+                                draft,
+                                file: file.clone(),
+                                open,
+                                conflicted,
+                            }
                         }
                     }
                 }
@@ -290,7 +344,7 @@ fn option_label(revision: &Revision, latest: u32) -> String {
 /// # Arguments
 ///
 /// * `status` - The file's status
-fn status_of(status: FileStatus) -> (&'static str, &'static str) {
+pub(super) fn status_of(status: FileStatus) -> (&'static str, &'static str) {
     match status {
         FileStatus::Added => ("A", "added"),
         FileStatus::Deleted => ("D", "deleted"),

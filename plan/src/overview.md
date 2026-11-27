@@ -347,6 +347,83 @@ nodes:
   - feature: Escape, or a press outside the menu, closes it and selects nothing
     status: met
     test: central/reef-app/check.py::c100_the_node_menu
+- id: C101
+  title: C101 A semantic Changes view
+  status: done
+  needs:
+  - C33
+  - C35
+  docs:
+  - design/app.md#the-semantic-changes-view
+  description:
+    why: The Changes tab shows a revision a file at a time as git's hunks, so reviewing it means opening every file and working out which type or function each hunk changes.
+    what: The Changes tab groups each file's changes by struct, enum or trait with its methods, then loose functions, each tagged new, changed or removed, with a toggle back to the classic view.
+    details: |
+      **Outlined when captured.** `crates/reef/src/outline/`: `outline_files` runs in
+      `capture::take` right after `Checkout::diff`, which stays equal to git's oracle, reading each
+      side's blob through `Checkout::blob`. A `Grammar` a language (`rust.rs`, through
+      tree-sitter 0.27.2 and tree-sitter-rust 0.24.2, pinned) walks a side's tree into items:
+      structs, enums, unions and traits, impl blocks owned by their type's last name with the trait
+      they implement, their members, inline modules owning their loose items, and loose fns,
+      consts, statics, types and macros, each starting at the attributes and comments written above
+      it. Items are matched across sides by owner, kind, name, trait and occurrence; one on a side
+      alone is new or removed if it holds a changed line. A side with a syntax error, a binary,
+      symlinked, non-UTF-8 or over-1-MiB side, or more than 500 changed items leaves the file
+      without an outline.
+
+      **Kept as JSON.** `reef_api::outline` holds `Outline`, `Item`, `Owner` and `Span`, and the
+      pure `attribute` (each line to its deepest item, a blank change to the change beside it),
+      `groups` (by owner, a type's tag its definition's) and `segments`. `FileDiff` and
+      `FileSummary` gain a serde-defaulted `outline`, so rows needed no schema change; the store's
+      `file_row` drops it with a too-large file's hunks. The capture recounts its kept items with
+      `attribute` over them alone, as the app draws them.
+
+      **The view.** `central/reef-app/src/side/outline.rs`: `OutlineFile` lists a file's groups
+      from the revision's listing and fetches its hunks once one opens; `OutlineView` draws each
+      open group's members with their own runs of lines through `diff::hunk_table`, which the
+      classic `Diff` now shares, so threads and the comment box work alike, and a thread on a line
+      no item holds keeps the "Other lines" group. "Show in diff" opens the group holding its line,
+      once (`Review.applied`). `View::diff_mode` holds the Semantic/Classic toggle at the tab's top
+      right, kept in localStorage. `check.py`'s C33, C35, C36 and C56 pick Classic first.
+  performance:
+    labels:
+    - Diff alone
+    - Diff and outline
+    metrics:
+    - name: C100's diff read for a capture, ms
+      key: capture-diff-ms
+      unit: ms
+      before:
+      - 1.214
+      - 1.21
+      - 1.234
+      after:
+      - 19.738
+      - 19.667
+      - 19.847
+    note: '`cargo run --release -p reef --example diff_bench -- --commit b51a32b --rounds 20` on this machine: C100''s commit from its parent, 13 files +788 −22, of which 7 Rust files outline into 22 items, the checkout open, 3 warm-up rounds then 20 timed. Medians with the lowest and highest. Outlining alone took 18.4 ms (18.3–18.6).'
+  acceptance:
+  - unit: A Rust file's outline names each changed item with its owner, trait and lines, glues its attributes and comments, and is left out when either side doesn't parse
+    status: met
+    test: crates/reef/src/outline/mod.rs::tests::edits_outline_by_their_items
+  - unit: A line goes to its deepest item, a blank line to the change beside it, and a type's group takes its definition's tag
+    status: met
+    test: crates/reef-api/src/outline.rs::tests::lines_go_to_their_deepest_item
+  - integration: A capture keeps each Rust file's outline with the file and its summary, and a file too large to keep has none
+    status: met
+    test: central/reef-service/tests/cli.rs::a_capture_outlines_its_rust_files
+  - integration: An outlined file draws its groups, kinds, tags and counts, each member with only its own lines, and every thread on its lines once
+    status: met
+    test: central/reef-app/tests/outline.rs::an_open_group_draws_its_members_lines
+  - feature: The Changes tab opens in the semantic view, each Rust file's changes grouped by type and loose function and tagged, and a group opens to lines that take comments
+    status: met
+    test: central/reef-app/check.py::c101_semantic_changes
+  - feature: A toggle at the tab's top right switches to the classic view and back, kept across nodes and reloads
+    status: met
+    test: central/reef-app/check.py::c101_semantic_changes
+  - perf: Reading C100's commit's diff and outlining it, as a capture does, takes at most 50 ms
+    metric: capture-diff-ms
+    at-most: 50.0
 ---
 # Centralized reef
 

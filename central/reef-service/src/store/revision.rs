@@ -391,7 +391,8 @@ fn sort_key(number: u32) -> String {
 /// A file's row in a revision, and its summary for the revision's listing
 ///
 /// A file whose JSON would pass [`FILE_ROW_MAX`] is kept without its hunks, marked too large,
-/// its counts still taken from the hunks it had.
+/// its counts still taken from the hunks it had, and without its outline, whose items would
+/// have no lines to show.
 ///
 /// # Arguments
 ///
@@ -411,7 +412,9 @@ fn file_row(
     if json.len() > FILE_ROW_MAX {
         file.hunks.clear();
         file.too_large = true;
+        file.outline = None;
         summary.too_large = true;
+        summary.outline = None;
         json = serde_json::to_string(&file)?;
     }
     let row = RevisionFileRow {
@@ -500,7 +503,7 @@ fn check_file_key(node: &NodeName, number: u32, row: &RevisionFileRow) -> anyhow
 mod tests {
     use super::{FILE_ROW_MAX, Store, file_row, sort_key};
     use crate::schema::{RevisionFileRow, RevisionRow};
-    use reef_api::{FileDiff, FileStatus, Hunk, Line, LineKind};
+    use reef_api::{FileDiff, FileStatus, Hunk, Line, LineKind, Outline};
     use reef_model::NodeName;
 
     /// A file added with one hunk of a number of lines, each so many bytes long
@@ -521,6 +524,7 @@ mod tests {
             new_id: Some("a".repeat(40)),
             binary: false,
             too_large: false,
+            outline: None,
             hunks: vec![Hunk {
                 old_start: 0,
                 old_lines: 0,
@@ -539,7 +543,8 @@ mod tests {
         }
     }
 
-    /// Revisions sort as numbers do, and a file too large to keep is kept without its hunks
+    /// Revisions sort as numbers do, and a file too large to keep is kept without its hunks or
+    /// its outline
     #[test]
     fn rows_sort_by_number_and_hold_under_the_frame() {
         // padded numbers sort in their order
@@ -557,12 +562,21 @@ mod tests {
                 .len(),
             1
         );
-        // one over it is kept without its hunks, its counts still the hunks'
+        // one over it, outlined, is kept without its hunks or its outline, its counts still the
+        // hunks'
         let lines = (FILE_ROW_MAX / 1000 + 1) as u32;
-        let (row, summary) = file_row(&node, "central/C32", 1, added(lines, 1000)).unwrap();
+        let outlined = FileDiff {
+            outline: Some(Outline {
+                language: "rust".to_string(),
+                items: Vec::new(),
+            }),
+            ..added(lines, 1000)
+        };
+        let (row, summary) = file_row(&node, "central/C32", 1, outlined).unwrap();
         assert!(row.file.len() < 1024, "{} bytes kept", row.file.len());
         let kept: FileDiff = serde_json::from_str(&row.file).unwrap();
         assert!(kept.too_large && kept.hunks.is_empty());
+        assert!(kept.outline.is_none() && summary.outline.is_none());
         assert!(summary.too_large);
         assert_eq!(summary.added, lines);
     }

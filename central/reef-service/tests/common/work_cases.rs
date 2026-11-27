@@ -125,6 +125,7 @@ pub fn added_file(path: &str, text: &str) -> FileDiff {
         new_id: Some("f".repeat(40)),
         binary: false,
         too_large: false,
+        outline: None,
         hunks: vec![Hunk {
             old_start: 0,
             old_lines: 0,

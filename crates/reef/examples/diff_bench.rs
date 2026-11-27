@@ -13,7 +13,10 @@
 //! - **gix**: the checkout opened and the diff read, each round, as one `reef node capture`
 //!   process would;
 //! - **gix, open**: the diff alone, the checkout opened once;
-//! - **git CLI**: `git diff --raw -z -p` run and parsed, a process a round.
+//! - **git CLI**: `git diff --raw -z -p` run and parsed, a process a round;
+//! - **outline, open**: each file of the diff a grammar reads outlined from both of its sides,
+//!   the checkout open and the diff read once;
+//! - **gix and outline, open**: the diff read and outlined, as a capture takes them.
 //!
 //! With `--clone`, a capture's reads are timed too, in a clone of this repo checked out at the
 //! commit with one tracked file edited and one untracked file written: its start the commit's
@@ -25,6 +28,7 @@ mod oracle;
 
 use reef::capture::take;
 use reef::git::Checkout;
+use reef::outline::outline_files;
 use reef_api::WorkStart;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -160,6 +164,31 @@ fn main() -> anyhow::Result<()> {
         Ok(())
     })?;
     report("git CLI", &cli);
+    // each file a grammar reads outlined, from the diff read once, then the two as a capture does
+    let mut outlined = ours.clone();
+    outline_files(&checkout, &mut outlined)?;
+    let items: usize = outlined
+        .iter()
+        .filter_map(|file| file.outline.as_ref())
+        .map(|outline| outline.items.len())
+        .sum();
+    let rust = outlined
+        .iter()
+        .filter(|file| file.outline.is_some())
+        .count();
+    let outline = time(args.rounds, || {
+        let mut files = ours.clone();
+        outline_files(&checkout, &mut files)
+    })?;
+    report(
+        &format!("outline, open, {rust} files, {items} items"),
+        &outline,
+    );
+    let both = time(args.rounds, || {
+        let mut files = checkout.diff(&base, &head)?;
+        outline_files(&checkout, &mut files)
+    })?;
+    report("gix and outline, open", &both);
     // a capture's reads, in a clone checked out at the commit with one edit and one new file
     if let Some(clone) = &args.clone {
         let clone = clone.canonicalize()?;

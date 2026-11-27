@@ -2,7 +2,8 @@
 //!
 //! **Details** is what reef-view's sidebar shows: why and what, acceptance, performance, docs,
 //! design choices and the nodes around it. **Changes** is the node's captured revisions, each
-//! file's diff drawn once it is opened, with the threads on its lines. **Comments** is the
+//! file's changes grouped by the types and functions they change, or each file's diff as git
+//! draws it, with the threads on its lines. **Comments** is the
 //! node's threads, general and on its lines, with how many are open. **Decisions** is each plan
 //! its sessions asked approval for and each question they asked, and what came of it. **History** is
 //! who made each edit of the node, what it changed and when. **Timeline** is everything that
@@ -17,6 +18,7 @@ mod details;
 pub mod diff;
 mod docs;
 pub mod history;
+pub mod outline;
 mod perf;
 pub mod threads;
 pub mod timeline;
@@ -36,7 +38,7 @@ use history::History;
 use reef_api::{Anchor, Place, QueueEdit};
 use reef_draw::markup::{status_class, status_label};
 use reef_model::PlanName;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use timeline::Timeline;
 
 /// The sidebar's tabs
@@ -98,6 +100,50 @@ impl Tab {
     }
 }
 
+/// How the Changes tab draws a revision's files, which the viewer picks and the browser keeps
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffMode {
+    /// Each outlined file's changes grouped by the types and functions they change
+    Semantic,
+    /// Each file's hunks as git draws them
+    Classic,
+}
+
+impl DiffMode {
+    /// The key the browser keeps the mode under
+    pub const STORAGE_KEY: &'static str = "reef-app-diff-mode";
+
+    /// The mode as the browser keeps it, and as the toggle names it in its attributes
+    pub fn key(self) -> &'static str {
+        match self {
+            DiffMode::Semantic => "semantic",
+            DiffMode::Classic => "classic",
+        }
+    }
+
+    /// The mode the browser kept, the semantic view for anything else
+    ///
+    /// # Arguments
+    ///
+    /// * `stored` - What the browser kept
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_app::side::DiffMode;
+    ///
+    /// assert_eq!(DiffMode::from_stored("classic"), DiffMode::Classic);
+    /// assert_eq!(DiffMode::from_stored("anything"), DiffMode::Semantic);
+    /// ```
+    pub fn from_stored(stored: &str) -> DiffMode {
+        if stored == DiffMode::Classic.key() {
+            DiffMode::Classic
+        } else {
+            DiffMode::Semantic
+        }
+    }
+}
+
 /// What the Changes tab shows of the selected node, kept while another tab is open and let go
 /// when another node is selected
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -106,8 +152,12 @@ pub struct Review {
     pub revision: Signal<Option<u32>>,
     /// The files open, by the path each is shown under
     pub open: Signal<HashSet<String>>,
+    /// The groups of each outlined file open, by the path it is shown under
+    pub groups: Signal<HashMap<String, HashSet<String>>>,
     /// A line to bring into view once its file is drawn
     pub focus: Signal<Option<Anchor>>,
+    /// The line the semantic view has opened the group of, so a group closed after stays closed
+    pub applied: Signal<Option<Anchor>>,
 }
 
 /// The sidebar of the selected node
@@ -130,7 +180,9 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
     let mut review = use_context_provider(|| Review {
         revision: Signal::new(None),
         open: Signal::new(HashSet::new()),
+        groups: Signal::new(HashMap::new()),
         focus: Signal::new(None),
+        applied: Signal::new(None),
     });
     // how many of the node's threads are open, which its tab says
     let open_threads = try_use_context::<threads::Threads>().map(|threads| {
@@ -152,7 +204,9 @@ pub fn Sidebar(id: String, project: String, plan: String, changes: ReadSignal<u6
             seen.set(id);
             review.revision.set(None);
             review.open.write().clear();
+            review.groups.write().clear();
             review.focus.set(None);
+            review.applied.set(None);
         }
     }));
     let Some(g) = view.graph() else {

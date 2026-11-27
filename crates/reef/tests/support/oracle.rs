@@ -356,6 +356,7 @@ fn parse(out: &[u8]) -> Vec<FileDiff> {
             new_id,
             binary,
             too_large: false,
+            outline: None,
             hunks,
         });
     }

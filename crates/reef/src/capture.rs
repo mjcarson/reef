@@ -14,6 +14,8 @@
 //!   holds them, so a `__pycache__` no ignore file names stays out of the node's changes.
 //! - **gix for every step but the snapshot,** which stays git's CLI on a copy of the index, so
 //!   the user's own staging is left as it was.
+//! - **Each file a grammar reads is outlined** ([`outline`](crate::outline)) from both of its
+//!   sides once the diff is read, so the items its change touched go with it.
 //! - **Only the local checkout is read.** Nothing is fetched, pushed or read from a remote, and
 //!   the service is sent what was read, since it reads no checkout.
 //! - **A capture the node's latest revision already holds** adds no revision. Its SHAs are still
@@ -40,6 +42,7 @@ use std::path::Path;
 use crate::cli::{self, PlanPick};
 use crate::client::{Client, is_code};
 use crate::git::{Checkout, Walked};
+use crate::outline;
 use crate::start::{checkout_in, where_started};
 
 /// Each trailer value that names no thread number: its commit and the value
@@ -317,7 +320,9 @@ pub fn take(checkout: &Checkout, start: &WorkStart) -> anyhow::Result<Taken> {
     let carry = carry(checkout, start, merge_base.as_deref())?;
     // the worktree as a seal takes it, and the diff from the base to it
     let tree = checkout.seal_snapshot(&carry.tree)?;
-    let files = checkout.diff(&carry.tree, &tree)?;
+    let mut files = checkout.diff(&carry.tree, &tree)?;
+    // each file a grammar reads outlined from both its sides, while the blobs are at hand
+    outline::outline_files(checkout, &mut files)?;
     // the node's own commits, past its start and not the base branch's, and the threads they
     // name
     let own = own_commits(checkout, &head, &start.start, merge_base.as_deref())?;
@@ -617,6 +622,7 @@ mod tests {
             new_id: None,
             binary,
             too_large: false,
+            outline: None,
             added: 2,
             removed: 1,
         };

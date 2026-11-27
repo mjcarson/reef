@@ -104,10 +104,12 @@ fn LineThread(thread: Thread) -> Element {
                     button {
                         class: "reef-button reef-app-show-line",
                         onclick: move |_| {
-                            // the line's revision, its file open, and the line to bring into view
-                            let Review { mut revision, mut open, mut focus } = review;
+                            // the line's revision, its file open, and the line to bring into view,
+                            // its group opened again in the semantic view if it was closed since
+                            let Review { mut revision, mut open, mut focus, mut applied, .. } = review;
                             revision.set(Some(anchor.revision));
                             open.write().insert(anchor.path.clone());
+                            applied.set(None);
                             focus.set(Some(anchor.clone()));
                             view.tab.set(Tab::Changes);
                         },

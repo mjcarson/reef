@@ -20,6 +20,8 @@
 //! - **Capturing changes** ([`capture`]): a node's diff read in its own worktree, from its start
 //!   carried forward to what is tracked there, and sent to be kept as a revision, with the
 //!   threads its commits' `Reef-Resolves` trailers name.
+//! - **Outlines** ([`outline`]): each captured file a grammar reads parsed on both sides with
+//!   tree-sitter, and the items its change touched sent with it, for the app to group by.
 //! - **Hooks** ([`hook`]): git's post-commit and post-rewrite, and Claude Code's PostToolUse on
 //!   reef's status tool, keep the draft of the node a worktree is on current, and Stop seals it
 //!   once the node is done.
@@ -99,6 +101,7 @@ pub mod loops;
 pub mod mcp;
 pub mod node;
 pub mod open;
+pub mod outline;
 pub mod page;
 pub mod queue;
 pub mod run;

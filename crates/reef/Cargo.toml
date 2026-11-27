@@ -33,3 +33,9 @@ schemars = "1"
 # carry of its start, all but the snapshot, which gix can't stage. Pinned, since it is 0.x and
 # breaks often; X3 chose it over git2, which builds libgit2 from C and runs no filter drivers
 gix = { version = "=0.90.0", default-features = false, features = ["blob-diff", "merge", "revision", "sha1", "max-performance"] }
+# each file's outline parsed from both sides of a capture: the items its change touched, by a
+# grammar a language, which tolerates code mid-edit and has a grammar for each language to come.
+# Pinned, since both are 0.x and the grammar's ABI must be one the runtime reads; each compiles C
+# through cc, as ring already does here
+tree-sitter = "=0.27.2"
+tree-sitter-rust = "=0.24.2"

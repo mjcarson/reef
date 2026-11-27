@@ -506,6 +506,7 @@ mod tests {
             new_id: Some(blob(worktree)),
             binary: false,
             too_large: false,
+            outline: None,
             hunks,
         }
     }

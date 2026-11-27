@@ -12,6 +12,9 @@
 //!   side it is on ([`Anchor`]).
 //! - **A file too large to keep whole** is kept without its hunks and says so, as a binary file
 //!   is kept without them.
+//! - **A file may carry its outline**: the items of its code a change touched, which the
+//!   capture parsed both sides for ([`crate::outline`]). A file with no grammar, and one kept
+//!   before outlines, has none.
 //! - **The latest revision may be a draft.** git's hooks keep a draft current while the node is
 //!   worked on, each capture rewriting it under its number, and a seal makes it a revision for
 //!   good, which comments can name.
@@ -20,6 +23,7 @@ use reef_model::NodeName;
 use serde::{Deserialize, Serialize};
 
 use crate::comment::ResolvingCommit;
+use crate::outline::Outline;
 use crate::user::Author;
 use crate::work::CaptureShas;
 
@@ -106,6 +110,9 @@ pub struct FileDiff {
     /// Its hunks, in order
     #[serde(default)]
     pub hunks: Vec<Hunk>,
+    /// The items of its code its hunks changed, if a grammar outlined it when it was captured
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Outline>,
 }
 
 impl FileDiff {
@@ -127,6 +134,7 @@ impl FileDiff {
     ///     binary: false,
     ///     too_large: false,
     ///     hunks: Vec::new(),
+    ///     outline: None,
     /// };
     /// assert_eq!(gone.path(), "old.rs");
     /// ```
@@ -169,6 +177,7 @@ impl FileDiff {
             too_large: self.too_large,
             added,
             removed,
+            outline: self.outline.clone(),
         }
     }
 }
@@ -200,6 +209,9 @@ pub struct FileSummary {
     pub added: u32,
     /// How many lines it removed
     pub removed: u32,
+    /// The items of its code its hunks changed, if a grammar outlined it when it was captured
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Outline>,
 }
 
 impl FileSummary {
@@ -368,6 +380,7 @@ mod tests {
                     line(LineKind::Added, None, Some(3)),
                 ],
             }],
+            outline: None,
         }
     }
 

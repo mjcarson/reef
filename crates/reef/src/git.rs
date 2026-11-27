@@ -717,6 +717,15 @@ impl Checkout {
         Ok(self.repo.has_object(id(object)?))
     }
 
+    /// A blob's contents, as a capture reads a file's side to outline it
+    ///
+    /// # Arguments
+    ///
+    /// * `object` - The blob's full id
+    pub fn blob(&self, object: &str) -> anyhow::Result<Vec<u8>> {
+        Ok(self.repo.find_blob(id(object)?)?.detach().data)
+    }
+
     /// The tree a commit holds
     ///
     /// # Arguments
@@ -1186,12 +1195,21 @@ fn hunks(
     if before == after {
         return Ok((false, Vec::new()));
     }
+    Ok((false, line_hunks(&before, &after)?))
+}
+
+/// Diffs two texts line by line into hunks, as `git diff` cuts them: Myers with git's slider
+/// heuristics, and three lines of context around each change
+///
+/// # Arguments
+///
+/// * `before` - The base side's bytes
+/// * `after` - The worktree side's bytes
+pub fn line_hunks(before: &[u8], after: &[u8]) -> anyhow::Result<Vec<Hunk>> {
     // a line diff, with git's slider heuristics, cut into hunks with three lines around each
-    let input = InternedInput::new(before.as_slice(), after.as_slice());
+    let input = InternedInput::new(before, after);
     let diff = diff_with_slider_heuristics(Algorithm::Myers, &input);
-    let hunks =
-        UnifiedDiff::new(&diff, &input, Hunks::default(), ContextSize::symmetrical(3)).consume()?;
-    Ok((false, hunks))
+    Ok(UnifiedDiff::new(&diff, &input, Hunks::default(), ContextSize::symmetrical(3)).consume()?)
 }
 
 /// Turns one of gix's tree changes into a file's diff, if it is a file at all
@@ -1279,6 +1297,7 @@ fn file_diff(repo: &gix::Repository, change: ChangeDetached) -> anyhow::Result<O
         new_id: new.as_ref().map(|side| side.id.to_string()),
         binary,
         too_large: false,
+        outline: None,
         hunks,
     }))
 }

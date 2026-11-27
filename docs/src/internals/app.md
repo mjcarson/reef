@@ -14,6 +14,17 @@ the pages and the JSON API alike.
   and a file's diff once it is opened, fetched then and drawn as a table of its hunks. A
   capture the plan's stream announces reads the tab again (`live::WorkChanges`) without
   reading the plan again.
+- **Its semantic view groups a file by its outline** (C101). The service keeps hunks with three
+  lines of context and never reads git, so `reef node capture` parses both sides of each file a
+  grammar reads with tree-sitter (`reef::outline`), matches their items, and sends the ones a
+  change touched as the file's `outline`, kept in its row and its summary. `reef_api::outline`
+  puts each line in its deepest item, the capture to count and the app to draw, so the two
+  agree, and groups items by owner: a type with its impl blocks' members, a module with its
+  loose items. `side::outline` lists a file's groups from the revision's listing and fetches
+  its hunks once one opens, each item's lines drawn by `diff::hunk_table`, as the classic view
+  draws them, so comments work alike. A language is a tree-sitter grammar crate and a `Grammar`
+  that names its item nodes; Rust's is the only one yet. `View::diff_mode` keeps the toggle's
+  pick in the browser.
 - **Comments are threads on a diff's lines or on the node.** A click on a line's numbers opens a
   box under it, and its threads show under it, in each revision their line was followed to.
   The Comments tab holds the node's threads, a box for a general one, and how many are open,

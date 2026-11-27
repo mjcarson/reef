@@ -10,7 +10,13 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   says which. The queue beside it is the plan's own, and a fetch
   reloads it only when the branch it follows moved. Click a box to open its panel:
   - its YAML, which you can edit and save, checked as a put is;
-  - **Changes**: the node's captured revisions and their diffs;
+  - **Changes**: the node's captured revisions and their diffs. Each Rust file's changes are
+    grouped by what they change: a struct, enum or trait with its definition and the methods
+    of its impl blocks, then its loose functions, then its other lines, such as its imports,
+    each tagged **new**, **changed** or **removed** with its counts. Click a group to see its
+    lines. **Classic**, at the tab's top right, draws every file as git does instead, and the
+    browser keeps the pick. Other files, Rust that doesn't parse, and revisions captured before
+    reef outlined files show their plain diff;
   - **Comments**: its threads; click a diff line's number to start one there;
   - **Decisions**: every plan its Claude sessions asked approval for, and every question they
     asked, with what was answered;

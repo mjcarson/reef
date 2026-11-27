@@ -98,7 +98,12 @@ code { font-size: 0.92em; }
 .reef-app-queue-off:hover { color: var(--fg); }
 .reef-app-queue-problem { margin: 0 0 0.5rem; }
 .reef-app-changes { margin-top: 0.6rem; font-size: 0.85rem; }
-.reef-app-revision-pick { display: flex; gap: 0.4rem; align-items: center; }
+.reef-app-revision-bar { display: flex; gap: 0.5rem; align-items: center; }
+.reef-app-revision-pick { flex: 1; min-width: 0; display: flex; gap: 0.4rem; align-items: center; }
+.reef-app-mode { flex: none; display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.reef-app-mode-pick { font: inherit; font-size: 0.75rem; color: var(--muted); background: var(--bg); border: 0; padding: 0.2rem 0.55rem; cursor: pointer; }
+.reef-app-mode-pick + .reef-app-mode-pick { border-left: 1px solid var(--line); }
+.reef-app-mode-pick[aria-pressed="true"] { color: var(--fg); background: var(--panel); font-weight: 600; }
 .reef-app-revision { flex: 1; min-width: 0; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.2rem 0.3rem; }
 .reef-app-revision-sum { margin: 0.4rem 0; }
 .reef-app-plus { color: var(--add-fg); }
@@ -119,6 +124,22 @@ code { font-size: 0.92em; }
 .reef-app-tag { flex: none; font-size: 0.72rem; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 0.3rem; }
 .reef-app-tag.conflicted { color: var(--reef-blocked); border-color: var(--reef-blocked); }
 .reef-app-tag.draft { color: var(--reef-progress); border-color: var(--reef-progress); }
+.reef-app-tag.new { color: var(--add-fg); border-color: var(--add-fg); }
+.reef-app-tag.changed { color: var(--reef-progress); border-color: var(--reef-progress); }
+.reef-app-tag.removed { color: var(--del-fg); border-color: var(--del-fg); }
+.reef-app-ofile-head { display: flex; gap: 0.45rem; align-items: baseline; background: var(--panel); border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; padding: 0.3rem 0.45rem; }
+.reef-app-groups { list-style: none; margin: 0; padding: 0; }
+.reef-app-group + .reef-app-group { border-top: 1px solid var(--line); }
+.reef-app-group-head { display: flex; gap: 0.45rem; align-items: baseline; width: 100%; box-sizing: border-box; font: inherit; color: inherit; text-align: left; background: none; border: 0; padding: 0.25rem 0.45rem 0.25rem 1.1rem; cursor: pointer; }
+.reef-app-group-head:hover .reef-app-group-name { text-decoration: underline; }
+.reef-app-group.open > .reef-app-group-head { background: var(--panel); }
+.reef-app-kind { flex: none; font-family: monospace; font-size: 0.78rem; color: var(--muted); }
+.reef-app-group-name { flex: 1; min-width: 0; font-family: monospace; font-weight: 600; overflow-wrap: anywhere; }
+.reef-app-group-body { border-top: 1px solid var(--line); }
+.reef-app-member + .reef-app-member { border-top: 1px dashed var(--line); }
+.reef-app-member-head { display: flex; gap: 0.45rem; align-items: baseline; padding: 0.2rem 0.45rem 0.2rem 1.6rem; font-size: 0.8rem; }
+.reef-app-member-name { flex: 1; min-width: 0; font-family: monospace; overflow-wrap: anywhere; }
+.reef-app-via { flex: none; font-family: monospace; font-size: 0.75rem; }
 .reef-app-diff { overflow-x: auto; }
 .reef-app-diff-note { margin: 0.4rem 0.5rem; }
 .reef-app-diff-wait { margin: 0.4rem 0.5rem; }

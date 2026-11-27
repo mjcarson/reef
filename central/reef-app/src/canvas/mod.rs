@@ -15,7 +15,7 @@ pub use diagram::{Diagram, Drawing, Hit, Hits, Shown, use_hits};
 pub use menu::Menu;
 pub use toolbar::Chip;
 
-use crate::side::{Sidebar, Tab};
+use crate::side::{DiffMode, Sidebar, Tab};
 use dioxus::prelude::*;
 use dom::{El, Measure};
 use menu::NodeMenu;
@@ -122,6 +122,8 @@ pub struct View {
     pub tip: Signal<Option<Tip>>,
     /// The sidebar's tab
     pub tab: Signal<Tab>,
+    /// How the Changes tab draws a revision's files, kept by the browser across nodes and pages
+    pub diff_mode: Signal<DiffMode>,
     /// The node menu shown, if a right-click opened one
     pub menu: Signal<Option<Menu>>,
 }
@@ -415,6 +417,16 @@ impl View {
         self.filter.set(f);
     }
 
+    /// Draws the Changes tab's files as the semantic view or the classic one, and keeps the pick
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - How to draw them
+    pub fn set_diff_mode(mut self, mode: DiffMode) {
+        dom::store(DiffMode::STORAGE_KEY, mode.key());
+        self.diff_mode.set(mode);
+    }
+
     /// Shows or leaves full screen
     pub fn fullscreen(self) {
         if let Some(el) = self.root.peek().as_ref() {
@@ -580,6 +592,7 @@ fn use_view(name: String) -> View {
     let mut filter = use_signal(Filter::default);
     let measure = use_signal(|| None::<Rc<Measure>>);
     let mut side_w = use_signal(|| None);
+    let mut diff_mode = use_signal(|| DiffMode::Semantic);
     // what the browser keeps is read once the page is live, since the server's HTML had none of it
     use_effect(move || {
         if let Some(stored) = dom::load(Filter::STORAGE_KEY) {
@@ -587,6 +600,9 @@ fn use_view(name: String) -> View {
         }
         if let Some(px) = dom::load(reef_draw::side_w_key(true)).and_then(|w| w.parse().ok()) {
             side_w.set(Some(px));
+        }
+        if let Some(stored) = dom::load(DiffMode::STORAGE_KEY) {
+            diff_mode.set(DiffMode::from_stored(&stored));
         }
     });
     // how many layouts the view has done, which the page shows as `data-draws`
@@ -655,6 +671,7 @@ fn use_view(name: String) -> View {
         tip: use_signal(|| None),
         tab: use_signal(|| Tab::Details),
         menu: use_signal(|| None),
+        diff_mode,
     };
     use_context_provider(|| view);
     view

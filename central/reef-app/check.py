@@ -632,6 +632,15 @@ def c69_a_body_put_shows_in_the_sidebar(page):
           {"body": body, "no reload": kept})
 
 
+def diff_mode(page, mode):
+    """Picks how the open Changes tab draws its files, `semantic` or `classic`, by its toggle; the
+    browser keeps the pick for every later check on the page."""
+    toggle = f'.reef-app-mode-pick[data-mode="{mode}"]'
+    page.wait_for_selector(toggle, timeout=10000)
+    page.click(toggle)
+    page.wait_for_selector(f'{toggle}[aria-pressed="true"]', timeout=10000)
+
+
 def rows_of(page, path):
     """Each line of an open file's diff as drawn: its class, its two numbers, and its sign and text."""
     return page.evaluate(
@@ -688,6 +697,7 @@ def c33_changes_in_the_sidebar(page):
     wait_drawn(page)
     page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
     page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    diff_mode(page, "classic")
     page.wait_for_selector(".reef-app-file-head", timeout=10000)
     seen = {}
     seen["files"] = page.eval_on_selector_all(
@@ -775,6 +785,7 @@ def c56_drafts_in_the_sidebar(page):
     wait_drawn(page)
     page.locator(".reef-viewport .reef-node", has_text="D1 Draft the code").click()
     page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    diff_mode(page, "classic")
     page.wait_for_selector('.reef-app-file-head[data-path="src/draft.rs"]', timeout=10000)
     page.click('.reef-app-file-head[data-path="src/draft.rs"]')
     page.wait_for_selector('.reef-app-diff[data-path="src/draft.rs"] tr.reef-app-line', timeout=10000)
@@ -831,6 +842,168 @@ def c56_drafts_in_the_sidebar(page):
           sealed)
 
 
+# the Rust file C101 edits: a struct, its impl and a loose fn, then the edit that adds an import,
+# a field and a method, changes the method there was, removes the fn and adds a struct
+SCALER = """use std::fmt;
+
+pub struct Scaler {
+    count: u32,
+}
+
+impl Scaler {
+    pub fn run(&self) -> u32 {
+        self.count
+    }
+}
+
+fn gone() {}
+"""
+SCALER_EDITED = """use std::fmt;
+use std::io;
+
+pub struct Scaler {
+    count: u32,
+    rate: u32,
+}
+
+impl Scaler {
+    pub fn run(&self) -> u32 {
+        self.count * self.rate
+    }
+
+    pub fn stop(&self) {}
+}
+
+struct Fresh;
+"""
+
+
+def outline_of(page, path):
+    """An outlined file's groups as drawn: each one's key, change and head's text, and the label of
+    each item drawn in it, if it is open."""
+    return page.evaluate(
+        """(path) => [...document.querySelectorAll(`.reef-app-ofile[data-path="${path}"] .reef-app-group`)]
+            .map(g => [g.dataset.key, g.dataset.change, g.querySelector('.reef-app-group-head').textContent,
+                       [...g.querySelectorAll('.reef-app-member')].map(m => m.dataset.item)])""",
+        path)
+
+
+def c101_semantic_changes(page):
+    """C101: the Changes tab opens in the semantic view, a Rust file's changes grouped by its struct
+    with its methods and by loose item, each tagged, other files drawn as before; a group opens to
+    its own lines, which take comments, and Show in diff opens the group of its line; and the toggle
+    at the tab's top right draws the classic view, kept across nodes and reloads. In a browser
+    context of its own, since the checks before it picked the classic view."""
+    repo = WORK / "repo"
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "scaler.rs").write_text(SCALER)
+    (repo / "notes.md").write_text("# Notes\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "scaler")
+    reef("plan", "new", "semantic")
+    put("semantic", node_yaml("S1", "S1 Change the scaler"))
+    put("semantic", node_yaml("S2", "S2 Something else"))
+    reef("start", "S1", "--plan", "semantic")
+    (repo / "src" / "scaler.rs").write_text(SCALER_EDITED)
+    (repo / "notes.md").write_text("# Notes\n\nMore.\n")
+    git("add", "-A")
+    reef("node", "capture")
+    # a browser that has picked nothing yet
+    context = page.context.browser.new_context(viewport={"width": 1400, "height": 900}, ignore_https_errors=True)
+    fresh = context.new_page()
+    fresh.on("console", lambda m: "/_dioxus" in m.text or logs.append(f"console.{m.type}: {m.text}"))
+    fresh.on("pageerror", lambda e: logs.append(f"pageerror: {e}"))
+
+    def changes_of(node):
+        """Selects a node of the plan, the sidebar closed first so it hides no box, and opens its
+        Changes tab."""
+        if fresh.locator(".reef-side").count():
+            fresh.click(".reef-side .reef-close")
+            fresh.wait_for_selector(".reef-side", state="detached", timeout=10000)
+        fresh.locator(".reef-viewport .reef-node", has_text=node).click()
+        fresh.click(".reef-side .reef-app-tab:text-is('Changes')")
+
+    try:
+        fresh.goto(URL + "/plans/check/semantic")
+        wait_drawn(fresh)
+        changes_of("S1 Change the scaler")
+        fresh.wait_for_selector('.reef-app-ofile[data-path="src/scaler.rs"] .reef-app-group', timeout=10000)
+        listed = {
+            "mode": fresh.evaluate("() => document.querySelector('.reef-app-mode-pick[aria-pressed=\"true\"]')?.dataset.mode"),
+            "groups": outline_of(fresh, "src/scaler.rs"),
+            "plain files": fresh.eval_on_selector_all(".reef-app-file-head", "hs => hs.map(h => h.dataset.path)"),
+        }
+        check("C101 the Changes tab opens semantic, a Rust file's changes grouped by struct and loose item, and tagged",
+              listed == {"mode": "semantic",
+                         "groups": [["owner:Scaler", "changed", "structScalerchanged+4 −1", []],
+                                    ["item:fn:gone:0", "removed", "fngoneremoved+0 −1", []],
+                                    ["owner:Fresh", "new", "structFreshnew+1 −0", []],
+                                    ["other", "changed", "Other lines+1 −0", []]],
+                         "plain files": ["notes.md"]},
+              listed)
+        # the struct's group opens to its definition and methods, each with its own lines
+        fresh.click('.reef-app-group[data-key="owner:Scaler"] .reef-app-group-head')
+        stop = '.reef-app-member[data-item="fn stop"] tr.reef-app-line[data-side="new"][data-line="14"]'
+        fresh.wait_for_selector(stop, timeout=10000)
+        opened = fresh.evaluate("""() => [...document.querySelectorAll('.reef-app-group[data-key="owner:Scaler"] .reef-app-member')]
+            .map(m => [m.dataset.item, m.querySelector('.reef-app-tag')?.textContent,
+                       [...m.querySelectorAll('tr.reef-app-line')].map(tr => tr.querySelector('.reef-app-code').textContent)])""")
+        fresh.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-semantic.png"))
+        fresh.emulate_media(color_scheme="dark")
+        fresh.locator(".reef-side").screenshot(path=str(SHOTS / "reef-app-semantic-dark.png"))
+        fresh.emulate_media(color_scheme="light")
+        # a click on `stop`'s line numbers starts a thread there, shown under it
+        fresh.click(f"{stop} td.reef-app-ln >> nth=1")
+        fresh.fill(".reef-app-compose-row textarea", "Why stop?")
+        fresh.click(".reef-app-compose-row .reef-app-send")
+        fresh.wait_for_selector(f"{stop} + tr.reef-app-thread-row", timeout=10000)
+        threaded = fresh.evaluate(f"""() => document.querySelector('{stop}').nextElementSibling
+            .querySelector('.reef-app-comment-body').textContent.trim()""")
+        check("C101 a group opens to each member's own lines, which take a comment",
+              opened == [["definition", "changed", [" pub struct Scaler {", "     count: u32,", "+    rate: u32,", " }"]],
+                         ["fn run", "changed", ["     pub fn run(&self) -> u32 {", "-        self.count",
+                                                "+        self.count * self.rate", "     }"]],
+                         ["fn stop", "new", ["+", "+    pub fn stop(&self) {}"]]]
+              and threaded == "Why stop?",
+              {"members": opened, "thread": threaded})
+        # closed, then Show in diff from the Comments tab opens it again at the line
+        fresh.click('.reef-app-group[data-key="owner:Scaler"] .reef-app-group-head')
+        fresh.wait_for_selector(".reef-app-group-body", state="detached", timeout=10000)
+        fresh.click(".reef-side .reef-app-tab:nth-child(3)")
+        fresh.click(".reef-app-line-thread .reef-app-show-line")
+        fresh.wait_for_selector(".reef-app-line.focus", timeout=10000)
+        focused = fresh.evaluate("""() => { const l = document.querySelector('.reef-app-line.focus');
+            return [l.closest('.reef-app-group')?.dataset.key, l.closest('.reef-app-member')?.dataset.item, l.dataset.line]; }""")
+        check("C101 Show in diff opens the group that holds the line", focused == ["owner:Scaler", "fn stop", "14"], focused)
+        # the toggle draws the classic view, kept across another node and a reload
+        diff_mode(fresh, "classic")
+        fresh.wait_for_selector('.reef-app-file-head[data-path="src/scaler.rs"]', timeout=10000)
+        classic = {"outlined": fresh.locator(".reef-app-ofile").count(),
+                   "files": fresh.eval_on_selector_all(".reef-app-file-head", "hs => hs.map(h => h.dataset.path)")}
+        changes_of("S2 Something else")
+        changes_of("S1 Change the scaler")
+        fresh.wait_for_selector('.reef-app-file-head[data-path="src/scaler.rs"]', timeout=10000)
+        classic["after another node"] = fresh.evaluate(
+            "() => document.querySelector('.reef-app-mode-pick[aria-pressed=\"true\"]')?.dataset.mode")
+        fresh.reload()
+        wait_drawn(fresh)
+        changes_of("S1 Change the scaler")
+        fresh.wait_for_selector('.reef-app-file-head[data-path="src/scaler.rs"]', timeout=10000)
+        classic["after a reload"] = fresh.evaluate(
+            "() => document.querySelector('.reef-app-mode-pick[aria-pressed=\"true\"]')?.dataset.mode")
+        classic["outlined after"] = fresh.locator(".reef-app-ofile").count()
+        # and back to the semantic view
+        diff_mode(fresh, "semantic")
+        fresh.wait_for_selector('.reef-app-ofile[data-path="src/scaler.rs"]', timeout=10000)
+        classic["back"] = fresh.locator(".reef-app-ofile").count()
+        check("C101 the toggle switches to the classic view and back, kept across nodes and reloads",
+              classic == {"outlined": 0, "files": ["notes.md", "src/scaler.rs"], "after another node": "classic",
+                          "after a reload": "classic", "outlined after": 0, "back": 1},
+              classic)
+    finally:
+        context.close()
+
+
 def open_counts(page):
     """How many open threads the Comments tab and the toolbar each say there are."""
     return page.evaluate("""() => [
@@ -859,6 +1032,7 @@ def c35_comment_threads_in_the_diff(page):
     wait_drawn(page)
     page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
     page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    diff_mode(page, "classic")
     page.wait_for_selector('.reef-app-file-head[data-path="src/keep.rs"]', timeout=10000)
     seen = {"before": wait_counts(page, 0)}
     # a click on the added line's numbers opens a box under it, which keeps a thread on it
@@ -1004,6 +1178,7 @@ def c36_comments_follow_the_code(page):
     wait_drawn(page)
     page.locator(".reef-viewport .reef-node", has_text="K1 Change the code").click()
     page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    diff_mode(page, "classic")
     page.wait_for_selector('.reef-app-file-head[data-path="src/keep.rs"]', timeout=10000)
     # a thread on the line revision 2 added to small.rs, from another writer
     line = {"on": "line", "revision": 2, "path": "src/small.rs", "side": "new", "line": 4}
@@ -1050,6 +1225,7 @@ def c36_comments_follow_the_code(page):
     page.emulate_media(color_scheme="light")
     # revision 2 picked again still shows each thread where its line was then
     page.click(".reef-side .reef-app-tab:text-is('Changes')")
+    diff_mode(page, "classic")
     page.wait_for_selector(".reef-app-revision", timeout=10000)
     page.select_option(".reef-app-revision", "2")
     try:
@@ -2678,6 +2854,7 @@ def main():
                 c36_comments_follow_the_code,
                 c73_a_review_holds_comments_until_submitted,
                 c56_drafts_in_the_sidebar,
+                c101_semantic_changes,
                 c45_a_loop_started_from_the_app_streams_its_transcript,
                 c46_a_question_is_answered_in_the_app,
                 c47_a_rejected_plan_comes_back_revised,

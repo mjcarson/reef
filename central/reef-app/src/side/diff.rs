@@ -15,7 +15,7 @@ use reef_api::{Anchor, FileDiff, Line, LineKind, Side, Target, Thread};
 use std::collections::HashMap;
 
 /// A line of a file as threads are kept by: whether it is numbered in the base, and its number
-type Spot = (bool, u32);
+pub(super) type Spot = (bool, u32);
 
 /// An open file of a revision, fetched when it is opened and drawn once it comes, with the
 /// threads on its lines
@@ -107,8 +107,7 @@ pub fn Diff(
     #[props(default)] node: Option<String>,
 ) -> Element {
     // the line a box is open under, and the line to bring into view, if any is this file's
-    let mut composing = use_signal(|| None::<Spot>);
-    let focus = try_use_context::<Review>().map(|review| review.focus);
+    let composing = use_signal(|| None::<Spot>);
     // how many lines it draws, which a check waits for
     let lines: usize = file.hunks.iter().map(|hunk| hunk.lines.len()).sum();
     let path = file.path().to_string();
@@ -119,19 +118,8 @@ pub fn Diff(
         _ => None,
     };
     // each line's threads, by where their line is in this revision
-    let mut by_line: HashMap<Spot, Vec<Thread>> = HashMap::new();
-    for thread in threads {
-        if let Some(anchor) = thread.anchor_in(revision) {
-            by_line
-                .entry(spot(anchor.side, anchor.line))
-                .or_default()
-                .push(thread);
-        }
-    }
-    let focused = focus
-        .and_then(|focus| focus.read().clone())
-        .filter(|anchor| anchor.revision == revision && anchor.path == path)
-        .map(|anchor| spot(anchor.side, anchor.line));
+    let by_line = threads_by_line(revision, threads);
+    let focused = focused_spot(revision, &path);
     let commenting = node.is_some();
     let drawn = Lines {
         revision,
@@ -141,6 +129,18 @@ pub fn Diff(
         focused,
         node: node.as_deref(),
     };
+    // a section a hunk, headed as git heads it
+    let sections: Vec<(String, &[Line])> = file
+        .hunks
+        .iter()
+        .map(|hunk| {
+            let head = format!(
+                "@@ -{},{} +{},{} @@",
+                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+            );
+            (head, hunk.lines.as_slice())
+        })
+        .collect();
     rsx! {
         div {
             class: if commenting { "reef-app-diff commenting" } else { "reef-app-diff" },
@@ -159,35 +159,84 @@ pub fn Diff(
             } else if file.hunks.is_empty() {
                 p { class: "reef-app-muted reef-app-diff-note", "No lines changed." }
             } else {
-                table {
-                    class: "reef-app-hunks",
-                    // one handler for every line: a click on a line's numbers opens its box
-                    onclick: move |event| {
-                        if !commenting {
-                            return;
-                        }
-                        let Some(row) = dom::target(&*event.data())
-                            .and_then(|target| dom::closest(&target, "td.reef-app-ln"))
-                            .and_then(|cell| dom::closest(&cell, "tr.reef-app-line"))
-                        else {
-                            return;
-                        };
-                        let old = dom::attr(&row, "data-side").as_deref() == Some("old");
-                        if let Some(line) = dom::attr(&row, "data-line").and_then(|n| n.parse().ok()) {
-                            composing.set(Some((old, line)));
-                        }
-                    },
-                    for hunk in file.hunks.iter() {
-                        tbody { class: "reef-app-hunk",
-                            tr { class: "reef-app-hunk-head",
-                                td { colspan: "3",
-                                    "@@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines} @@"
-                                }
-                            }
-                            for line in hunk.lines.iter() {
-                                {line_rows(line, &drawn)}
-                            }
-                        }
+                {hunk_table(&sections, &drawn)}
+            }
+        }
+    }
+}
+
+/// Each line's threads in a revision, by where their line is in it
+///
+/// # Arguments
+///
+/// * `revision` - The revision drawn
+/// * `threads` - The threads whose line is in its file
+pub(super) fn threads_by_line(revision: u32, threads: Vec<Thread>) -> HashMap<Spot, Vec<Thread>> {
+    let mut by_line: HashMap<Spot, Vec<Thread>> = HashMap::new();
+    for thread in threads {
+        // a thread is drawn where its line is in this revision, if it is in it
+        if let Some(anchor) = thread.anchor_in(revision) {
+            by_line
+                .entry(spot(anchor.side, anchor.line))
+                .or_default()
+                .push(thread);
+        }
+    }
+    by_line
+}
+
+/// The line of a file to bring into view, if the Changes tab was asked for one of its lines
+///
+/// # Arguments
+///
+/// * `revision` - The revision drawn
+/// * `path` - The path its file is shown under
+pub(super) fn focused_spot(revision: u32, path: &str) -> Option<Spot> {
+    try_use_context::<Review>()
+        .and_then(|review| review.focus.read().clone())
+        .filter(|anchor| anchor.revision == revision && anchor.path == path)
+        .map(|anchor| spot(anchor.side, anchor.line))
+}
+
+/// A table of a file's lines, a section a run of them: a head row with the section's head,
+/// then each line's rows
+///
+/// One handler serves every line: given the file's node, a click on a line's numbers opens a
+/// box under it.
+///
+/// # Arguments
+///
+/// * `sections` - Each section's head and its lines
+/// * `drawn` - What every line of the file needs
+pub(super) fn hunk_table(sections: &[(String, &[Line])], drawn: &Lines) -> Element {
+    let commenting = drawn.node.is_some();
+    let mut composing = drawn.composing;
+    rsx! {
+        table {
+            class: "reef-app-hunks",
+            // one handler for every line: a click on a line's numbers opens its box
+            onclick: move |event| {
+                if !commenting {
+                    return;
+                }
+                let Some(row) = dom::target(&*event.data())
+                    .and_then(|target| dom::closest(&target, "td.reef-app-ln"))
+                    .and_then(|cell| dom::closest(&cell, "tr.reef-app-line"))
+                else {
+                    return;
+                };
+                let old = dom::attr(&row, "data-side").as_deref() == Some("old");
+                if let Some(line) = dom::attr(&row, "data-line").and_then(|n| n.parse().ok()) {
+                    composing.set(Some((old, line)));
+                }
+            },
+            for (head, lines) in sections.iter() {
+                tbody { class: "reef-app-hunk",
+                    tr { class: "reef-app-hunk-head",
+                        td { colspan: "3", "{head}" }
+                    }
+                    for line in lines.iter() {
+                        {line_rows(line, drawn)}
                     }
                 }
             }
@@ -197,19 +246,19 @@ pub fn Diff(
 
 /// What each line of a drawn file needs: where it is, the threads by line, and the line a box
 /// is open under or to bring into view
-struct Lines<'a> {
+pub(super) struct Lines<'a> {
     /// The revision the file is in
-    revision: u32,
+    pub revision: u32,
     /// The path the file is shown under
-    path: &'a str,
+    pub path: &'a str,
     /// Each line's threads
-    threads: &'a HashMap<Spot, Vec<Thread>>,
+    pub threads: &'a HashMap<Spot, Vec<Thread>>,
     /// The line a box is open under, if any
-    composing: Signal<Option<Spot>>,
+    pub composing: Signal<Option<Spot>>,
     /// The line to bring into view, if it is this file's
-    focused: Option<Spot>,
+    pub focused: Option<Spot>,
     /// The node the file is a change of, if its lines can be commented on
-    node: Option<&'a str>,
+    pub node: Option<&'a str>,
 }
 
 /// The rows of one line of a hunk: its number on each side it is on, its sign and its text, a
@@ -308,7 +357,7 @@ fn line_rows(line: &Line, drawn: &Lines) -> Element {
 ///
 /// * `side` - The side its number counts on
 /// * `line` - Its number there
-fn spot(side: Side, line: u32) -> Spot {
+pub(super) fn spot(side: Side, line: u32) -> Spot {
     (side == Side::Old, line)
 }
 

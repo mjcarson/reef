@@ -300,6 +300,47 @@ Changes tab shows them beside what the plan says of the node ([C33](../milestone
 - **Kept across tabs, let go with the node.** The revision picked and the files open stay
   while another tab is shown, and are let go when another node is selected.
 
+## The semantic Changes view
+
+The Changes tab shows a revision as git does, a file at a time, so a reviewer opens every file and
+works out which type or function each hunk touches. Its semantic view, the default, groups each
+file's changes by what they change ([C101](../overview.md)), and a toggle at the tab's top right goes
+back to the classic view.
+
+### Design choices
+
+- **Outlined when captured.** The service keeps hunks with three lines of context and never reads
+  git again, so it can't tell which item a line is in. `reef node capture` still has both blobs:
+  it parses each side, finds the items a change touched, and sends them as the file's outline,
+  kept in the file's row and its summary as JSON, so no schema changed. A revision captured
+  before has none and shows its plain diff.
+- **tree-sitter, not syn.** Other languages will follow Rust, and tree-sitter has a grammar for
+  each, so a language is a grammar crate and one table of the node kinds that are items and those
+  that own them. It compiles C into the CLI, which the gix-over-git2 choice had avoided for
+  libgit2's build; ring already builds C there.
+- **A file that doesn't parse shows its plain diff.** tree-sitter recovers from errors, but its
+  recovery can end an impl's body early, which would show its methods removed and added again.
+  An error on either side, a binary or symlinked side, one over 1 MiB, or more than 500 changed
+  items leaves the file without an outline.
+- **File, then type, then loose items.** A file lists its structs, enums, unions, traits and
+  inline mods, each with its definition and the methods of its impl blocks in that file, then its
+  loose functions and items, then its other lines, such as its imports, in the order the diff
+  reaches them.
+- **Tagged new, changed or removed.** An item on one side only is new or removed, if it holds a
+  changed line, and one on both with a changed line is changed. A type's group takes its
+  definition's tag, else new or removed when every member is, else changed. Items are matched by
+  owner, kind, name and the trait an impl implements, so `From<A>` and `From<B>` stay apart.
+- **A line goes to its deepest item.** Attributes and comments directly above an item are its
+  own, so a changed doc comment tags its item. A blank line added or removed goes to the changed
+  line beside it, so adding a method doesn't tag its impl changed too. The capture counts each
+  item's lines with the same function the app draws them by, so the two agree.
+- **Groups open to their lines.** A file's groups show at once from the revision's listing, and
+  its hunks are fetched once one of them is opened. A group's lines are the runs of its hunks'
+  lines that are its own, each drawn as the classic view draws a line, so comments are written
+  and shown on them as there. "Show in diff" opens the group that holds the line.
+- **The mode is the viewer's.** Semantic or classic is kept in the browser, across nodes and
+  reloads.
+
 ## Comment threads
 
 The user reviews a node's work in the app as a merge request is reviewed: on the lines of its

@@ -122,6 +122,7 @@ fn revision(revision: u32, at: u64, draft: bool) -> Revision {
             new_id: None,
             binary: false,
             too_large: false,
+            outline: None,
             added: 3,
             removed: 1,
         }],
