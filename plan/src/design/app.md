@@ -487,3 +487,86 @@ once `! reef loop run` typed in it attaches it ([C84](../milestones/m8.md)).
   transcript keeps each version of the plan, folded, beside the answer it got.
 - **Ended runners folded away.** The live runners come first; one that let go or went silent is
   listed under *Ended*, still there to read its transcript.
+
+## The plan explorer
+
+The front page lists each project's plans by name and branch, so which plans have work going on,
+who is on them and how far they moved today means opening each one. The explorer shows each plan
+at a glance ([C119](../milestones/m15.md), [C120](../milestones/m15.md), [C121](../milestones/m15.md)).
+
+### Design choices
+
+- **The front page lists plans.** Each project shows how many plans it has and how many are
+  active, then its plans: the active ones first, then the rest by their last update.
+- **Active means work going on now:** a node in progress, a live session, or a test run building
+  or running. A plan written to yesterday with none of those is idle.
+- **One state of work of three.** A plan reads *testing* while a run builds or runs, else
+  *sessions* while a session is live, else *no sessions*.
+- **Who is working on what.** Each node in progress names who started its work record, and each
+  live session names its user and its loop's node. With sign-in off every author is nobody, so a
+  session's host stands in for its user.
+- **A plan's activity is kept plan-wide.** History is a partition per node and a plan's row
+  carries no times, so each write to a plan's nodes or pages also keeps an entry in a partition of
+  the plan's own: when, who, which nodes, and which went done. It is a table of its own, so no
+  data directory is replaced for it. *Done in the last 24 hours* counts the nodes done now that
+  went done in that window, so one set back isn't counted. A plan with no entry yet answers its
+  listing as its last update.
+- **One summary a plan, from one route.** The page reads each project's plans summed up in one
+  call, rather than a read per node, work record or session.
+- **One change stream for the page,** not one a project, since plain HTTP/1.1 opens six
+  connections a host.
+- **Times are relative, exact on hover.**
+
+## A plan's docs
+
+A plan has no docs of its own to say what it is for, its goals and its requirements: its pages
+are a flat list by path, and the app shows a doc only as a node's section cut out of its page. A
+plan names its docs, and reads them as a book beside the graph or in its place
+([C122](../milestones/m15.md), [C123](../milestones/m15.md), [C124](../milestones/m15.md)).
+
+### Design choices
+
+- **A plan names its docs:** a folder, or a summary in mdbook's format, named by
+  `reef plan docs <plan> <PATH>` and cleared by `--clear`. Either lies in the layered source, the
+  plan's pages over the repo's files ([Docs in central mode](#docs-in-central-mode)).
+- **A folder is a book.** Its markdown files and folders make a tree of chapters: a folder's
+  `README.md` or `index.md` is its section's own page, then its other files, then its folders,
+  each by name. A `SUMMARY.md` in a folder orders it in mdbook's format instead. Each chapter is
+  titled by its first heading, else its file's name.
+- **A summary may be a page,** anywhere but the book's root, where export writes its own.
+- **A plan that names none** reads its root node's body, then its pages by path, as export's
+  fresh summary lists them.
+- **Checked as links are.** Naming a folder or summary that isn't there is refused, and so is a
+  page edit that takes a chapter away. A fetch can't be refused, so a chapter it took away is a
+  problem `check` lists.
+- **mdbook's look, drawn by the app.** A folding chapter bar on the left, the page, and its prev
+  and next, with mdbook's content width, headings, tables and code, written in the app's own
+  styles rather than an mdbook build in a frame. The service answers a chapter as runs of HTML and
+  views, mdbook's heading ids kept, so a ```` ```reef ```` fence draws as a live view of the plan.
+- **Links stay inside the docs.** A link to another chapter opens it in the view, a heading's
+  anchor scrolls to it, a `node:` link opens that node, and a link outside the book opens its
+  served page. A chapter has a route of its own, `/plans/{project}/{plan}/docs/{path}`.
+- **Either pane shows the docs.** The main area flips between Graph and Docs, and the sidebar
+  shows the docs beside a node's tabs, with or without a node selected. Each pane's choice and its
+  open chapter are kept per plan.
+- **Followed live.** A page edit, or a fetch of the plan's branch, reads the chapter bar and the
+  open chapter again.
+
+## The floating sidebar
+
+The sidebar is fixed to the canvas's right edge at its full height: only its width changes, and
+it covers the graph behind it. It floats free as a panel, and docks back ([C125](../milestones/m15.md)).
+
+### Design choices
+
+- **Docked or floating.** *Detach* floats the sidebar where it was. The panel moves by its head
+  and resizes from every edge and corner, and the graph takes back the width it freed
+  (`View::free_width`).
+- **Docked again** by the panel's *Dock*, or by dropping it in a zone at the right edge, which
+  lights as the panel nears it. It docks at its last docked width.
+- **Kept in the window.** A move or a resize stops at the window's edges and at a least size, and
+  a window resize brings the panel back into view.
+- **Kept per browser.** Docked or floating, and the panel's place and size, are kept in
+  localStorage beside the docked width.
+- **From the keyboard too.** Its grips are separators that arrows move and resize, as the docked
+  edge's grip is.

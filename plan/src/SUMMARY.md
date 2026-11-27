@@ -18,6 +18,7 @@
 - [M11 Branches side by side](milestones/m11.md)
 - [M12 Test runs followed live](milestones/m12.md)
 - [M13 One command to deploy](milestones/m13.md)
+- [M15 A plan explorer](milestones/m15.md)
 
 # Design
 
