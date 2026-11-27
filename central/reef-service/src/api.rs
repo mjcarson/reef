@@ -51,6 +51,10 @@
 //! | `POST /api/v1/loops` | `edit_loop` | [`LoopEdited`]: 200 if written or joined, 409 if the pane's loop is busy or another loop or pane holds the node, 422 if the pane has no loop, the node isn't the loop's, its plan's or any loop's member, or the group is wider than the loop |
 //! | `GET /api/v1/projects/{project}/loops` | `project_loops` | every [`Loop`] feeding the project, by pane |
 //! | `GET /api/v1/projects/{project}/loops/history?older=&limit=` | `loop_history` | a page of the acts on its loops and sessions, newest first: a [`HistoryPage`] |
+//! | `POST /api/v1/test-runs` | `open_test_run` | the [`TestRun`] opened, 400 for an id a path can't hold or a node with no plan or not in it, 404 if the project or plan isn't there |
+//! | `GET /api/v1/test-runs/{run}` | `test_run` | the [`TestRun`], each failure with its output, or 404 |
+//! | `POST /api/v1/test-runs/{run}` | `report_test_run` | the [`TestRun`] as reported, or 404 if this service doesn't hold it, so its client opens it again |
+//! | `GET /api/v1/projects/{project}/test-runs` | `project_test_runs` | every [`TestRun`] it keeps, newest first, each failure's output left out |
 //! | `GET /api/v1/changes?project=&plan=` | `changes` | server-sent [`Change`]s |
 //! | `POST /api/v1/tokens` | `sign_in` | [`IssuedToken`]: 201, 401 if no user has that name and password, or 429 if too many failed lately |
 //! | `GET /api/v1/tokens?user=` | `tokens` | every [`TokenInfo`] of the caller's, or of the user an admin names; 401 or 403 otherwise |
@@ -115,8 +119,8 @@ use reef_api::{
     Transcript, User, UserAdded, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_api::{
-    HistoryPage, HistoryQuery, MoveNodes, Moved, PasswordChange, PasswordChanged, TokenInfo,
-    UserRemoved,
+    HistoryPage, HistoryQuery, MoveNodes, Moved, OpenRun, PasswordChange, PasswordChanged,
+    RunReport, TestRun, TokenInfo, UserRemoved,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -137,7 +141,9 @@ use crate::backend::Backend;
 use crate::certs::Own;
 use crate::conf::Conf;
 use crate::remote::{BadRemote, FetchFailed};
-use crate::service::{NoSession, NoUser, NotAllowed, NotSignedIn, Service, TooManyTries};
+use crate::service::{
+    NoSession, NoTestRun, NoUser, NotAllowed, NotSignedIn, Service, TooManyTries,
+};
 use crate::store::{BadCursor, NotListed, NotRegistered, Pending, Unkeepable};
 use crate::tls::{self, TlsListener};
 use crate::tree::NotFetched;
@@ -272,6 +278,17 @@ pub fn router<S: Serves>(serves: S) -> Router {
             get(session_orders::<S>).post(act_on_session::<S>),
         )
         .route(paths::PROJECT_SESSIONS, get(project_sessions::<S>))
+        .route(
+            paths::TEST_RUNS,
+            axum::routing::post(open_test_run::<S>).layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
+        .route(
+            paths::TEST_RUN,
+            get(test_run::<S>)
+                .post(report_test_run::<S>)
+                .layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
+        )
+        .route(paths::PROJECT_TEST_RUNS, get(project_test_runs::<S>))
         .route(paths::CHANGES, get(changes::<S>))
         .route(paths::TOKENS, get(tokens::<S>).post(issue_token::<S>))
         .route(
@@ -543,6 +560,7 @@ impl From<anyhow::Error> for Failure {
         } else if error.downcast_ref::<NotListed>().is_some() {
             ErrorCode::NotListed
         } else if error.downcast_ref::<NoSession>().is_some()
+            || error.downcast_ref::<NoTestRun>().is_some()
             || error.downcast_ref::<NoUser>().is_some()
             || error.downcast_ref::<NotFetched>().is_some()
         {
@@ -842,6 +860,13 @@ impl FindQuery {
 struct SessionSegments {
     /// The session's id
     session: String,
+}
+
+/// The segments of a route under one test run
+#[derive(Deserialize)]
+struct TestRunSegments {
+    /// The run's id
+    run: String,
 }
 
 /// The query a session's transcript takes
@@ -2310,6 +2335,84 @@ async fn project_sessions<S: Serves>(
     // refused if the project isn't registered
     let sessions = serves.service().project_sessions(&segments.project).await?;
     Ok(Json(sessions))
+}
+
+/// Opens a test run, or opens it again with what its client holds
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, whom the run names as starting it
+/// * `open` - The run's id, project, node, host, checkout and command, and what it holds
+#[instrument(name = "api::open_test_run", skip_all, err(Debug))]
+async fn open_test_run<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Body(open): Body<OpenRun>,
+) -> Result<Json<TestRun>, Failure> {
+    // refused for a bad id, or a project, plan or node that isn't there
+    let run = serves
+        .service()
+        .open_test_run(open, &caller.author())
+        .await?;
+    Ok(Json(run))
+}
+
+/// A test run as it stands, each failure with its output, 404 if this service doesn't hold it
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The run's id
+#[instrument(name = "api::test_run", skip_all, err(Debug))]
+async fn test_run<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<TestRunSegments>,
+) -> Result<Json<TestRun>, Failure> {
+    // gone if its client went silent
+    let run = serves.service().test_run(&segments.run).await?;
+    Ok(Json(run))
+}
+
+/// Takes a test run's report, 404 if this service doesn't hold the run, so its client opens it
+/// again
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The run's id
+/// * `report` - Where the run and its binaries stand, and the failures since its last report
+#[instrument(name = "api::report_test_run", skip_all, err(Debug))]
+async fn report_test_run<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<TestRunSegments>,
+    Body(report): Body<RunReport>,
+) -> Result<Json<TestRun>, Failure> {
+    // kept in memory, and told to the change stream
+    let run = serves
+        .service()
+        .report_test_run(&segments.run, report)
+        .await?;
+    Ok(Json(run))
+}
+
+/// Lists a project's test runs, newest first, each failure's output left out
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::project_test_runs", skip_all, err(Debug))]
+async fn project_test_runs<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<TestRun>>, Failure> {
+    // refused if the project isn't registered
+    let runs = serves
+        .service()
+        .project_test_runs(&segments.project)
+        .await?;
+    Ok(Json(runs))
 }
 
 /// Follows the change stream: one server-sent event a change, from now on

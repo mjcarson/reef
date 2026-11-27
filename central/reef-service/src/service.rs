@@ -38,6 +38,8 @@
 //!   send what they read there, and the service keeps it, reading no checkout itself.
 //! - **Comments are threads on a node's work** ([`comments`]), each resolved by a mark, by hand
 //!   or by the change a commit's trailer names.
+//! - **A test run is kept as its client reports it** ([`test_runs`]): each binary's counts and
+//!   each failure, in memory, for the app to draw beside the node its checkout is on.
 //! - **A terminal loop is kept by its pane** ([`loops`]): the project it feeds, the node it
 //!   holds, which no other loop may take, and whether it is paused.
 //! - **Users sign in for tokens** ([`users`]), when reef's config requires it: the first user is
@@ -88,11 +90,13 @@ mod loops;
 mod moving;
 mod remotes;
 mod sessions;
+mod test_runs;
 mod throttle;
 mod users;
 mod work;
 
 pub use sessions::{KEPT_ENTRIES, NoSession, ORDERS_WAIT_MAX};
+pub use test_runs::{KEPT_COMMANDS, KEPT_RUNS, NoTestRun};
 pub use throttle::TooManyTries;
 pub use users::{
     Asker, BROWSER_TOKEN_LIFE, NoUser, NotAllowed, NotSignedIn, Recovered, token_hash,
@@ -115,6 +119,8 @@ pub struct Service<B = ShoalBackend> {
     changes: Mutex<Option<broadcast::Sender<Change>>>,
     /// The sessions of runners the user started, kept in memory
     sessions: sessions::Sessions,
+    /// The test runs clients report, kept in memory
+    test_runs: test_runs::TestRuns,
     /// Whether every caller must sign in
     requires_sign_in: bool,
     /// The tokens looked up lately, trusted for a minute
@@ -210,6 +216,7 @@ impl<B: Backend> Service<B> {
             sections: Sections::default(),
             changes: Mutex::new(Some(changes)),
             sessions: sessions::Sessions::default(),
+            test_runs: test_runs::TestRuns::default(),
             requires_sign_in: false,
             tokens: users::Tokens::default(),
             throttle: throttle::Throttle::default(),

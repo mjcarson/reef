@@ -157,7 +157,7 @@ impl Sessions {
 }
 
 /// The current time in milliseconds since the epoch
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)

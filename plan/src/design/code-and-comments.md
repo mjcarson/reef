@@ -387,3 +387,41 @@ Claude answers the comments on a node's work before the loop moves on ([C43](../
   as it stands, so a capture of the new start never writes over it. And a capture of nothing over
   a sealed revision of an earlier start keeps no revision, so a round answered without a change
   outdates no line thread.
+
+## Test runs
+
+A node's tests can take minutes, and nothing but the terminal they run in says how far they have
+got. central reef follows a run as it goes, so the app shows, on the node the run's checkout is
+on, how many tests are done and left, when they should be done, and which failed and why. The
+repo being tested doesn't change, and its tests run as they always did where reef isn't there.
+
+### Design choices
+
+- **A wrapper, not a change to the tests.** `reef test [ARGS]` runs `cargo test [ARGS]` as given,
+  under a pty so its colours and the order of its lines stay what the terminal would show, and
+  exits with cargo's code. `cargo test` itself still runs anywhere.
+- **Telling central is best-effort.** Reports go from a task beside the run. Where no project is
+  found or nothing answers, `reef test` says so once on stderr and the tests run as they would
+  have; a report that fails is dropped, never waited on.
+- **The total is known before a test runs.** `cargo test [ARGS] --no-run --message-format=json`
+  builds and names each test binary, and each is run with `--list --format terse` and the
+  arguments after `--`, which are stable and honour filters, `--ignored`, `--skip` and `--exact`.
+  An ignored test is listed, and ends as ignored. Listing doc tests compiles them, so their count
+  is the last run's until their `running N tests` line.
+- **libtest's own output is read.** cargo's `Running <target> (<binary>)` and `Doc-tests <crate>`
+  lines, `running N tests`, `test <name> ... ok`, `FAILED` or `ignored`, `test result:`, and each
+  `---- <name> stdout ----` block of `failures:`, a failed test's output. libtest's JSON is
+  unstable on stable Rust. A binary cargo never ran, since one before it failed without
+  `--no-fail-fast`, is not run rather than left.
+- **Kept in memory, as a runner's session is.** The service keeps each live run and the last
+  finished run of each command, by project, and tells each change as `test-run-changed`. A run
+  unheard from for a minute shows as gone.
+- **The ETA comes from the last run of the same command:** the binaries still to run at their
+  last times, and the running one's last time less its time so far, or its rate so far where
+  that says longer. A command with no earlier run estimates from its rate alone, and says so.
+- **On the node its checkout is on.** A run names the node `reef work` finds there, else only
+  its project. The node's box shows the run's progress while it runs, and its Tests tab shows
+  how many are done and left, the ETA, each failure with its output, and each binary.
+- **cargo's runner is not the way in.** `CARGO_TARGET_<triple>_RUNNER` would catch a plain
+  `cargo test`, but it sees one binary at a time, so no total, and never the build or the doc
+  tests; it wraps `cargo run` too, and clashes with a project's own runner.

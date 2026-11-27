@@ -30,6 +30,8 @@
 //! - **Sessions** ([`session`]): the sessions a runner the user started runs headless, as
 //!   central reef relays them: each one's transcript and prompts, what the app asks of it, and the
 //!   orders the runner takes.
+//! - **Test runs** ([`test_run`]): how far a run of a repo's tests has got, as `reef test`
+//!   reports it: each binary's counts and times, and each failed test with its output.
 //! - **Users** ([`user`]): reef's users, the tokens they sign in with, and the requests that add
 //!   and remove them, sign them in and out, change their passwords and list their tokens.
 //! - **History** ([`history`]): who made each edit of a node, a page or a queue, what it changed
@@ -61,6 +63,7 @@ pub mod prompt;
 pub mod queue;
 pub mod revision;
 pub mod session;
+pub mod test_run;
 pub mod user;
 pub mod work;
 
@@ -97,6 +100,10 @@ pub use revision::{
 pub use session::{
     Answer, Attach, Choice, Entry, EntryKind, Order, Ordered, Prompt, PromptKind, Question, Report,
     Session, SessionAct, SessionActed, SessionState, Transcript,
+};
+pub use test_run::{
+    Binary, BinaryState, FailedTest, OpenRun, RunReport, RunState, TestRun, command_line,
+    cut_output,
 };
 pub use user::{
     Author, IssuedToken, Me, NOBODY, NewUser, PasswordChange, PasswordChanged, SignIn, SignedOut,

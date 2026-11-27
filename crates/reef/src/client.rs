@@ -27,7 +27,7 @@ use reef_api::{
     StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
     WorkRecord, Writer, paths,
 };
-use reef_api::{MoveNodes, Moved};
+use reef_api::{MoveNodes, Moved, OpenRun, RunReport, TestRun};
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
 use std::path::Path;
@@ -969,6 +969,59 @@ impl Client {
     /// * `project` - The project's name
     pub async fn project_sessions(&self, project: &str) -> anyhow::Result<Vec<Session>> {
         let path = paths::project_sessions(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Opens a test run, or opens it again with what its client holds
+    ///
+    /// # Arguments
+    ///
+    /// * `open` - The run's id, project, node, host, checkout and command, and what it holds
+    pub async fn open_test_run(&self, open: &OpenRun) -> anyhow::Result<TestRun> {
+        let path = paths::TEST_RUNS;
+        let request = self.http.post(self.url(path)).json(open);
+        self.send(request, path).await
+    }
+
+    /// Reports where a test run and its binaries stand, or `None` if the service doesn't hold
+    /// the run, as after the service restarted, so its client opens it again
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The run's id
+    /// * `report` - Where the run and its binaries stand, and the failures since its last report
+    pub async fn report_test_run(
+        &self,
+        id: &str,
+        report: &RunReport,
+    ) -> anyhow::Result<Option<TestRun>> {
+        let path = paths::test_run(id);
+        let request = self.http.post(self.url(&path)).json(report);
+        // a run the service doesn't hold is an answer here, not an error
+        match self.send(request, &path).await {
+            Ok(run) => Ok(Some(run)),
+            Err(error) if is_code(&error, ErrorCode::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// A test run as it stands, each failure with its output
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The run's id
+    pub async fn test_run(&self, id: &str) -> anyhow::Result<TestRun> {
+        let path = paths::test_run(id);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Lists a project's test runs, newest first, each failure's output left out
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn project_test_runs(&self, project: &str) -> anyhow::Result<Vec<TestRun>> {
+        let path = paths::project_test_runs(project);
         self.send(self.http.get(self.url(&path)), &path).await
     }
 

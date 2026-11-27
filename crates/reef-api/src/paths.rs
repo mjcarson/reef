@@ -43,6 +43,9 @@
 //! | `GET ?after=`, `POST`, `DELETE` | [`SESSION`] |
 //! | `GET ?after=&wait=`, `POST` | [`SESSION_ORDERS`] |
 //! | `GET` | [`PROJECT_SESSIONS`] |
+//! | `POST` | [`TEST_RUNS`] |
+//! | `GET`, `POST` | [`TEST_RUN`] |
+//! | `GET` | [`PROJECT_TEST_RUNS`] |
 //! | `GET ?project=&plan=` | [`CHANGES`] |
 //! | `POST` | [`TOKENS`] |
 //! | `DELETE` | [`CURRENT_TOKEN`] |
@@ -217,6 +220,15 @@ pub const SESSION_ORDERS: &str = "/api/v1/sessions/{session}/orders";
 
 /// One project's runners' sessions
 pub const PROJECT_SESSIONS: &str = "/api/v1/projects/{project}/sessions";
+
+/// Test runs: a client opens one, or opens it again, by `POST`
+pub const TEST_RUNS: &str = "/api/v1/test-runs";
+
+/// One test run: read whole by `GET`, and its client's report sent by `POST`
+pub const TEST_RUN: &str = "/api/v1/test-runs/{run}";
+
+/// One project's test runs, newest first, each failure's output left out
+pub const PROJECT_TEST_RUNS: &str = "/api/v1/projects/{project}/test-runs";
 
 /// The change stream, as server-sent events, narrowed by the `project` and `plan` queries
 pub const CHANGES: &str = "/api/v1/changes";
@@ -807,6 +819,24 @@ pub fn project_sessions(project: &str) -> String {
     format!("{PROJECTS}/{}/sessions", encode(project))
 }
 
+/// The path of one test run
+///
+/// # Arguments
+///
+/// * `run` - The run's id
+pub fn test_run(run: &str) -> String {
+    format!("{TEST_RUNS}/{}", encode(run))
+}
+
+/// The path of one project's test runs
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn project_test_runs(project: &str) -> String {
+    format!("{PROJECTS}/{}/test-runs", encode(project))
+}
+
 /// The path of one user's tokens, as an admin lists them
 ///
 /// # Arguments
@@ -959,6 +989,7 @@ mod tests {
                 .replace("{id}", "C30")
                 .replace("{thread}", "7")
                 .replace("{session}", "k3x9-4242")
+                .replace("{run}", "r-7f3a")
         };
         assert_eq!(super::plan_comments(&plan), fill(super::PLAN_COMMENTS));
         assert_eq!(super::node_comments(&node), fill(super::NODE_COMMENTS));
@@ -983,6 +1014,12 @@ mod tests {
         assert_eq!(
             super::project_sessions("reef"),
             fill(super::PROJECT_SESSIONS)
+        );
+        // and a test run and a project's runs
+        assert_eq!(super::test_run("r-7f3a"), fill(super::TEST_RUN));
+        assert_eq!(
+            super::project_test_runs("reef"),
+            fill(super::PROJECT_TEST_RUNS)
         );
         // and a token, a user, their password and an admin's listing of their tokens
         let user = |template: &str| template.replace("{id}", "0a1b").replace("{name}", "ada");

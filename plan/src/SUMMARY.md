@@ -16,6 +16,7 @@
 - [M9 Questions and approval in the app](milestones/m9.md)
 - [M10 A shared server](milestones/m10.md)
 - [M11 Branches side by side](milestones/m11.md)
+- [M12 Test runs followed live](milestones/m12.md)
 
 # Design
 

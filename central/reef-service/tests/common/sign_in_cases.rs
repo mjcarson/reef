@@ -164,6 +164,8 @@ fn writes(plan: &PlanName) -> anyhow::Result<Vec<(Method, String)>> {
         (Method::POST, paths::session("s")),
         (Method::DELETE, paths::session("s")),
         (Method::POST, paths::session_orders("s")),
+        (Method::POST, paths::TEST_RUNS.to_string()),
+        (Method::POST, paths::test_run("r")),
         (Method::DELETE, paths::CURRENT_TOKEN.to_string()),
     ])
 }

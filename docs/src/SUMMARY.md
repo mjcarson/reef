@@ -63,6 +63,7 @@
   - [Signing in and serving other hosts](internals/sign-in.md)
   - [Remote projects](internals/remotes.md)
   - [Sessions' plans and runners](internals/sessions.md)
+  - [Test runs](internals/test-runs.md)
   - [The app](internals/app.md)
   - [The store](internals/store.md)
   - [The schema](internals/schema.md)

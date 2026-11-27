@@ -197,6 +197,17 @@ pub enum Change {
         /// The session's id
         session: String,
     },
+    /// A test run was opened, or opened again, or its client reported
+    TestRunChanged {
+        /// The project whose tests it runs
+        project: String,
+        /// The run's id
+        run: String,
+        /// The plan of the node its checkout is on, or `None` for a run on no node, which every
+        /// plan of the project hears of
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<PlanName>,
+    },
     /// The stream fell behind and dropped changes, so a client should read again
     Missed {
         /// How many changes were dropped
@@ -225,6 +236,7 @@ impl Change {
             Change::LoopChanged { .. } => "loop-changed",
             Change::DecisionsRecorded { .. } => "decisions-recorded",
             Change::SessionChanged { .. } => "session-changed",
+            Change::TestRunChanged { .. } => "test-run-changed",
             Change::Missed { .. } => "missed",
         }
     }
@@ -241,7 +253,8 @@ impl Change {
             Change::QueueChanged { project, .. }
             | Change::ProjectFetched { project, .. }
             | Change::LoopChanged { project, .. }
-            | Change::SessionChanged { project, .. } => Some(project.as_str()),
+            | Change::SessionChanged { project, .. }
+            | Change::TestRunChanged { project, .. } => Some(project.as_str()),
             Change::WorkRecorded { node, .. }
             | Change::RevisionCaptured { node, .. }
             | Change::CommentAdded { node, .. }
@@ -259,7 +272,9 @@ impl Change {
     /// from a service that named no plan.
     pub fn plan(&self) -> Option<&PlanName> {
         match self {
-            Change::QueueChanged { plan, .. } => plan.as_ref(),
+            Change::QueueChanged { plan, .. } | Change::TestRunChanged { plan, .. } => {
+                plan.as_ref()
+            }
             Change::PlanAdded { plan }
             | Change::PlanBranched { plan, .. }
             | Change::NodesPut { plan, .. }
@@ -310,6 +325,8 @@ impl Change {
             Change::ProjectFetched { plans, .. } => plans
                 .as_ref()
                 .is_none_or(|plans| plans.iter().any(|name| name == plan)),
+            // a run on no node is every plan's to show
+            Change::TestRunChanged { plan: None, .. } => true,
             // no other project's change concerns a plan
             _ => false,
         }
@@ -442,6 +459,11 @@ mod tests {
                 state: crate::ReviewState::Submitted,
                 version: 2,
             },
+            Change::TestRunChanged {
+                project: "reef".to_string(),
+                run: "r1".to_string(),
+                plan: Some(PlanName::new("reef", "central").unwrap()),
+            },
             Change::Missed { count: 3 },
         ];
         for change in changes {
@@ -507,5 +529,29 @@ mod tests {
             branch: None,
         };
         assert_eq!(branched.plan().map(|plan| plan.plan.as_str()), Some("app"));
+    }
+
+    /// A test run on a node is its plan's, and one on no node reaches every plan of its project
+    #[test]
+    fn a_test_run_reaches_its_plan_or_every_plan() {
+        // a run on a node of `app` is that plan's alone
+        let on_node = Change::TestRunChanged {
+            project: "reef".to_string(),
+            run: "r1".to_string(),
+            plan: Some(PlanName::new("reef", "app").unwrap()),
+        };
+        assert_eq!(on_node.project(), Some("reef"));
+        assert_eq!(on_node.plan().map(|plan| plan.plan.as_str()), Some("app"));
+        assert!(!on_node.reaches("central"));
+        // and a run on no node is no plan's, but every plan hears of it
+        let on_none = Change::TestRunChanged {
+            project: "reef".to_string(),
+            run: "r2".to_string(),
+            plan: None,
+        };
+        assert_eq!(on_none.plan(), None);
+        assert!(on_none.reaches("central") && on_none.reaches("app"));
+        let wire = json!({"kind": "test-run-changed", "project": "reef", "run": "r2"});
+        assert_eq!(serde_json::to_value(&on_none).unwrap(), wire);
     }
 }

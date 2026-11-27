@@ -50,6 +50,10 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST /api/v1/loops` `EditLoop` | `LoopEdited`: 200 if written, 409 if the pane's loop feeds another project or plan or another loop holds the node, 422 if the pane has no loop or the node isn't the loop's or in its plan |
 | `GET /api/v1/projects/{project}/loops` | every `Loop` feeding the project, by pane, each naming who started it and changed it last |
 | `GET /api/v1/projects/{project}/loops/history?older=&limit=` | a `HistoryPage` of the acts on its loops and sessions, newest first |
+| `POST /api/v1/test-runs` `OpenRun` | the `TestRun` opened, 400 for an id a path can't hold or a node with no plan or not in it, 404 if the project or plan isn't there |
+| `GET /api/v1/test-runs/{run}` | the `TestRun`, each failure with its output, or 404 |
+| `POST /api/v1/test-runs/{run}` `RunReport` | the `TestRun` as reported, or 404 if the service doesn't hold it, so its client opens it again |
+| `GET /api/v1/projects/{project}/test-runs` | every `TestRun` it keeps, newest first, each failure's output left out |
 | `GET /api/v1/changes?project=&plan=` | server-sent events, one a `Change` |
 | `POST /api/v1/tokens` `SignIn` | `IssuedToken`: 201, 401 if no user has that name and password, the same words for either, or 429 with `Retry-After` if too many failed lately |
 | `GET /api/v1/tokens?user=` | every `TokenInfo` of the caller's, the one it sent marked `current`, or of the user an admin names; 401 or 403 otherwise |
@@ -82,7 +86,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,
   `project-fetched`, `plan-added`, `plan-branched`, `nodes-put`, `pages-put`, `plan-written`,
-  `queue-changed`, `work-recorded`), its data the change as JSON. It is live only: a client reads
+  `queue-changed`, `work-recorded`, `test-run-changed`), its data the change as JSON. It is live only: a client reads
   what it needs, then follows. One that falls behind by more than 256 changes is sent `missed`,
   with how many, and should read again. `plan` narrows it within a `project`, and a project's
   own changes reach it only if they concern that plan: a `project-fetched` names the branch that

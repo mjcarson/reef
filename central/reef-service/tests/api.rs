@@ -72,6 +72,8 @@ suite!(
     a_projects_branches_are_listed,
     a_moved_node_takes_everything_with_it,
     a_subtree_moves_whole_and_groups_with_their_members,
+    test_run_routes_answer_with_their_status,
+    test_runs_are_told_on_the_change_stream,
 );
 
 /// A config listening on this host's loopback port alone, over HTTPS, with reef's own
