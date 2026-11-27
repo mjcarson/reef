@@ -85,6 +85,7 @@ mod comments;
 mod decisions;
 mod history;
 mod loops;
+mod moving;
 mod remotes;
 mod sessions;
 mod throttle;
@@ -1123,7 +1124,7 @@ fn page_of<S: DocSource>(source: &S, page: &str) -> Option<String> {
 /// * `project` - The plan's project, whose repo the docs are read from
 /// * `sections` - The doc sections a node's why, what and design choices are taken from
 /// * `proposal` - The plan as it stands and as the write would leave it, and its branch
-async fn added_at(
+pub(crate) async fn added_at(
     project: Project,
     sections: Sections,
     proposal: Proposal,

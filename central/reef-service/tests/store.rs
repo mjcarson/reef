@@ -77,6 +77,7 @@ suite!(
     concurrent_edits_both_land,
     each_project_has_its_own_queue,
     queue_deletes_only_the_row_read,
+    a_move_killed_partway_is_finished_by_running_it_again,
     two_plans_queues_are_edited_apart,
     a_node_already_in_place_in_its_plan_changes_nothing,
     bulk_write_with_pages_replaces_them,

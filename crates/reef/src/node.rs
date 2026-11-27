@@ -28,7 +28,7 @@
 //! fails with what was wrong: each stale node, or check's messages.
 
 pub use reef_api::puts_for;
-use reef_api::{Checked, NodeRemove, Puts, Refusal, StalePut, StoredNode, lift};
+use reef_api::{Checked, MoveNodes, Moved, NodeRemove, Puts, Refusal, StalePut, StoredNode, lift};
 use reef_model::spec::split_frontmatter;
 use reef_model::{NodeSpec, PlanName};
 use std::collections::HashMap;
@@ -104,6 +104,98 @@ pub async fn put<W: Write>(
         writeln!(out, "put `{id}` at version {version}")?;
     }
     Ok(())
+}
+
+/// Moves nodes of a plan to another plan of its project, and says what moved, which group a
+/// node whose own stayed behind joined, and each thread's new number
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `plan` - The plan the nodes leave
+/// * `ids` - The nodes to move, by id
+/// * `to` - The plan they join, by its name within the project
+/// * `group` - The group there a node joins whose own stays behind, or `None` for none
+/// * `out` - Where to print what came of it
+pub async fn move_nodes<W: Write>(
+    client: &Client,
+    plan: &PlanName,
+    ids: Vec<String>,
+    to: &str,
+    group: Option<String>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the plan they join, of the same project, named alone or in full
+    let joined = crate::cli::named_plan(&plan.project, to)?;
+    let request = MoveNodes {
+        ids,
+        to: joined.plan.clone(),
+        group: group.clone(),
+    };
+    match client.move_nodes(plan, &request).await? {
+        Moved::Applied {
+            nodes,
+            regrouped,
+            threads,
+        } => {
+            // what moved, then what joined another group, then each thread's new number
+            let named: Vec<String> = nodes.iter().map(|id| format!("`{id}`")).collect();
+            writeln!(
+                out,
+                "moved {} from `{plan}` to `{joined}`",
+                named.join(", ")
+            )?;
+            for id in regrouped {
+                match &group {
+                    Some(group) => writeln!(
+                        out,
+                        "  `{id}` joined group `{group}`, its own staying in `{plan}`"
+                    )?,
+                    None => writeln!(
+                        out,
+                        "  `{id}` is in no group now, its own staying in `{plan}`"
+                    )?,
+                }
+            }
+            for thread in threads {
+                writeln!(
+                    out,
+                    "  thread {} is thread {} in `{joined}`",
+                    thread.from, thread.to
+                )?;
+            }
+            Ok(())
+        }
+        Moved::NotInPlan { ids } => {
+            let named: Vec<String> = ids.iter().map(|id| format!("`{id}`")).collect();
+            anyhow::bail!(
+                "{} not in `{plan}`, so nothing moved",
+                named.join(", ") + if ids.len() == 1 { " is" } else { " are" }
+            )
+        }
+        Moved::Taken { ids } => {
+            let named: Vec<String> = ids.iter().map(|id| format!("`{id}`")).collect();
+            anyhow::bail!(
+                "`{joined}` has {} already, so nothing moved: rename them in one plan first",
+                named.join(", ")
+            )
+        }
+        Moved::Held { node, pane } => anyhow::bail!(
+            "the loop in {pane} holds `{node}`, so nothing moved: let it finish, or `reef loop \
+             stop` there"
+        ),
+        Moved::Refused(problems) => {
+            let lines: Vec<String> = problems
+                .iter()
+                .map(|problem| format!("  {problem}"))
+                .collect();
+            anyhow::bail!(
+                "nothing moved, since the move would add these problems: name the rest of a \
+                 subtree of needs to move it whole, or change its needs first\n{}",
+                lines.join("\n")
+            )
+        }
+    }
 }
 
 /// Removes the nodes named as one change, unless one has moved on or it breaks the plan

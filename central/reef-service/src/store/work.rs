@@ -67,7 +67,7 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `project` - The project whose work records' lock to find
-    fn work_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(super) fn work_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
         // the map is only held to find or add the lock, never across a wait
         self.works
             .lock()

@@ -35,6 +35,56 @@ pub enum Expect {
     Version(u64),
 }
 
+/// The full key of a row of a node's own, which a node moved to another plan leaves behind
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowKey {
+    /// A node's work record
+    Work {
+        /// The project
+        project: String,
+        /// The node's name within its project, `plan/id`
+        node: String,
+    },
+    /// One of a node's captured revisions
+    Revision {
+        /// The project
+        project: String,
+        /// The node's name within its project, `plan/id`
+        node: String,
+        /// The revision's number, padded as the row's sort key is
+        revision: String,
+    },
+    /// One file of a node's captured revision
+    RevisionFile {
+        /// The project
+        project: String,
+        /// The node's name within its project, `plan/id`
+        node: String,
+        /// The revision's number
+        revision: u64,
+        /// The file's path
+        path: String,
+    },
+    /// One comment of a plan's
+    Comment {
+        /// The project
+        project: String,
+        /// The plan's name within its project
+        plan: String,
+        /// The comment's number, padded as the row's sort key is
+        number: String,
+    },
+    /// One of a node's decisions
+    Decision {
+        /// The project
+        project: String,
+        /// The node's name within its project, `plan/id`
+        node: String,
+        /// The decision's number, padded as the row's sort key is
+        number: String,
+    },
+}
+
 /// The revisions a plan's row names that change in one write; `None` leaves one as it is
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Pointers {
@@ -537,6 +587,16 @@ pub trait Backend: Send + Sync {
         row: RemoteRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Deletes rows by their full keys, whatever is stored under them, a row not stored deleting
+    /// nothing
+    ///
+    /// The deletes are not atomic: one that fails partway leaves the rows after it stored.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The keys of the rows to delete
+    fn delete_rows(&self, rows: Vec<RowKey>) -> impl Future<Output = anyhow::Result<()>> + Send;
 
     /// Reads the branch rows of a project's plans, in plan order
     ///

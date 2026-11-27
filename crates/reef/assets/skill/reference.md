@@ -161,6 +161,7 @@ reef next --all                      # the same across every plan, whichever the
 reef node get C38                    # a node's YAML, after its `# version:` line
 reef node get C38 --md               # as a node file: frontmatter, version inside, then its body
 reef node put c38.yml                # put YAML, or a node file to write its body too
+reef node move C38 C39 --to side     # move nodes, a subtree of needs or a group, to another plan
 reef status C38 in-progress          # todo | in-progress | done | blocked
 reef accept C38                      # its criteria, numbered from 1
 reef accept C38 2 met --test tests/skill.rs::writes_twice   # met | unmet | todo

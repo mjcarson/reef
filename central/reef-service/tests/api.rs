@@ -70,6 +70,8 @@ suite!(
     a_branch_change_that_breaks_a_link_is_refused,
     each_plans_queue_keeps_its_own_history,
     a_projects_branches_are_listed,
+    a_moved_node_takes_everything_with_it,
+    a_subtree_moves_whole_and_groups_with_their_members,
 );
 
 /// A config listening on this host's loopback port alone, over HTTPS, with reef's own

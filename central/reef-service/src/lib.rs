@@ -41,7 +41,7 @@ pub mod store;
 pub mod tls;
 pub mod tree;
 
-pub use backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
+pub use backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 pub use client::{Mode, ShoalBackend};
 pub use conf::{ApiSettings, AuthSettings, Conf, RemoteSettings, ShoalSettings, TlsSettings};
 pub use memory::MemoryBackend;

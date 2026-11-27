@@ -55,6 +55,7 @@ mod decision;
 mod follow;
 mod history;
 mod loops;
+mod moving;
 mod remotes;
 mod revision;
 mod users;
@@ -63,6 +64,7 @@ mod work;
 pub use branches::{BranchProposal, BranchSet, KeptBranch, StoredBranch};
 pub use comment::{Followed, Pending};
 pub use history::BadCursor;
+pub use moving::{MoveProposal, MoveSet};
 pub use remotes::{KeptRemote, StoredRemote};
 pub use users::{StoredToken, StoredUser, UserDropped, UserKept};
 

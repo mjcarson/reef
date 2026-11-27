@@ -75,8 +75,8 @@ pub use error::{ApiError, ErrorCode};
 pub use history::{Edited, HISTORY_MAX, HistoryPage, HistoryQuery, Logged, LoopAct, UserAct};
 pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
 pub use node::{
-    Checked, Listing, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal, Rewrite, Rewritten,
-    StalePut, StoredNode, lift, puts_for, records,
+    Checked, Listing, MoveNodes, Moved, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal,
+    Renumbered, Rewrite, Rewritten, StalePut, StoredNode, lift, puts_for, records,
 };
 pub use page::{
     PLAN_PAGES_MAX_BYTES, PageEdit, PageEdited, PageListing, PageWrite, StoredPage, WRITE_BODY_MAX,

@@ -354,6 +354,26 @@ plan, as the plans themselves are.
   checkout still on one picks the plan and is told where it went. `--merged` reads where the
   old branch went from the checkout's own history, since a remote project's clone is shallow.
 
+## Moving nodes
+
+A node moved to another plan of its project ([C99](../milestones/m11.md)), everything of its own with it.
+
+### Design choices
+
+- **Copied under its new name, never pointed at.** A node's work record, revisions, files and
+  decisions are keyed by `plan/id`, and its comments numbered in its plan's partition. A move
+  copies each to the other plan's keys and deletes the old, rather than leaving a pointer that
+  every read would have to follow. A node added later under the old name then starts clean.
+- **Judged on both plans, so needs move whole.** Needs only work within a plan, so a move
+  that leaves a need across the two is refused, and a subtree or a group moves at once.
+- **Every step can run twice.** Copies are written where none is stored, a copied comment names
+  the one it came from, and the node joins the other plan before what it left is deleted and
+  before it leaves its own. A node in both plans whose newest edit is the same in both
+  histories is one a killed move left, so running the move again finishes it. A node added to
+  the other plan by hand under the same id never is, and is refused as taken.
+- **Locks in one order:** the project's queue, work, comment and decision locks, then both
+  plans' write locks by name, since other writes read a plan while holding a project's lock.
+
 ## History
 
 Who made each edit of a node, a page or a project's queue, and what it changed

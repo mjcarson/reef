@@ -88,7 +88,7 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `project` - The project whose decisions' lock to find
-    fn decision_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(super) fn decision_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
         // the map is only held to find or add the lock, never across a wait
         self.decisions
             .lock()

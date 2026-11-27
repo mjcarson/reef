@@ -10,7 +10,7 @@ use reef_service::schema::{
     PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
     WorkRow,
 };
-use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
+use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
@@ -58,6 +58,9 @@ pub struct Faults {
     /// Fail the next insert of a project row, before writing it, as a registration killed after
     /// its remote's row would be
     fail_project_insert: AtomicBool,
+    /// Fail the next delete of a moved node's rows, before deleting any, as a move killed after
+    /// its nodes joined the other plan would be
+    fail_row_deletes: AtomicBool,
     /// Fail the next write of edit rows, before writing any, as a history that couldn't keep
     fail_edit_write: AtomicBool,
 }
@@ -106,6 +109,11 @@ impl Faults {
     /// its new row and deleting its old one would
     pub fn fail_next_queue_delete(&self) {
         self.fail_queue_delete.store(true, Ordering::SeqCst);
+    }
+
+    /// Fails the next delete of a moved node's rows, before deleting any
+    pub fn fail_next_row_delete(&self) {
+        self.fail_row_deletes.store(true, Ordering::SeqCst);
     }
 
     /// Refuses the next write of a work row as moved, as a write from another process between
@@ -721,6 +729,19 @@ impl<B: Backend> Backend for Faulty<B> {
     /// * `expect` - What must be stored under its key
     async fn write_remote(&self, row: RemoteRow, expect: Expect) -> anyhow::Result<Written> {
         self.inner.write_remote(row, expect).await
+    }
+
+    /// Deletes rows by their full keys
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The keys of the rows to delete
+    async fn delete_rows(&self, rows: Vec<RowKey>) -> anyhow::Result<()> {
+        // a move killed once its nodes joined the other plan deletes nothing
+        if self.faults.fail_row_deletes.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("deleting a moved node's rows failed, as a fault asked");
+        }
+        self.inner.delete_rows(rows).await
     }
 
     /// Reads the branch rows of a project's plans

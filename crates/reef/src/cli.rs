@@ -554,6 +554,26 @@ pub enum NodeCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
+    /// Move the nodes named to another plan of the project, everything of theirs with them,
+    /// unless that breaks either plan
+    ///
+    /// A group moves with its members, and a node whose group stays behind joins `--group`, or
+    /// none. A need left across the two plans is refused, so a subtree of needs moves whole:
+    /// name each node of it, or the group that holds it.
+    Move {
+        /// The nodes to move, by id
+        #[arg(required = true)]
+        ids: Vec<String>,
+        /// The plan to move them to, by its name within the project
+        #[arg(long, value_name = "PLAN")]
+        to: String,
+        /// The group of that plan a node joins whose own group stays behind
+        #[arg(long, value_name = "ID")]
+        group: Option<String>,
+        /// The plan they are in, if not the one the checkout picks
+        #[command(flatten)]
+        pick: PlanPick,
+    },
     /// Remove the nodes named as one change, unless it breaks the plan
     ///
     /// A group goes only with its members named too, and a node another needs only once
@@ -1085,6 +1105,15 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Node(NodeCommand::Get { id, md, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;
             node::get(&client, &plan, &id, md, out).await
+        }
+        Command::Node(NodeCommand::Move {
+            ids,
+            to,
+            group,
+            pick,
+        }) => {
+            let plan = picked_plan(&client, cwd, &pick).await?;
+            node::move_nodes(&client, &plan, ids, &to, group, out).await
         }
         Command::Node(NodeCommand::Rm { ids, pick }) => {
             let plan = picked_plan(&client, cwd, &pick).await?;

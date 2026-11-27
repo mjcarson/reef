@@ -19,6 +19,8 @@ pub use super::history_cases::*;
 #[allow(unused_imports)]
 pub use super::loop_cases::*;
 #[allow(unused_imports)]
+pub use super::move_cases::*;
+#[allow(unused_imports)]
 pub use super::page_cases::*;
 #[allow(unused_imports)]
 pub use super::queue_cases::*;

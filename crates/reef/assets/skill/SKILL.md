@@ -169,6 +169,9 @@ If the work has no node, add one.
   node, change its `needs`, or ask the user to remove it.
 - Split a node when only part of it waits on something.
 - New work found along the way (a bug, a follow-up) gets its own node, not a note in a body.
+- A node that belongs in another plan of the project, such as a general fix taken up on another
+  branch, moves with `reef node move <ID>... --to <plan>`, its work and comments with it. Needs
+  stay within a plan, so name the whole subtree of needs, or its group, to move it at once.
 - Use status `blocked` when it is stuck, and say on what in its `details`.
 
 ## 4. When benchmarks are run

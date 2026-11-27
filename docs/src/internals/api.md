@@ -19,6 +19,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/nodes` | its `Listing` |
 | `POST …/plans/{plan}/nodes` `Puts` | `Checked`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/nodes/{id}` | the `StoredNode` |
+| `POST …/plans/{plan}/move` `MoveNodes` | `Moved`: 200 if they moved to the plan named, everything of theirs with them, 404 if one isn't in the plan, 409 if the other plan has its id or a loop holds it, 422 if either plan would gain a problem |
 | `GET …/plans/{plan}/nodes/{id}/history?older=&limit=` | a `HistoryPage` of the node's `Logged` edits, newest first, a node removed included |
 | `PUT …/plans/{plan}/revision` `PlanWrite` | `Rewrite`: 200, or 422 if it would add a problem |
 | `GET …/plans/{plan}/payload` | the viewer's `Payload` |

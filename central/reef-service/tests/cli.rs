@@ -4045,3 +4045,42 @@ async fn a_checkout_on_a_plans_old_branch_is_told_where_it_moved() -> anyhow::Re
     assert!(next.contains("S ") && !next.contains("A "), "{next}");
     Ok(())
 }
+
+/// `reef node move` moves a subtree of needs to another plan, says what moved, and refuses a
+/// node others left behind need, saying how to move it whole
+#[tokio::test]
+async fn node_move_moves_a_subtree_and_refuses_a_need_left_behind() -> anyhow::Result<()> {
+    let cx = Cx::new("node-move").await?;
+    let repo = cx.ax.repo.clone();
+    // `central`'s A, and B needing it, beside an empty `side`
+    cx.put("a.yml", &work("A", &[])).await?;
+    cx.put("b.yml", &work("B", &["A"])).await?;
+    cx.reef(&repo, &["plan", "new", "side"]).await?;
+    // A alone is refused, B left behind needing it
+    let (_, error) = cx
+        .failing(
+            &repo,
+            &["node", "move", "A", "--to", "side", "--plan", "central"],
+        )
+        .await?;
+    assert!(
+        error.starts_with("nothing moved, since the move would add these problems"),
+        "{error}"
+    );
+    assert!(error.contains("reef/central/B"), "{error}");
+    // both at once move, and `side` holds them
+    let out = cx
+        .reef(
+            &repo,
+            &[
+                "node", "move", "A", "B", "--to", "side", "--plan", "central",
+            ],
+        )
+        .await?;
+    assert_eq!(out, "moved `A`, `B` from `reef/central` to `reef/side`\n");
+    let got = cx
+        .reef(&repo, &["node", "get", "B", "--plan", "side"])
+        .await?;
+    assert!(got.contains("needs:\n- A\n"), "{got}");
+    Ok(())
+}

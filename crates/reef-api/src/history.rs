@@ -223,6 +223,13 @@ pub enum Edited {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<String>,
     },
+    /// The node moved from one plan of its project to another, its work and comments with it
+    Relisted {
+        /// The plan it left
+        from: String,
+        /// The plan it joined
+        to: String,
+    },
     /// A kind of edit a newer reef kept, which this one can't read
     #[serde(other)]
     Other,
@@ -315,6 +322,7 @@ impl Edited {
                 };
                 format!("follows {}, not {}", side(to), side(from))
             }
+            Edited::Relisted { from, to } => format!("moved from plan `{from}` to `{to}`"),
             Edited::Other => "an edit this reef can't read".to_string(),
         }
     }

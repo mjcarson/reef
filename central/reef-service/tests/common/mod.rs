@@ -17,6 +17,7 @@ pub mod git;
 pub mod history_cases;
 pub mod http;
 pub mod loop_cases;
+pub mod move_cases;
 pub mod page_cases;
 pub mod queue_cases;
 pub mod service_cases;

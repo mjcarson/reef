@@ -27,6 +27,7 @@ use reef_api::{
     StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
     WorkRecord, Writer, paths,
 };
+use reef_api::{MoveNodes, Moved};
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
 use std::path::Path;
@@ -362,6 +363,20 @@ impl Client {
         let path = paths::plans(&plan.project);
         let new = NewPlan::new(plan.plan.clone());
         let request = self.http.post(self.url(&path)).json(&new);
+        self.send(request, &path).await
+    }
+
+    /// Moves nodes of a plan to another plan of its project, everything of theirs with them
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan the nodes leave
+    /// * `request` - The nodes, the plan they join, and the group a node joins there whose own
+    ///   stays behind
+    pub async fn move_nodes(&self, plan: &PlanName, request: &MoveNodes) -> anyhow::Result<Moved> {
+        // posted to the plan they leave, which an older service has no route for
+        let path = paths::move_nodes(plan);
+        let request = self.http.post(self.url(&path)).json(request);
         self.send(request, &path).await
     }
 

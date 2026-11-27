@@ -38,6 +38,20 @@ is the twin's oracle.
   rows must never share one. A node beside another plan's entry is refused. Each edit is kept
   under `queue/<plan>` and under the project's `queue`, so the project's history still spans
   every plan.
+- **A move takes a node's rows with it** (`Store::move_nodes`, C99), under the project's queue,
+  work, comment and decision locks and both plans' write locks, judged on both plans. Each step
+  can run twice:
+  1. its work record, revisions, their files and decisions are copied to its new name where
+     none is stored, and its history is copied under its own keys;
+  2. its comments are copied with new numbers, each naming the one it came from, and those
+     left behind deleted;
+  3. the plan it joins is written;
+  4. what it left behind is deleted;
+  5. its own plan is written without it;
+  6. its queue entry moves to a rank just after its own.
+
+  A node in both plans with its newest edit the same in both histories is one a killed move
+  left, so running the move again finishes it.
 - **A node's work record is one row** (`Store::start_work`), in its project's partition by
   `plan/id`, so the node a worktree is on is the one started there last, across the project's
   plans. A start is written where no record is, or over the version of the one it replaces, and

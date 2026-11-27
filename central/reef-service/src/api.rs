@@ -115,7 +115,8 @@ use reef_api::{
     Transcript, User, UserAdded, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_api::{
-    HistoryPage, HistoryQuery, PasswordChange, PasswordChanged, TokenInfo, UserRemoved,
+    HistoryPage, HistoryQuery, MoveNodes, Moved, PasswordChange, PasswordChanged, TokenInfo,
+    UserRemoved,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -204,6 +205,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PLAN_QUEUE_HISTORY, get(plan_queue_history::<S>))
         .route(paths::NODES, get(list::<S>).post(put::<S>))
         .route(paths::NODE, get(node::<S>))
+        .route(paths::NODE_MOVE, axum::routing::post(move_nodes::<S>))
         .route(
             paths::REVISION,
             axum::routing::put(write_plan::<S>).layer(DefaultBodyLimit::max(WRITE_BODY_MAX)),
@@ -1207,6 +1209,37 @@ async fn plan<S: Serves>(
         Some(info) => Ok(Json(info)),
         None => Err(anyhow::Error::from(NotListed(plan)).into()),
     }
+}
+
+/// Moves nodes of a plan to another plan of its project: 200 if they moved, 404 if one isn't in
+/// the plan, 409 if the other plan has its id or a loop holds it, 422 if either plan would gain
+/// a problem
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, whom both plans' histories name as moving them
+/// * `segments` - The plan's project and name, the plan the nodes leave
+/// * `request` - The nodes, the plan they join, and the group a node whose own stays behind
+///   joins there
+#[instrument(name = "api::move_nodes", skip_all, err(Debug))]
+async fn move_nodes<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Segments(segments): Segments<PlanSegments>,
+    Body(request): Body<MoveNodes>,
+) -> Result<(StatusCode, Json<Moved>), Failure> {
+    let plan = segments.name()?;
+    // judged on both plans, under every lock the move needs
+    let asker = caller.asker();
+    let moved = serves.service().move_nodes(&plan, request, &asker).await?;
+    let status = match moved {
+        Moved::Applied { .. } => StatusCode::OK,
+        Moved::NotInPlan { .. } => StatusCode::NOT_FOUND,
+        Moved::Taken { .. } | Moved::Held { .. } => StatusCode::CONFLICT,
+        Moved::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(moved)))
 }
 
 /// Lists the branches a project's repo has, which its plans can follow

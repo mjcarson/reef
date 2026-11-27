@@ -50,7 +50,7 @@ use tracing::instrument;
 
 use super::follow::{follow_line, next_file};
 use super::{Store, Unkeepable, work::now_ms};
-use crate::backend::{Backend, Expect, Written};
+use crate::backend::{Backend, Expect, RowKey, Written};
 use crate::schema::CommentRow;
 
 /// What a comment row keeps as JSON: everything of a comment but its plan and number
@@ -71,6 +71,19 @@ struct Kept {
     body: String,
     /// Whether it starts a thread, replies in one, or is a review
     on: KeptOn,
+    /// The comment of another plan it was moved from with its node, if it was, so a move run
+    /// again never moves it twice
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<MovedFrom>,
+}
+
+/// Where a comment moved with its node was before
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct MovedFrom {
+    /// The plan it was in
+    plan: String,
+    /// Its number there
+    number: u32,
 }
 
 /// Whether a comment starts a thread, holding the thread's target and state, or replies in one
@@ -157,7 +170,7 @@ impl<B: Backend> Store<B> {
     /// # Arguments
     ///
     /// * `project` - The project whose comments' lock to find
-    fn comment_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(super) fn comment_lock(&self, project: &str) -> Arc<tokio::sync::Mutex<()>> {
         // the map is only held to find or add the lock, never across a wait
         self.comments
             .lock()
@@ -378,6 +391,7 @@ impl<B: Backend> Store<B> {
                 resolutions: Vec::new(),
                 marks: Vec::new(),
             },
+            from: None,
         };
         self.keep_comment(&node.plan, number, kept).await?;
         // the thread as it now stands, read back with the rest
@@ -439,6 +453,7 @@ impl<B: Backend> Store<B> {
             review,
             body: reply.body,
             on: KeptOn::Reply { thread },
+            from: None,
         };
         self.keep_comment(plan, number, kept).await?;
         // the thread as it now stands, the reply last in it
@@ -834,6 +849,106 @@ impl<B: Backend> Store<B> {
         Ok(file)
     }
 
+    /// Moves a node's comments, its threads, their replies and its reviews, from one plan's
+    /// partition to another's, each numbered anew after the other plan's last, and answers each
+    /// thread's number in both
+    ///
+    /// The caller holds the project's comment lock. Each copy names the comment it came from,
+    /// so a move run again after one killed partway copies none twice, and the comments left
+    /// behind are deleted once every copy is written.
+    ///
+    /// # Arguments
+    ///
+    /// * `from` - The plan the node leaves
+    /// * `to` - The plan it joins
+    /// * `id` - The node's id, which it keeps
+    #[instrument(name = "Store::move_comments_held", skip_all, err(Debug))]
+    pub(super) async fn move_comments_held(
+        &self,
+        from: &PlanName,
+        to: &PlanName,
+        id: &str,
+    ) -> anyhow::Result<Vec<(u32, u32)>> {
+        // the node's comments where it was, and every comment where it goes
+        let leaving: Vec<Read> = self
+            .comment_rows(from)
+            .await?
+            .into_iter()
+            .filter(|(_, _, kept)| kept.node == id)
+            .collect();
+        let there = self.comment_rows(to).await?;
+        // each already copied by a move before, by the number it had
+        let mut numbers: BTreeMap<u32, u32> = there
+            .iter()
+            .filter_map(|(number, _, kept)| {
+                kept.from
+                    .as_ref()
+                    .filter(|moved| moved.plan == from.plan)
+                    .map(|moved| (moved.number, *number))
+            })
+            .collect();
+        // and a number of its own for each not copied yet, after the other plan's last
+        let mut next = next_number(&there)?;
+        for (number, _, _) in &leaving {
+            if !numbers.contains_key(number) {
+                numbers.insert(*number, next);
+                next = next.checked_add(1).ok_or_else(|| {
+                    anyhow::anyhow!("a plan can hold no more than {} comments", u32::MAX)
+                })?;
+            }
+        }
+        let copied: HashSet<u32> = there
+            .iter()
+            .filter_map(|(_, _, kept)| kept.from.as_ref())
+            .filter(|moved| moved.plan == from.plan)
+            .map(|moved| moved.number)
+            .collect();
+        // each not copied yet, its thread and review named by their new numbers
+        for (number, version, kept) in &leaving {
+            if copied.contains(number) {
+                continue;
+            }
+            let renumber = |old: u32| numbers.get(&old).copied().unwrap_or(old);
+            let mut moved = kept.clone();
+            moved.review = kept.review.map(renumber);
+            if let KeptOn::Reply { thread } = &mut moved.on {
+                *thread = renumber(*thread);
+            }
+            moved.from = Some(MovedFrom {
+                plan: from.plan.clone(),
+                number: *number,
+            });
+            let row = comment_row(to, renumber(*number), *version, &moved)?;
+            if let Written::Refused(refusal) =
+                self.backend.write_comment(row, Expect::Absent).await?
+            {
+                anyhow::bail!(
+                    "comment {} of `{to}` was written by another process while `{id}`'s comments \
+                     moved there ({refusal:?})",
+                    renumber(*number)
+                );
+            }
+        }
+        // then the ones left behind go, if it left any
+        let gone: Vec<RowKey> = leaving
+            .iter()
+            .map(|(number, _, _)| RowKey::Comment {
+                project: from.project.clone(),
+                plan: from.plan.clone(),
+                number: sort_key(*number),
+            })
+            .collect();
+        if !gone.is_empty() {
+            self.backend.delete_rows(gone).await?;
+        }
+        // each thread's number in both plans
+        Ok(leaving
+            .iter()
+            .filter(|(_, _, kept)| matches!(kept.on, KeptOn::Thread { .. }))
+            .map(|(number, _, _)| (*number, numbers[number]))
+            .collect())
+    }
+
     /// Reads every comment row of a plan, in number order, each checked against its full key
     ///
     /// # Arguments
@@ -949,6 +1064,7 @@ impl<B: Backend> Store<B> {
                 marked_at: None,
                 marked_by: Author::default(),
             },
+            from: None,
         };
         self.keep_comment(plan, number, review).await?;
         *next = number
@@ -1335,6 +1451,7 @@ mod tests {
                 resolutions: Vec::new(),
                 marks: Vec::new(),
             },
+            from: None,
         }
     }
 
@@ -1431,6 +1548,102 @@ mod tests {
         // and a comment in no review says nothing of one
         let kept = serde_json::to_string(&general("C34"))?;
         assert!(!kept.contains("review"), "{kept}");
+        Ok(())
+    }
+
+    /// A node's comments moved to another plan are numbered anew after that plan's last: a
+    /// thread, a review and a reply written in the review following their new numbers, each
+    /// naming where it came from, the plan they left keeping none, and a move run again moving
+    /// none twice
+    #[tokio::test]
+    async fn moved_comments_are_numbered_anew_their_replies_and_reviews_following()
+    -> anyhow::Result<()> {
+        // `side` holds X's comment 1; `central` holds C1's review 1, its thread 2, the thread's
+        // reply 3 written in the review, and D's thread 4, which stays
+        let store = Store::memory();
+        let (central, side) = (
+            PlanName::new("reef", "central")?,
+            PlanName::new("reef", "side")?,
+        );
+        let rows = [
+            (
+                "side",
+                1,
+                r#"{"node":"X","at":1,"body":"On X.","on":{"thread":{"target":{"on":"node"},"state":"open"}}}"#,
+            ),
+            (
+                "central",
+                1,
+                r#"{"node":"C1","at":2,"body":"","on":{"review":{"state":"submitted"}}}"#,
+            ),
+            (
+                "central",
+                2,
+                r#"{"node":"C1","at":3,"body":"Why?","on":{"thread":{"target":{"on":"node"},"state":"open"}}}"#,
+            ),
+            (
+                "central",
+                3,
+                r#"{"node":"C1","at":4,"review":1,"body":"Because.","on":{"reply":{"thread":2}}}"#,
+            ),
+            (
+                "central",
+                4,
+                r#"{"node":"D","at":5,"body":"On D.","on":{"thread":{"target":{"on":"node"},"state":"open"}}}"#,
+            ),
+        ];
+        for (plan, number, record) in rows {
+            let row = crate::schema::CommentRow {
+                project: "reef".to_string(),
+                plan: plan.to_string(),
+                number: sort_key(number),
+                version: 1,
+                record: record.to_string(),
+            };
+            store.backend().plant_comment("reef", plan, row);
+        }
+        // moved, C1's thread is 3 in `side`, after X's and its review's
+        let threads = store.move_comments_held(&central, &side, "C1").await?;
+        assert_eq!(threads, [(2, 3)]);
+        // the review is 2, the thread 3 and the reply 4, naming its thread and review anew
+        let moved: Vec<(u32, Kept)> = store
+            .comment_rows(&side)
+            .await?
+            .into_iter()
+            .filter(|(_, _, kept)| kept.node == "C1")
+            .map(|(number, _, kept)| (number, kept))
+            .collect();
+        let numbers: Vec<u32> = moved.iter().map(|(number, _)| *number).collect();
+        assert_eq!(numbers, [2, 3, 4]);
+        let reply = &moved[2].1;
+        assert_eq!(reply.on, KeptOn::Reply { thread: 3 });
+        assert_eq!(reply.review, Some(2));
+        let from: Vec<u32> = moved
+            .iter()
+            .filter_map(|(_, kept)| kept.from.as_ref().map(|moved| moved.number))
+            .collect();
+        assert_eq!(from, [1, 2, 3]);
+        // and served as one thread of two comments under its new number
+        let served = store
+            .node_threads(&side.node("C1")?, Pending::Leave)
+            .await?;
+        assert_eq!(served.len(), 1);
+        assert_eq!((served[0].number, served[0].comments.len()), (3, 2));
+        // `central` keeps D's alone, and a move run again moves nothing twice
+        let left: Vec<u32> = store
+            .comment_rows(&central)
+            .await?
+            .into_iter()
+            .map(|(number, _, _)| number)
+            .collect();
+        assert_eq!(left, [4]);
+        assert!(
+            store
+                .move_comments_held(&central, &side, "C1")
+                .await?
+                .is_empty()
+        );
+        assert_eq!(store.comment_rows(&side).await?.len(), 4);
         Ok(())
     }
 

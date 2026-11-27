@@ -107,6 +107,9 @@ pub const NODES: &str = "/api/v1/projects/{project}/plans/{plan}/nodes";
 /// One node of a plan
 pub const NODE: &str = "/api/v1/projects/{project}/plans/{plan}/nodes/{id}";
 
+/// A plan's nodes moved to another plan of its project, by `POST`
+pub const NODE_MOVE: &str = "/api/v1/projects/{project}/plans/{plan}/move";
+
 /// A plan's current revision, replaced whole by `PUT`
 pub const REVISION: &str = "/api/v1/projects/{project}/plans/{plan}/revision";
 
@@ -412,6 +415,15 @@ pub fn plan(plan: &PlanName) -> String {
 /// * `plan` - The plan's full name
 pub fn plan_branch(plan: &PlanName) -> String {
     format!("{}/branch", self::plan(plan))
+}
+
+/// The path nodes of a plan are moved from, to another plan
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn move_nodes(plan: &PlanName) -> String {
+    format!("{}/move", self::plan(plan))
 }
 
 /// The path of a plan's own queue

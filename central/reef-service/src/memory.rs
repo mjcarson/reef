@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
+use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use crate::schema::{
     CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanBranchRow,
     PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
@@ -64,6 +64,29 @@ struct Tables {
     edits: BTreeMap<SubjectPartition, BTreeMap<String, EditRow>>,
     /// Each project's plans' branches, by plan name
     plan_branches: BTreeMap<String, BTreeMap<String, PlanBranchRow>>,
+}
+
+/// Removes a row from a table by its partition and sort key, and the partition with it once
+/// it is empty, as one never written
+///
+/// # Arguments
+///
+/// * `table` - The table's partitions
+/// * `partition` - The row's partition
+/// * `sort` - The row's sort key
+fn remove_from<P: Ord + Clone, R>(
+    table: &mut BTreeMap<P, BTreeMap<String, R>>,
+    partition: &P,
+    sort: &str,
+) {
+    // a row not stored deletes nothing
+    let Some(rows) = table.get_mut(partition) else {
+        return;
+    };
+    rows.remove(sort);
+    if rows.is_empty() {
+        table.remove(partition);
+    }
 }
 
 /// reef's rows in memory, shared by every clone of this
@@ -1084,6 +1107,56 @@ impl Backend for MemoryBackend {
         }
         partition.insert(row.project.clone(), row);
         Ok(Written::Applied)
+    }
+
+    /// Deletes rows by their full keys, a row not stored deleting nothing
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The keys of the rows to delete
+    async fn delete_rows(&self, rows: Vec<RowKey>) -> anyhow::Result<()> {
+        let mut tables = self.tables();
+        for row in rows {
+            match row {
+                RowKey::Work { project, node } => {
+                    remove_from(&mut tables.work, &project, &node);
+                }
+                RowKey::Revision {
+                    project,
+                    node,
+                    revision,
+                } => {
+                    remove_from(&mut tables.revisions, &(project, node), &revision);
+                }
+                RowKey::RevisionFile {
+                    project,
+                    node,
+                    revision,
+                    path,
+                } => {
+                    remove_from(
+                        &mut tables.revision_files,
+                        &(project, node, revision),
+                        &path,
+                    );
+                }
+                RowKey::Comment {
+                    project,
+                    plan,
+                    number,
+                } => {
+                    remove_from(&mut tables.comments, &(project, plan), &number);
+                }
+                RowKey::Decision {
+                    project,
+                    node,
+                    number,
+                } => {
+                    remove_from(&mut tables.decisions, &(project, node), &number);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Reads the branch rows of a project's plans, in plan order

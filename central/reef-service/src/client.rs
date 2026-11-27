@@ -10,18 +10,19 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use tracing::instrument;
 
-use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, Written};
+use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    CommentRow, CommentRowFilter, CommentRowGet, DecisionRow, DecisionRowFilter, DecisionRowGet,
-    EditRow, EditRowGet, LOOPS, LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey,
-    NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete,
-    PageRowFilter, PageRowGet, PlanBranchRow, PlanBranchRowFilter, PlanBranchRowGet, PlanRow,
-    PlanRowFilter, PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete,
-    QueueRowFilter, QueueRowGet, REMOTES, ReefClient, ReefQueryKinds, RemoteRow, RemoteRowFilter,
-    RemoteRowGet, RevisionFileRow, RevisionFileRowGet, RevisionRow, RevisionRowFilter,
+    CommentRow, CommentRowDelete, CommentRowFilter, CommentRowGet, DecisionRow, DecisionRowDelete,
+    DecisionRowFilter, DecisionRowGet, EditRow, EditRowGet, LOOPS, LoopRow, LoopRowDelete,
+    LoopRowFilter, LoopRowGet, NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet,
+    PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter, PageRowGet, PlanBranchRow,
+    PlanBranchRowFilter, PlanBranchRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate,
+    ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES,
+    ReefClient, ReefQueryKinds, RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow,
+    RevisionFileRowDelete, RevisionFileRowGet, RevisionRow, RevisionRowDelete, RevisionRowFilter,
     RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter, TokenRowGet, USERS, UserRow,
-    UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowFilter, WorkRowGet,
+    UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowDelete, WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -1013,6 +1014,72 @@ impl Backend for ShoalBackend {
             }
         };
         written(sent)
+    }
+
+    /// Deletes rows by their full keys, in one bundle, a row not stored deleting nothing
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The keys of the rows to delete
+    #[instrument(name = "ShoalBackend::delete_rows", skip_all, err(Debug))]
+    async fn delete_rows(&self, rows: Vec<RowKey>) -> anyhow::Result<()> {
+        // nothing to send is nothing to check
+        if rows.is_empty() {
+            return Ok(());
+        }
+        // one bundle of deletes, each by its row's full key
+        let mut bundle = self.client.query();
+        for row in rows {
+            match row {
+                RowKey::Work { project, node } => {
+                    bundle.add_mut(WorkRowDelete::new(project, node));
+                }
+                RowKey::Revision {
+                    project,
+                    node,
+                    revision,
+                } => {
+                    bundle.add_mut(RevisionRowDelete::new(project, node, revision));
+                }
+                RowKey::RevisionFile {
+                    project,
+                    node,
+                    revision,
+                    path,
+                } => {
+                    bundle.add_mut(RevisionFileRowDelete::new(project, node, revision, path));
+                }
+                RowKey::Comment {
+                    project,
+                    plan,
+                    number,
+                } => {
+                    bundle.add_mut(CommentRowDelete::new(project, plan, number));
+                }
+                RowKey::Decision {
+                    project,
+                    node,
+                    number,
+                } => {
+                    bundle.add_mut(DecisionRowDelete::new(project, node, number));
+                }
+            }
+        }
+        match self.client.exec(bundle).await {
+            Ok(_) => Ok(()),
+            // a delete that found nothing to delete worked, so a delete tried again is harmless
+            Err(Errors::QueryDidNotSucceed { .. }) => Ok(()),
+            Err(Errors::BulkErrors(errors))
+                if errors
+                    .iter()
+                    .all(|error| matches!(error, Errors::QueryDidNotSucceed { .. })) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(anyhow::anyhow!(
+                "deleting a moved node's rows failed: {error:?}"
+            )),
+        }
     }
 
     /// Reads the branch rows of a project's plans, in plan order

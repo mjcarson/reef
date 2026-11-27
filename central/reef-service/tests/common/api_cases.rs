@@ -15,7 +15,7 @@ use reef_api::{
     StoredNode, StoredPage, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord,
     paths,
 };
-use reef_api::{BranchFetched, Branched, PlanBranch};
+use reef_api::{BranchFetched, Branched, MoveNodes, Moved, PlanBranch};
 use reef_api::{MarkReview, Review, ReviewState, Reviewed, Writer};
 use reef_model::{
     Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
@@ -2507,7 +2507,7 @@ pub async fn each_plans_queue_keeps_its_own_history<B: Backend + 'static>(
     };
     let (_, central): (_, QueueListing) = ax.client.get(&paths::plan_queue(&ax.plan)).await?;
     assert_eq!(names(&central), ["reef/central/A"]);
-    assert_eq!(central.plans, [ax.plan.clone()]);
+    assert_eq!(central.plans, std::slice::from_ref(&ax.plan));
     let (_, theirs): (_, QueueListing) = ax.client.get(&paths::plan_queue(&other)).await?;
     assert_eq!(names(&theirs), ["reef/other/X"]);
     let (_, all): (_, QueueListing) = ax.client.get(&paths::queue("reef")).await?;
@@ -2577,6 +2577,388 @@ pub async fn a_projects_branches_are_listed<B: Backend + 'static>(ax: Ax<B>) -> 
     assert_eq!(
         (status, error.code),
         (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
+    );
+    Ok(())
+}
+
+/// Moves nodes of the case's plan to another of its project, through the route
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+/// * `ids` - The nodes to move
+/// * `to` - The plan to move them to
+/// * `group` - The group there a node joins whose own stays behind
+async fn move_to<B: Backend + 'static>(
+    ax: &Ax<B>,
+    ids: &[&str],
+    to: &str,
+    group: Option<&str>,
+) -> anyhow::Result<(StatusCode, Moved)> {
+    let request = MoveNodes {
+        ids: ids.iter().map(|id| id.to_string()).collect(),
+        to: to.to_string(),
+        group: group.map(str::to_string),
+    };
+    ax.client.post(&paths::move_nodes(&ax.plan), &request).await
+}
+
+/// A node moved to another plan takes everything of its with it: its spec, its work record, its
+/// revisions and their files, its threads numbered anew after the other plan's, their replies,
+/// its decisions, its history and its queue entry, all of it read under its new name and none
+/// under its old
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn a_moved_node_takes_everything_with_it<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // `side`, whose X has a thread already, so a moved thread is numbered after it
+    let side = PlanName::new("reef", "side")?;
+    let (_, _): (_, AddedPlan) = ax
+        .client
+        .post(&paths::plans("reef"), &NewPlan::new("side"))
+        .await?;
+    let (status, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&side), &one(work("X", &[], 0), None))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let general = NewThread {
+        target: Target::Node,
+        body: "On X.".to_string(),
+        by: Writer::User,
+        review: false,
+    };
+    let (status, _): (_, Commented) = ax
+        .client
+        .post(&paths::node_comments(&side.node("X")?), &general)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    // C1 of `central`, started, captured once, with a thread on its line and one on it replied
+    // to, a decision and a queue entry
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("C1", &[], 0), None))
+        .await?;
+    let node = ax.plan.node("C1")?;
+    let start = StartWork {
+        start: start_in(&ax.repo, "C1", 'a'),
+        replaces: None,
+    };
+    let (_, started): (_, Started) = ax.client.post(&paths::node_work(&node), &start).await?;
+    let Started::Recorded { record, .. } = started else {
+        anyhow::bail!("the start wasn't recorded: {started:?}");
+    };
+    let add = AddCapture {
+        pinned: record.start.pinned.clone(),
+        shas: CaptureShas {
+            head: "d".repeat(40),
+            tree: "e".repeat(40),
+            merge_base: None,
+            base: record.start.start_tree.clone(),
+        },
+        conflicts: Vec::new(),
+        files: vec![added_file("src/a.rs", "one\ntwo\n")],
+        resolves: Vec::new(),
+        draft: false,
+        commits: Vec::new(),
+    };
+    let (status, _): (_, Captured) = ax.client.post(&paths::captures(&node), &add).await?;
+    assert_eq!(status, StatusCode::OK);
+    let on_line = NewThread {
+        target: Target::Line(Anchor {
+            revision: 1,
+            path: "src/a.rs".to_string(),
+            side: Side::New,
+            line: 2,
+        }),
+        body: "Why two?".to_string(),
+        by: Writer::User,
+        review: false,
+    };
+    let (status, _): (_, Commented) = ax
+        .client
+        .post(&paths::node_comments(&node), &on_line)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let on_node = NewThread {
+        target: Target::Node,
+        body: "Looks right.".to_string(),
+        by: Writer::User,
+        review: false,
+    };
+    let (_, commented): (_, Commented) = ax
+        .client
+        .post(&paths::node_comments(&node), &on_node)
+        .await?;
+    let Commented::Added { comment, .. } = commented else {
+        anyhow::bail!("the thread wasn't kept: {commented:?}");
+    };
+    let reply = NewReply {
+        body: "Agreed.".to_string(),
+        by: Writer::User,
+        review: false,
+    };
+    let (status, _): (_, Commented) = ax
+        .client
+        .post(&paths::replies(&ax.plan, comment), &reply)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let decided = reef_api::Decided {
+        call: "call-1".to_string(),
+        session: "s1".to_string(),
+        via: reef_api::Via::Terminal,
+        asked_at: 1_000,
+        answered_at: None,
+        kind: reef_api::DecisionKind::Plan {
+            plan: "# Plan".to_string(),
+            html: String::new(),
+        },
+        outcome: None,
+        author: reef_api::Author::default(),
+    };
+    let record_decisions = reef_api::RecordDecisions {
+        decisions: vec![decided],
+    };
+    let (status, _): (_, reef_api::DecisionsRecorded) = ax
+        .client
+        .post(&paths::node_decisions(&node), &record_decisions)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let queue = QueueEdit::Add {
+        node: node.clone(),
+        at: Place::Bottom,
+    };
+    let (_, _): (_, Queued) = ax.client.post(&paths::queue("reef"), &queue).await?;
+    // moved to `side`, its threads numbered after X's
+    let (status, moved) = move_to(&ax, &["C1"], "side", None).await?;
+    assert_eq!(status, StatusCode::OK, "{moved:?}");
+    let Moved::Applied { nodes, threads, .. } = moved else {
+        anyhow::bail!("the move wasn't applied: {moved:?}");
+    };
+    assert_eq!(nodes, ["C1"]);
+    let renumbered: Vec<(u32, u32)> = threads.iter().map(|t| (t.from, t.to)).collect();
+    assert_eq!(renumbered, [(1, 2), (2, 3)]);
+    // gone from `central`, everything of its under `side`'s name
+    let moved_node = side.node("C1")?;
+    let (status, _): (_, ApiError) = ax.client.get(&paths::node(&ax.plan, "C1")).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, stored): (_, StoredNode) = ax.client.get(&paths::node(&side, "C1")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored.spec.id, "C1");
+    let (status, work): (_, WorkRecord) = ax.client.get(&paths::node_work(&moved_node)).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(work.start.start, record.start.start);
+    assert_eq!(work.node, moved_node);
+    let (_, revisions): (_, Vec<Revision>) = ax.client.get(&paths::revisions(&moved_node)).await?;
+    assert_eq!(revisions.len(), 1);
+    let (_, file): (_, FileDiff) = ax
+        .client
+        .get(&paths::revision_file(&moved_node, 1, "src/a.rs"))
+        .await?;
+    assert_eq!(file.new_path.as_deref(), Some("src/a.rs"));
+    let (_, left): (_, Vec<Revision>) = ax.client.get(&paths::revisions(&node)).await?;
+    assert!(left.is_empty(), "{left:?}");
+    // its threads, under their new numbers, the reply with its thread, the line's anchor kept
+    let (_, moved_threads): (_, Vec<Thread>) =
+        ax.client.get(&paths::node_comments(&moved_node)).await?;
+    let shapes: Vec<(u32, usize, bool)> = moved_threads
+        .iter()
+        .map(|thread| {
+            (
+                thread.number,
+                thread.comments.len(),
+                matches!(thread.target, Target::Line(_)),
+            )
+        })
+        .collect();
+    assert_eq!(shapes, [(2, 1, true), (3, 2, false)]);
+    let (_, left): (_, Vec<Thread>) = ax.client.get(&paths::plan_comments(&ax.plan)).await?;
+    assert!(left.is_empty(), "{left:?}");
+    // its decision, its history with both plans' moves, and its queue entry
+    let (_, decisions): (_, Vec<reef_api::Decision>) =
+        ax.client.get(&paths::node_decisions(&moved_node)).await?;
+    assert_eq!(decisions.len(), 1);
+    let (_, history): (_, HistoryPage) = ax.client.get(&paths::node_history(&moved_node)).await?;
+    let told: Vec<String> = history
+        .edits
+        .iter()
+        .map(|logged| logged.describe())
+        .collect();
+    assert!(
+        told.iter()
+            .any(|said| said == "moved from plan `central` to `side`"),
+        "{told:?}"
+    );
+    assert!(told.iter().any(|said| said == "added"), "{told:?}");
+    let (_, theirs): (_, QueueListing) = ax.client.get(&paths::plan_queue(&side)).await?;
+    let queued: Vec<String> = theirs
+        .entries
+        .iter()
+        .map(|listed| listed.entry.node.to_string())
+        .collect();
+    assert_eq!(queued, ["reef/side/C1"]);
+    let (_, ours): (_, QueueListing) = ax.client.get(&paths::plan_queue(&ax.plan)).await?;
+    assert!(ours.entries.is_empty(), "{:?}", ours.entries);
+    Ok(())
+}
+
+/// A move that would leave a need across the plans is refused, the whole subtree moved at once
+/// is taken, a group moves with its members, and a node whose group stays behind joins the
+/// group named
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn a_subtree_moves_whole_and_groups_with_their_members<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // `central`: A, B needing A, C needing B, and group G holding M1 and M2
+    let side = PlanName::new("reef", "side")?;
+    let (_, _): (_, AddedPlan) = ax
+        .client
+        .post(&paths::plans("reef"), &NewPlan::new("side"))
+        .await?;
+    // G says why and what, so it is work of its own once its members are gone
+    let group = work("G", &[], 3);
+    let mut members = Vec::new();
+    for (i, id) in ["M1", "M2"].iter().enumerate() {
+        let mut member = work(id, &[], 4 + i as u64);
+        member.spec.group = Some("G".to_string());
+        members.push(member);
+    }
+    let mut puts = vec![
+        work("A", &[], 0),
+        work("B", &["A"], 1),
+        work("C", &["B"], 2),
+        group,
+    ];
+    puts.extend(members);
+    let batch = Puts::new(
+        puts.into_iter()
+            .map(|node| NodePut::new(node, None))
+            .collect(),
+    );
+    let (status, checked): (_, Checked) = ax.client.post(&paths::nodes(&ax.plan), &batch).await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    // `side` has a group of its own, H
+    let mut holder = work("H", &[], 0);
+    holder.spec.description = None;
+    let mut inside = work("H1", &[], 1);
+    inside.spec.group = Some("H".to_string());
+    let batch = Puts::new(vec![NodePut::new(holder, None), NodePut::new(inside, None)]);
+    let (status, checked): (_, Checked) = ax.client.post(&paths::nodes(&side), &batch).await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    // B alone is refused: C, left behind, needs it, and it needs A, left behind too
+    let (status, moved) = move_to(&ax, &["B"], "side", None).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{moved:?}");
+    let Moved::Refused(problems) = moved else {
+        anyhow::bail!("moving B alone was taken: {moved:?}");
+    };
+    let said: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert!(
+        said.iter().any(|line| line.contains("reef/central/C")),
+        "{said:?}"
+    );
+    assert!(
+        said.iter().any(|line| line.contains("reef/side/B")),
+        "{said:?}"
+    );
+    // the whole subtree at once is taken
+    let (status, moved) = move_to(&ax, &["A", "B", "C"], "side", None).await?;
+    assert_eq!(status, StatusCode::OK, "{moved:?}");
+    // a group moves with its members, named by the group alone
+    let (status, moved) = move_to(&ax, &["G"], "side", None).await?;
+    assert_eq!(status, StatusCode::OK, "{moved:?}");
+    let Moved::Applied {
+        nodes, regrouped, ..
+    } = moved
+    else {
+        anyhow::bail!("moving G wasn't applied: {moved:?}");
+    };
+    assert_eq!(nodes, ["G", "M1", "M2"]);
+    assert!(regrouped.is_empty(), "{regrouped:?}");
+    // a member moved alone, its own group staying behind, joins no group with none named
+    let (status, moved): (_, Moved) = ax
+        .client
+        .post(
+            &paths::move_nodes(&side),
+            &MoveNodes {
+                ids: vec!["M2".to_string()],
+                to: "central".to_string(),
+                group: None,
+            },
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{moved:?}");
+    let Moved::Applied { regrouped, .. } = moved else {
+        anyhow::bail!("moving M2 back wasn't applied: {moved:?}");
+    };
+    assert_eq!(regrouped, ["M2"]);
+    let (_, stored): (_, StoredNode) = ax.client.get(&paths::node(&ax.plan, "M2")).await?;
+    assert_eq!(stored.spec.group, None);
+    // and joins the group named where one is
+    let (status, moved): (_, Moved) = ax
+        .client
+        .post(
+            &paths::move_nodes(&side),
+            &MoveNodes {
+                ids: vec!["M1".to_string()],
+                to: "central".to_string(),
+                group: Some("M2".to_string()),
+            },
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{moved:?}");
+    let Moved::Applied { regrouped, .. } = moved else {
+        anyhow::bail!("moving M1 wasn't applied: {moved:?}");
+    };
+    assert_eq!(regrouped, ["M1"]);
+    let (_, stored): (_, StoredNode) = ax.client.get(&paths::node(&ax.plan, "M1")).await?;
+    assert_eq!(stored.spec.group.as_deref(), Some("M2"));
+    // and each plan holds what moved to it
+    let (_, listing): (_, Listing) = ax.client.get(&paths::nodes(&side)).await?;
+    let mut ids: Vec<String> = listing
+        .nodes
+        .iter()
+        .map(|node| node.spec.id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["A", "B", "C", "G", "H", "H1"]);
+    let (_, listing): (_, Listing) = ax.client.get(&paths::nodes(&ax.plan)).await?;
+    let mut ids: Vec<String> = listing
+        .nodes
+        .iter()
+        .map(|node| node.spec.id.clone())
+        .collect();
+    ids.sort();
+    assert_eq!(ids, ["M1", "M2"]);
+    // a node the other plan has by its id is taken, and one not in the plan isn't there
+    let (_, _): (_, Checked) = ax
+        .client
+        .post(&paths::nodes(&ax.plan), &one(work("A", &[], 0), None))
+        .await?;
+    let (status, moved) = move_to(&ax, &["A"], "side", None).await?;
+    assert_eq!(
+        (status, &moved),
+        (
+            StatusCode::CONFLICT,
+            &Moved::Taken {
+                ids: vec!["A".to_string()]
+            }
+        )
+    );
+    let (status, moved) = move_to(&ax, &["Z"], "side", None).await?;
+    assert_eq!(
+        (status, &moved),
+        (
+            StatusCode::NOT_FOUND,
+            &Moved::NotInPlan {
+                ids: vec!["Z".to_string()]
+            }
+        )
     );
     Ok(())
 }

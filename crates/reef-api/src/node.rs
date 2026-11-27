@@ -9,7 +9,7 @@
 //! `{"applied":{"versions":[1]}}` or `{"refused":[...]}`.
 
 use crate::page::PageWrite;
-use reef_model::{Diagnostic, NameError, NodeSpec, Origin, PlanName, Record};
+use reef_model::{Diagnostic, NameError, NodeName, NodeSpec, Origin, PlanName, Record};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -348,6 +348,65 @@ pub enum Checked {
     /// Some puts found their nodes other than their writers read them, so nothing was written
     Stale(Vec<StalePut>),
     /// The check found problems the puts would add, so nothing was written
+    Refused(Vec<Diagnostic>),
+}
+
+/// A request to move nodes of a plan to another plan of its project, each with its work, its
+/// revisions, its comments, its decisions, its history and its queue entry
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveNodes {
+    /// The nodes to move, by id: a group named moves with its members
+    pub ids: Vec<String>,
+    /// The plan to move them to, by its name within the project
+    pub to: String,
+    /// The group of that plan a node joins whose own group stays behind, or `None` for none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+/// A thread a move numbered anew in its new plan
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Renumbered {
+    /// Its number in the plan it left
+    pub from: u32,
+    /// Its number in the plan it joined
+    pub to: u32,
+}
+
+/// What came of moving nodes to another plan
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Moved {
+    /// They were moved, everything of theirs with them
+    Applied {
+        /// Every node moved, by id, a group's members among them
+        nodes: Vec<String>,
+        /// The nodes whose group stayed behind, which joined the group named, or none
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        regrouped: Vec<String>,
+        /// Each of their threads, numbered anew in the plan they joined
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        threads: Vec<Renumbered>,
+    },
+    /// Some nodes named aren't in the plan they move from, so nothing moved
+    NotInPlan {
+        /// Their ids
+        ids: Vec<String>,
+    },
+    /// The plan they move to has nodes of those ids already, so nothing moved
+    Taken {
+        /// Their ids
+        ids: Vec<String>,
+    },
+    /// A terminal loop holds a node named, so nothing moved until it lets go
+    Held {
+        /// The node held
+        node: NodeName,
+        /// The pane whose loop holds it, as a person would name it
+        pane: String,
+    },
+    /// The move would add problems to either plan, such as a need left across the two, so
+    /// nothing moved
     Refused(Vec<Diagnostic>),
 }
 
