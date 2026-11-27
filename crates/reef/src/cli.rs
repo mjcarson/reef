@@ -60,6 +60,7 @@
 //! reef skill [DIR] [--print]
 //! reef claude install [DIR]
 //! reef version [--json]
+//! reef [--conf PATH] update [--check] [--force]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -86,7 +87,9 @@
 //! install` into the checkout that holds its directory, and neither needs reef's config or its
 //! service, nor does `version`, which prints the build this binary is. Every command sends the token `login` kept for the service, from the file
 //! `--credentials` names, else `$REEF_TOKEN`, else the file `$REEF_CREDENTIALS` names, else
-//! `$XDG_CONFIG_HOME/reef/credentials.toml`.
+//! `$XDG_CONFIG_HOME/reef/credentials.toml`. A stamped `reef` that reads a newer build of
+//! itself in an answer starts `reef update --auto` in the background, unless `[client] update`
+//! is false, and `update` swaps this binary for the service's build by hand.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::work::on_worktree;
@@ -455,6 +458,25 @@ pub enum Command {
         /// `target`
         #[arg(long)]
         json: bool,
+    },
+    /// Replace this `reef` with the build the service hands its users, if it is newer
+    ///
+    /// A stamped `reef` does this by itself, in the background, when an answer names a newer
+    /// build, unless `[client] update = false`. A build `cargo install` made is replaced only by
+    /// hand. A reefadm release's own `reef` is left to `reefadm upgrade`.
+    Update {
+        /// Only say whether the service hands out a newer build, installing nothing
+        #[arg(long, conflicts_with = "force")]
+        check: bool,
+        /// Install the service's build even if it isn't newer than this one
+        #[arg(long)]
+        force: bool,
+        /// Run as the updater a command starts: quietly, newer builds alone
+        #[arg(long, hide = true, conflicts_with_all = ["check", "force"])]
+        auto: bool,
+        /// Replace this file instead of this binary
+        #[arg(long, hide = true, value_name = "PATH")]
+        into: Option<PathBuf>,
     },
 }
 
@@ -1456,7 +1478,16 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             // and the inbox of a follower of its Claude Code process, if one follows it
             let inbox = here.pid.and_then(|pid| follow::inbox_of(var, pid).ok());
             let input = stdin()?;
-            loops::session_start(&client, &input, &here.pane, here.pid, inbox.as_deref(), out).await
+            loops::session_start(
+                &client,
+                &input,
+                cwd,
+                &here.pane,
+                here.pid,
+                inbox.as_deref(),
+                out,
+            )
+            .await
         }
         Command::Hook(HookCommand::PostCommit) => hook::post_commit(&client, cwd, out).await,
         Command::Hook(HookCommand::PostRewrite { kind }) => {
@@ -1614,6 +1645,24 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         }
         Command::Token(TokenCommand::Revoke { ids, others }) => {
             login::token_revoke(&client, &ids, others, out).await
+        }
+        Command::Update {
+            check,
+            force,
+            auto,
+            into,
+        } => {
+            let asked = update::Asked {
+                check,
+                force,
+                auto,
+                into: into.map(|into| cwd.join(into)),
+            };
+            // the updater's word goes to its log, its standard error, and a hand's to the terminal
+            match auto {
+                true => update::update(&client, &asked, &mut std::io::stderr()).await,
+                false => update::update(&client, &asked, out).await,
+            }
         }
         // written above, before the config was read
         Command::Skill { .. } => unreachable!("the skill is written before the config is read"),

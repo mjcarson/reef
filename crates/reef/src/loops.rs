@@ -44,6 +44,7 @@ use crate::clear::{self, Clear};
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
 use crate::follow;
+use crate::skill;
 use crate::task::{self, Ending};
 use crate::worktree;
 
@@ -469,7 +470,50 @@ pub async fn ls<W: Write>(
 /// except after a clear while the loop is between nodes: its node done and its end acted on, and
 /// another next. Then it names that node and how to take it, so `next`, or the kickoff reef
 /// types, starts it. A plan approval's clear, mid-node, is told nothing. A pane with no loop is
-/// left as it is.
+/// left as it is. Whenever the repo's skill isn't the one this `reef` writes, as after it updated
+/// itself, it says so too, and how to write it again.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `input` - What the hook was handed on standard input
+/// * `cwd` - The session's directory, whose repo holds its skill
+/// * `pane` - The pane the session runs in
+/// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
+/// * `inbox` - The inbox of a follower of that process, which is told of the session if it
+///   exists
+/// * `out` - Where the hook's output goes
+pub async fn session_start<W: Write>(
+    client: &Client,
+    input: &str,
+    cwd: &Path,
+    pane: &Pane,
+    pid: Option<u32>,
+    inbox: Option<&Path>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // what the pane's loop hands the session, if anything
+    let handed = handed(client, input, pane, pid, inbox).await?;
+    // and the skill, if this `reef` would write it otherwise
+    let context: Vec<String> = handed.into_iter().chain(skill::stale(cwd)).collect();
+    if context.is_empty() {
+        out.flush()?;
+        return Ok(());
+    }
+    // added to the session's context, as Claude Code reads a SessionStart's JSON
+    let said = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": context.join("\n\n"),
+        }
+    });
+    writeln!(out, "{said}")?;
+    Ok(())
+}
+
+/// Hands the pane's loop to the session that just started there, returning what to add to the
+/// session's context: the next node after a clear between nodes, or the member a pane works, or
+/// nothing
 ///
 /// # Arguments
 ///
@@ -479,15 +523,13 @@ pub async fn ls<W: Write>(
 /// * `pid` - The Claude Code process the session runs in, `CLAUDE_PID`, if it was named
 /// * `inbox` - The inbox of a follower of that process, which is told of the session if it
 ///   exists
-/// * `out` - Where the hook's output goes
-pub async fn session_start<W: Write>(
+async fn handed(
     client: &Client,
     input: &str,
     pane: &Pane,
     pid: Option<u32>,
     inbox: Option<&Path>,
-    out: &mut W,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     // the session that started
     let started: SessionStarted = serde_json::from_str(input).map_err(|error| {
         anyhow::anyhow!("the SessionStart hook's input doesn't read as Claude Code's: {error}")
@@ -513,24 +555,21 @@ pub async fn session_start<W: Write>(
         // handed over, or no loop to hand: either way the session goes on
         LoopEdited::Edited { r#loop } => r#loop,
         // a pane with no loop of its own may work a group's member, which it is told of
-        LoopEdited::NoLoop { .. } => return member_started(client, pane, out).await,
-        other => return unexpected(pane, other),
+        LoopEdited::NoLoop { .. } => return member_started(client, pane).await,
+        other => return unexpected(pane, other).map(|()| None),
     };
     // only a clear between nodes is told what is next, never a plan approval's mid-node
     if started.source != "clear" {
-        out.flush()?;
-        return Ok(());
+        return Ok(None);
     }
     let Some(done) = between(&feeding) else {
-        out.flush()?;
-        return Ok(());
+        return Ok(None);
     };
     let loops = client.loops().await?;
     let Ending::Next { next, round, .. } =
         task::upcoming(client, &feeding, done.clone(), &loops).await?
     else {
-        out.flush()?;
-        return Ok(());
+        return Ok(None);
     };
     // what comes next: another node, or a round of a done node's open comments
     let coming = match (round, next == done) {
@@ -538,55 +577,37 @@ pub async fn session_start<W: Write>(
         (true, true) => "its open comments come next, in a round of their own".to_string(),
         (true, false) => format!("`{next}`'s open comments come next, in a round of their own"),
     };
-    // added to the new session's context, as Claude Code reads a SessionStart's JSON
-    let context = format!(
+    // added to the new session's context
+    Ok(Some(format!(
         "reef's loop in this pane is between nodes: `{done}` is done, and {coming}. When the user \
          says next, or asks for the next node, take it with reef's next_task tool \
          (`mcp__reef__next_task`, or `reef loop take` where reef's tools aren't served), then \
          plan it in plan mode as the reef skill's loop says."
-    );
-    let said = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    });
-    writeln!(out, "{said}")?;
-    Ok(())
+    )))
 }
 
-/// Tells a session that started in a pane working a group's member which node it works, so the
-/// user's `next` takes it; a pane working none is told nothing
+/// What to tell a session that started in a pane working a group's member: which node it works,
+/// so the user's `next` takes it, or nothing for a pane working none
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `pane` - The pane the session runs in
-/// * `out` - Where the hook's output goes
-async fn member_started<W: Write>(client: &Client, pane: &Pane, out: &mut W) -> anyhow::Result<()> {
+async fn member_started(client: &Client, pane: &Pane) -> anyhow::Result<Option<String>> {
     // the member this pane joined, if it joined one
     let loops = client.loops().await?;
     let Some((by, member)) = reef_api::loops::member_of(&loops, pane) else {
-        out.flush()?;
-        return Ok(());
+        return Ok(None);
     };
-    // added to the session's context, as Claude Code reads a SessionStart's JSON
-    let context = format!(
+    // added to the session's context
+    Ok(Some(format!(
         "This session works `{}`, a member of the group of reef's loop in {}, in a worktree of \
          its own. When the user says next, or asks for its node, take it with reef's next_task \
          tool (`mcp__reef__next_task`, or `reef loop take` where reef's tools aren't served), \
          then plan it in plan mode as the reef skill's loop says.",
         member.node,
         by.pane.describe()
-    );
-    let said = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    });
-    writeln!(out, "{said}")?;
-    Ok(())
+    )))
 }
 
 /// The node a loop holds when it is between nodes: running, its node done and that node's end

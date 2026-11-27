@@ -6,15 +6,23 @@ see [Adding projects and plans](../projects/index.md).
 
 ## Install the CLI
 
-From reef's checkout, on stable Rust:
+From the server, which hands its users the `reef` its release was built with, a static binary
+for any x86-64 Linux, with no sign-in needed:
 
 ```sh
-cargo install --locked --path crates/reef
+curl --cacert ~/.config/reef/reef-ca.pem -o ~/.local/bin/reef \
+  https://reef.example.com:12443/api/v1/client/reef
+chmod +x ~/.local/bin/reef
 ```
 
 The one binary is the CLI, Claude Code's MCP server (`reef mcp`) and its hooks (`reef hook …`).
-Keep it at the same version as the server. A `reef` newer than its server says the server has
-no route for what it asked.
+It keeps itself at the server's version: once the server is upgraded, the next `reef` you run
+replaces itself in the background ([Keeping reef up to date](updates.md)).
+
+A server older than that hands out no client. Build one from reef's checkout, on stable Rust,
+with `cargo install --locked --path crates/reef`, and keep it at the server's version by hand: a
+`reef` newer than its server says the server has no route for what it asked. `reef update`
+swaps such a build for the server's once it hands one out.
 
 ## Point it at the server
 

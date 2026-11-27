@@ -441,8 +441,9 @@ pub fn spawn(
     let log = clear::open_log(LOG)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
-    // this same binary, on the same service, signed in as this reef is
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    // this same binary, the new one if it was replaced while running, on the same service,
+    // signed in as this reef is
+    let mut command = std::process::Command::new(crate::update::own_exe()?);
     if let Some(conf) = conf {
         command.arg("--conf").arg(conf);
     }

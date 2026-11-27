@@ -194,8 +194,10 @@ pub(crate) fn after(cx: &mut Cx, src: &Path, old: &Release, new: &Release) -> Re
             .args(["diff", "--quiet", &old.reef, &new.reef])
             .args(["--", "crates/reef/assets/skill"]),
     )?;
-    cx.runner
-        .say("  upgrade every user's `reef` too, so the CLI knows the server's newest routes");
+    cx.runner.say(
+        "  users' stamped `reef` follows by itself, the next time it calls the server; a `reef` \
+         built with `cargo install` needs `reef update` once",
+    );
     if skill.code == Some(1) {
         cx.runner.say(
             "  reef's skill changed: run `reef claude install` in each repo set up for Claude \

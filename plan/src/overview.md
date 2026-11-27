@@ -493,33 +493,67 @@ nodes:
       test: central/reef-service/src/served.rs::tests::only_a_stamped_client_is_served
   - id: C118
     title: C118 reef updates itself
+    status: done
     needs:
     - C117
     description:
       why: After central reef is upgraded every user must reinstall `reef` by hand, and an old one only finds out through a missing route.
       what: A stamped `reef` that sees its server serve a newer build replaces itself in the background, and `reef update` does it by hand, a reefadm release's own copy left to reefadm.
       details: |
-        - **Noticing**: `Client::send_as` reads `reef-client`. A stamped build older than it, with
-          `[client] update` on and a binary reef may replace, spawns `reef update --auto` once a
-          process, detached, its log `update.log`.
-        - **`reef update [--check] [--force]`**: newer only by commit time; an older build with
-          `--force`; an unstamped build by hand always. `--auto` is quiet, takes `update.lock`, and
-          keeps `update.toml` so a failed commit waits an hour.
-        - **Installing**: streamed next to the target, made executable and synced, run with
-          `version --json` to check its commit, then renamed over the target. Any failure leaves
-          the old binary.
-        - **Replaced while running**: `update::own_exe` strips Linux's ` (deleted)`, so a
-          long-lived `reef mcp` spawns its followers from the new binary.
-        - **The skill**: SessionStart says to run `reef claude install` when the repo's skill isn't
-          the one this binary writes.
+        - **Noticing** (`update::Watch`): `Client::send_as` reads `reef-client` off every answer. A
+          stamped build older than it, with `[client] update` on, a binary reef may replace and no
+          install of that commit failed within the hour, spawns `reef update --auto` once a process
+          (an `AtomicBool`), in its own process group, `--conf` and `--credentials` passed on, its
+          stderr `update.log`, and a thread reaps it so a long-lived `reef mcp` leaves no zombie.
+        - **`reef update [--check] [--force]`**: newer only by commit time; an older build, or the
+          same, with `--force`; an unstamped build by hand always. Hidden `--auto` is quiet and
+          newer-only, takes `update.lock` with `File::try_lock`, and keeps `update.toml` so a failed
+          commit waits an hour. Hidden `--into PATH` aims it at another file, for the tests.
+        - **An old server**: `GET /api/v1/client` answering 404, 401, or 200 with no JSON (reef-app's
+          page) is no client.
+        - **Installing** (`update::install`): streamed with `Response::chunk()` to
+          `.reef-update-<pid>` beside the target, its length checked, chmod 0755 and fsync, run with
+          `version --json` to check its commit, then renamed over the target, a link followed. Any
+          failure removes the new file. A run that hits `ETXTBSY` (a fork elsewhere holding the
+          file just written) is tried again, here and in C117's `Served::read`, whose test hit it.
+        - **A reefadm release's own `reef`** (`may_replace`): `releases/<name>/bin/reef` with
+          `release.toml` beside `bin`, through any link, is refused, saying to run `reefadm upgrade`.
+        - **Replaced while running**: `update::own_exe` strips Linux's ` (deleted)`; the updater's,
+          the follower's and the injector's spawns use it.
+        - **The skill**: SessionStart adds to its context, when the repo's `.claude/skills/reef`
+          isn't the one this binary writes (`skill::stale`), to suggest `reef claude install`.
+
+        **Tried live** (2026-11-27): `reefadm --host` deployed a temp commit of this tree to an
+        ubuntu:26.04 LXD container, whose reef-app said it hands out its release's `reef`. A second
+        container fetched it with curl and no token, signed in, and ran it. After `reefadm upgrade`
+        to a later commit, its next `reef whoami` updated it in the background within a second
+        (`update.log`). A copy with `[client] update = false` and an unstamped build stayed put,
+        and the unstamped one updated by `reef update` by hand. The server's previous release's
+        `reef` stayed put and `reef update` there said to use `reefadm upgrade`. A `reef mcp`
+        running across a swap (`/proc` naming its binary ` (deleted)`) still answered, and under
+        strace spawned its updater from the stripped path.
     acceptance:
     - unit: Builds order by commit time, stamped or not, older, equal and newer
+      status: met
+      test: crates/reef/src/update.rs::tests::builds_order_by_their_commits_time
     - unit: The header reads as a commit and its time, and anything else as nothing
+      status: met
+      test: crates/reef/src/update.rs::tests::the_header_reads_as_a_commit_and_its_time; crates/reef-api/src/build.rs::tests::a_stamp_needs_the_commit_and_its_time
     - unit: A binary in a reefadm release is never replaced
+      status: met
+      test: crates/reef/src/update.rs::tests::a_releases_own_reef_is_never_replaced
     - unit: A replaced binary's path drops Linux's ` (deleted)`
+      status: met
+      test: crates/reef/src/update.rs::tests::a_replaced_binary_drops_deleted
     - unit: An install swaps in a binary that says the wanted commit, and refuses one that doesn't, leaving the original
+      status: met
+      test: crates/reef/src/update.rs::tests::an_install_swaps_in_the_commit_wanted_and_refuses_another
     - integration: '`reef update --force` against a server with a client swaps the target'
+      status: met
+      test: central/reef-service/tests/cli.rs::update_swaps_a_binary_for_the_served_client; central/reef-service/tests/cli.rs::update_says_when_the_service_hands_out_no_client
     - feature: A stamped reef on another host follows its server's upgrade by itself, and reefadm's own copy, an unstamped build and `update = false` stay put
+      status: met
+      test: 'by hand: two ubuntu:26.04 LXD containers; reefadm --host deploy then upgrade of c1 to a later temp commit; c2''s curl-fetched reef updated itself on its next whoami (update.log), a copy with update = false, an unstamped build and c1''s previous release''s reef stayed put (sha256 unchanged), and a reef mcp running across a swap answered and spawned its updater from the stripped path under strace'
 ---
 # Centralized reef
 

@@ -18,8 +18,12 @@ sudo rm -rf /opt/reef/app && sudo cp -r central/target/dx/reef-app/release/web /
 sudo systemctl start reef
 ```
 
-- **Tell users to upgrade their `reef`.** A CLI newer than the server says the server has no
-  route for what it asked.
+- **Users' `reef` follows by itself.** The server hands its users the `reef` its release holds,
+  and every answer names that build, so a stamped `reef` replaces itself with the new one the
+  next time it calls ([Keeping reef up to date](../using/updates.md)). A `reef` built with
+  `cargo install` isn't stamped, so its user runs `reef update` once, or upgrades it by hand.
+  By hand, the server hands out the client `[client] reef` names, if it is stamped
+  ([Configuring](../deploy/config.md)): install the new one there before the restart.
 - **When the skill changed,** users run `reef claude install` again in each repo. It changes
   only what is out of date, and the skill it writes names the tools of the `reef` that wrote
   it. Commit the changed skill.

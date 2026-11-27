@@ -222,8 +222,8 @@ pub fn spawn(order: &Clear, conf: Option<&Path>, credentials: Option<&Path>) -> 
     let log = open_log("clear.log")
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
-    // this same binary, on the same service
-    let mut command = std::process::Command::new(std::env::current_exe()?);
+    // this same binary, on the same service, the new one if it was replaced while running
+    let mut command = std::process::Command::new(crate::update::own_exe()?);
     if let Some(conf) = conf {
         command.arg("--conf").arg(conf);
     }

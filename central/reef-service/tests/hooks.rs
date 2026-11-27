@@ -352,6 +352,7 @@ impl Hx {
         reef::loops::session_start(
             &self.client()?,
             &input.to_string(),
+            &self.repo,
             &pane.parse()?,
             None,
             None,
@@ -1061,6 +1062,7 @@ async fn a_clear_tells_the_sessions_follower_where_it_moved() -> anyhow::Result<
             reef::loops::session_start(
                 &hx.client()?,
                 &input,
+                &hx.repo,
                 &pane,
                 Some(4242),
                 inbox.as_deref(),

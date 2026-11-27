@@ -43,6 +43,7 @@
   - [Recording work](central/using/recording.md)
   - [The app](central/using/app.md)
   - [With Claude Code](central/using/claude-code.md)
+  - [Keeping reef up to date](central/using/updates.md)
 - [Administering](central/admin/index.md)
   - [Users and tokens](central/admin/users.md)
   - [A lost admin](central/admin/lost-admin.md)

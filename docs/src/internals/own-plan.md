@@ -63,6 +63,9 @@ reef claude install                        # the MCP entry, the hooks and the sk
 - **A new binary is a reinstall and a restart.** Install both again, then
   `systemctl --user restart reef`. Stop the unit before running reef-app over the same data. A
   `reef` newer than the service it calls says the service has no route for what it asked.
+  `cargo install` builds an unstamped `reef`, which never updates itself, so this repo's stays
+  as installed by hand; and this unit's `reef-serve`, in `~/.cargo/bin`, finds no stamped client
+  beside it to hand out ([Keeping reef up to date](../central/using/updates.md)).
 - **A changed row needs a fresh data directory**, since shoal can't migrate a table: stop the
   unit, move `~/.local/share/reef/shoal` aside, start it, then `reef project add reef` and
   `reef import plan --plan central` again. Export first if the book is behind. What carries over

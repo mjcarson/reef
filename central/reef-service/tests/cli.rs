@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use common::git;
-use common::http::Ax;
+use common::http::{Ax, fake_client, stamped};
 
 /// A served twin, a config naming its address, and a credentials file of the case's own
 struct Cx {
@@ -91,6 +91,21 @@ impl Cx {
             conf,
             credentials,
         })
+    }
+
+    /// Serves a fresh twin handing its users a fake client, stamped, and writes a config naming
+    /// its address
+    ///
+    /// # Arguments
+    ///
+    /// * `case` - The case's name, which names its directory
+    /// * `build` - The build the fake client says it is
+    async fn serving(case: &str, build: &reef_api::Build) -> anyhow::Result<Cx> {
+        // the client a release would hold, read as the service reads one
+        let fx = common::Fx::memory(&format!("cli-{case}")).await?;
+        let client = fake_client(&fx.dir.join("release/bin/reef"), build)?;
+        let served = reef_service::Served::read(&client).await?;
+        Cx::over(fx.api_serving(false, served).await?)
     }
 
     /// Writes a config naming a served twin's address, beside a credentials file of the case's
@@ -3863,7 +3878,16 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
     let client = reef::Client::new(&conf)?;
     let cleared = r#"{"session_id":"s2","source":"clear","hook_event_name":"SessionStart"}"#;
     let mut printed = Vec::new();
-    reef::loops::session_start(&client, cleared, &pane.parse()?, None, None, &mut printed).await?;
+    reef::loops::session_start(
+        &client,
+        cleared,
+        &repo,
+        &pane.parse()?,
+        None,
+        None,
+        &mut printed,
+    )
+    .await?;
     assert!(printed.is_empty());
     let listed = cx.reef(&repo, &["loop", "ls"]).await?;
     assert_eq!(
@@ -3918,7 +3942,16 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
         "{gone}"
     );
     let mut printed = Vec::new();
-    reef::loops::session_start(&client, cleared, &pane.parse()?, None, None, &mut printed).await?;
+    reef::loops::session_start(
+        &client,
+        cleared,
+        &repo,
+        &pane.parse()?,
+        None,
+        None,
+        &mut printed,
+    )
+    .await?;
     assert!(printed.is_empty());
     // and a pane's key that names none says what one is
     let (_, bad) = cx
@@ -4204,5 +4237,83 @@ async fn node_move_moves_a_subtree_and_refuses_a_need_left_behind() -> anyhow::R
         .reef(&repo, &["node", "get", "B", "--plan", "side"])
         .await?;
     assert!(got.contains("needs:\n- A\n"), "{got}");
+    Ok(())
+}
+
+/// A binary of a case's own to update: a script that says it is an old `reef`
+///
+/// # Arguments
+///
+/// * `path` - Where to write it
+fn old_reef(path: &Path) -> anyhow::Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().expect("a binary is in a directory"))?;
+    std::fs::write(path, "#!/bin/sh\necho old\n")?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(path.to_str().expect("the case's dir is utf-8").to_string())
+}
+
+/// `reef update` says what it would install when only asked, swaps a binary for the client the
+/// service hands out, and leaves a reefadm release's own `reef` to reefadm
+#[tokio::test]
+async fn update_swaps_a_binary_for_the_served_client() -> anyhow::Result<()> {
+    let build = stamped("dc5e68cd25c95db18f885357f505e97af24175f9", 1_795_800_000);
+    let cx = Cx::serving("update", &build).await?;
+    let repo = cx.ax.repo.clone();
+    let target = cx.ax.dir.join("home/ada/.local/bin/reef");
+    let into = old_reef(&target)?;
+    // only asked, it says what it would install, and installs nothing
+    let said = cx
+        .reef(&repo, &["update", "--check", "--into", &into])
+        .await?;
+    assert!(
+        said.contains("reef 0.1.0 dc5e68cd25c9 (2026-11-27)"),
+        "{said}"
+    );
+    assert!(said.contains("`reef update` installs it"), "{said}");
+    assert_eq!(std::fs::read_to_string(&target)?, "#!/bin/sh\necho old\n");
+    // forced, it swaps the binary for the client
+    let said = cx
+        .reef(&repo, &["update", "--force", "--into", &into])
+        .await?;
+    assert!(
+        said.starts_with(&format!(
+            "updated {} to reef 0.1.0 dc5e68cd25c9 (2026-11-27)",
+            target.display()
+        )),
+        "{said}"
+    );
+    let client = cx.ax.dir.join("release/bin/reef");
+    assert_eq!(std::fs::read(&target)?, std::fs::read(&client)?);
+    // which says the build the service named
+    let output = std::process::Command::new(&target)
+        .args(["version", "--json"])
+        .output()?;
+    let said: reef_api::Build = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(said, build);
+    // a reefadm release's own `reef`, or the host's link into it, is reefadm's to replace
+    let release = cx
+        .ax
+        .dir
+        .join("opt/reef/releases/dc5e68cd25c9-20261127000000");
+    let own = old_reef(&release.join("bin/reef"))?;
+    std::fs::write(release.join("release.toml"), "")?;
+    let (_, error) = cx.failing(&repo, &["update", "--into", &own]).await?;
+    assert!(error.contains("`reefadm upgrade`"), "{error}");
+    assert_eq!(std::fs::read_to_string(&own)?, "#!/bin/sh\necho old\n");
+    Ok(())
+}
+
+/// `reef update` against a service that hands out no client says so, and changes nothing
+#[tokio::test]
+async fn update_says_when_the_service_hands_out_no_client() -> anyhow::Result<()> {
+    let cx = Cx::new("update-none").await?;
+    let target = cx.ax.dir.join("home/ada/.local/bin/reef");
+    let into = old_reef(&target)?;
+    let (_, error) = cx
+        .failing(&cx.ax.repo, &["update", "--into", &into])
+        .await?;
+    assert!(error.contains("hands its users no `reef`"), "{error}");
+    assert_eq!(std::fs::read_to_string(&target)?, "#!/bin/sh\necho old\n");
     Ok(())
 }

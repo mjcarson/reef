@@ -57,7 +57,8 @@ no model.
 - **Only reef-serve and reef-app are built for the target.** The `reef` CLI and reefadm are built
   for any x86-64, once. The CLI is a static musl build, its symbols stripped, so it runs on any
   x86-64 Linux whatever its glibc. It is stamped with reef's commit and when that commit was
-  made, which `reef version` prints.
+  made, which `reef version` prints, and the server hands it to its users, whose `reef` keeps
+  up with it by itself ([Keeping reef up to date](../using/updates.md)).
 - **The build is checked.** reefadm reads back the flags cargo compiled each server with, and
   refuses a release they didn't reach. On the target, it refuses a release whose reef-serve was
   compiled with a feature that CPU lacks.

@@ -1,8 +1,9 @@
 //! The part of reef's config the CLI reads: where the JSON API is served
 //!
 //! The CLI reads the service's own config file, found by `reef_api::config`, so the two meet at
-//! the address one file names. It reads `[api]`'s `address`, `url`, `ca` and `certs` alone and
-//! ignores every other key, since the service is what checks the rest of the file. On the
+//! the address one file names. It reads `[api]`'s `address`, `url`, `ca` and `certs`, and
+//! `[client] update`, alone and ignores every other key, since the service is what checks the
+//! rest of the file. On the
 //! service's own host it calls `address` over HTTPS, trusting the CA the service made and keeps
 //! in `certs`, else in `$XDG_DATA_HOME/reef/certs`; on another host, `url` names the service, and
 //! `ca` a root its certificate is trusted by beside the system's. The token it signs in with
@@ -19,6 +20,10 @@
 //! url = "https://reef.example:12443"
 //! # a PEM root to trust the service's certificate by, beside the system's own
 //! ca = "/home/me/.config/reef/ca.pem"
+//!
+//! [client]
+//! # whether a stamped `reef` replaces itself with a newer build the service serves
+//! update = true
 //! ```
 
 use serde::Deserialize;
@@ -31,6 +36,8 @@ use std::path::{Path, PathBuf};
 pub struct Conf {
     /// Where the JSON API is served
     pub api: ApiSettings,
+    /// Whether this `reef` updates itself
+    pub client: ClientSettings,
     /// The file this was read from, if one was
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -52,6 +59,22 @@ pub struct ApiSettings {
     pub url: Option<String>,
     /// A PEM root the service's certificate is trusted by, beside the system's own
     pub ca: Option<PathBuf>,
+}
+
+/// Whether this `reef` updates itself from the service it calls
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ClientSettings {
+    /// Whether a stamped build replaces itself, in the background, with a newer one the service
+    /// serves
+    pub update: bool,
+}
+
+impl Default for ClientSettings {
+    /// A stamped build keeps up with its service
+    fn default() -> Self {
+        ClientSettings { update: true }
+    }
 }
 
 impl Default for ApiSettings {
@@ -160,6 +183,22 @@ mod tests {
         // and neither said is the address alone
         let conf = Conf::parse("").expect("an empty config parses");
         assert_eq!((conf.api.url, conf.api.ca), (None, None));
+    }
+
+    /// A stamped `reef` updates itself unless `[client] update` says it doesn't, and the
+    /// service's own key beside it is left to the service
+    #[test]
+    fn updates_are_on_unless_turned_off() {
+        // nothing said is on
+        assert!(
+            Conf::parse("")
+                .expect("an empty config parses")
+                .client
+                .update
+        );
+        // and turned off, beside the key that names the service's client
+        let text = "[client]\nreef = \"/opt/reef/current/bin/reef\"\nupdate = false\n";
+        assert!(!Conf::parse(text).expect("the config parses").client.update);
     }
 
     /// A config that says nothing of the API leaves it at the service's default

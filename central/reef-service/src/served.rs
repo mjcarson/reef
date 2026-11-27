@@ -23,6 +23,12 @@ use crate::conf::Conf;
 /// How long the client has to say its build before it is taken for one that can't
 const ASK_WAIT: Duration = Duration::from_secs(10);
 
+/// How many times a client that is busy is run again
+const BUSY_TRIES: usize = 10;
+
+/// How long to wait before running a busy client again
+const BUSY_PAUSE: Duration = Duration::from_millis(50);
+
 /// The `reef` the service hands its users: its build, where it is, and how big
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Served {
@@ -115,23 +121,24 @@ impl Served {
             "the client at {} is not a file",
             path.display()
         );
-        // its build, as it says it, within a few seconds, and never waited on past them
-        let asked = tokio::process::Command::new(path)
-            .args(["version", "--json"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .output();
-        let output = tokio::time::timeout(ASK_WAIT, asked)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "the client at {} didn't say its build within {} s",
-                    path.display(),
-                    ASK_WAIT.as_secs()
-                )
-            })?
-            .with_context(|| format!("running the client at {}", path.display()))?;
+        // its build, as it says it, a file just written run again while a fork elsewhere still
+        // holds it open
+        let mut tries = 0;
+        let output = loop {
+            match ask(path).await? {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && tries < BUSY_TRIES =>
+                {
+                    tries += 1;
+                    tokio::time::sleep(BUSY_PAUSE).await;
+                }
+                asked => {
+                    break asked
+                        .with_context(|| format!("running the client at {}", path.display()))?;
+                }
+            }
+        };
         anyhow::ensure!(
             output.status.success(),
             "the client at {} answered `version --json` with {}, so it is older than reef's \
@@ -158,6 +165,28 @@ impl Served {
             size: meta.len(),
         })
     }
+}
+
+/// Runs a client's `version --json` within a few seconds, never waiting on it past them, the
+/// outer error a timeout and the inner one a run that failed to start
+///
+/// # Arguments
+///
+/// * `path` - The client
+async fn ask(path: &Path) -> anyhow::Result<std::io::Result<std::process::Output>> {
+    let asked = tokio::process::Command::new(path)
+        .args(["version", "--json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    tokio::time::timeout(ASK_WAIT, asked).await.map_err(|_| {
+        anyhow::anyhow!(
+            "the client at {} didn't say its build within {} s",
+            path.display(),
+            ASK_WAIT.as_secs()
+        )
+    })
 }
 
 /// The `reef` in the release this process runs from: two directories up from this binary,

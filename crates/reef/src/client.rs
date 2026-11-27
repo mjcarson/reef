@@ -15,6 +15,10 @@
 //! read from where [`credentials`](crate::credentials) says for each request. A service that asks
 //! the caller to sign in answers 401, which comes back as an `unauthorized` error saying to run
 //! `reef login`.
+//!
+//! Every answer's `reef-client` header, the build the service hands its users, is read too, and a
+//! newer one than this stamped build starts its updater in the background
+//! ([`update`](crate::update)).
 
 use reef_api::HistoryPage;
 use reef_api::{
@@ -27,7 +31,7 @@ use reef_api::{
     StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
     WorkRecord, Writer, paths,
 };
-use reef_api::{MoveNodes, Moved, OpenRun, RunReport, TestRun};
+use reef_api::{Build, MoveNodes, Moved, OpenRun, RunReport, TestRun};
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
 use std::path::Path;
@@ -35,6 +39,7 @@ use std::time::Duration;
 
 use crate::conf::Conf;
 use crate::credentials::{self, Held};
+use crate::update::Watch;
 
 /// How long to wait for the service to take a connection
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
@@ -51,6 +56,8 @@ pub struct Client {
     held: Held,
     /// Whether it writes as the user, or as Claude for them, which every request it sends says
     writer: Writer,
+    /// What it needs to start this `reef`'s updater when an answer names a newer build
+    watch: Watch,
 }
 
 impl Client {
@@ -109,6 +116,11 @@ impl Client {
             origin,
             held: credentials::held(conf.credentials.as_deref()),
             writer: Writer::User,
+            watch: Watch {
+                enabled: conf.client.update,
+                conf: conf.source.clone(),
+                credentials: conf.credentials.clone(),
+            },
         })
     }
 
@@ -1025,6 +1037,50 @@ impl Client {
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
+    /// The build of the `reef` the service hands its users, or `None` if it hands them none
+    ///
+    /// A service older than reef's updates has no such route: it answers 404, or reef-app's page
+    /// for a path it doesn't know, or 401 where it asks every caller to sign in. Each is no client.
+    pub async fn served_client(&self) -> anyhow::Result<Option<Build>> {
+        let path = paths::CLIENT;
+        let (request, _) = self.signed(self.http.get(self.url(path)))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| self.unreachable(error))?;
+        let status = response.status().as_u16();
+        let text = response
+            .text()
+            .await
+            .map_err(|error| anyhow::anyhow!("reading {path}'s answer: {error}"))?;
+        match status {
+            // a build, or a page that isn't one, as an app older than the route serves
+            200 => Ok(serde_json::from_str(&text).ok()),
+            // no client to hand out, or no route at all
+            401 | 404 => Ok(None),
+            _ => decode::<Build>(status, path, &text).map(Some),
+        }
+    }
+
+    /// Opens the `reef` the service hands its users, its bytes to read as they come
+    pub async fn client_binary(&self) -> anyhow::Result<reqwest::Response> {
+        let path = paths::CLIENT_BINARY;
+        let (request, _) = self.signed(self.http.get(self.url(path)))?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| self.unreachable(error))?;
+        // anything but the bytes is read as the error it is
+        let status = response.status().as_u16();
+        if status != 200 {
+            let text = response.text().await.unwrap_or_default();
+            return Err(decode::<serde_json::Value>(status, path, &text)
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("{status} from {path}: {text}")));
+        }
+        Ok(response)
+    }
+
     /// The full URL of a route's path
     ///
     /// # Arguments
@@ -1062,22 +1118,15 @@ impl Client {
         path: &str,
         signs_in: bool,
     ) -> anyhow::Result<T> {
-        // the token kept for the service, if one is
-        let token = self.token()?;
-        let request = match &token {
-            Some(token) => request.bearer_auth(token),
-            None => request,
-        };
-        // and Claude's word that it writes for the token's user, if it does
-        let request = match self.writer {
-            Writer::Claude => request.header(WRITER_HEADER, Writer::Claude.as_str()),
-            Writer::User => request,
-        };
+        // the token kept for the service, if one is, and who writes
+        let (request, token) = self.signed(request)?;
         // a service that isn't there is said plainly, with how to start it
         let response = request
             .send()
             .await
             .map_err(|error| self.unreachable(error))?;
+        // a newer `reef` the service hands out starts this one's updater
+        self.watch.notice(response.headers());
         let status = response.status().as_u16();
         // the whole body, then read as whichever answer its status calls for
         let text = response
@@ -1090,6 +1139,30 @@ impl Client {
             return Err(signed_out(&self.base, held).into());
         }
         decode(status, path, &text)
+    }
+
+    /// A request with the token kept for the service, if one is, and Claude's word that it
+    /// writes for the token's user, if it does, returned with the token it sends
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The request, ready to send but for these
+    fn signed(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<(reqwest::RequestBuilder, Option<String>)> {
+        // the token, read now, so a login since this client was made is sent
+        let token = self.token()?;
+        let request = match &token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        };
+        // and who writes
+        let request = match self.writer {
+            Writer::Claude => request.header(WRITER_HEADER, Writer::Claude.as_str()),
+            Writer::User => request,
+        };
+        Ok((request, token))
     }
 
     /// Says why a request got no answer at all

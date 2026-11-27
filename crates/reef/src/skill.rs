@@ -93,6 +93,28 @@ pub fn is_written(skill: &Path) -> bool {
     })
 }
 
+/// What to tell a session whose repo's skill isn't the one this `reef` writes, as after this
+/// `reef` updated itself: that it may be out of step, and how to write it again; or nothing for
+/// a repo with this skill, or with none at all
+///
+/// # Arguments
+///
+/// * `dir` - A directory in the repo, such as the session's
+pub fn stale(dir: &Path) -> Option<String> {
+    // a repo set up for reef, whose skill this `reef` would write otherwise
+    let skill = place(dir);
+    if !skill.join(FILES[0].0).is_file() || is_written(&skill) {
+        return None;
+    }
+    Some(format!(
+        "reef's skill in {} isn't the one this `reef` ({}) writes, so it may name tools or \
+         commands that have changed. Suggest the user run `reef claude install` from the repo's \
+         root, which writes it again with reef's hooks.",
+        skill.display(),
+        crate::update::describe(&crate::update::BUILD)
+    ))
+}
+
 /// Prints the skill's SKILL.md
 ///
 /// # Arguments
@@ -103,4 +125,29 @@ pub fn print<W: Write>(out: &mut W) -> anyhow::Result<()> {
     let (_, text) = FILES[0];
     out.write_all(text.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{place, stale, write};
+
+    /// A session is told to write the skill again only where the repo holds a skill this `reef`
+    /// would write otherwise
+    #[test]
+    fn a_skill_out_of_step_is_said() {
+        // a repo of this test's own, with no skill yet
+        let repo = std::env::temp_dir().join(format!("reef-skill-{}", std::process::id()));
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        assert_eq!(stale(&repo), None);
+        // this reef's skill, as written
+        write(&repo, &mut Vec::new()).unwrap();
+        assert_eq!(stale(&repo), None);
+        // another reef's, as after this one updated itself
+        let skill = place(&repo);
+        std::fs::write(skill.join("SKILL.md"), "# an older skill\n").unwrap();
+        let note = stale(&repo).expect("a skill out of step is said");
+        assert!(note.contains("`reef claude install`"), "{note}");
+        assert!(note.contains(&skill.display().to_string()), "{note}");
+        std::fs::remove_dir_all(&repo).unwrap();
+    }
 }
