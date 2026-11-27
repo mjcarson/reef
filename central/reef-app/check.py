@@ -1216,6 +1216,46 @@ def c96_plans_side_by_side(page):
           seen)
 
 
+def c98_picking_a_branch_moves_the_plan(page):
+    """C98: picking a branch on the plan page's bar moves the plan there, and a pick that would break a
+    link is refused, saying why, the plan following what it did."""
+    # `b3`, holding a doc of its own, beside `side`'s `b2` (C96 listed `side`)
+    git("checkout", "-q", "-b", "b3")
+    (WORK / "repo" / "docs").mkdir(exist_ok=True)
+    (WORK / "repo" / "docs" / "b3.md").write_text("# B3\n\n## Only b3\n\nWords.\n")
+    git("add", "docs/b3.md")
+    git("commit", "-q", "-m", "b3's doc")
+    git("checkout", "-q", "main")
+    seen = {}
+    page.goto(URL + "/plans/check/side")
+    wait_drawn(page)
+    picker = ".reef-app-branch-pick select"
+    page.wait_for_function(
+        "sel => [...document.querySelector(sel)?.options ?? []].some(o => o.value === 'b3')", arg=picker,
+        timeout=10000)
+    seen["offered"] = page.eval_on_selector(picker, "s => [...s.options].map(o => o.value)")
+    seen["before"] = page.eval_on_selector(picker, "s => s.value")
+    # picking `b3` moves the plan there, which the switcher and the CLI both say
+    page.select_option(picker, "b3")
+    page.wait_for_function(
+        "() => document.querySelector('.reef-app-plan-switch .on .reef-app-branch')?.textContent === 'b3'",
+        timeout=10000)
+    seen["after"] = page.eval_on_selector(picker, "s => s.value")
+    seen["ls"] = [line for line in reef("plan", "ls").splitlines() if line.startswith("check/side")]
+    # a node linking `b3`'s doc, then `b2` picked, which lacks it: refused, saying why
+    put("side", node_yaml("S2", "S2 On b3's doc", "docs: [docs/b3.md#only-b3]\n"))
+    page.select_option(picker, "b2")
+    page.wait_for_selector(".reef-app-branch-said", timeout=10000)
+    seen["said"] = page.inner_text(".reef-app-branch-said")
+    page.screenshot(path=str(SHOTS / "reef-app-branch-pick.png"))
+    seen["still"] = [line for line in reef("plan", "ls").splitlines() if line.startswith("check/side")]
+    check("C98 picking a branch in the app moves the plan there, and a refusal says why",
+          {"main", "b2", "b3"} <= set(seen["offered"]) and seen["before"] == "b2" and seen["after"] == "b3"
+          and "follows `b3`" in seen["ls"][0] and "docs/b3.md" in seen["said"]
+          and "follows `b3`" in seen["still"][0],
+          seen)
+
+
 def c96_a_fetch_reloads_only_its_branchs_plan(page):
     """C96: a fetch that moves one branch reloads the page of the plan that follows it, and not its sibling's."""
     # a remote repo with `main` and `b2`, registered by its URL, with a plan following each
@@ -2516,6 +2556,7 @@ def main():
                 c25_keys_and_the_sidebar_queue,
                 c96_plans_side_by_side,
                 c96_a_fetch_reloads_only_its_branchs_plan,
+                c98_picking_a_branch_moves_the_plan,
                 c28_a_linked_page_shows_in_the_sidebar,
                 c28_an_edited_page_shows_live,
                 c68_a_node_link_opens_its_node,

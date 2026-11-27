@@ -2541,3 +2541,42 @@ pub async fn each_plans_queue_keeps_its_own_history<B: Backend + 'static>(
     );
     Ok(())
 }
+
+/// A project's branches are listed, a local repo's as it keeps them and a remote's as it lists
+/// them now, and an unregistered project's are refused
+///
+/// # Arguments
+///
+/// * `ax` - The served service, its project `reef` a local repo
+pub async fn a_projects_branches_are_listed<B: Backend + 'static>(ax: Ax<B>) -> anyhow::Result<()> {
+    // the local repo's branch it was made on, and two beside it
+    let first = git::run(&ax.repo, &["branch", "--show-current"])?;
+    git::run(&ax.repo, &["branch", "b2"])?;
+    git::run(&ax.repo, &["branch", "b3"])?;
+    let (status, mut local): (_, Vec<String>) = ax.client.get(&paths::branches("reef")).await?;
+    assert_eq!(status, StatusCode::OK);
+    local.sort();
+    let mut expected = vec!["b2".to_string(), "b3".to_string(), first];
+    expected.sort();
+    assert_eq!(local, expected);
+    // a remote's, which its clone keeps only some of, as the remote lists them
+    let (bare, checkout) = git::published(&ax.dir.join("up"), &[("README.md", "# Up\n")])?;
+    git::run(&checkout, &["push", "-q", "origin", "HEAD:refs/heads/dev"])?;
+    let url = format!("file://{}", bare.display());
+    let (status, _): (_, AddedProject) = ax
+        .client
+        .post(paths::PROJECTS, &NewProject::remote("up", url, None))
+        .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, mut remote): (_, Vec<String>) = ax.client.get(&paths::branches("up")).await?;
+    assert_eq!(status, StatusCode::OK);
+    remote.sort();
+    assert_eq!(remote, ["dev", "main"]);
+    // and a project that isn't registered has none
+    let (status, error): (_, ApiError) = ax.client.get(&paths::branches("ghost")).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotRegistered)
+    );
+    Ok(())
+}

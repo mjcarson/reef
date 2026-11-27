@@ -198,6 +198,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::PROJECT_NEXT, get(project_next::<S>))
         .route(paths::WORK, get(work::<S>))
         .route(paths::PLAN, get(plan::<S>))
+        .route(paths::BRANCHES, get(branches::<S>))
         .route(paths::PLAN_BRANCH, axum::routing::put(set_plan_branch::<S>))
         .route(paths::PLAN_QUEUE, get(plan_queue::<S>))
         .route(paths::PLAN_QUEUE_HISTORY, get(plan_queue_history::<S>))
@@ -1206,6 +1207,22 @@ async fn plan<S: Serves>(
         Some(info) => Ok(Json(info)),
         None => Err(anyhow::Error::from(NotListed(plan)).into()),
     }
+}
+
+/// Lists the branches a project's repo has, which its plans can follow
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::branches", skip_all, err(Debug))]
+async fn branches<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<String>>, Failure> {
+    // a remote's as it lists them now, a local repo's as it keeps them
+    let branches = serves.service().branches(&segments.project).await?;
+    Ok(Json(branches))
 }
 
 /// Sets the branch a plan follows, or drops it: 200 if it follows it now, 422 if the repo has

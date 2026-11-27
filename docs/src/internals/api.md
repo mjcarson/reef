@@ -11,6 +11,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST /api/v1/projects` `NewProject` | `AddedProject`: 201, 409 if the name or repo is taken, or 502 if its `remote` can't be fetched |
 | `GET /api/v1/find-project?dir=&remote=` | the `Project` a directory belongs to, or one of its checkout's remotes was registered by, or 404 |
 | `POST /api/v1/projects/{project}/fetch` | `Fetched`: 200 whether its branches moved or not, each other branch a plan follows saying what came of its own fetch, 422 for a local project, or 502 if its registered branch can't be fetched |
+| `GET /api/v1/projects/{project}/branches` | the branches its repo has: a remote's as `git ls-remote --heads` lists them now, a local repo's as it keeps them |
 | `GET /api/v1/projects/{project}/plans` | every `PlanInfo`, each with its `registered`, as a project |
 | `POST /api/v1/projects/{project}/plans` `NewPlan` | `AddedPlan`: 201, or 200 if it was listed |
 | `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load and the branch it follows |

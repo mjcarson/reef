@@ -97,6 +97,27 @@ impl<B: Backend> Service<B> {
         }
     }
 
+    /// The branches a project's repo has, which a plan can follow: a remote project's as its
+    /// remote lists them now, a local one's as its repo keeps them
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    #[instrument(name = "Service::branches", skip_all, err(Debug))]
+    pub async fn branches(&self, project: &str) -> anyhow::Result<Vec<String>> {
+        // a project that is registered, remote or local
+        let project = self.project_named(project).await?;
+        match &project.remote {
+            // the remote's own, asked of it, since its clone keeps only the branches followed
+            Some(remote) => remote::heads(&remote.url).await,
+            // the repo's own, read off the async threads
+            None => {
+                let repo = project.repo.clone();
+                tokio::task::spawn_blocking(move || tree::local_branches(&repo)).await?
+            }
+        }
+    }
+
     /// Why a project's repo can't give a plan a branch, or `None` if it can
     ///
     /// A remote project's clone that hasn't fetched the branch fetches it now, so its plan's

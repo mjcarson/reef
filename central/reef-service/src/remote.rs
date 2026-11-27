@@ -206,6 +206,32 @@ pub async fn default_branch(url: &str) -> anyhow::Result<String> {
     }
 }
 
+/// The branches a remote has, by name, in the order git lists them
+///
+/// # Arguments
+///
+/// * `url` - The remote's URL, already checked
+#[instrument(name = "remote::heads", skip_all, err(Debug))]
+pub async fn heads(url: &str) -> anyhow::Result<Vec<String>> {
+    // ask the remote for its branches alone
+    let what = format!("asking {url} for its branches");
+    let said = git(None, ["ls-remote", "--heads", "--", url], &what).await?;
+    Ok(heads_in(&said))
+}
+
+/// The branches a `git ls-remote --heads` names: a commit and `refs/heads/<branch>` a line
+///
+/// # Arguments
+///
+/// * `said` - What it printed
+fn heads_in(said: &str) -> Vec<String> {
+    said.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter_map(|(_, name)| name.strip_prefix("refs/heads/"))
+        .map(str::to_string)
+        .collect()
+}
+
 /// The branch a `git ls-remote --symref … HEAD` names, if it names one
 ///
 /// # Arguments
@@ -444,6 +470,15 @@ mod tests {
         assert!(checked("https://example.com/reef\n.git").is_err());
         let long = format!("https://example.com/{}", "r".repeat(3000));
         assert!(checked(&long).is_err());
+    }
+
+    /// A remote's branches are read from the refs `ls-remote --heads` prints
+    #[test]
+    fn heads_are_read_from_ls_remote() {
+        // two branches, one with a slash in its name
+        let said = "0123\trefs/heads/main\n4567\trefs/heads/feature/x\n";
+        assert_eq!(super::heads_in(said), ["main", "feature/x"]);
+        assert!(super::heads_in("").is_empty());
     }
 
     /// The default branch is read from the symbolic ref `ls-remote` prints, if it prints one

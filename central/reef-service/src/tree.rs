@@ -307,6 +307,22 @@ fn branch_tip(repo: &gix::Repository, branch: &str) -> anyhow::Result<String> {
     Ok(found.peel_to_id()?.detach().to_string())
 }
 
+/// A local project's repo's branches, by name, in the order git keeps them
+///
+/// # Arguments
+///
+/// * `repo` - The root of its main worktree
+pub fn local_branches(repo: &Path) -> anyhow::Result<Vec<String>> {
+    // every ref under `refs/heads/`, by its short name
+    let opened = open_repo(repo)?;
+    let mut names = Vec::new();
+    for found in opened.references()?.local_branches()? {
+        let found = found.map_err(|error| anyhow::anyhow!("reading a branch: {error}"))?;
+        names.push(found.name().shorten().to_string());
+    }
+    Ok(names)
+}
+
 /// Whether a local project's repo has a branch, for a plan to follow it
 ///
 /// # Arguments

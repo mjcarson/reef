@@ -8,7 +8,7 @@ use crate::queue::{QueuePanel, use_queue};
 use crate::session::{SessionPanel, SessionsButton, use_runners};
 use crate::sign_in::{CallFailed, SignedInAs};
 use dioxus::prelude::*;
-use reef_api::{PlanInfo, Project};
+use reef_api::{Branched, PlanInfo, Project};
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
 /// mdbook lacks, and the shell's own layout
@@ -51,6 +51,9 @@ code { font-size: 0.92em; }
 .reef-app-plan-tab { font-size: 0.85rem; padding: 0.1rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; text-decoration: none; color: var(--fg); background: var(--panel); }
 .reef-app-plan-tab.on { border-color: var(--links); }
 .reef-app-plan-tab .reef-app-branch { margin-left: 0.35rem; }
+.reef-app-branch-pick { display: flex; gap: 0.4rem; align-items: baseline; font-size: 0.85rem; color: var(--muted); }
+.reef-app-branch-pick select { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 0.1rem 0.3rem; }
+.reef-app-branch-said { max-width: 32rem; overflow-wrap: anywhere; }
 .reef-app-muted { color: var(--muted); }
 .reef-app-error { color: #c0392b; }
 .reef-app-plan { display: flex; flex-direction: column; height: 100vh; }
@@ -471,6 +474,95 @@ fn PlanSwitch(listing: ProjectPlans, plan: String) -> Element {
     }
 }
 
+/// The plan page's branch picker: the branches of the project's repo, the one the plan follows
+/// chosen, and picking another moves the plan there, as `reef plan branch` does, saying why if
+/// it can't
+///
+/// # Arguments
+///
+/// * `listing` - The project and its plans
+/// * `plan` - The plan shown
+/// * `siblings` - The project's plans as the bar read them, read again once the plan moves
+#[component]
+fn BranchPicker(
+    listing: ProjectPlans,
+    plan: String,
+    siblings: Resource<Result<ProjectPlans, ServerFnError>>,
+) -> Element {
+    // the repo's branches, read once the page is up, and what came of the last pick
+    let project = listing.project.name.clone();
+    let named = project.clone();
+    let branches = use_resource(move || calls::branches(named.clone()));
+    let mut said = use_signal(|| None::<String>);
+    // the branch the plan follows, empty for its project's own, and what that own one is
+    let current = listing
+        .plans
+        .iter()
+        .find(|info| info.name.plan == plan)
+        .and_then(|info| info.branch.clone())
+        .unwrap_or_default();
+    let own = match &listing.project.remote {
+        Some(remote) => format!("its project's own, {}", remote.branch),
+        None => "its project's working tree".to_string(),
+    };
+    // each branch to pick, the one followed among them even if the repo has it no longer
+    let mut options: Vec<String> = match &*branches.read() {
+        Some(Ok(listed)) => listed.clone(),
+        _ => Vec::new(),
+    };
+    if !current.is_empty() && !options.contains(&current) {
+        options.push(current.clone());
+    }
+    let shown = plan.clone();
+    let on_pick = move |event: FormEvent| {
+        // the branch picked, or none for the project's own, sent as a change of the plan's
+        let picked = event.value();
+        let branch = (!picked.is_empty()).then_some(picked);
+        let (project, plan) = (project.clone(), plan.clone());
+        let mut siblings = siblings;
+        spawn(async move {
+            let outcome = calls::set_plan_branch(project, plan, branch).await;
+            said.set(match outcome {
+                Ok(Branched::Applied { .. }) => None,
+                Ok(Branched::NoBranch { branch, reason }) => {
+                    Some(format!("It can't follow `{branch}`: {reason}"))
+                }
+                Ok(Branched::Refused(problems)) => {
+                    let named: Vec<String> = problems.iter().map(ToString::to_string).collect();
+                    Some(format!(
+                        "It follows what it did, since its docs there would add: {}",
+                        named.join("; ")
+                    ))
+                }
+                Err(error) => Some(format!("Moving the plan failed: {error}")),
+            });
+            // the bar reads what it follows again, whatever came of it
+            siblings.restart();
+        });
+    };
+    rsx! {
+        label { class: "reef-app-branch-pick",
+            "follows"
+            select {
+                "aria-label": "The branch {shown} follows",
+                onchange: on_pick,
+                option { value: "", selected: current.is_empty(), "{own}" }
+                for branch in options {
+                    option {
+                        key: "{branch}",
+                        value: "{branch}",
+                        selected: branch == current,
+                        "{branch}"
+                    }
+                }
+            }
+            if let Some(said) = said() {
+                span { class: "reef-app-error reef-app-branch-said", "{said}" }
+            }
+        }
+    }
+}
+
 /// A plan's page: a bar naming the plan, or saying why it can't be read, over its project's
 /// queue and the plan's canvas
 ///
@@ -512,6 +604,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                 strong { class: "reef-app-plan-name", "{project}/{plan}" }
                 if let Some(Ok(listing)) = &*siblings.read() {
                     PlanSwitch { listing: listing.clone(), plan: plan_now.clone() }
+                    BranchPicker { listing: listing.clone(), plan: plan_now.clone(), siblings }
                 }
                 if let Some(Err(error)) = &*info.read() {
                     CallFailed { error: error.clone(), doing: "Reading the plan" }

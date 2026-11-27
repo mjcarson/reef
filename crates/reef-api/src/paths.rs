@@ -68,6 +68,9 @@ pub const FIND_PROJECT: &str = "/api/v1/find-project";
 /// A remote project's fetch, which `POST` asks for
 pub const PROJECT_FETCH: &str = "/api/v1/projects/{project}/fetch";
 
+/// The branches a project's repo has, which its plans can follow, listed by `GET`
+pub const BRANCHES: &str = "/api/v1/projects/{project}/branches";
+
 /// A project's plans: listed by `GET`, added to by `POST`
 pub const PLANS: &str = "/api/v1/projects/{project}/plans";
 
@@ -346,6 +349,15 @@ pub fn fetch(project: &str) -> String {
 /// * `project` - The project's name
 pub fn plans(project: &str) -> String {
     format!("{PROJECTS}/{}/plans", encode(project))
+}
+
+/// The path of the branches a project's repo has
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn branches(project: &str) -> String {
+    format!("{PROJECTS}/{}/branches", encode(project))
 }
 
 /// The path of a project's queue

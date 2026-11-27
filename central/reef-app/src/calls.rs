@@ -4,14 +4,14 @@
 //! the hooks depend on. Their answers are the service's own types, from `reef-api`.
 
 use dioxus::prelude::*;
+use reef_api::{
+    Branched, Commented, Decision, FileDiff, HISTORY_MAX, HistoryPage, Loop, Marked, Me,
+    PasswordChange, PasswordChanged, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review,
+    ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, SignedOut, Target, Thread,
+    ThreadState, TokenInfo, Transcript, User, UserRemoved,
+};
 #[cfg(feature = "server")]
 use reef_api::{Checked, Puts, lift, puts_for};
-use reef_api::{
-    Commented, Decision, FileDiff, HISTORY_MAX, HistoryPage, Loop, Marked, Me, PasswordChange,
-    PasswordChanged, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review, ReviewState,
-    Reviewed, Revision, Session, SessionAct, SessionActed, SignedOut, Target, Thread, ThreadState,
-    TokenInfo, Transcript, User, UserRemoved,
-};
 #[cfg(feature = "server")]
 use reef_api::{HistoryQuery, MarkReview, MarkThread, NewReply, NewThread, Writer};
 use reef_model::Payload;
@@ -261,6 +261,52 @@ pub async fn queue(project: String, plan: String) -> Result<QueueListing, Server
     // refused for a plan that isn't listed
     crate::server::service()
         .plan_queue(&name)
+        .await
+        .map_err(failed)
+}
+
+/// The branches a project's repo has, which its plans can follow
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+#[get("/app/branches?project")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::branches", skip_all, err(Debug))
+)]
+pub async fn branches(project: String) -> Result<Vec<String>, ServerFnError> {
+    // a remote's as it lists them now, a local repo's as it keeps them
+    crate::server::service()
+        .branches(&project)
+        .await
+        .map_err(failed)
+}
+
+/// Sets the branch a plan follows, or drops it, unless the repo has no such branch or the plan's
+/// docs there would add a problem, which is an answer rather than a failure
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `branch` - The branch to follow, or `None` for its project's own
+#[post("/app/plan-branch")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::set_plan_branch", skip_all, err(Debug))
+)]
+pub async fn set_plan_branch(
+    project: String,
+    plan: String,
+    branch: Option<String>,
+) -> Result<Branched, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    // checked at both branches, under the plan's write lock, naming who changed it
+    let caller = caller();
+    crate::server::service()
+        .set_plan_branch(&name, branch, &caller.asker())
         .await
         .map_err(failed)
 }

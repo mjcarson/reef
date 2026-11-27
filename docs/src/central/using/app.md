@@ -5,7 +5,9 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
 - **The front page** lists every project and its plans, each with the branch it follows and the
   commit last fetched of it, or "working tree" for a local project's plan that follows none.
 - **A plan's page** draws the plan, and follows changes live. Its bar lists the project's plans,
-  each with its branch, to move between them. The queue beside it is the plan's own, and a fetch
+  each with its branch, to move between them, and picks the branch the plan follows from the
+  repo's branches: a pick is checked as `reef plan branch` is, and one that would break a link
+  says which. The queue beside it is the plan's own, and a fetch
   reloads it only when the branch it follows moved. Click a box to open its panel:
   - its YAML, which you can edit and save, checked as a put is;
   - **Changes**: the node's captured revisions and their diffs;
