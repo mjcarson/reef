@@ -791,6 +791,10 @@ where
         project: Some(project.name.clone()),
     };
     let (checkout, _) = start::checkout_in(client, cwd, &named, "take").await?;
+    // a checkout still on a branch its plan moved from is told where the plan went
+    if let Some(note) = cli::moved_here(client, cwd, &project).await? {
+        writeln!(out, "{note}\n")?;
+    }
     // where each node of its group stands, then the ready work over the loop's plans
     let statuses = statuses(client, feeding.group()).await?;
     let held = feeding

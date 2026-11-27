@@ -10,6 +10,8 @@
 //!   write is judged at the branch it lands on, never one a change replaced meanwhile.
 //! - **Written over the version read**, or only where no row is, so two changes can't both land.
 //! - **Kept in the plan's history**, under `plan/<plan>`, naming who changed it.
+//! - **A plan remembers the branches it followed before**, the latest last, so a checkout still
+//!   on one keeps working in it and is told where it moved.
 //! - **Every row is checked against its full key on read**, so a hash collision is caught rather
 //!   than read as another plan's branch.
 //!
@@ -32,6 +34,9 @@ pub struct KeptBranch {
     /// The branch it follows, or `None` for its project's own
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The branches it followed before, the latest last, so a checkout still on one finds it
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub was: Vec<String>,
 }
 
 /// A plan's branch as the store keeps it: its plan, its record and the row's version
@@ -211,9 +216,23 @@ impl<B: Backend> Store<B> {
         if !problems.is_empty() {
             return Ok(BranchSet::Refused(problems));
         }
+        // the branch it leaves joins those it followed before, and the one it follows now leaves
+        // them, so a checkout still on the old one finds the plan
+        let mut was = stored
+            .as_ref()
+            .map(|stored| stored.kept.was.clone())
+            .unwrap_or_default();
+        if let Some(old) = &from {
+            was.retain(|kept| kept != old);
+            was.push(old.clone());
+        }
+        if let Some(new) = &branch {
+            was.retain(|kept| kept != new);
+        }
         // written where no row is, or over the version read
         let kept = KeptBranch {
             branch: branch.clone(),
+            was,
         };
         let (version, expect) = match &stored {
             Some(stored) => (stored.version + 1, Expect::Version(stored.version)),

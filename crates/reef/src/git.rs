@@ -375,6 +375,37 @@ impl Checkout {
             .map(|base| base.detach().to_string()))
     }
 
+    /// Every branch this checkout knows and the commit each is at: its own branches, then its
+    /// remotes' by their names alone, each name once, a branch of its own winning over a
+    /// remote's of the same name
+    pub fn branch_tips(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let refs = self.repo.references()?;
+        let mut tips: Vec<(String, String)> = Vec::new();
+        // the checkout's own branches, by their short names
+        for found in refs.local_branches()? {
+            let mut found = found.map_err(|error| anyhow::anyhow!("reading a branch: {error}"))?;
+            let name = found.name().shorten().to_string();
+            if let Ok(tip) = found.peel_to_id() {
+                tips.push((name, tip.detach().to_string()));
+            }
+        }
+        // then each remote's, `origin/main` as `main`, unless a branch of its own has the name
+        for found in refs.remote_branches()? {
+            let mut found = found.map_err(|error| anyhow::anyhow!("reading a branch: {error}"))?;
+            let full = found.name().shorten().to_string();
+            let Some((_, name)) = full.split_once('/') else {
+                continue;
+            };
+            if name == "HEAD" || tips.iter().any(|(kept, _)| kept == name) {
+                continue;
+            }
+            if let Ok(tip) = found.peel_to_id() {
+                tips.push((name.to_string(), tip.detach().to_string()));
+            }
+        }
+        Ok(tips)
+    }
+
     /// Whether one commit is the other, or one of its ancestors
     ///
     /// # Arguments

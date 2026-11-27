@@ -473,15 +473,17 @@ impl<B: Backend> Store<B> {
                     row.project,
                     row.name
                 );
-                // the branch it follows, if it has one of its own
-                let branch = branches
+                // the branch it follows, if it has one of its own, and those it followed before
+                let kept = branches
                     .remove(&row.name)
-                    .and_then(|stored| stored.kept.branch);
+                    .map(|stored| stored.kept)
+                    .unwrap_or_default();
                 Ok(PlanInfo {
                     name: PlanName::new(row.project, row.name)?,
                     revision: row.current,
                     registered: None,
-                    branch,
+                    branch: kept.branch,
+                    was: kept.was,
                 })
             })
             .collect()

@@ -155,6 +155,9 @@ pub struct PlanInfo {
     /// a remote project was registered by, or a local project's working tree
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The branches it followed before, the latest last
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub was: Vec<String>,
 }
 
 /// A request to register a project, for a repo on the service's host or by its git URL
@@ -389,6 +392,7 @@ mod tests {
             name: PlanName::new("reef", "central").unwrap(),
             revision: 3,
             branch: None,
+            was: Vec::new(),
         };
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value, json!({"name": "reef/central", "revision": 3}));

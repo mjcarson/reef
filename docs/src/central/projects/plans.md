@@ -5,6 +5,7 @@ reef plan new launch               # an empty plan in the working directory's pr
 reef plan new app --branch dev     # one that follows a branch of the repo
 reef plan branch launch release    # follow another branch, unless the plan's links break there
 reef plan branch launch --clear    # follow the project's own branch again
+reef plan branch launch --merged   # follow the branch its branch was merged into
 reef plan ls                       # each plan, the revision it is at, what it follows, who listed it
 ```
 
@@ -33,6 +34,14 @@ A project can keep plans for several lines of work at once, such as `main`'s and
 - **A local project's plan reads a worktree that has its branch checked out,** the main one
   first, so its uncommitted docs link as the working tree's do. With none, it reads the
   branch's last commit.
+- **A plan migrates with its branch.** Once a plan's branch is merged, `--merged`, run from a
+  checkout, follows the branch whose history now holds the old branch's last commit: the
+  project's own branch first, then the checkout's. It still works after the old branch is
+  deleted, from the commit the service last fetched of it or the plan's captures. A squash or a
+  rebase leaves no trace git can follow, so it says to name the branch instead. The queue and
+  the loops held to the plan go with it, since they are the plan's. A plan remembers the
+  branches it followed before, so a checkout still on one keeps working in it, and `next` and
+  `next_task` there say where the plan went.
 - **A branch is checked before a plan follows it,** as every write is. A branch the repo hasn't
   is refused, a remote project's clone fetches one it lacks, and a change that would break the
   plan's links is refused with the problems it would add, leaving the plan as it was.

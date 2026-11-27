@@ -155,6 +155,7 @@ on), else `--plan`.
 ```sh
 reef project show                    # the project the working directory belongs to
 reef plan ls                         # its plans, each at its revision, and the branch each follows
+reef plan branch central --merged    # move a plan to the branch its branch was merged into
 reef next                            # ready work, the queue's first, then what the rest waits on
 reef next --all                      # the same across every plan, whichever the checkout picks
 reef node get C38                    # a node's YAML, after its `# version:` line

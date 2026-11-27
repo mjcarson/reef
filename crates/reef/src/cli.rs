@@ -511,11 +511,14 @@ pub enum PlanCommand {
         /// The plan's name within its project
         name: String,
         /// The branch to follow, without `refs/heads/`
-        #[arg(required_unless_present = "clear")]
+        #[arg(required_unless_present_any = ["clear", "merged"])]
         branch: Option<String>,
         /// Follow the project's own branch again instead
         #[arg(long, conflicts_with = "branch")]
         clear: bool,
+        /// Follow the branch the plan's branch was merged into, as this checkout's history says
+        #[arg(long, conflicts_with_all = ["branch", "clear"])]
+        merged: bool,
         /// The project the plan is in, if not the working directory's
         #[command(flatten)]
         pick: Pick,
@@ -1064,8 +1067,15 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         }
         Command::Plan(PlanCommand::Ls { pick }) => plan_ls(&client, cwd, &pick, out).await,
         Command::Plan(PlanCommand::Branch {
-            name, branch, pick, ..
-        }) => plan_branch(&client, cwd, &name, branch, &pick, out).await,
+            name,
+            branch,
+            merged,
+            pick,
+            ..
+        }) => match merged {
+            true => plan_merged(&client, cwd, &name, &pick, out).await,
+            false => plan_branch(&client, cwd, &name, branch, &pick, out).await,
+        },
         Command::Node(NodeCommand::Put { file, pick }) => {
             // the YAML first, so a file that can't be read asks nothing of the service
             let text = node::read_input(cwd, file.as_deref())?;
@@ -1177,9 +1187,14 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         }
         Command::Next { pick, all } => {
             // the plan named or picked, else every plan of the project
-            match next_plan(&client, cwd, &pick, all).await? {
-                (_, Some(plan)) => work::next(&client, &plan, out).await,
-                (project, None) => work::project_next(&client, &project.name, out).await,
+            let (project, plan) = next_plan(&client, cwd, &pick, all).await?;
+            // a checkout still on a branch its plan moved from is told where the plan went
+            if let Some(note) = moved_here(&client, cwd, &project).await? {
+                writeln!(out, "{note}\n")?;
+            }
+            match plan {
+                Some(plan) => work::next(&client, &plan, out).await,
+                None => work::project_next(&client, &project.name, out).await,
             }
         }
         Command::Queue(QueueCommand::Add { id, at, pick }) => {
@@ -1772,6 +1787,172 @@ async fn plan_branch<W: Write>(
     branched(client, &project, &plan, branch, out).await
 }
 
+/// Moves a plan of the picked project to the branch its branch was merged into, as the working
+/// directory's checkout's history says
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory, a checkout of the project
+/// * `name` - The plan's name within its project
+/// * `pick` - The project named, if one was
+/// * `out` - Where to print what came of it
+async fn plan_merged<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    name: &str,
+    pick: &Pick,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the plan, the branch it follows, and its nodes' work, read before git is
+    let project = picked(client, cwd, pick).await?;
+    let plan = PlanName::new(project.name.clone(), name)?;
+    let plans = client.plans(&project.name).await?;
+    let info = plans
+        .iter()
+        .find(|info| info.name == plan)
+        .ok_or_else(|| anyhow::anyhow!("`{plan}` is not listed: `reef plan ls` lists its plans"))?;
+    let records = client.work(&project.name).await?;
+    // where the plan's branch was merged, read from the checkout's history
+    let to = merged_into(cwd, &project, info, &records)?;
+    writeln!(out, "`{plan}`'s branch was merged into `{to}`")?;
+    branched(client, &project, &plan, Some(to), out).await
+}
+
+/// The branch a plan's branch was merged into, as a checkout's history says
+///
+/// The old branch's last commit is the checkout's own or its remote's, else the commit the
+/// service last fetched of it, else the newest capture of a node of the plan started on it, so a
+/// branch deleted after its merge is still followed.
+///
+/// # Arguments
+///
+/// * `cwd` - The working directory, a checkout of the project
+/// * `project` - The project
+/// * `info` - The plan
+/// * `records` - The project's work records
+fn merged_into(
+    cwd: &Path,
+    project: &Project,
+    info: &PlanInfo,
+    records: &[WorkRecord],
+) -> anyhow::Result<String> {
+    // the checkout, and the branch the plan follows now
+    let here = Here::read(cwd, project).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`--merged` reads the history of a checkout of `{}`: run it from one",
+            project.name
+        )
+    })?;
+    let Some(old) = followed(project, info, here.main_branch.as_deref()).map(str::to_string) else {
+        anyhow::bail!(
+            "`{}` reads its project's working tree, on no branch: name the branch it follows",
+            info.name
+        );
+    };
+    let checkout = Checkout::open(cwd)?;
+    let tips = checkout.branch_tips()?;
+    // its last commit: here, else as the service last fetched it, else its newest capture
+    let captured = records
+        .iter()
+        .filter(|record| record.node.plan == info.name)
+        .filter(|record| record.start.branch.as_deref() == Some(old.as_str()))
+        .flat_map(|record| record.captures.iter())
+        .max_by_key(|capture| capture.at)
+        .map(|capture| capture.shas.head.clone());
+    let tip = tips
+        .iter()
+        .find(|(name, _)| *name == old)
+        .map(|(_, tip)| tip.clone())
+        .or_else(|| {
+            project
+                .remote
+                .as_ref()
+                .and_then(|remote| remote.commit_of(Some(&old)).map(str::to_string))
+        })
+        .or(captured)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "nothing here says where `{old}` was last: name the branch to follow, \
+                 `reef plan branch {} <branch>`",
+                info.name.plan
+            )
+        })?;
+    if !checkout.has_object(&tip)? {
+        anyhow::bail!(
+            "this checkout has no commit {}, where `{old}` was last: fetch it, then try again",
+            reef_api::project::short(&tip)
+        );
+    }
+    // every other branch whose history holds it
+    let mut holding = Vec::new();
+    for (name, at) in &tips {
+        if *name != old && checkout.is_ancestor(&tip, at)? {
+            holding.push(name.clone());
+        }
+    }
+    // the project's own branch first, then the checkout's, else the one that holds it
+    let own = match &project.remote {
+        Some(remote) => Some(remote.branch.as_str()),
+        None => here.main_branch.as_deref(),
+    };
+    pick_merged(
+        &info.name.plan,
+        &old,
+        &tip,
+        &holding,
+        own,
+        here.branch.as_deref(),
+    )
+}
+
+/// The branch to follow of those that hold an old branch's last commit: the project's own,
+/// else the checkout's, else the only one, refused where none holds it or several do
+///
+/// # Arguments
+///
+/// * `plan` - The plan's name, for the refusal
+/// * `old` - The branch it follows now
+/// * `tip` - That branch's last commit
+/// * `holding` - The other branches whose history holds it
+/// * `own` - The project's own branch, if known
+/// * `current` - The branch the checkout has, if any
+pub(crate) fn pick_merged(
+    plan: &str,
+    old: &str,
+    tip: &str,
+    holding: &[String],
+    own: Option<&str>,
+    current: Option<&str>,
+) -> anyhow::Result<String> {
+    let short = reef_api::project::short(tip);
+    // none holds it: a squash or a rebase leaves no trace git can follow
+    if holding.is_empty() {
+        anyhow::bail!(
+            "no branch here holds {short}, where `{old}` was last: a squash or a rebase leaves \
+             no trace git can follow, so name the branch it went to, `reef plan branch {plan} \
+             <branch>`"
+        );
+    }
+    // the project's own, then the checkout's, then the only one
+    for preferred in [own, current].into_iter().flatten() {
+        if holding.iter().any(|name| name == preferred) {
+            return Ok(preferred.to_string());
+        }
+    }
+    match holding {
+        [only] => Ok(only.clone()),
+        many => {
+            let names: Vec<String> = many.iter().map(|name| format!("`{name}`")).collect();
+            anyhow::bail!(
+                "{short}, where `{old}` was last, is in {}: name the one to follow, `reef plan \
+                 branch {plan} <branch>`",
+                names.join(", ")
+            )
+        }
+    }
+}
+
 /// Sets the branch a plan follows and says what it follows now, or why it can't
 ///
 /// # Arguments
@@ -2096,8 +2277,73 @@ pub(crate) fn branch_plan(project: &Project, plans: &[PlanInfo], here: &Here) ->
         .collect();
     match following.as_slice() {
         [one] => Some(one.name.clone()),
+        [] => moved_from(plans, branch).map(|(info, _)| info.name.clone()),
         _ => None,
     }
+}
+
+/// The one plan that followed a branch before and moved on, and the branch it follows now, if
+/// exactly one did
+///
+/// # Arguments
+///
+/// * `plans` - The project's plans
+/// * `branch` - The branch a checkout is on
+pub(crate) fn moved_from<'a>(
+    plans: &'a [PlanInfo],
+    branch: &str,
+) -> Option<(&'a PlanInfo, String)> {
+    // the plans that followed it before, one of which it must be
+    let before: Vec<&PlanInfo> = plans
+        .iter()
+        .filter(|info| info.was.iter().any(|was| was == branch))
+        .collect();
+    match before.as_slice() {
+        [one] => Some((one, one.branch.clone().unwrap_or_default())),
+        _ => None,
+    }
+}
+
+/// What a checkout still on a branch its plan moved from is told: where the plan went, and how
+/// to work on its branch, or `None` for a checkout on no such branch
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `project` - The project
+pub(crate) async fn moved_here(
+    client: &Client,
+    cwd: &Path,
+    project: &Project,
+) -> anyhow::Result<Option<String>> {
+    // the checkout's branch, which no plan follows now
+    let Some(here) = Here::read(cwd, project) else {
+        return Ok(None);
+    };
+    let Some(branch) = here.branch.as_deref() else {
+        return Ok(None);
+    };
+    let plans = client.plans(&project.name).await?;
+    let main_branch = here.main_branch.as_deref();
+    if plans
+        .iter()
+        .any(|info| followed(project, info, main_branch) == Some(branch))
+    {
+        return Ok(None);
+    }
+    // and a plan that followed it before, which says where it went
+    Ok(moved_from(&plans, branch).map(|(info, now)| {
+        let now = match now.is_empty() {
+            true => "its project's own branch".to_string(),
+            false => format!("`{now}`"),
+        };
+        format!(
+            "`{}` follows {now} now, not `{branch}`, which this checkout is on: check out its \
+             branch to work where it is",
+            info.name
+        )
+    }))
 }
 
 /// The plan a checkout picks among a project's plans: the one that follows its branch, else
@@ -2322,7 +2568,7 @@ mod tests {
     use super::{
         ClaudeCommand, Cli, Command, CommentCommand, Here, HookCommand, LoopCommand, NodeCommand,
         PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, branch_plan, columns,
-        named_plan, unpicked,
+        named_plan, pick_merged, unpicked,
     };
     use clap::{CommandFactory, Parser};
     use reef_api::{PlanInfo, Project, Remote};
@@ -2367,6 +2613,7 @@ mod tests {
             revision: 1,
             registered: None,
             branch: branch.map(str::to_string),
+            was: Vec::new(),
         }
     }
 
@@ -2427,6 +2674,52 @@ mod tests {
         // and two plans on one branch pick neither
         let twins = [info("reef", "a", Some("b2")), info("reef", "b", Some("b2"))];
         assert_eq!(branch_plan(&local, &twins, &here(Some("b2"), None)), None);
+    }
+
+    /// A merged branch is followed into the project's own branch, else the checkout's, else the
+    /// only one that holds it, and one no branch holds, as a squash leaves it, is refused naming
+    /// how to give the branch
+    #[test]
+    fn a_merge_git_cant_follow_is_refused() {
+        let tip = "abcdef0123456789abcdef0123456789abcdef01";
+        let holding =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|name| name.to_string()).collect() };
+        // the project's own branch wins, then the checkout's, then the only one
+        let picked = pick_merged(
+            "side",
+            "b2",
+            tip,
+            &holding(&["dev", "main"]),
+            Some("main"),
+            Some("dev"),
+        );
+        assert_eq!(picked.unwrap(), "main");
+        let picked = pick_merged(
+            "side",
+            "b2",
+            tip,
+            &holding(&["dev", "rel"]),
+            Some("main"),
+            Some("dev"),
+        );
+        assert_eq!(picked.unwrap(), "dev");
+        let picked = pick_merged("side", "b2", tip, &holding(&["rel"]), Some("main"), None);
+        assert_eq!(picked.unwrap(), "rel");
+        // several and none preferred is refused, naming them
+        let error = pick_merged("side", "b2", tip, &holding(&["rel", "dev"]), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`rel`, `dev`"), "{error}");
+        // and none, as a squash leaves it, says to name the branch
+        let error = pick_merged("side", "b2", tip, &[], Some("main"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no branch here holds abcdef0"), "{error}");
+        assert!(error.contains("a squash or a rebase"), "{error}");
+        assert!(
+            error.contains("`reef plan branch side <branch>`"),
+            "{error}"
+        );
     }
 
     /// With nothing to pick, the refusal names each plan alone and the branch it follows, says

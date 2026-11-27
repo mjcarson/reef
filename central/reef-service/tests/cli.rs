@@ -3951,3 +3951,97 @@ async fn a_paused_loop_is_resumed_as_it_was_kept() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A plan whose branch was merged and deleted follows the branch that holds it with `--merged`,
+/// the old branch's last commit the one the service last fetched of it
+#[tokio::test]
+async fn a_merged_branch_is_followed_with_merged() -> anyhow::Result<()> {
+    let cx = Cx::new("merged-branch").await?;
+    // a repo published to a bare remote, its `b2` a branch with a doc of its own
+    let (bare, work_dir) = git::published(&cx.ax.dir.join("up"), &[("docs/main.md", "# Main\n")])?;
+    git::run(&work_dir, &["checkout", "-q", "-b", "b2"])?;
+    git::write(&work_dir, "docs/b2.md", "# B2\n\n## Only b2\n\nWords.\n")?;
+    commit_all(&work_dir, "b2's doc")?;
+    git::run(&work_dir, &["push", "-q", "origin", "b2"])?;
+    // registered by its URL, with a plan following `b2` and a node linking its doc
+    let url = format!("file://{}", bare.display());
+    cx.reef(&cx.ax.dir, &["project", "add", "up", "--url", &url])
+        .await?;
+    cx.reef(
+        &cx.ax.dir,
+        &["plan", "new", "p2", "--branch", "b2", "--project", "up"],
+    )
+    .await?;
+    let a = cx.yaml(
+        "A.yml",
+        &format!("{}docs: [docs/b2.md#only-b2]\n", work("A", &[])),
+    )?;
+    cx.reef(
+        &cx.ax.dir,
+        &["node", "put", &a, "--project", "up", "--plan", "p2"],
+    )
+    .await?;
+    // `b2` merged into `main`, pushed, and deleted, on the remote and here
+    git::run(&work_dir, &["checkout", "-q", "main"])?;
+    git::run(
+        &work_dir,
+        &["merge", "-q", "--no-ff", "-m", "merge b2", "b2"],
+    )?;
+    git::run(&work_dir, &["push", "-q", "origin", "main"])?;
+    git::run(&work_dir, &["push", "-q", "origin", "--delete", "b2"])?;
+    git::run(&work_dir, &["branch", "-q", "-D", "b2"])?;
+    cx.reef(&cx.ax.dir, &["project", "fetch", "--project", "up"])
+        .await?;
+    // `--merged` from the clone follows `main`, which holds `b2`'s last commit and its doc
+    let out = cx
+        .reef(
+            &work_dir,
+            &["plan", "branch", "p2", "--merged", "--project", "up"],
+        )
+        .await?;
+    assert!(
+        out.starts_with("`up/p2`'s branch was merged into `main`\n"),
+        "{out}"
+    );
+    assert!(out.contains("`up/p2` follows `main` at "), "{out}");
+    let listed = cx
+        .reef(&work_dir, &["plan", "ls", "--project", "up"])
+        .await?;
+    assert!(listed.contains("follows `main`"), "{listed}");
+    Ok(())
+}
+
+/// A checkout still on a branch its plan moved from keeps working in the plan, and is told
+/// where it moved
+#[tokio::test]
+async fn a_checkout_on_a_plans_old_branch_is_told_where_it_moved() -> anyhow::Result<()> {
+    let cx = Cx::new("old-branch").await?;
+    let repo = cx.ax.repo.clone();
+    // `central` beside `side`, which follows `b2`, checked out in a linked worktree
+    cx.put("a.yml", &work("A", &[])).await?;
+    git::run(&repo, &["branch", "b2"])?;
+    git::run(&repo, &["branch", "b3"])?;
+    let linked = cx.ax.dir.join("b2-old");
+    let linked_path = linked.to_str().expect("a utf-8 path");
+    git::run(&repo, &["worktree", "add", "-q", linked_path, "b2"])?;
+    cx.reef(&repo, &["plan", "new", "side", "--branch", "b2"])
+        .await?;
+    let s = cx.yaml("s.yml", &work("S", &[]))?;
+    cx.reef(&linked, &["node", "put", &s]).await?;
+    // `side` moves to `b3`, and remembers it followed `b2`
+    let out = cx.reef(&repo, &["plan", "branch", "side", "b3"]).await?;
+    assert!(out.contains("`reef/side` follows `b3`"), "{out}");
+    // the worktree still on `b2` works in `side`, and next says where it went
+    let got = cx.reef(&linked, &["node", "get", "S"]).await?;
+    assert!(got.contains("id: S"), "{got}");
+    let next = cx.reef(&linked, &["next"]).await?;
+    assert!(
+        next.starts_with(
+            "`reef/side` follows `b3` now, not `b2`, which this checkout is on: check out its \
+             branch to work where it is\n"
+        ),
+        "{next}"
+    );
+    assert!(next.contains("S ") && !next.contains("A "), "{next}");
+    Ok(())
+}

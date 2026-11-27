@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::cli::{Pick, PlanPick, next_plan, picked, picked_plan};
+use crate::cli::{Pick, PlanPick, moved_here, next_plan, picked, picked_plan};
 use crate::client::Client;
 use crate::comment::{self, Answering};
 use crate::{history, node, open, task, work};
@@ -429,9 +429,14 @@ impl Tools {
             if pick.plan.is_none() {
                 pick.plan = self.loop_plan(&pick.project).await?;
             }
-            match next_plan(&self.client, &self.cwd, &pick, false).await? {
-                (_, Some(plan)) => work::next(&self.client, &plan, &mut out).await,
-                (project, None) => work::project_next(&self.client, &project.name, &mut out).await,
+            let (project, plan) = next_plan(&self.client, &self.cwd, &pick, false).await?;
+            // a checkout still on a branch its plan moved from is told where the plan went
+            if let Some(note) = moved_here(&self.client, &self.cwd, &project).await? {
+                writeln!(out, "{note}\n")?;
+            }
+            match plan {
+                Some(plan) => work::next(&self.client, &plan, &mut out).await,
+                None => work::project_next(&self.client, &project.name, &mut out).await,
             }
         }
         .await;

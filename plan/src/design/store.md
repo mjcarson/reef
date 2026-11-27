@@ -350,6 +350,9 @@ plan, as the plans themselves are.
   judged at a branch a change replaced meanwhile.
 - **Kept in the plan's history**, under `plan/<plan>`, as an `Edited::Branched` naming both
   sides.
+- **The branches it followed before are kept with it** ([C97](../milestones/m11.md)), the latest last, so a
+  checkout still on one picks the plan and is told where it went. `--merged` reads where the
+  old branch went from the checkout's own history, since a remote project's clone is shallow.
 
 ## History
 
