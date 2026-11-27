@@ -208,7 +208,8 @@ pub fn judge(
 
 /// Whether a route answers anyone while sign-in is required: the routes that sign a user in or
 /// out, the one that says who is calling, the users' routes, which judge their callers
-/// themselves, and the app's static files
+/// themselves, the `reef` the service hands its users, which a new machine fetches before it can
+/// sign in, and the app's static files
 ///
 /// # Arguments
 ///
@@ -226,6 +227,8 @@ fn is_open(method: &Method, path: &str) -> bool {
         paths::ME => reads,
         // the users' routes, which judge their callers themselves
         paths::USERS => reads || method == Method::POST,
+        // the open-source client and its build, fetched before there is a token to send
+        paths::CLIENT | paths::CLIENT_BINARY => reads,
         // the app's stylesheet, its bundle and its assets
         "/reef.css" => reads,
         _ => reads && (path.starts_with("/assets/") || path.starts_with("/wasm/")),

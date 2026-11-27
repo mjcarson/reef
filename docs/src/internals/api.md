@@ -65,6 +65,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST /api/v1/users` `NewUser` | `UserAdded`: 201, 409 if the name is taken, 401 or 403 unless an admin asks, or the first user is added from the service's own host |
 | `DELETE /api/v1/users/{name}` | `UserRemoved`: 200 with how many tokens were revoked, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
 | `PUT /api/v1/users/{name}/password` `PasswordChange` | `PasswordChanged`: 200, the caller's own with its `current`, or another's by an admin, which revokes their tokens; 403 if `current` doesn't match, 404 if no user has the name, 429 if too many failed lately |
+| `GET /api/v1/client` | the `Build` of the `reef` the service hands its users, to anyone, or 404 if it hands them none |
+| `GET /api/v1/client/reef` | that `reef`'s bytes, to anyone, as `application/octet-stream` with `content-disposition: attachment; filename="reef"`, or 404 |
 | `GET /sign-in?next=` | the browser's sign-in page, plain HTML that runs no script |
 | `POST /sign-in` (a form) | the sign-in cookie set and 303 to `next`, a path of this origin, or the form again with a 401, or a 429 if too many failed lately |
 | `POST /sign-out` | the cookie's token revoked, the cookie cleared, and 303 to `/sign-in` |
@@ -100,6 +102,14 @@ that `Service::shared` opens. Every route is one service call, and every body an
   page a browser opens is sent to `/sign-in?next=…`, and anything else is answered 401 with
   `WWW-Authenticate: Bearer`. A change stream opened with a token ends once the token signs
   nobody in: revoked, expired, or its user removed or given a new password by an admin.
+- **Every answer names the client it hands out.** While the service has a `reef` to hand its
+  users (`served::Served`), every answer the router gives carries `reef-client: <commit>
+  <committed>`, the build's commit and that commit's time in seconds since the epoch, so a
+  client sees a newer build on whatever it calls next. The service finds it once, as it opens:
+  `[client] reef`, else `bin/reef` two directories up from its own binary, which is a reefadm
+  release's. It asks the binary `version --json` with a 10 s timeout, and serves it only if it
+  is stamped. Its two routes answer without a token, so a machine fetches `reef` before it can
+  sign in.
 - **Every write names its author,** from its `Caller`: the user the token or cookie signs in, and
   Claude, for them, if the request sends `reef-writer: claude`, as reef's MCP server does. A
   body's own word on who wrote it is never taken, but a comment's `by: claude`, which older

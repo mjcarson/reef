@@ -50,6 +50,12 @@
 //! fetch_every = "5m"
 //! # the hosts a remote may be cloned from; unset or empty, any
 //! hosts = ["github.com", "git.example"]
+//!
+//! [client]
+//! # the `reef` central reef hands its users, stamped; unset, the release's own `bin/reef`
+//! reef = "/opt/reef/current/bin/reef"
+//! # whether a stamped `reef` reading this file updates itself: the CLI's alone, left be here
+//! update = true
 //! ```
 
 use serde::Deserialize;
@@ -72,6 +78,8 @@ pub struct Conf {
     pub auth: AuthSettings,
     /// Where projects registered by their git URLs are cloned, and how often they are fetched
     pub remotes: RemoteSettings,
+    /// The `reef` this service hands its users, and whether a client updates itself
+    pub client: ClientSettings,
     /// The file this was read from, if one was
     #[serde(skip)]
     pub source: Option<PathBuf>,
@@ -165,6 +173,29 @@ pub struct RemoteSettings {
     pub fetch_every: String,
     /// The hosts a remote may be cloned from, or empty for any
     pub hosts: Vec<String>,
+}
+
+/// The `reef` the service hands its users, and whether a client reading this file updates itself
+///
+/// A client and the service may read one file, as on the service's own host, so the table holds
+/// the keys of both, and each leaves the other's be.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClientSettings {
+    /// The stamped `reef` to serve, else `bin/reef` in the release this service runs from
+    pub reef: Option<PathBuf>,
+    /// Whether a stamped `reef` updates itself from the service it calls: the CLI's alone
+    pub update: bool,
+}
+
+impl Default for ClientSettings {
+    /// The release's own `reef`, and a client that updates itself
+    fn default() -> Self {
+        ClientSettings {
+            reef: None,
+            update: true,
+        }
+    }
 }
 
 impl Default for RemoteSettings {
@@ -445,6 +476,25 @@ mod tests {
         let parsed = toml::from_str::<Conf>(
             "[api.tls]\naddress = \"0.0.0.0:1\"\ncert = \"c\"\nkey = \"k\"\nkye = \"k\"\n",
         );
+        assert!(parsed.is_err(), "a misspelt key was read");
+    }
+
+    /// The client served is the release's own unless `[client] reef` names one, and the CLI's
+    /// key is read beside it, so one file serves both
+    #[test]
+    fn the_client_is_the_releases_unless_named() {
+        // nothing said is the release's own, and a client that updates itself
+        let conf: Conf = toml::from_str("").expect("an empty config parses");
+        assert_eq!(conf.client.reef, None);
+        assert!(conf.client.update);
+        // both said, as a host that serves its users a client and updates its own by hand
+        let conf: Conf =
+            toml::from_str("[client]\nreef = \"/opt/reef/bin/reef\"\nupdate = false\n")
+                .expect("it parses");
+        assert_eq!(conf.client.reef, Some("/opt/reef/bin/reef".into()));
+        assert!(!conf.client.update);
+        // a misspelt key is refused
+        let parsed = toml::from_str::<Conf>("[client]\nupdates = false\n");
         assert!(parsed.is_err(), "a misspelt key was read");
     }
 

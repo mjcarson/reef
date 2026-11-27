@@ -63,4 +63,7 @@ suite!(
     tokens_are_listed_and_revoked_by_their_user,
     a_change_stream_ends_when_its_token_is_revoked,
     the_host_recovers_a_lost_admin,
+    the_served_client_is_its_build_its_bytes_and_a_header,
+    the_client_routes_answer_without_a_token,
+    with_no_client_the_route_says_not_found,
 );

@@ -161,6 +161,8 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
     if let Some(note) = service.sign_in_note().await? {
         eprintln!("reef-serve: {note}");
     }
+    // the `reef` it hands its users, or why it hands them none
+    eprintln!("reef-serve: {}", service.client_note());
     // serve until told to stop, then wait for the requests still open, fetching every remote
     // project on its interval meanwhile, and stopping any fetch still running once it ends
     tokio::select! {

@@ -8,15 +8,16 @@
 //! too gets a second port, on every interface, with a certificate minted for it, and a client
 //! that trusts that.
 
-use reef_api::ApiError;
+use reef_api::{ApiError, Build};
 use reef_model::PlanName;
 use reef_service::api::{Listeners, Local};
-use reef_service::{Backend, Conf, Service, TlsSettings, api};
+use reef_service::{Backend, Conf, Served, Service, TlsSettings, api};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -295,6 +296,17 @@ impl<B: Backend + 'static> Fx<B> {
         self.api_with(true).await
     }
 
+    /// Serves this fixture's store handing its users a client, asking every caller to sign in or
+    /// not, and makes a client of it
+    ///
+    /// # Arguments
+    ///
+    /// * `required` - Whether every caller must sign in
+    /// * `client` - The `reef` it hands its users
+    pub async fn api_serving(self, required: bool, client: Served) -> anyhow::Result<Ax<B>> {
+        self.api_on(required, None, Some(client)).await
+    }
+
     /// Serves this fixture's store asking every caller to sign in, on a loopback port and for
     /// other hosts on every interface, with a certificate minted for this host there
     pub async fn api_over_tls(self) -> anyhow::Result<Ax<B>> {
@@ -305,7 +317,7 @@ impl<B: Backend + 'static> Fx<B> {
             cert: Some(minted.cert.clone()),
             key: Some(minted.key.clone()),
         };
-        self.api_on(true, Some((tls, minted))).await
+        self.api_on(true, Some((tls, minted)), None).await
     }
 
     /// Serves this fixture's store on a loopback port of its own, asking callers to sign in or
@@ -315,7 +327,7 @@ impl<B: Backend + 'static> Fx<B> {
     ///
     /// * `required` - Whether every caller must sign in
     async fn api_with(self, required: bool) -> anyhow::Result<Ax<B>> {
-        self.api_on(required, None).await
+        self.api_on(required, None, None).await
     }
 
     /// Serves this fixture's store over HTTPS on a loopback port of its own, with reef's own
@@ -325,14 +337,20 @@ impl<B: Backend + 'static> Fx<B> {
     ///
     /// * `required` - Whether every caller must sign in
     /// * `wide` - Other hosts' listener, and the certificate minted for it, if the case has one
+    /// * `client` - The `reef` it hands its users, if it hands them one
     async fn api_on(
         self,
         required: bool,
         wide: Option<(TlsSettings, Minted)>,
+        client: Option<Served>,
     ) -> anyhow::Result<Ax<B>> {
-        // the service, shared by the server and the case
+        // the service, shared by the server and the case, handing its users the client given
         let sx = self.serve();
-        let service = Arc::new(sx.service.requiring_sign_in(required));
+        let mut service = sx.service.requiring_sign_in(required);
+        if let Some(client) = client {
+            service = service.serving_client(Ok(client));
+        }
+        let service = Arc::new(service);
         // any free port on localhost, reef's own certificate in the case's own directory
         let certs = sx.dir.join("certs");
         let mut conf = Conf::default();
@@ -385,6 +403,40 @@ impl<B: Backend + 'static> Fx<B> {
             server,
         })
     }
+}
+
+/// The build a fake client says it is: stamped with a commit and its time, for this host's
+/// architecture and OS, as a release's static `reef` is
+///
+/// # Arguments
+///
+/// * `commit` - The commit it is stamped with
+/// * `committed` - That commit's time, in seconds since the epoch
+pub fn stamped(commit: &str, committed: i64) -> Build {
+    Build {
+        version: "0.1.0".to_string(),
+        commit: Some(commit.to_string()),
+        committed: Some(committed),
+        target: format!("{}-{}-musl", std::env::consts::ARCH, std::env::consts::OS),
+    }
+}
+
+/// Writes a fake `reef`: a shell script that answers `version --json` with a build, and is
+/// served and installed as a release's client would be
+///
+/// # Arguments
+///
+/// * `path` - Where to write it
+/// * `build` - The build it says it is
+pub fn fake_client(path: &Path, build: &Build) -> anyhow::Result<PathBuf> {
+    // a script whatever it is asked, printing the build as `reef version --json` prints one
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_string(build)?;
+    std::fs::write(path, format!("#!/bin/sh\necho '{json}'\n"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Ok(path.to_path_buf())
 }
 
 /// One server-sent event: its name and its data

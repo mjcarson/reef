@@ -16,7 +16,8 @@
 //! judged by its `origin`. Projects name the repos their plans describe, and `repo`
 //! locates the one a working directory, or a linked worktree, is in. A project registered by its
 //! git URL is a remote one: `remote` checks the URL and keeps a clone of it, and `tree` reads its
-//! docs at the commit last fetched. Before a pool starts,
+//! docs at the commit last fetched. The `reef` it hands its users is the stamped one its release
+//! holds (`served`). Before a pool starts,
 //! `checks` refuses a config shoal would fail on obscurely, naming the fix. Without `embedded`
 //! this is shoal's client half alone and builds on stable.
 
@@ -36,6 +37,7 @@ pub mod rank;
 pub mod remote;
 pub mod repo;
 pub mod schema;
+pub mod served;
 pub mod service;
 pub mod store;
 pub mod tls;
@@ -43,8 +45,11 @@ pub mod tree;
 
 pub use backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 pub use client::{Mode, ShoalBackend};
-pub use conf::{ApiSettings, AuthSettings, Conf, RemoteSettings, ShoalSettings, TlsSettings};
+pub use conf::{
+    ApiSettings, AuthSettings, ClientSettings, Conf, RemoteSettings, ShoalSettings, TlsSettings,
+};
 pub use memory::MemoryBackend;
+pub use served::{NoClient, Served};
 pub use service::{Asker, NoUser, NotAllowed, NotSignedIn, Recovered, Service, TooManyTries};
 pub use store::{
     AddCapture, AddedProject, BadCursor, CaptureRead, CaptureShas, Captured, Checked, FILE_ROW_MAX,

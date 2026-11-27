@@ -53,6 +53,8 @@
 //! | `GET`, `POST` | [`USERS`] |
 //! | `GET ?older=&limit=` | [`USER_HISTORY`] |
 //! | `GET ?older=&limit=` | [`LOOP_HISTORY`] |
+//! | `GET` | [`CLIENT`] |
+//! | `GET` | [`CLIENT_BINARY`] |
 //! | `GET ?next=`, `POST` | [`SIGN_IN`] |
 //! | `POST` | [`SIGN_OUT`] |
 
@@ -262,6 +264,17 @@ pub const USER_HISTORY: &str = "/api/v1/user-history";
 /// One user's password, changed by `PUT`: their own with their current one, or another's by an
 /// admin
 pub const USER_PASSWORD: &str = "/api/v1/users/{name}/password";
+
+/// The build of the `reef` the service hands its users, read by `GET`, which anyone may
+pub const CLIENT: &str = "/api/v1/client";
+
+/// The `reef` the service hands its users, its bytes read by `GET`, which anyone may
+pub const CLIENT_BINARY: &str = "/api/v1/client/reef";
+
+/// The header every API answer carries while the service hands its users a `reef`, naming that
+/// build as `<commit> <committed>` ([`Build::header`](crate::Build::header)), so a client can
+/// tell when its server serves a newer one
+pub const CLIENT_HEADER: &str = "reef-client";
 
 /// The browser's sign-in page by `GET`, and its form sent by `POST`, which sets the sign-in
 /// cookie

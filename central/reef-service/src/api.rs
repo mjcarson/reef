@@ -66,6 +66,8 @@
 //! | `POST /api/v1/users` | `add_user` | [`UserAdded`]: 201, 409 if the name is taken, 401 or 403 unless an admin, or the first from this host, asks |
 //! | `DELETE /api/v1/users/{name}` | `remove_user` | [`UserRemoved`]: 200, 404 if no user has the name, 409 if they are the last admin, 401 or 403 unless an admin asks |
 //! | `PUT /api/v1/users/{name}/password` | `change_password` | [`PasswordChanged`]: 200, 403 if the current password doesn't match or another's is set by no admin, 404 if no user has the name, 429 if too many failed lately |
+//! | `GET /api/v1/client` | `served_client` | the [`Build`] of the `reef` it hands its users, or 404 if it hands them none |
+//! | `GET /api/v1/client/reef` | `served_client` | that `reef`'s bytes, as `application/octet-stream`, or 404 |
 //!
 //! - **Every write names its author.** Each write route takes its [`Caller`] and hands the service
 //!   [`Caller::author`]: the user the token signs in, Claude's for them if the `reef-writer`
@@ -98,6 +100,10 @@
 //! - **Writes from another origin are refused.** The guard judges every write a browser sends
 //!   by where it came from ([`origin`](crate::origin)), so a page of another origin can't write
 //!   through a visitor's browser, signed in or not.
+//! - **Every answer names the client.** While the service hands its users a `reef`
+//!   ([`served`](crate::served)), every answer the router gives carries
+//!   [`paths::CLIENT_HEADER`], its commit and that commit's time, so a client sees a newer build
+//!   on whatever it calls next. Its two routes answer anyone, signed in or not.
 
 use axum::extract::{
     DefaultBodyLimit, FromRequest, FromRequestParts, Path as Segment, Query, Request, State,
@@ -119,7 +125,7 @@ use reef_api::{
     Transcript, User, UserAdded, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_api::{
-    HistoryPage, HistoryQuery, MoveNodes, Moved, OpenRun, PasswordChange, PasswordChanged,
+    Build, HistoryPage, HistoryQuery, MoveNodes, Moved, OpenRun, PasswordChange, PasswordChanged,
     RunReport, TestRun, TokenInfo, UserRemoved,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
@@ -195,7 +201,13 @@ impl<B: Backend + 'static> Serves for &'static Service<B> {
 /// let router = api::router(Arc::new(Service::memory()));
 /// ```
 pub fn router<S: Serves>(serves: S) -> Router {
-    Router::new()
+    // the build of the client the service hands its users, which every answer names
+    let named = serves
+        .service()
+        .served_client()
+        .and_then(|served| served.build.header())
+        .and_then(|header| HeaderValue::from_str(&header).ok());
+    let router = Router::new()
         .route(paths::PROJECTS, get(projects::<S>).post(add_project::<S>))
         .route(paths::FIND_PROJECT, get(find_project::<S>))
         .route(paths::PROJECT_FETCH, axum::routing::post(fetch::<S>))
@@ -304,7 +316,29 @@ pub fn router<S: Serves>(serves: S) -> Router {
             paths::USER_PASSWORD,
             axum::routing::put(change_password::<S>),
         )
-        .with_state(serves)
+        .route(paths::CLIENT, get(client::<S>))
+        .route(paths::CLIENT_BINARY, get(client_binary::<S>))
+        .with_state(serves);
+    match named {
+        Some(value) => router.layer(axum::middleware::map_response(move |response: Response| {
+            naming(response, value.clone())
+        })),
+        None => router,
+    }
+}
+
+/// Names the client the service hands its users on an answer
+///
+/// # Arguments
+///
+/// * `response` - The answer
+/// * `value` - The client's build, as [`Build::header`] says it
+async fn naming(mut response: Response, value: HeaderValue) -> Response {
+    // every answer the router gives, a refusal or an error too
+    response
+        .headers_mut()
+        .insert(header::HeaderName::from_static(paths::CLIENT_HEADER), value);
+    response
 }
 
 /// This host's listener: HTTPS on a loopback address, or plain HTTP under `dx serve` alone,
@@ -2531,6 +2565,71 @@ async fn revoke_current<S: Serves>(
     };
     let revoked = serves.service().sign_out(&token).await?;
     Ok(Json(SignedOut { revoked }))
+}
+
+/// Says the build of the `reef` the service hands its users, to anyone, or 404 if it hands them
+/// none
+///
+/// # Arguments
+///
+/// * `serves` - The service
+#[instrument(name = "api::client", skip_all, err(Debug))]
+async fn client<S: Serves>(State(serves): State<S>) -> Result<Json<Build>, Failure> {
+    // the build it found as it opened, which a release never changes
+    match serves.service().served_client() {
+        Some(served) => Ok(Json(served.build.clone())),
+        None => Err(no_client()),
+    }
+}
+
+/// Sends the `reef` the service hands its users, to anyone, or 404 if it hands them none
+///
+/// # Arguments
+///
+/// * `serves` - The service
+#[instrument(name = "api::client_binary", skip_all, err(Debug))]
+async fn client_binary<S: Serves>(State(serves): State<S>) -> Result<Response, Failure> {
+    let Some(served) = serves.service().served_client() else {
+        return Err(no_client());
+    };
+    // the whole file, which is a release's and so never changes under it
+    let bytes = tokio::fs::read(&served.path).await.map_err(|error| {
+        Failure::new(
+            ErrorCode::Internal,
+            format!("reading the client at {}: {error}", served.path.display()),
+        )
+    })?;
+    // and only the file that said its build, never one put there since
+    if bytes.len() as u64 != served.size {
+        return Err(Failure::new(
+            ErrorCode::Internal,
+            format!(
+                "the client at {} changed since this server started: restart it",
+                served.path.display()
+            ),
+        ));
+    }
+    let headers = [
+        (
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        ),
+        (header::CONTENT_LENGTH, HeaderValue::from(bytes.len())),
+        (
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment; filename=\"reef\""),
+        ),
+    ];
+    Ok((headers, bytes).into_response())
+}
+
+/// The failure a client route answers with when the service hands its users no `reef`
+fn no_client() -> Failure {
+    Failure::new(
+        ErrorCode::NotFound,
+        "this server hands its users no `reef`: its release has no stamped client, and \
+         `[client] reef` names none",
+    )
 }
 
 /// Says who the service takes the caller for, and whether it asks callers to sign in

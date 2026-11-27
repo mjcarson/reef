@@ -461,15 +461,17 @@ nodes:
       test: 'by hand: REEF_COMMIT=dc5e68c… REEF_COMMITTED=1795809468 CARGO_PROFILE_RELEASE_STRIP=symbols cargo +stable build --release --locked --target x86_64-unknown-linux-musl -p reef built in 24 s; file says static-pie linked, stripped, ldd says statically linked, and reef version --json printed the commit and time; that binary read europa''s project over HTTPS'
   - id: C117
     title: C117 Central reef serves its client
+    status: done
     needs:
     - C116
     description:
       why: A new machine has to build `reef` from source to reach central reef, and a client can't tell whether the server it calls has a newer one.
       what: Central reef serves the stamped `reef` from its release, and its build, to anyone, and names that build in a header on every API response.
       details: |
-        - **Finding it** (`reef_service::client::Served::find`): `[client] reef`, else
-          `bin/reef` beside the running release's, asked `version --json` once with a timeout and
-          kept only if stamped.
+        - **Finding it** (`reef_service::served::Served::find`, beside shoal's `client.rs`):
+          `[client] reef`, else `bin/reef` beside the running release's, asked `version --json` once
+          with a timeout and kept only if stamped. Otherwise it keeps why (`NoClient`), which
+          reef-serve and reef-app print as they start, with the build they serve when they do.
         - **Routes**: `GET /api/v1/client` answers the `Build`, `GET /api/v1/client/reef` the bytes.
           Both answer without a token, so a machine can fetch it before signing in.
         - **The header**: `reef-client: <commit> <committed>` on every API response, when a client
@@ -478,9 +480,17 @@ nodes:
           may share one file.
     acceptance:
     - integration: A service given a stamped client serves its build and its bytes, and names it in a header on API responses
+      status: met
+      test: central/reef-service/tests/sign_in.rs::memory::the_served_client_is_its_build_its_bytes_and_a_header
     - integration: Both client routes answer without a token on a server that requires sign-in
+      status: met
+      test: central/reef-service/tests/sign_in.rs::memory::the_client_routes_answer_without_a_token
     - integration: With no client, the route says not found and responses carry no header
+      status: met
+      test: central/reef-service/tests/sign_in.rs::memory::with_no_client_the_route_says_not_found
     - unit: An unstamped build is refused as the served client
+      status: met
+      test: central/reef-service/src/served.rs::tests::only_a_stamped_client_is_served
   - id: C118
     title: C118 reef updates itself
     needs:

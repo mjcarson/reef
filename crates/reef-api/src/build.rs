@@ -2,8 +2,9 @@
 //! commit was made, and the target it runs on
 //!
 //! A release's `reef` is stamped with its commit and the commit's time, which `reef version
-//! --json` prints as a [`Build`]. Central reef serves its release's client and says that build on
-//! `GET /api/v1/client`, and names it in its `reef-client` header on every API response
+//! --json` prints as a [`Build`]. Central reef serves its release's client and says that build
+//! on [`paths::CLIENT`](crate::paths::CLIENT), and names it in
+//! [`paths::CLIENT_HEADER`](crate::paths::CLIENT_HEADER) on every API response
 //! ([`Build::header`]), so a client can tell whether the server it calls serves a newer one
 //! ([`read_header`]). A build with no stamp, as `cargo install` makes, has no commit.
 

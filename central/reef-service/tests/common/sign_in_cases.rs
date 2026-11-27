@@ -6,22 +6,23 @@
 
 use reef_api::user::SIGN_IN_COOKIE;
 use reef_api::{
-    AddedProject, ApiError, Checked, ErrorCode, IssuedToken, Listing, Me, NewProject, NewUser,
-    PasswordChange, PasswordChanged, Project, SignIn, SignedOut, TokenInfo, TokenKind, User,
-    UserAdded, UserRemoved, paths,
+    AddedProject, ApiError, Build, Checked, ErrorCode, IssuedToken, Listing, Me, NewProject,
+    NewUser, PasswordChange, PasswordChanged, Project, SignIn, SignedOut, TokenInfo, TokenKind,
+    User, UserAdded, UserRemoved, paths,
 };
 use reef_model::{Description, NodeSpec, PlanName};
 use reef_service::service::token_hash;
-use reef_service::{Asker, Backend, Recovered, Unkeepable};
+use reef_service::{Asker, Backend, Recovered, Served, Unkeepable};
 use reqwest::header::{
-    ACCEPT, CONTENT_SECURITY_POLICY, COOKIE, LOCATION, RETRY_AFTER, SET_COOKIE, WWW_AUTHENTICATE,
+    ACCEPT, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE, COOKIE,
+    LOCATION, RETRY_AFTER, SET_COOKIE, WWW_AUTHENTICATE,
 };
 use reqwest::{Method, StatusCode, Version};
 use std::time::Duration;
 
 use super::Fx;
 use super::git;
-use super::http::{Ax, Client};
+use super::http::{Ax, Client, fake_client, stamped};
 use reef_api::{NodePut, NodeWrite, Puts};
 
 /// The password every case's users sign in with
@@ -1669,5 +1670,150 @@ pub async fn the_host_recovers_a_lost_admin<B: Backend + 'static>(fx: Fx<B>) -> 
         "{refused:#}"
     );
     assert_eq!(try_sign_in(&ax, "ada", new).await?.0, StatusCode::CREATED);
+    Ok(())
+}
+
+/// The `reef` a case's service hands its users: a fake client in the case's own directory,
+/// stamped with a commit and its time, read as the service reads a release's
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, whose directory holds the client
+async fn served_client<B: Backend>(fx: &Fx<B>) -> anyhow::Result<Served> {
+    let build = stamped("dc5e68cd25c95db18f885357f505e97af24175f9", 1_795_800_000);
+    let path = fake_client(&fx.dir.join("release/bin/reef"), &build)?;
+    Served::read(&path).await
+}
+
+/// A service handing its users a client says its build and sends its bytes, as a release's, and
+/// names the build on every answer the API gives, its refusals and errors too
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking no caller to sign in
+pub async fn the_served_client_is_its_build_its_bytes_and_a_header<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let served = served_client(&fx).await?;
+    let ax = fx.api_serving(false, served.clone()).await?;
+    let named = "dc5e68cd25c95db18f885357f505e97af24175f9 1795800000";
+    // its build, as the client said it, named in the answer's header too
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::GET, paths::CLIENT))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[paths::CLIENT_HEADER], named);
+    let build: Build = response.json().await?;
+    assert_eq!(build, served.build);
+    // its bytes, whole, as a file to save
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::GET, paths::CLIENT_BINARY))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[CONTENT_TYPE], "application/octet-stream");
+    assert_eq!(headers[CONTENT_LENGTH], served.size.to_string());
+    assert_eq!(
+        headers[CONTENT_DISPOSITION],
+        "attachment; filename=\"reef\""
+    );
+    let bytes = response.bytes().await?;
+    assert_eq!(bytes.as_ref(), std::fs::read(&served.path)?.as_slice());
+    // and every other answer names it, a listing, a write and an error alike
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::GET, paths::PROJECTS))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[paths::CLIENT_HEADER], named);
+    let response = ax
+        .client
+        .raw(
+            ax.client
+                .request(Method::POST, &paths::nodes(&ax.plan))
+                .json(&work("C1")),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[paths::CLIENT_HEADER], named);
+    let missing = paths::node(&ax.plan, "C404");
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::GET, &missing))
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.headers()[paths::CLIENT_HEADER], named);
+    Ok(())
+}
+
+/// Both client routes answer a caller with no token on a server that asks every caller to sign
+/// in, so a new machine fetches `reef` before it can, while the rest still refuse it
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking every caller to sign in
+pub async fn the_client_routes_answer_without_a_token<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let served = served_client(&fx).await?;
+    let ax = fx.api_serving(true, served.clone()).await?;
+    // no token sent, and both answer
+    let (status, build): (_, Build) = ax.client.get(paths::CLIENT).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(build, served.build);
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::GET, paths::CLIENT_BINARY))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await?.len() as u64, served.size);
+    // a HEAD of either too, as a download's first look
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::HEAD, paths::CLIENT_BINARY))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    // but only those: the plan still asks who is calling
+    let (status, error): (_, ApiError) = ax.client.get(paths::PROJECTS).await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.code, ErrorCode::Unauthorized);
+    // and a write to either is no read
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::POST, paths::CLIENT_BINARY))
+        .await?;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+/// A service handing its users no client says so on its route, and names no build on any answer
+///
+/// # Arguments
+///
+/// * `fx` - The fixture, served asking no caller to sign in
+pub async fn with_no_client_the_route_says_not_found<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let ax = fx.api().await?;
+    // the build's route, and the bytes', are not found, naming the key that would serve one
+    let (status, error): (_, ApiError) = ax.client.get(paths::CLIENT).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(error.code, ErrorCode::NotFound);
+    assert!(
+        error.message.contains("`[client] reef`"),
+        "{}",
+        error.message
+    );
+    let (status, _): (_, ApiError) = ax.client.get(paths::CLIENT_BINARY).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    // and no answer names a build
+    let response = ax
+        .client
+        .raw(ax.client.request(Method::GET, paths::PROJECTS))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(paths::CLIENT_HEADER).is_none());
     Ok(())
 }

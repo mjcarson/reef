@@ -41,6 +41,17 @@ hosts = ["github.com"]              # the only hosts a remote may be cloned from
   account's data directory is closed to other accounts, so copy `ca.pem` out once the server
   has made it, and name the copy as `ca`:
   `sudo install -m 0644 /var/lib/reef/certs/ca.pem /etc/reef/reef-ca.pem`.
+- **The server hands its users the `reef` its release holds.** A reefadm release's `bin/reef` is
+  static and stamped with its commit, and the server finds it beside its own binary, so a team
+  server's config says nothing of it. An install made by hand names its client instead, which
+  must be a stamped build ([Building and installing](build.md)); anything else is said as the
+  server starts, and no client is served:
+
+  ```toml
+  [client]
+  reef = "/usr/local/bin/reef"        # the stamped reef handed to users; default the release's own
+  update = true                       # the CLI's alone: whether a stamped reef reading this updates itself
+  ```
 - **`[shoal] exclude_cores` keeps the shards off cores,** listed as physical cores, both threads of
   each, such as `[0, 1, 2, 3]`; unset, they may take any cpu but cpu 0. A machine that also
   runs shoal's benchmarks wants it, and a port off theirs: see [Beside a benchmark](benchmarks.md).

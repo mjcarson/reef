@@ -48,6 +48,9 @@
 //!   slowed ([`throttle`]).
 //! - **A project registers by its git URL too** ([`remotes`]): the service clones one branch of
 //!   it, and fetches it when asked and on the interval reef's config sets.
+//! - **It hands its users `reef`** ([`served`](crate::served)): the stamped client its release
+//!   holds, found once as it opens, which the JSON API serves to anyone and names on every
+//!   answer.
 //!
 //! A process keeps one service over shoal. `Service::shared` opens it once however often a
 //! caller asks, since `dioxus::serve` runs its setup again after every hot-patch, and a second
@@ -75,6 +78,7 @@ use crate::backend::Backend;
 use crate::client::{Mode, ShoalBackend};
 use crate::conf::Conf;
 use crate::memory::MemoryBackend;
+use crate::served::{NoClient, Served};
 use crate::store::{
     AddedProject, BranchProposal, Checked, Listing, NodePut, NotListed, NotRegistered, PageEdit,
     PageEdited, PageListing, PageWrite, PlanInfo, PlanWrite, Project, Proposal, Puts, QueueEdit,
@@ -139,6 +143,8 @@ pub struct Service<B = ShoalBackend> {
     fetch_every: Option<Duration>,
     /// Each remote project's fetch lock, held while its clone is fetched and its row written
     fetches: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The `reef` this service hands its users, or why it hands them none
+    client: Result<Served, NoClient>,
 }
 
 impl Service<ShoalBackend> {
@@ -163,6 +169,7 @@ impl Service<ShoalBackend> {
         };
         Ok(Service::new(store)
             .requiring_sign_in(conf.auth.required)
+            .serving_client(Served::find(conf).await)
             .cloning_into(clones)
             .cloning_from(conf.remotes.hosts.clone())
             .fetching_every(conf.fetch_every()?))
@@ -201,6 +208,25 @@ impl Service<MemoryBackend> {
     }
 }
 
+/// A build as one line, as `reef version` prints it: `reef 0.1.0 dc5e68cd25c9 (2026-11-27)`
+///
+/// # Arguments
+///
+/// * `build` - The build, stamped
+fn served_line(build: &reef_api::Build) -> String {
+    match build.stamp() {
+        Some((commit, committed)) => {
+            // the commit's first 12, and the day it was made, in UTC
+            let short: String = commit.chars().take(12).collect();
+            let day = time::OffsetDateTime::from_unix_timestamp(committed)
+                .map(|at| at.date().to_string())
+                .unwrap_or_else(|_| committed.to_string());
+            format!("reef {} {short} ({day})", build.version)
+        }
+        None => format!("reef {} (not stamped)", build.version),
+    }
+}
+
 impl<B: Backend> Service<B> {
     /// A service over a store, taking a node's brief form from the default doc sections, asking
     /// no caller to sign in
@@ -226,6 +252,39 @@ impl<B: Backend> Service<B> {
             hosts: Vec::new(),
             fetch_every: None,
             fetches: Mutex::new(HashMap::new()),
+            client: Err(NoClient(
+                "this service was given no client to serve".to_string(),
+            )),
+        }
+    }
+
+    /// Hands its users a `reef`, or none, saying why
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The stamped client to serve, as [`Served::find`] found it, or why there is
+    ///   none
+    pub fn serving_client(mut self, client: Result<Served, NoClient>) -> Self {
+        self.client = client;
+        self
+    }
+
+    /// The `reef` this service hands its users, if it hands them one
+    pub fn served_client(&self) -> Option<&Served> {
+        self.client.as_ref().ok()
+    }
+
+    /// What a server says of its client as it starts: the build it hands its users, or why it
+    /// hands them none
+    pub fn client_note(&self) -> String {
+        match &self.client {
+            // the build, as `reef version` names it, and where it was found
+            Ok(served) => format!(
+                "hands its users {} from {}",
+                served_line(&served.build),
+                served.path.display()
+            ),
+            Err(why) => format!("hands its users no `reef`: {why}"),
         }
     }
 
