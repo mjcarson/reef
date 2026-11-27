@@ -929,18 +929,22 @@ pub enum QueueCommand {
         #[command(flatten)]
         pick: PlanPick,
     },
-    /// List the queue, each entry ready, waiting on what, in progress, blocked, done or missing
+    /// List a plan's queue, each entry ready, waiting on what, in progress, blocked, done or
+    /// missing: the plan named, else the one the checkout picks, else every plan's
     Ls {
-        /// The project whose queue to list, if not the working directory's
+        /// The plan whose queue to list, if not the one the checkout picks
         #[command(flatten)]
-        pick: Pick,
+        pick: PlanPick,
+        /// List every plan's entries, in the project's order, whichever the checkout picks
+        #[arg(long, conflicts_with = "plan")]
+        all: bool,
     },
-    /// Print the queue's history: who queued, moved or took off each entry, newest first, 200
-    /// edits at a time
+    /// Print a plan's queue's history: who queued, moved or took off each entry, newest first,
+    /// 200 edits at a time: the plan named, else the one the checkout picks, else every plan's
     Log {
-        /// The project whose queue's history to print, if not the working directory's
+        /// The plan whose queue's history to print, if not the one the checkout picks
         #[command(flatten)]
-        pick: Pick,
+        pick: PlanPick,
         /// How far back to print
         #[command(flatten)]
         paging: Paging,
@@ -1187,14 +1191,24 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Queue(QueueCommand::Rm { ids, pick }) => {
             queue::rm(&client, cwd, &ids, &pick, out).await
         }
-        Command::Queue(QueueCommand::Ls { pick }) => {
-            let project = picked(&client, cwd, &pick).await?;
-            queue::ls(&client, &project.name, out).await
+        Command::Queue(QueueCommand::Ls { pick, all }) => {
+            // the plan named or picked, else every plan's entries
+            let (project, plan) = next_plan(&client, cwd, &pick, all).await?;
+            queue::ls(&client, &project.name, plan.as_ref(), out).await
         }
         Command::Queue(QueueCommand::Log { pick, paging }) => {
-            let project = picked(&client, cwd, &pick).await?;
+            // the plan named or picked, else the project's whole queue's history
+            let (project, plan) = next_plan(&client, cwd, &pick, false).await?;
             let older = paging.older.as_deref();
-            history::queue(&client, &project.name, older, paging.all, out).await
+            history::queue(
+                &client,
+                &project.name,
+                plan.as_ref(),
+                older,
+                paging.all,
+                out,
+            )
+            .await
         }
         Command::Import {
             book,
@@ -2619,7 +2633,11 @@ mod tests {
             Command::Queue(QueueCommand::Rm { ids, .. }) if ids == ["C21", "C22"]
         ));
         assert!(Cli::try_parse_from(["reef", "queue", "ls", "--project", "reef"]).is_ok());
-        assert!(Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central"]).is_err());
+        assert!(Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central"]).is_ok());
+        assert!(Cli::try_parse_from(["reef", "queue", "ls", "--all"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["reef", "queue", "ls", "--plan", "central", "--all"]).is_err()
+        );
     }
 
     /// `user log` and `loop log` page as the other logs do, and `--older` and `--all` don't go

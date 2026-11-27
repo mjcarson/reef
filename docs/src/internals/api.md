@@ -27,7 +27,9 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `POST …/plans/{plan}/pages` `PageEdit` | `PageEdited`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/pages/{*path}` | the `StoredPage`, or 404 |
 | `GET …/plans/{plan}/page-history/{*path}?older=&limit=` | a `HistoryPage` of the page's `Logged` edits, newest first |
-| `GET /api/v1/projects/{project}/queue/history?older=&limit=` | a `HistoryPage` of its queue's `Logged` edits, newest first |
+| `GET /api/v1/projects/{project}/queue/history?older=&limit=` | a `HistoryPage` of its queue's `Logged` edits, every plan's, newest first |
+| `GET …/plans/{plan}/queue` | the plan's own `QueueListing`: its entries alone, in their order |
+| `GET …/plans/{plan}/queue/history?older=&limit=` | a `HistoryPage` of the plan's queue's `Logged` edits, newest first |
 | `GET /api/v1/projects/{project}/work` | every `WorkRecord` of its nodes, by node |
 | `GET …/plans/{plan}/work/{id}` | the node's `WorkRecord`, or 404 if it wasn't started |
 | `POST …/plans/{plan}/work/{id}` `StartWork` | `Started`: 200, 409 if stale, 422 if the node is not in its plan |
@@ -82,7 +84,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
   what it needs, then follows. One that falls behind by more than 256 changes is sent `missed`,
   with how many, and should read again. `plan` narrows it within a `project`, and a project's
   own changes reach it only if they concern that plan: a `project-fetched` names the branch that
-  moved and the plans that follow it, and reaches only those. One from an older service names no
+  moved and the plans that follow it, and reaches only those, and a `queue-changed` names the
+  plan whose queue it edited. One from an older service names no
   plans, and reaches every plan.
 - **One layer signs callers in.** `api::serve` wraps the router in `auth::guard`, as reef-app
   wraps its whole router. It reads a token from `Authorization: Bearer`, else the `reef_sign_in`

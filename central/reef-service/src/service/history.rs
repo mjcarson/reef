@@ -15,7 +15,7 @@ use tracing::instrument;
 
 use super::Service;
 use crate::backend::Backend;
-use crate::store::NotRegistered;
+use crate::store::{NotListed, NotRegistered};
 
 impl<B: Backend> Service<B> {
     /// Reads a page of a node's history, newest first, a node removed since included
@@ -72,6 +72,26 @@ impl<B: Backend> Service<B> {
             return Err(NotRegistered(project.to_string()).into());
         }
         self.store.queue_history(project, query).await
+    }
+
+    /// Reads a page of one plan's queue's history, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `query` - Which page to read
+    #[instrument(name = "Service::plan_queue_history", skip_all, err(Debug))]
+    pub async fn plan_queue_history(
+        &self,
+        plan: &PlanName,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        // a plan its project lists, of a project that is registered
+        let plans = self.plans(&plan.project).await?;
+        if !plans.iter().any(|info| info.name == *plan) {
+            return Err(NotListed(plan.clone()).into());
+        }
+        self.store.plan_queue_history(plan, query).await
     }
 
     /// Reads a page of a project's loops' and sessions' history, newest first

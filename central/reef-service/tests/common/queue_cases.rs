@@ -394,3 +394,122 @@ pub async fn queue_deletes_only_the_row_read<B: Reopen>(fx: Fx<B>) -> anyhow::Re
     );
     Ok(())
 }
+
+/// Puts a node of a plan of the case's project in the queue, at a place
+///
+/// # Arguments
+///
+/// * `fx` - The store
+/// * `plan` - The plan's name within `reef`
+/// * `id` - The node's id
+/// * `at` - Where it goes
+async fn add_to<B: Backend>(fx: &Fx<B>, plan: &str, id: &str, at: Place) -> anyhow::Result<Queued> {
+    let node = reef_model::PlanName::new("reef", plan)?.node(id)?;
+    let edit = QueueEdit::Add { node, at };
+    fx.store.edit_queue("reef", edit, &reef_api::NOBODY).await
+}
+
+/// A node of a plan of the case's project
+///
+/// # Arguments
+///
+/// * `plan` - The plan's name within `reef`
+/// * `id` - The node's id
+fn of(plan: &str, id: &str) -> NodeName {
+    reef_model::PlanName::new("reef", plan)
+        .and_then(|plan| plan.node(id))
+        .expect("a test's names are good")
+}
+
+/// The ids of one plan's queue, in its order
+///
+/// # Arguments
+///
+/// * `fx` - The store
+/// * `plan` - The plan's name within `reef`
+async fn plan_order<B: Backend>(fx: &Fx<B>, plan: &str) -> anyhow::Result<Vec<String>> {
+    let queue = fx.store.queue("reef").await?;
+    Ok(queue
+        .into_iter()
+        .filter(|entry| entry.node.plan.plan == plan)
+        .map(|entry| entry.node.id)
+        .collect())
+}
+
+/// Two plans' queues are edited apart, each in its own order: a place is among its own plan's
+/// entries, an edit answers with its plan's entries alone, a node beside another plan's entry
+/// is refused, and every rank stays unique across the project
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn two_plans_queues_are_edited_apart<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    // `central`'s and `other`'s entries, interleaved in the project's partition
+    add_to(&fx, "central", "A", Place::Bottom).await?;
+    add_to(&fx, "other", "X", Place::Bottom).await?;
+    add_to(&fx, "central", "B", Place::Bottom).await?;
+    add_to(&fx, "other", "Y", Place::Bottom).await?;
+    // the top of `central` is before its first, and of `other` before its own, not the project's
+    add_to(&fx, "central", "C", Place::Top).await?;
+    let Queued::Applied { queue } = add_to(&fx, "other", "Z", Place::Top).await? else {
+        panic!("queueing Z at the top of `other` was refused");
+    };
+    // its answer lists `other`'s entries alone
+    let ids: Vec<&str> = queue.iter().map(|entry| entry.node.id.as_str()).collect();
+    assert_eq!(ids, ["Z", "X", "Y"]);
+    // beside entries of their own plan, wherever the other plan's rows lie between
+    add_to(&fx, "central", "D", Place::After(of("central", "A"))).await?;
+    add_to(&fx, "other", "W", Place::Before(of("other", "Y"))).await?;
+    add_to(&fx, "central", "E", Place::After(of("central", "B"))).await?;
+    assert_eq!(plan_order(&fx, "central").await?, ["C", "A", "D", "B", "E"]);
+    assert_eq!(plan_order(&fx, "other").await?, ["Z", "X", "W", "Y"]);
+    // every row has a rank of its own, so none was written over
+    let stored = rows(&fx).await?;
+    assert_eq!(stored.len(), 9);
+    let ranks: std::collections::HashSet<&str> =
+        stored.iter().map(|row| row.rank.as_str()).collect();
+    assert_eq!(ranks.len(), 9);
+    // a node placed beside another plan's entry is refused, and changes nothing
+    let refused = add_to(&fx, "central", "F", Place::Before(of("other", "X")))
+        .await
+        .expect_err("a place in another plan's queue was taken");
+    assert!(refused.is::<Unkeepable>(), "{refused:#}");
+    assert!(
+        refused.to_string().contains("among its own entries"),
+        "{refused:#}"
+    );
+    assert_eq!(rows(&fx).await?.len(), 9);
+    Ok(())
+}
+
+/// A node placed where it is already among its own plan's entries changes nothing, though
+/// another plan's rows lie between it and its neighbours
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_node_already_in_place_in_its_plan_changes_nothing<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // `other`'s X first in the project, then `central`'s A and B
+    add_to(&fx, "other", "X", Place::Bottom).await?;
+    add_to(&fx, "central", "A", Place::Bottom).await?;
+    add_to(&fx, "central", "B", Place::Bottom).await?;
+    let before = rows(&fx).await?;
+    // A is `central`'s first, so its top is where it is, and after it is where B is
+    add_to(&fx, "central", "A", Place::Top).await?;
+    let mv = QueueEdit::Move {
+        node: of("central", "B"),
+        at: Place::After(of("central", "A")),
+    };
+    fx.store.edit_queue("reef", mv, &reef_api::NOBODY).await?;
+    // no row was written, and no edit kept in either history
+    assert_eq!(rows(&fx).await?, before);
+    let plan = reef_model::PlanName::new("reef", "central")?;
+    let history = fx
+        .store
+        .plan_queue_history(&plan, &reef_api::HistoryQuery::default())
+        .await?;
+    assert_eq!(history.edits.len(), 2, "{:?}", history.edits);
+    Ok(())
+}

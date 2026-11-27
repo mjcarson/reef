@@ -2445,3 +2445,99 @@ pub async fn a_branch_change_that_breaks_a_link_is_refused<B: Backend + 'static>
     );
     Ok(())
 }
+
+/// Each plan's queue keeps its own entries and history: its routes list its entries alone and
+/// the edits of its own, the project's spans both, a node beside another plan's entry is a bad
+/// request, and a queue's change reaches its own plan's followers alone
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn each_plans_queue_keeps_its_own_history<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // `central` holding A and B, and `other` beside it holding X
+    let other = PlanName::new("reef", "other")?;
+    let (_, _): (_, AddedPlan) = ax
+        .client
+        .post(&paths::plans("reef"), &NewPlan::new("other"))
+        .await?;
+    for (plan, id) in [(&ax.plan, "A"), (&ax.plan, "B"), (&other, "X")] {
+        let (status, _): (_, Checked) = ax
+            .client
+            .post(&paths::nodes(plan), &one(work(id, &[], 0), None))
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // a follower of `central`, then an entry queued in each plan
+    let mut events = Events::new(
+        ax.client
+            .open(&paths::changes(Some("reef"), Some("central")))
+            .await?,
+    );
+    for node in [other.node("X")?, ax.plan.node("A")?] {
+        let edit = QueueEdit::Add {
+            node,
+            at: Place::Bottom,
+        };
+        let (status, _): (_, Queued) = ax.client.post(&paths::queue("reef"), &edit).await?;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // `central`'s follower hears its own queue's change, and not `other`'s before it
+    let event = events
+        .next()
+        .await?
+        .expect("the stream sent the queue's change");
+    assert_eq!(event.event, "queue-changed");
+    let change: Change = serde_json::from_str(&event.data)?;
+    assert_eq!(
+        change,
+        Change::QueueChanged {
+            project: "reef".to_string(),
+            plan: Some(ax.plan.clone()),
+        }
+    );
+    // each plan's queue lists its own entry alone, and the project's both
+    let names = |listing: &QueueListing| -> Vec<String> {
+        listing
+            .entries
+            .iter()
+            .map(|listed| listed.entry.node.to_string())
+            .collect()
+    };
+    let (_, central): (_, QueueListing) = ax.client.get(&paths::plan_queue(&ax.plan)).await?;
+    assert_eq!(names(&central), ["reef/central/A"]);
+    assert_eq!(central.plans, [ax.plan.clone()]);
+    let (_, theirs): (_, QueueListing) = ax.client.get(&paths::plan_queue(&other)).await?;
+    assert_eq!(names(&theirs), ["reef/other/X"]);
+    let (_, all): (_, QueueListing) = ax.client.get(&paths::queue("reef")).await?;
+    assert_eq!(names(&all), ["reef/other/X", "reef/central/A"]);
+    // and so does each plan's history, while the project's spans both
+    let edits = |page: &HistoryPage| page.edits.len();
+    let (_, mine): (_, HistoryPage) = ax.client.get(&paths::plan_queue_history(&ax.plan)).await?;
+    assert_eq!(edits(&mine), 1, "{mine:?}");
+    let (_, theirs): (_, HistoryPage) = ax.client.get(&paths::plan_queue_history(&other)).await?;
+    assert_eq!(edits(&theirs), 1, "{theirs:?}");
+    let (_, project): (_, HistoryPage) = ax.client.get(&paths::queue_history("reef")).await?;
+    assert_eq!(edits(&project), 2, "{project:?}");
+    // a node placed beside another plan's entry is a bad request
+    let beside = QueueEdit::Add {
+        node: ax.plan.node("B")?,
+        at: Place::Before(other.node("X")?),
+    };
+    let (status, error): (_, ApiError) = ax.client.post(&paths::queue("reef"), &beside).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+        "{}",
+        error.message
+    );
+    // and a plan that isn't listed has no queue
+    let ghost = PlanName::new("reef", "ghost")?;
+    let (status, error): (_, ApiError) = ax.client.get(&paths::plan_queue(&ghost)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    Ok(())
+}

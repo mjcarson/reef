@@ -91,6 +91,13 @@ pub const PLAN: &str = "/api/v1/projects/{project}/plans/{plan}";
 /// The branch a plan follows, set, changed or dropped by `PUT`
 pub const PLAN_BRANCH: &str = "/api/v1/projects/{project}/plans/{plan}/branch";
 
+/// A plan's own queue: its entries of its project's queue, in their order, listed by `GET`
+pub const PLAN_QUEUE: &str = "/api/v1/projects/{project}/plans/{plan}/queue";
+
+/// A plan's queue's history: who queued, moved or took off each of its entries, newest first,
+/// a page at a time ([`history_page`])
+pub const PLAN_QUEUE_HISTORY: &str = "/api/v1/projects/{project}/plans/{plan}/queue/history";
+
 /// A plan's nodes: listed by `GET`, put and removed in batches by `POST`
 pub const NODES: &str = "/api/v1/projects/{project}/plans/{plan}/nodes";
 
@@ -393,6 +400,24 @@ pub fn plan(plan: &PlanName) -> String {
 /// * `plan` - The plan's full name
 pub fn plan_branch(plan: &PlanName) -> String {
     format!("{}/branch", self::plan(plan))
+}
+
+/// The path of a plan's own queue
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn plan_queue(plan: &PlanName) -> String {
+    format!("{}/queue", self::plan(plan))
+}
+
+/// The path of a plan's queue's history
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn plan_queue_history(plan: &PlanName) -> String {
+    format!("{}/queue/history", self::plan(plan))
 }
 
 /// The path of a plan's nodes

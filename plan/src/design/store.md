@@ -163,8 +163,12 @@ and no transactions, rewriting every row's position on each move would be slow a
   rewrite of the whole partition would.
 - **Writes take a lock per project; reads take none**, since every step of a write leaves a
   queue that reads in order.
-- **One queue per project, spanning its plans.** Each entry names a plan and a node, and a
-  loop can be narrowed to one plan.
+- **A queue per plan, in its project's partition** ([C94](../milestones/m11.md)). Each entry names a plan and
+  a node, and a plan's entries are a queue of their own: a place is found among them alone, and
+  the rank is made between the two rows beside that place in the whole partition, since the rank
+  is the partition's sort key and two plans' rows sharing one would write over each other. A
+  node beside another plan's entry is refused. The project's order across its plans is still
+  read whole, for a `next` over every plan.
 
 ## Work records
 

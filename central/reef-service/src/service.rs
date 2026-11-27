@@ -655,14 +655,55 @@ impl<B: Backend> Service<B> {
     /// * `project` - The project's name
     #[instrument(name = "Service::queue", skip_all, err(Debug))]
     pub async fn queue(&self, project: &str) -> anyhow::Result<QueueListing> {
-        // every plan the project lists, refused if it isn't registered
-        let plans: Vec<PlanName> = self
+        // every plan's entries, in the project's order
+        self.queue_over(project, None).await
+    }
+
+    /// Lists a plan's own queue: each of its entries with its rank, whether next takes it, and
+    /// if not why, and who put it where it is, if the queue's history still holds that
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Service::plan_queue", skip_all, err(Debug))]
+    pub async fn plan_queue(&self, plan: &PlanName) -> anyhow::Result<QueueListing> {
+        // the plan's entries alone
+        self.queue_over(&plan.project, Some(plan)).await
+    }
+
+    /// Lists a project's queue, or one plan's entries of it
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    /// * `only` - The one plan whose entries to list, or `None` for every plan's
+    #[instrument(name = "Service::queue_over", skip_all, err(Debug))]
+    async fn queue_over(
+        &self,
+        project: &str,
+        only: Option<&PlanName>,
+    ) -> anyhow::Result<QueueListing> {
+        // every plan the project lists, refused if it isn't registered, or the one asked for
+        let mut plans: Vec<PlanName> = self
             .plans(project)
             .await?
             .into_iter()
             .map(|info| info.name)
             .collect();
-        let ranked = self.store.queue(project).await?;
+        if let Some(plan) = only {
+            if !plans.contains(plan) {
+                return Err(NotListed(plan.clone()).into());
+            }
+            plans = vec![plan.clone()];
+        }
+        // the queue's entries, of that plan alone if one was asked for
+        let ranked: Vec<_> = self
+            .store
+            .queue(project)
+            .await?
+            .into_iter()
+            .filter(|ranked| only.is_none_or(|plan| ranked.node.plan == *plan))
+            .collect();
         // each listed plan an entry names, built; an entry of a plan gone is missing
         let mut graphs = Vec::new();
         for plan in plans
@@ -713,7 +754,8 @@ impl<B: Backend> Service<B> {
         Ok(QueueListing { plans, entries })
     }
 
-    /// Edits a project's queue: puts a node in it, moves one, or takes one off
+    /// Edits a plan's queue: puts a node in it, moves one, or takes one off, among the entries
+    /// of the node's own plan
     ///
     /// A node added must be in its plan, or the edit is [`Queued::NotInPlan`], and its plan must
     /// be listed. A node moved or taken off need not be, so an entry whose node is gone can
@@ -742,11 +784,14 @@ impl<B: Backend> Service<B> {
         {
             return Ok(Queued::NotInPlan { node: node.clone() });
         }
-        // edited under the queue's lock, and told to the change stream once it is
+        // edited under the queue's lock, and told to the change stream once it is, as a change
+        // to the queue of the node's plan
+        let plan = edit.node().plan.clone();
         let queued = self.store.edit_queue(project, edit, author).await?;
         if let Queued::Applied { .. } = &queued {
             self.publish(Change::QueueChanged {
                 project: project.to_string(),
+                plan: Some(plan),
             });
         }
         Ok(queued)

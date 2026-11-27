@@ -99,7 +99,9 @@ use crate::memory::MemoryBackend;
 use crate::rank;
 use crate::remote;
 use crate::repo::{self, Located};
-use crate::schema::{NodeRow, PROJECT_SUBJECT, PROJECTS, PageRow, PlanRow, ProjectRow, QueueRow};
+use crate::schema::{
+    NodeRow, PROJECT_SUBJECT, PROJECTS, PageRow, PlanRow, ProjectRow, QUEUE_SUBJECT, QueueRow,
+};
 
 /// How many rows a bulk write sends in one bundle, at most
 const BUNDLE_ROWS: usize = 256;
@@ -1650,17 +1652,21 @@ impl<B: Backend> Store<B> {
         ranked_all(&rows)
     }
 
-    /// Edits a project's queue: puts a node in it, moves one, or takes one off
+    /// Edits a plan's queue: puts a node in it, moves one, or takes one off
     ///
-    /// Each edit writes the node's one row, and a move deletes its old one after. Adding a node
-    /// already queued moves it. Moving or taking off a node that isn't queued, or placing one
-    /// beside a node that isn't, is [`Queued::NotQueued`], and changes nothing. A placement that
-    /// would make a rank longer than [`rank::LONG`] spreads the queue's ranks anew first.
+    /// Each plan's entries are a queue of their own, so a node is placed among its plan's
+    /// entries alone: `Top` before its plan's first, `Bottom` after every row, and beside a node
+    /// of its own plan only. Each edit writes the node's one row, and a move deletes its old one
+    /// after. Adding a node already queued moves it. Moving or taking off a node that isn't
+    /// queued, or placing one beside a node that isn't, is [`Queued::NotQueued`], and changes
+    /// nothing. A placement that would make a rank longer than [`rank::LONG`] spreads the
+    /// project's ranks anew first.
     ///
     /// The store keeps rows; it doesn't check the nodes named are in their plans. The service
     /// does.
     ///
-    /// An edit that changed the queue keeps an entry in its history, under the queue's lock.
+    /// An edit that changed the queue keeps an entry in its plan's queue's history and in the
+    /// project's, under the queue's lock.
     ///
     /// # Arguments
     ///
@@ -1683,23 +1689,44 @@ impl<B: Backend> Store<B> {
                 return Err(Unkeepable(message).into());
             }
         }
+        // and a node is placed among its own plan's entries
+        let plan = &edit.node().plan;
+        if let Some(anchor) = edit.place().and_then(Place::anchor)
+            && anchor.plan != *plan
+        {
+            let message = format!(
+                "`{anchor}` is in `{}`'s queue, not `{plan}`'s: a plan's queue is placed among \
+                 its own entries",
+                anchor.plan
+            );
+            return Err(Unkeepable(message).into());
+        }
         // one write to a project's queue at a time, its history kept under the same lock
         let lock = self.queue_lock(project);
         let _write = lock.lock().await;
         let (queued, edited) = self.edit_queue_held(project, &edit).await?;
         if let Some(edited) = edited {
-            let pending = history::Pending {
-                subject: crate::schema::QUEUE_SUBJECT.to_string(),
-                version: None,
-                edits: vec![edited],
-            };
-            self.keep_edits(project, author, false, vec![pending]).await;
+            // in its plan's queue's history, and in the project's, which spans every plan
+            let pending = [history::queue_subject(plan), QUEUE_SUBJECT.to_string()]
+                .into_iter()
+                .map(|subject| history::Pending {
+                    subject,
+                    version: None,
+                    edits: vec![edited.clone()],
+                })
+                .collect();
+            self.keep_edits(project, author, false, pending).await;
         }
         Ok(queued)
     }
 
-    /// Edits a project's queue under its lock, which the caller holds, and answers what came of
-    /// it and what it changed, `None` for an edit that changed nothing
+    /// Edits a plan's queue under its project's lock, which the caller holds, and answers what
+    /// came of it, the plan's entries alone, and what it changed, `None` for an edit that changed
+    /// nothing
+    ///
+    /// A place is among the entries of the plan the node is in, and its rank is made between
+    /// the two rows beside that place in the whole partition, so no two plans' rows ever share
+    /// a rank, which sorts the partition.
     ///
     /// # Arguments
     ///
@@ -1716,6 +1743,7 @@ impl<B: Backend> Store<B> {
         let (mut rows, leftovers) = settle(read);
         self.prune_queue(leftovers).await?;
         let node = edit.node();
+        let plan = node.plan.plan.as_str();
         let queued = rows.iter().any(|row| is_entry_of(row, node));
         let at = match edit {
             // taking a node off deletes its one row
@@ -1725,7 +1753,7 @@ impl<B: Backend> Store<B> {
                 };
                 let row = rows.remove(i);
                 self.delete_row(&row).await?;
-                let queue = ranked_all(&rows)?;
+                let queue = ranked_in(&rows, plan)?;
                 let edited = Edited::Unqueued { node: node.clone() };
                 return Ok((Queued::Applied { queue }, Some(edited)));
             }
@@ -1737,28 +1765,34 @@ impl<B: Backend> Store<B> {
         };
         // a queued node placed beside itself stays where it is
         if queued && at.anchor() == Some(node) {
-            let queue = ranked_all(&rows)?;
+            let queue = ranked_in(&rows, plan)?;
             return Ok((Queued::Applied { queue }, None));
         }
         // at most twice: once as the queue stands, and once spread anew if that was too long
         let mut spread = false;
         loop {
-            // where the node goes among the other entries
-            let old = rows.iter().position(|row| is_entry_of(row, node));
-            let others: Vec<&QueueRow> =
-                rows.iter().filter(|row| !is_entry_of(row, node)).collect();
-            let index = match place_index(&others, at) {
+            // where the node goes among its plan's other entries
+            let mine: Vec<&QueueRow> = rows.iter().filter(|row| row.plan == plan).collect();
+            let old = mine.iter().position(|row| is_entry_of(row, node));
+            let siblings: Vec<&QueueRow> = mine
+                .iter()
+                .copied()
+                .filter(|row| !is_entry_of(row, node))
+                .collect();
+            let index = match place_index(&siblings, at) {
                 Ok(index) => index,
                 Err(anchor) => return Ok((Queued::NotQueued { node: anchor }, None)),
             };
-            // a node placed where it already is changes nothing
+            // a node placed where it already is among them changes nothing
             if old == Some(index) {
-                let queue = ranked_all(&rows)?;
+                let queue = ranked_in(&rows, plan)?;
                 return Ok((Queued::Applied { queue }, None));
             }
-            // a rank between its new neighbours, unless that is too long to keep
-            let lo = index.checked_sub(1).map(|i| others[i].rank.as_str());
-            let hi = others.get(index).map(|row| row.rank.as_str());
+            // a rank between the two rows beside that place in the whole partition, unless that
+            // is too long to keep
+            let others: Vec<&QueueRow> =
+                rows.iter().filter(|row| !is_entry_of(row, node)).collect();
+            let (lo, hi) = beside(&others, &siblings, index, at);
             let made = rank::between(lo, hi)?;
             if made.len() > rank::LONG && !spread {
                 rows = self.rebalance(rows, &mut seq).await?;
@@ -1774,12 +1808,13 @@ impl<B: Backend> Store<B> {
                 id: node.id.clone(),
                 seq,
             };
-            let replaced = old.map(|i| rows[i].clone());
+            let replaced = rows.iter().find(|row| is_entry_of(row, node)).cloned();
             self.move_row(replaced.as_ref(), row.clone()).await?;
-            // and the queue as the edit leaves it, a node queued already told as moved
+            // and the plan's queue as the edit leaves it, a node queued already told as moved
             let mut after: Vec<QueueRow> = others.into_iter().cloned().collect();
-            after.insert(index, row);
-            let queue = ranked_all(&after)?;
+            after.push(row);
+            after.sort_by(|a, b| a.rank.cmp(&b.rank));
+            let queue = ranked_in(&after, plan)?;
             let edited = match queued {
                 true => Edited::Moved {
                     node: node.clone(),
@@ -1985,6 +2020,64 @@ fn place_index(others: &[&QueueRow], at: &Place) -> Result<usize, NodeName> {
             })
         }
     }
+}
+
+/// The ranks a node's new row goes between: those of the two rows beside its place in the whole
+/// partition, so its rank is one no other plan's row has
+///
+/// Before an entry of its own plan it goes just before that entry, after whatever row precedes
+/// it. After its plan's last entry it goes just after that entry, before whatever row follows
+/// it, and at the bottom, or into a plan with no entries, it goes after the partition's last.
+///
+/// # Arguments
+///
+/// * `others` - Every row of the partition but the node's own, in rank order
+/// * `siblings` - Its plan's other entries, in rank order
+/// * `index` - Where it goes among its siblings
+/// * `at` - The place it was given
+fn beside<'a>(
+    others: &[&'a QueueRow],
+    siblings: &[&'a QueueRow],
+    index: usize,
+    at: &Place,
+) -> (Option<&'a str>, Option<&'a str>) {
+    // where a row stands in the whole partition, which holds every sibling
+    let global = |row: &QueueRow| others.iter().position(|other| other.rank == row.rank);
+    match (siblings.get(index), at) {
+        // before a sibling: just before it, after the row that precedes it
+        (Some(next), _) => {
+            let lo = global(next)
+                .and_then(|i| i.checked_sub(1))
+                .map(|i| others[i].rank.as_str());
+            (lo, Some(next.rank.as_str()))
+        }
+        // after its plan's last entry, named: just after it, before the row that follows it
+        (None, Place::After(_)) if index > 0 => {
+            let last = siblings[index - 1];
+            let hi = global(last)
+                .and_then(|i| others.get(i + 1))
+                .map(|row| row.rank.as_str());
+            (Some(last.rank.as_str()), hi)
+        }
+        // at the bottom, or among no siblings: after the partition's last row
+        (None, _) => (others.last().map(|row| row.rank.as_str()), None),
+    }
+}
+
+/// A queue's rows of one plan, as its entries, each naming its node in full
+///
+/// # Arguments
+///
+/// * `rows` - The partition's rows, in order
+/// * `plan` - The plan's name within the project
+fn ranked_in(rows: &[QueueRow], plan: &str) -> anyhow::Result<Vec<Ranked>> {
+    // the plan's own rows, in the partition's order
+    let mine: Vec<QueueRow> = rows
+        .iter()
+        .filter(|row| row.plan == plan)
+        .cloned()
+        .collect();
+    ranked_all(&mine)
 }
 
 /// A queue's rows as its entries, each naming its node in full
@@ -2371,11 +2464,84 @@ fn fresh_revision() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AddedProject, BUNDLE_BYTES, BUNDLE_ROWS, NodeWrite, Store, bundles, settle};
+    use super::{
+        AddedProject, BUNDLE_BYTES, BUNDLE_ROWS, NodeWrite, Place, Store, beside, bundles, settle,
+    };
     use crate::backend::RevisionKey;
+    use crate::rank;
     use crate::schema::{NodeRow, PageRow, QueueRow};
     use reef_model::PlanName;
     use std::path::Path;
+
+    /// A queue row of a node of `reef`, at a rank
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The node's plan
+    /// * `id` - The node's id
+    /// * `rank` - Its rank
+    fn entry(plan: &str, id: &str, rank: &str) -> QueueRow {
+        QueueRow {
+            project: "reef".to_string(),
+            rank: rank.to_string(),
+            plan: plan.to_string(),
+            id: id.to_string(),
+            seq: 1,
+        }
+    }
+
+    /// A placement among a plan's entries makes its rank between the rows beside it in the
+    /// whole partition, so it never takes a rank another plan's row has
+    #[test]
+    fn a_placement_never_takes_another_plans_rank() {
+        // `p`'s A and B, with `q`'s rows before, between and after them
+        let rows = [
+            entry("q", "W", "a0"),
+            entry("p", "A", "a1"),
+            entry("q", "X", "a2"),
+            entry("p", "B", "a3"),
+            entry("q", "Y", "a4"),
+        ];
+        let others: Vec<&QueueRow> = rows.iter().collect();
+        let siblings: Vec<&QueueRow> = rows.iter().filter(|row| row.plan == "p").collect();
+        let node = |id: &str| PlanName::new("reef", "p").unwrap().node(id).unwrap();
+        // each place, and where among `p`'s entries it puts the node
+        let places = [
+            (Place::Top, 0),
+            (Place::Before(node("B")), 1),
+            (Place::After(node("A")), 1),
+            (Place::After(node("B")), 2),
+            (Place::Bottom, 2),
+        ];
+        for (at, index) in places {
+            let (lo, hi) = beside(&others, &siblings, index, &at);
+            let made = rank::between(lo, hi).unwrap();
+            // a rank no row has, between the two beside it
+            assert!(rows.iter().all(|row| row.rank != made), "{at:?}: {made}");
+            assert!(
+                lo.is_none_or(|lo| lo < made.as_str()),
+                "{at:?}: {lo:?} {made}"
+            );
+            assert!(
+                hi.is_none_or(|hi| made.as_str() < hi),
+                "{at:?}: {made} {hi:?}"
+            );
+        }
+        // the top of `p` goes after `q`'s W and before A, and after B before `q`'s Y
+        assert_eq!(
+            beside(&others, &siblings, 0, &Place::Top),
+            (Some("a0"), Some("a1"))
+        );
+        assert_eq!(
+            beside(&others, &siblings, 2, &Place::After(node("B"))),
+            (Some("a3"), Some("a4"))
+        );
+        // and its bottom after every row
+        assert_eq!(
+            beside(&others, &siblings, 2, &Place::Bottom),
+            (Some("a4"), None)
+        );
+    }
 
     /// A second project for a repo, however its path is spelled, or under a taken name, is refused
     #[tokio::test]

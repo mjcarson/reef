@@ -1264,7 +1264,7 @@ async fn a_waiting_entry_shows_the_needs_it_waits_on() -> anyhow::Result<()> {
 }
 
 /// next spans the project's plans, naming nodes in full, and `--plan` narrows it to one, leaving
-/// the other plans' entries out
+/// the other plans' entries out, and each plan's queue is placed among its own entries alone
 #[tokio::test]
 async fn next_spans_the_projects_plans_and_plan_narrows_it() -> anyhow::Result<()> {
     let cx = Cx::new("queue-spans").await?;
@@ -1295,9 +1295,18 @@ async fn next_spans_the_projects_plans_and_plan_narrows_it() -> anyhow::Result<(
         next,
         "Ready to start (1), in plan order:\n  A  A Some work\n\nWaiting (0):\n  nothing\n"
     );
-    // and a bare id beside it is in its own plan
+    // each plan's queue is its own: A goes at the top of `central`'s, which holds it alone
     let added = cx
-        .reef(
+        .reef(&repo, &["queue", "add", "A", "--plan", "central", "--top"])
+        .await?;
+    assert_eq!(added, "`A` is queued 1 of 1\n");
+    let ls = cx
+        .reef(&repo, &["queue", "ls", "--plan", "central"])
+        .await?;
+    assert_eq!(ls, "1. A  ready  A Some work\n");
+    // and a place beside another plan's entry is refused, saying why
+    let (_, error) = cx
+        .failing(
             &repo,
             &[
                 "queue",
@@ -1310,7 +1319,7 @@ async fn next_spans_the_projects_plans_and_plan_narrows_it() -> anyhow::Result<(
             ],
         )
         .await?;
-    assert_eq!(added, "`A` is queued 1 of 2\n");
+    assert!(error.contains("among its own entries"), "{error}");
     Ok(())
 }
 

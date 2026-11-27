@@ -4,12 +4,16 @@
 //! reef queue add <ID> [--top | --bottom | --before ID | --after ID] [--project NAME] [--plan NAME]
 //! reef queue move <ID> (--top | --bottom | --before ID | --after ID) [--project NAME] [--plan NAME]
 //! reef queue rm <ID>... [--project NAME] [--plan NAME]
-//! reef queue ls [--project NAME]
+//! reef queue ls [--project NAME] [--plan NAME | --all]
 //! ```
 //!
-//! - **One queue a project, spanning its plans.** An entry is a bare id in the picked plan, or
-//!   a full name, `project/plan/id`, in any of the project's plans. A node beside which one goes
-//!   is a bare id in that one's plan, or a full name.
+//! - **A queue a plan.** Each plan's entries are a queue of their own, placed among themselves
+//!   alone. An entry is a bare id in the picked plan, or a full name, `project/plan/id`, in any
+//!   of the project's plans. A node beside which one goes is a bare id in that one's plan, or a
+//!   full name, of the same plan.
+//! - **`ls` lists the plan picked**, by `--plan`, else the checkout's branch or the node its
+//!   worktree is on, and every plan's entries in the project's order where nothing picks one,
+//!   or with `--all`.
 //! - **Adding a queued node moves it.** It goes to the bottom unless a place is given; a move
 //!   needs one.
 //! - **`ls` says what next makes of each entry**: ready, waiting with the needs it waits on, in
@@ -219,20 +223,31 @@ pub async fn rm<W: Write>(
     Ok(())
 }
 
-/// Lists a project's queue: each entry, whether next takes it, and if not why
+/// Lists a plan's queue, or every plan's entries of its project's: each entry, whether next
+/// takes it, and if not why
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `project` - The project's name
+/// * `plan` - The plan whose queue to list, or `None` for every plan's
 /// * `out` - Where to print it
-pub async fn ls<W: Write>(client: &Client, project: &str, out: &mut W) -> anyhow::Result<()> {
-    let listing = client.queue(project).await?;
+pub async fn ls<W: Write>(
+    client: &Client,
+    project: &str,
+    plan: Option<&PlanName>,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // the plan's own entries, else the project's
+    let (listing, whose) = match plan {
+        Some(plan) => (client.plan_queue(plan).await?, plan.to_string()),
+        None => (client.queue(project).await?, project.to_string()),
+    };
     // an empty queue says how to fill it
     if listing.entries.is_empty() {
         writeln!(
             out,
-            "the queue of `{project}` is empty: `reef queue add <ID>` queues a node"
+            "the queue of `{whose}` is empty: `reef queue add <ID>` queues a node"
         )?;
         return Ok(());
     }

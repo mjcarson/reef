@@ -77,6 +77,8 @@ suite!(
     concurrent_edits_both_land,
     each_project_has_its_own_queue,
     queue_deletes_only_the_row_read,
+    two_plans_queues_are_edited_apart,
+    a_node_already_in_place_in_its_plan_changes_nothing,
     bulk_write_with_pages_replaces_them,
     bulk_write_without_pages_keeps_them,
     node_batch_leaves_pages_in_place,

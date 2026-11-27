@@ -112,10 +112,16 @@ pub enum Change {
         /// The revision readers now load
         revision: u64,
     },
-    /// A project's queue was edited: an entry added, moved or taken off
+    /// A plan's queue was edited: an entry added, moved or taken off
+    ///
+    /// Only that plan's followers hear of it, and its project's. One from a service before each
+    /// plan had a queue of its own names no plan, and is its project's alone.
     QueueChanged {
         /// The project whose queue it is
         project: String,
+        /// The plan whose entries it edited, or `None` from a service that named none
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<PlanName>,
     },
     /// A node's work record was written: the node started, or a capture's SHAs added
     WorkRecorded {
@@ -232,7 +238,7 @@ impl Change {
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
-            Change::QueueChanged { project }
+            Change::QueueChanged { project, .. }
             | Change::ProjectFetched { project, .. }
             | Change::LoopChanged { project, .. }
             | Change::SessionChanged { project, .. } => Some(project.as_str()),
@@ -249,9 +255,11 @@ impl Change {
 
     /// The plan this change is to, or `None` for a project's or a gap in the stream
     ///
-    /// A queue spans its project's plans, so its change is the project's.
+    /// Each plan has a queue of its own, so its queue's change is the plan's, unless it came
+    /// from a service that named no plan.
     pub fn plan(&self) -> Option<&PlanName> {
         match self {
+            Change::QueueChanged { plan, .. } => plan.as_ref(),
             Change::PlanAdded { plan }
             | Change::PlanBranched { plan, .. }
             | Change::NodesPut { plan, .. }
@@ -266,7 +274,6 @@ impl Change {
             | Change::DecisionsRecorded { node } => Some(&node.plan),
             Change::ProjectAdded { .. }
             | Change::ProjectFetched { .. }
-            | Change::QueueChanged { .. }
             | Change::LoopChanged { .. }
             | Change::SessionChanged { .. }
             | Change::Missed { .. } => None,
@@ -399,6 +406,7 @@ mod tests {
             Change::PlanWritten { plan, revision: 4 },
             Change::QueueChanged {
                 project: "reef".to_string(),
+                plan: Some(PlanName::new("reef", "central").unwrap()),
             },
             Change::WorkRecorded {
                 node: "reef/central/C30".parse().unwrap(),
@@ -478,11 +486,21 @@ mod tests {
             plans: Some(Vec::new()),
         };
         assert!(!none.reaches("central"));
-        // a queue's change is its project's too, but no plan's
+        // a queue's change from a service that named no plan is its project's alone
         let queue = Change::QueueChanged {
             project: "reef".to_string(),
+            plan: None,
         };
+        assert_eq!(queue.plan(), None);
         assert!(!queue.reaches("central"));
+        let old = json!({"kind": "queue-changed", "project": "reef"});
+        assert_eq!(serde_json::from_value::<Change>(old).unwrap(), queue);
+        // and one naming its plan is that plan's
+        let queue = Change::QueueChanged {
+            project: "reef".to_string(),
+            plan: Some(PlanName::new("reef", "app").unwrap()),
+        };
+        assert_eq!(queue.plan().map(|plan| plan.plan.as_str()), Some("app"));
         // and a plan's branch changing is that plan's
         let branched = Change::PlanBranched {
             plan: PlanName::new("reef", "app").unwrap(),

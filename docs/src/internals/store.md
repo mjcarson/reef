@@ -32,6 +32,12 @@ is the twin's oracle.
   (`rank`), so an edit writes one row. A move writes its new row, then deletes its old one; of a
   node's two rows the later write wins, and the next edit prunes the other. A rank grown past 32
   characters spreads the queue anew, an entry at a time, last first.
+- **Each plan's entries are a queue of their own** (C94), in the same partition. A place is
+  found among the node's own plan's entries, then its rank is made between the two rows beside
+  that place in the whole partition, since the rank is the partition's sort key and two plans'
+  rows must never share one. A node beside another plan's entry is refused. Each edit is kept
+  under `queue/<plan>` and under the project's `queue`, so the project's history still spans
+  every plan.
 - **A node's work record is one row** (`Store::start_work`), in its project's partition by
   `plan/id`, so the node a worktree is on is the one started there last, across the project's
   plans. A start is written where no record is, or over the version of the one it replaces, and

@@ -199,6 +199,8 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::WORK, get(work::<S>))
         .route(paths::PLAN, get(plan::<S>))
         .route(paths::PLAN_BRANCH, axum::routing::put(set_plan_branch::<S>))
+        .route(paths::PLAN_QUEUE, get(plan_queue::<S>))
+        .route(paths::PLAN_QUEUE_HISTORY, get(plan_queue_history::<S>))
         .route(paths::NODES, get(list::<S>).post(put::<S>))
         .route(paths::NODE, get(node::<S>))
         .route(
@@ -1098,8 +1100,25 @@ async fn queue<S: Serves>(
     Ok(Json(listing))
 }
 
-/// Edits a project's queue: 200 if made, 409 if a node named isn't queued, 422 if the node
-/// added is not in its plan
+/// Lists a plan's own queue: its entries, in its order
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+#[instrument(name = "api::plan_queue", skip_all, err(Debug))]
+async fn plan_queue<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+) -> Result<Json<QueueListing>, Failure> {
+    let plan = segments.name()?;
+    // the plan's entries alone, refused if it isn't listed
+    let listing = serves.service().plan_queue(&plan).await?;
+    Ok(Json(listing))
+}
+
+/// Edits a plan's queue, among its own entries: 200 if made, 400 if placed beside another
+/// plan's entry, 409 if a node named isn't queued, 422 if the node added is not in its plan
 ///
 /// # Arguments
 ///
@@ -1525,6 +1544,25 @@ async fn queue_history<S: Serves>(
         .service()
         .queue_history(&segments.project, &query)
         .await?;
+    Ok(Json(history))
+}
+
+/// Reads a page of one plan's queue's history, newest first
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+/// * `query` - Which page to read, by the cursor a page ended with, and how many edits it holds
+#[instrument(name = "api::plan_queue_history", skip_all, err(Debug))]
+async fn plan_queue_history<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+    Params(query): Params<HistoryQuery>,
+) -> Result<Json<HistoryPage>, Failure> {
+    let plan = segments.name()?;
+    // none for a plan whose queue was never edited since each plan had one
+    let history = serves.service().plan_queue_history(&plan, &query).await?;
     Ok(Json(history))
 }
 
@@ -2577,6 +2615,7 @@ mod tests {
         };
         let queue = Change::QueueChanged {
             project: "reef".to_string(),
+            plan: None,
         };
         // every change, unnarrowed
         let all = query(None, None);
@@ -2590,12 +2629,25 @@ mod tests {
         assert!(query(Some("reef"), None).follows(&queue));
         assert!(!query(Some("shoal"), None).follows(&central));
         assert!(!query(Some("shoal"), None).follows(&queue));
-        // one plan's, and not its sibling's or its project's own, its queue being the project's
+        // one plan's, and not its sibling's or its project's own, a queue's change naming no plan
+        // being the project's
         let one = query(Some("reef"), Some("central"));
         assert!(one.follows(&central));
         assert!(!one.follows(&other));
         assert!(!one.follows(&project));
         assert!(!one.follows(&queue));
+        // a plan's own queue's change reaches that plan's followers, and not its sibling's
+        let central_queue = Change::QueueChanged {
+            project: "reef".to_string(),
+            plan: Some(PlanName::new("reef", "central").unwrap()),
+        };
+        let other_queue = Change::QueueChanged {
+            project: "reef".to_string(),
+            plan: Some(PlanName::new("reef", "other").unwrap()),
+        };
+        assert!(one.follows(&central_queue));
+        assert!(!one.follows(&other_queue));
+        assert!(query(Some("reef"), None).follows(&other_queue));
         // a fetch from a service that names no plans moves every plan's docs, so it reaches
         // each plan's
         assert!(one.follows(&fetched));

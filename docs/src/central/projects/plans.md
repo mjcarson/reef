@@ -14,7 +14,9 @@ reef plan ls                       # each plan, the revision it is at, what it f
   `--plan launch`, and the refusal lists each plan and the branch it follows. A plan is named by
   its name alone, or in full as `project/plan` in its own project.
 - **`reef next` looks in the checkout's plan,** and across every plan where nothing picks one,
-  or with `--all`. The project's queue holds every plan's entries.
+  or with `--all`.
+- **Each plan has a queue of its own,** which its `next` follows first. An entry is placed among
+  its plan's entries alone, and each plan's queue keeps its own history beside the project's.
 - **A plan's name** keeps to the same rule as a project's and a user's.
 
 ## A plan follows a branch

@@ -1022,10 +1022,11 @@ pub async fn queue_edit_is_a_change_and_a_refusal_none<B: Backend>(
         .put(&sx.plan, new(vec![work("A", 0)]), &reef_api::NOBODY)
         .await?;
     let mut changes = sx.service.changes();
-    // an entry added tells the stream its project's queue changed
+    // an entry added tells the stream its plan's queue changed
     queue_last(&sx, &sx.plan, "A").await?;
     let expected = Change::QueueChanged {
         project: "reef".to_string(),
+        plan: Some(sx.plan.clone()),
     };
     assert_eq!(changes.try_recv()?, expected);
     // a move of a node not queued, and an add of one not in its plan, tell it nothing

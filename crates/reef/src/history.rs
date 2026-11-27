@@ -191,31 +191,34 @@ pub async fn page<W: Write>(
     show(&page, &format!("no edit of page `{path}` is kept"), out)
 }
 
-/// Prints a project's queue's history, newest first
+/// Prints a plan's queue's history, or its project's whole queue's, newest first
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `project` - The project's name
+/// * `plan` - The plan whose queue's history to print, or `None` for every plan's
 /// * `older` - The cursor a page named, to print the page older than it, or `None` for the newest
 /// * `all` - Whether to print every page from there on
 /// * `out` - Where to print it
 pub async fn queue<W: Write>(
     client: &Client,
     project: &str,
+    plan: Option<&PlanName>,
     older: Option<&str>,
     all: bool,
     out: &mut W,
 ) -> anyhow::Result<()> {
+    // the plan's own history, else the project's, which spans every plan
     let page = pages(older, all, |older| async move {
-        client.queue_history(project, older.as_deref()).await
+        match plan {
+            Some(plan) => client.plan_queue_history(plan, older.as_deref()).await,
+            None => client.queue_history(project, older.as_deref()).await,
+        }
     })
     .await?;
-    show(
-        &page,
-        &format!("no edit of `{project}`'s queue is kept"),
-        out,
-    )
+    let whose = plan.map_or_else(|| project.to_string(), ToString::to_string);
+    show(&page, &format!("no edit of `{whose}`'s queue is kept"), out)
 }
 
 /// Prints a project's loops' and sessions' history, newest first

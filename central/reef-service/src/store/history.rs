@@ -88,6 +88,16 @@ pub fn page_subject(plan: &PlanName, path: &str) -> String {
     format!("page/{}/{path}", plan.plan)
 }
 
+/// The subject a plan's queue's edits are kept under, beside the project's queue's, which
+/// spans every plan
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn queue_subject(plan: &PlanName) -> String {
+    format!("{QUEUE_SUBJECT}/{}", plan.plan)
+}
+
 /// The subject a plan's listing is kept under
 ///
 /// # Arguments
@@ -698,6 +708,25 @@ impl<B: Backend> Store<B> {
         query: &HistoryQuery,
     ) -> anyhow::Result<HistoryPage> {
         self.history(&plan.project, &page_subject(plan, path), query)
+            .await
+    }
+
+    /// Reads a page of one plan's queue's history, newest first
+    ///
+    /// Edits kept before each plan had a queue of its own are in its project's queue's history
+    /// alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `query` - Which page to read
+    #[instrument(name = "Store::plan_queue_history", skip_all, err(Debug))]
+    pub async fn plan_queue_history(
+        &self,
+        plan: &PlanName,
+        query: &HistoryQuery,
+    ) -> anyhow::Result<HistoryPage> {
+        self.history(&plan.project, &queue_subject(plan), query)
             .await
     }
 

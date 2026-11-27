@@ -517,6 +517,32 @@ impl Client {
         self.send(self.http.get(self.url(&path)), &path).await
     }
 
+    /// Lists a plan's own queue: its entries, in their order, and what next makes of each
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn plan_queue(&self, plan: &PlanName) -> anyhow::Result<QueueListing> {
+        let path = paths::plan_queue(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Reads a page of a plan's queue's history: who queued, moved or took off each of its
+    /// entries, newest first
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `older` - The cursor a page named, to read the one older than it, or `None` for the newest
+    pub async fn plan_queue_history(
+        &self,
+        plan: &PlanName,
+        older: Option<&str>,
+    ) -> anyhow::Result<HistoryPage> {
+        let path = paths::history_page(&paths::plan_queue_history(plan), older);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
     /// Reads a page of a project's queue's history: who queued, moved or took off each entry,
     /// newest first
     ///

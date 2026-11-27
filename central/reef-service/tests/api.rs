@@ -68,6 +68,7 @@ suite!(
     two_plans_follow_two_branches_of_one_remote,
     a_local_plan_reads_its_branch_where_it_is_checked_out_or_at_its_tip,
     a_branch_change_that_breaks_a_link_is_refused,
+    each_plans_queue_keeps_its_own_history,
 );
 
 /// A config listening on this host's loopback port alone, over HTTPS, with reef's own
