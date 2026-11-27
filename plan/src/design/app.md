@@ -503,8 +503,8 @@ at a glance ([C119](../milestones/m15.md), [C120](../milestones/m15.md), [C121](
 - **One state of work of three.** A plan reads *testing* while a run builds or runs, else
   *sessions* while a session is live, else *no sessions*.
 - **Who is working on what.** Each node in progress names who started its work record, and each
-  live session names its user and its loop's node. With sign-in off every author is nobody, so a
-  session's host stands in for its user.
+  live session names its user and its loop's node. Sign-in is always required
+  ([C128](../milestones/m15.md)), so every author is known; what was written before keeps none.
 - **A plan's activity is kept plan-wide.** History is a partition per node and a plan's row
   carries no times, so each write to a plan's nodes or pages also keeps an entry in a partition of
   the plan's own: when, who, which nodes, and which went done. It is a table of its own, so no
