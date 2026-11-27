@@ -1162,6 +1162,117 @@ def c25_keys_and_the_sidebar_queue(page):
           seen)
 
 
+def menu_on(page, locator):
+    """Right-clicks a box or a group's head, and waits for its node's menu."""
+    locator.click(button="right")
+    page.wait_for_selector(".reef-app-menu", timeout=5000)
+    return page.get_attribute(".reef-app-menu", "data-node")
+
+
+def menu_gone(page):
+    """Waits for the node menu to close."""
+    page.wait_for_function("() => !document.querySelector('.reef-app-menu')", timeout=10000)
+
+
+def last_entry_is(page, node):
+    """Waits for the queue panel's last entry to be a node."""
+    page.wait_for_function(
+        "node => [...document.querySelectorAll('.reef-app-queue-entry')].at(-1)?.dataset.node === node",
+        arg=node, timeout=10000)
+
+
+def c100_the_node_menu(page):
+    """C100: a right-click on a box opens its node's menu in place of the browser's, which queues it, takes it
+    off, sets its status, opens its sidebar at a tab and copies its id, and closes on Escape or a press outside."""
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"], origin=URL)
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.wait_for_selector(".reef-app-queue-entry")
+    page.click("button[data-act=expand]")
+    page.wait_for_timeout(300)
+    # whether the page kept the browser's own menu from each right-click
+    page.evaluate("() => document.addEventListener('contextmenu', e => { window.__prevented = e.defaultPrevented; })")
+    node = lambda title: page.locator(".reef-viewport .reef-node", has_text=title)
+    acts = lambda: page.eval_on_selector_all(".reef-app-menu [data-act]", "bs => bs.map(b => b.dataset.act)")
+    seen = {}
+    start = panel_order(page)
+    # W1, not queued, is queued last from its menu
+    seen["W1 menu"] = (menu_on(page, node("W1 Lay the ground")), page.evaluate("() => window.__prevented"),
+                       "menu-unqueue" in acts(), "menu-status" in acts())
+    page.screenshot(path=str(SHOTS / "reef-app-node-menu.png"))
+    page.click(".reef-app-menu [data-act=menu-queue-bottom]")
+    last_entry_is(page, "check/draws/W1")
+    menu_gone(page)
+    seen["queued last"] = (panel_order(page), queue_order())
+    # queued now, it is moved first, then taken off
+    menu_on(page, node("W1 Lay the ground"))
+    seen["queued W1 offers off"] = "menu-unqueue" in acts()
+    page.click(".reef-app-menu [data-act=menu-queue-top]")
+    first_entry_is(page, "check/draws/W1")
+    seen["queued first"] = (panel_order(page), queue_order())
+    menu_on(page, node("W1 Lay the ground"))
+    page.click(".reef-app-menu [data-act=menu-unqueue]")
+    page.wait_for_function(
+        "() => ![...document.querySelectorAll('.reef-app-queue-entry')].some(e => e.dataset.node === 'check/draws/W1')",
+        timeout=10000)
+    seen["taken off"] = (panel_order(page), queue_order())
+    # a group's menu queues it, sets no status, and Escape closes it
+    head = page.locator(".reef-viewport .reef-group .reef-head", has_text="G1 The work").first
+    seen["G1 menu"] = (menu_on(page, head), "menu-queue-top" in acts(), "menu-status" in acts())
+    page.keyboard.press("Escape")
+    menu_gone(page)
+    # a press outside the menu, even on another box, closes it and selects nothing
+    menu_on(page, node("L1 After the work"))
+    w2 = node("W2 Build on it").bounding_box()
+    page.mouse.click(w2["x"] + w2["width"] / 2, w2["y"] + w2["height"] / 2)
+    menu_gone(page)
+    page.wait_for_timeout(300)
+    seen["pressed outside"] = page.locator(".reef-side").count()
+    # L1's status set from its menu, then back to do
+    menu_on(page, node("L1 After the work"))
+    seen["L1 to do marked"] = page.get_attribute(".reef-app-menu [data-status=todo]", "class")
+    page.click(".reef-app-menu [data-act=menu-status][data-status=blocked]")
+    menu_gone(page)
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('.reef-viewport .reef-node')]"
+        ".some(e => e.textContent.includes('L1 After the work') && e.classList.contains('s-blocked'))",
+        timeout=10000)
+    seen["blocked"] = "status: blocked" in reef("node", "get", "L1", "--plan", "draws")
+    menu_on(page, node("L1 After the work"))
+    seen["L1 blocked marked"] = page.get_attribute(".reef-app-menu [data-status=blocked]", "class")
+    page.click(".reef-app-menu [data-act=menu-status][data-status=todo]")
+    menu_gone(page)
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('.reef-viewport .reef-node')]"
+        ".some(e => e.textContent.includes('L1 After the work') && !e.classList.contains('s-blocked'))",
+        timeout=10000)
+    seen["to do again"] = "status:" not in reef("node", "get", "L1", "--plan", "draws")
+    # W2's sidebar opened at its Comments tab
+    menu_on(page, node("W2 Build on it"))
+    page.click(".reef-app-menu [data-act=menu-tab][data-tab=comments]")
+    page.wait_for_selector(".reef-side", timeout=5000)
+    menu_gone(page)
+    seen["tab"] = (page.inner_text(".reef-side .reef-id"), page.inner_text(".reef-side .reef-app-tab.on"))
+    # and L1's id copied
+    menu_on(page, node("L1 After the work"))
+    page.click(".reef-app-menu [data-act=menu-copy]")
+    menu_gone(page)
+    seen["copied"] = page.evaluate("() => navigator.clipboard.readText()")
+    check("C100 the node menu queues, takes off, sets a status, opens a tab and copies the id",
+          seen["W1 menu"] == ("W1", True, False, True)
+          and seen["queued last"] == ([*start, "check/draws/W1"],) * 2
+          and seen["queued W1 offers off"]
+          and seen["queued first"] == (["check/draws/W1", *start],) * 2
+          and seen["taken off"] == (start, start)
+          and seen["G1 menu"] == ("G1", True, False)
+          and seen["pressed outside"] == 0
+          and "on" in seen["L1 to do marked"].split() and seen["blocked"]
+          and "on" in seen["L1 blocked marked"].split() and seen["to do again"]
+          and seen["tab"][0] == "W2" and seen["tab"][1].startswith("Comments")
+          and seen["copied"] == "L1",
+          seen)
+
+
 
 def plan_tabs(page):
     """The plan page's switcher: each tab's plan, the branch it shows, and whether it is the one shown."""
@@ -2554,6 +2665,7 @@ def main():
                 c20_a_stale_save_shows_the_newer,
                 c25_a_drag_writes_one_row,
                 c25_keys_and_the_sidebar_queue,
+                c100_the_node_menu,
                 c96_plans_side_by_side,
                 c96_a_fetch_reloads_only_its_branchs_plan,
                 c98_picking_a_branch_moves_the_plan,

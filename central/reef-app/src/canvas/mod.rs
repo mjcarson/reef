@@ -8,14 +8,17 @@
 
 mod diagram;
 pub mod dom;
+mod menu;
 mod toolbar;
 
 pub use diagram::{Diagram, Drawing, Hit, Hits, Shown, use_hits};
+pub use menu::Menu;
 pub use toolbar::Chip;
 
 use crate::side::{Sidebar, Tab};
 use dioxus::prelude::*;
 use dom::{El, Measure};
+use menu::NodeMenu;
 use reef_draw::{Camera, Filter, Scene};
 use reef_layout::Dir;
 use reef_model::{Direction, Graph, Kind, Layout, Payload, ViewSpec};
@@ -119,6 +122,8 @@ pub struct View {
     pub tip: Signal<Option<Tip>>,
     /// The sidebar's tab
     pub tab: Signal<Tab>,
+    /// The node menu shown, if a right-click opened one
+    pub menu: Signal<Option<Menu>>,
 }
 
 impl View {
@@ -295,6 +300,31 @@ impl View {
         self.fit();
     }
 
+    /// Closes the node menu, giving the keyboard back to the view
+    pub fn close_menu(mut self) {
+        if self.menu.peek().is_some() {
+            self.menu.set(None);
+        }
+        if let Some(el) = self.root.peek().as_ref() {
+            dom::focus(el);
+        }
+    }
+
+    /// The id of the node an item of the drawing shows
+    ///
+    /// # Arguments
+    ///
+    /// * `item` - The item
+    fn item_id(self, item: usize) -> Option<String> {
+        self.drawn().and_then(|d| {
+            d.scene
+                .vis
+                .items
+                .get(item)
+                .map(|it| d.graph.node(it.node).id.clone())
+        })
+    }
+
     /// Selects a node, or none
     ///
     /// # Arguments
@@ -446,7 +476,7 @@ fn whole_plan() -> ViewSpec {
     }
 }
 
-/// The plan's canvas: its toolbar, diagram, legend and sidebar
+/// The plan's canvas: its toolbar, diagram, legend and sidebar, and a node's menu
 ///
 /// Keyed by the plan's name, so another plan starts it afresh, while each newer revision of the
 /// same plan is drawn in place.
@@ -522,6 +552,7 @@ pub fn Canvas(
             Toolbar { has_acc }
             Stage { changes, project: project.clone(), plan: plan.clone() }
             ChartTip {}
+            NodeMenu { project: project.clone(), plan: plan.clone() }
         }
         match &*payload.read() {
             Some(Err(error)) => rsx! {
@@ -623,6 +654,7 @@ fn use_view(name: String) -> View {
         results: use_signal(|| false),
         tip: use_signal(|| None),
         tab: use_signal(|| Tab::Details),
+        menu: use_signal(|| None),
     };
     use_context_provider(|| view);
     view
@@ -729,7 +761,12 @@ fn keyed(view: View, event: KeyboardEvent) {
             _ => false,
         },
         Key::Escape => {
-            view.select(None);
+            // an open menu closes first, and the selection goes after
+            if view.menu.peek().is_some() {
+                view.close_menu();
+            } else {
+                view.select(None);
+            }
             true
         }
         _ => false,
@@ -776,7 +813,7 @@ fn Stage(changes: ReadSignal<u64>, project: String, plan: String) -> Element {
     }
 }
 
-/// The diagram's SVG: pan, pinch, wheel, clicks and hover, over the diagram itself
+/// The diagram's SVG: pan, pinch, wheel, clicks, right-clicks and hover, over the diagram itself
 #[component]
 fn Board() -> Element {
     let mut view = use_context::<View>();
@@ -827,9 +864,10 @@ fn Board() -> Element {
             onpointerdown: move |event| {
                 let (x, y) = point(&event);
                 let id = event.pointer_id();
-                // a mouse presses with its main button alone
+                // a mouse presses with its main button alone, though what another button
+                // landed on is kept for the node menu a right-click opens
                 if event.pointer_type() == "mouse" && event.trigger_button() != Some(dioxus::html::input_data::MouseButton::Primary) {
-                    hits.take_press();
+                    last_hit.set(hits.take_press());
                     return;
                 }
                 if let Some(svg) = view.svg.peek().as_ref() {
@@ -897,6 +935,19 @@ fn Board() -> Element {
                 if view.hover.peek().is_some() {
                     view.hover.set(None);
                 }
+            },
+            oncontextmenu: move |event| {
+                // a right-click on a box, a group or its head opens its node's menu in place
+                // of the browser's, while one on nothing leaves the browser's alone
+                let Some(Hit::Item(item) | Hit::Toggle(item)) = *last_hit.peek() else {
+                    return;
+                };
+                let Some(id) = view.item_id(item) else {
+                    return;
+                };
+                event.prevent_default();
+                let c = event.client_coordinates();
+                view.menu.set(Some(Menu { id, x: c.x, y: c.y }));
             },
             ondoubleclick: move |_| {
                 // a collapsed box opens; its toggle already did on the press
@@ -990,16 +1041,7 @@ fn released(
     // a click: on a toggle, a box or a group, or on nothing
     match p.hit {
         Some(Hit::Toggle(item)) => view.toggle(item),
-        Some(Hit::Item(item)) => {
-            let id = view.drawn().and_then(|d| {
-                d.scene
-                    .vis
-                    .items
-                    .get(item)
-                    .map(|it| d.graph.node(it.node).id.clone())
-            });
-            view.select(id);
-        }
+        Some(Hit::Item(item)) => view.select(view.item_id(item)),
         None => view.select(None),
     }
 }

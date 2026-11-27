@@ -1,9 +1,10 @@
 //! What the canvas asks of the browser, and nothing on the server, where nothing is drawn
 //!
 //! Dioxus draws the canvas and hears its events. What it can't do is here: an element's place on
-//! the page, pointer capture, local storage, timers, full screen, text measurement, reading a
-//! doc's page, and the classes and overlays inside the charts' SVG, which come in as markup.
-//! The server renders the page before any plan is read, so its versions do nothing.
+//! the page, pointer capture, local storage, timers, full screen, text measurement, the
+//! clipboard, reading a doc's page, and the classes and overlays inside the charts' SVG, which
+//! come in as markup. The server renders the page before any plan is read, so its versions do
+//! nothing.
 
 #[cfg(feature = "web")]
 pub use web::*;
@@ -317,6 +318,26 @@ mod web {
         web_sys::console::warn_1(&msg.into());
     }
 
+    /// Writes text to the clipboard, returning whether the page has a clipboard to write to
+    ///
+    /// A page that isn't a secure context has none.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - What to copy
+    pub fn copy(text: &str) -> bool {
+        // the clipboard is undefined where the page isn't a secure context
+        let Some(clipboard) = window().map(|w| w.navigator().clipboard()) else {
+            return false;
+        };
+        if clipboard.is_undefined() {
+            return false;
+        }
+        // the browser writes it in the background
+        let _ = clipboard.write_text(text);
+        true
+    }
+
     /// A listener on the document, taken off again when this is dropped
     pub struct DocListener {
         /// The event it hears
@@ -544,6 +565,11 @@ mod server {
 
     /// The server has no console to warn in
     pub fn warn(_msg: &str) {}
+
+    /// The server has no clipboard
+    pub fn copy(_text: &str) -> bool {
+        false
+    }
 
     /// The server listens to no document
     pub struct DocListener;

@@ -247,6 +247,34 @@ The user orders a project's ready work, and the terminal sets that order first
 - **Each entry says who placed it,** "queued by ada" or "moved by Claude, for ada", from the
   queue's history ([C50](../milestones/m10.md)), and nothing for an entry nobody known placed.
 
+## The node menu
+
+A right-click on a box or a group opens a menu of what can be done to that node without
+selecting it first: queue it, set its status, open its sidebar at a tab, or copy its id
+([C100](../overview.md)).
+
+### Design choices
+
+- **Opened by what the press landed on.** A right-click's press records its box, group frame or
+  group head, as every press does, and the SVG keeps it as its last hit. `contextmenu` then opens
+  the menu for that node and prevents the browser's own. A press on nothing leaves the browser's
+  menu alone.
+- **Drawn beside the diagram, not in it.** The menu is HTML inside the view, placed at the
+  pointer and kept inside the view as the charts' tooltip is, so the boxes' markup stays what
+  reef-view draws.
+- **A backdrop closes it.** A backdrop over the window under the menu takes the next press,
+  wheel or right-click and closes the menu, so a press outside it never selects or pans. Escape
+  closes it too.
+- **The queue as the sidebar queues it.** Queue first and Queue last put the node at either end
+  of its plan's queue, moving it if it is queued already, and Off the queue shows for a queued
+  node alone. A menu drawn outside a plan's page has no queue, and none of them. A group is
+  queued as any node is.
+- **Status written as `reef status` writes it.** The app's server reads the node, sets its
+  status and puts it back over the version it read, checked as any put is. A group's status is
+  its members', so a group's menu offers none.
+- **Open in the sidebar** selects the node at the tab picked, and **Copy id** writes the bare id
+  to the clipboard.
+
 ## The Changes tab
 
 A node's changes are kept as revisions of its files, hunks and lines ([C32](../milestones/m7.md)). The

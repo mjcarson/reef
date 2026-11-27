@@ -11,12 +11,12 @@ use reef_api::{
     ThreadState, TokenInfo, Transcript, User, UserRemoved,
 };
 #[cfg(feature = "server")]
-use reef_api::{Checked, Puts, lift, puts_for};
+use reef_api::{Checked, NodePut, NodeWrite, Puts, lift, puts_for};
 #[cfg(feature = "server")]
 use reef_api::{HistoryQuery, MarkReview, MarkThread, NewReply, NewThread, Writer};
-use reef_model::Payload;
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
+use reef_model::{Payload, Status};
 use serde::{Deserialize, Serialize};
 
 use crate::side::timeline::NodeTimeline;
@@ -841,6 +841,29 @@ pub enum Saved {
     },
 }
 
+/// What came of setting a node's status
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StatusSet {
+    /// Written, at this new version
+    Applied {
+        /// The node's version now
+        version: u64,
+    },
+    /// The node was at that status already, so nothing was written
+    Unchanged,
+    /// The node is a group, whose status is its members', so nothing was written
+    Group,
+    /// The plan has no such node
+    NotInPlan,
+    /// The node changed between being read and being put back, so nothing was written
+    Stale,
+    /// The plan would have problems it hadn't, so nothing was written
+    Refused {
+        /// Each problem it would add, as check says it
+        problems: Vec<String>,
+    },
+}
+
 /// A node's YAML, at the version it is at, with the problems the plan has at it
 ///
 /// # Arguments
@@ -926,6 +949,69 @@ pub async fn save_node(
             now: text_of(&name, &id).await?,
         }),
         Checked::Refused(problems) => Ok(Saved::Refused {
+            problems: problems.iter().map(ToString::to_string).collect(),
+        }),
+    }
+}
+
+/// Sets a node's status, putting it back over the version it was read at, as `reef status` does
+///
+/// A group's status is its members', so a group's is refused, and a status the node has already
+/// writes nothing.
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+/// * `status` - Where its work now stands
+#[post("/app/status")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::set_status", skip_all, err(Debug))
+)]
+pub async fn set_status(
+    project: String,
+    plan: String,
+    id: String,
+    status: Status,
+) -> Result<StatusSet, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    // the plan as it stands, since whether a node is a group is whether others name it
+    let service = crate::server::service();
+    let listing = service.list(&name).await.map_err(failed)?;
+    let Some(stored) = listing.nodes.iter().find(|node| node.spec.id == id) else {
+        return Ok(StatusSet::NotInPlan);
+    };
+    if listing
+        .nodes
+        .iter()
+        .any(|member| member.spec.group.as_deref() == Some(id.as_str()))
+    {
+        return Ok(StatusSet::Group);
+    }
+    // to do is the default, which the canonical YAML leaves out
+    let wanted = (status != Status::Todo).then_some(status);
+    if stored.spec.status == wanted {
+        return Ok(StatusSet::Unchanged);
+    }
+    // the node as read, with its new status
+    let read = stored.version;
+    let mut write = NodeWrite::from(stored.clone());
+    write.spec.status = wanted;
+    // put back over the version read, checked against the whole plan
+    let put = NodePut::new(write, Some(read));
+    match service
+        .put(&name, vec![put], &caller().author())
+        .await
+        .map_err(failed)?
+    {
+        Checked::Applied { versions } => Ok(StatusSet::Applied {
+            version: versions.first().copied().unwrap_or(read),
+        }),
+        Checked::Stale(_) => Ok(StatusSet::Stale),
+        Checked::Refused(problems) => Ok(StatusSet::Refused {
             problems: problems.iter().map(ToString::to_string).collect(),
         }),
     }

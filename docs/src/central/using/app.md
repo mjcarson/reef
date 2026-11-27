@@ -24,6 +24,13 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   Each comment says who wrote it, "Claude, for ada" where Claude wrote it with ada's login, and
   each thread who marked it last. A revision says who captured it, a decision whose session
   asked it, and a queue entry who placed it.
+
+  Right-click a box, or a group, for its menu: **Queue first** and **Queue last** put it at
+  either end of the plan's queue, or move it there, and **Off the queue** takes a queued node
+  off. **Status** sets a node's to do, in progress, blocked or done, as `reef status` does; a
+  group has none, since its status is its members'. **Open** shows the node's panel at any of
+  its tabs, and **Copy id** copies its id. Escape, or a click anywhere outside it, closes the
+  menu.
 - **The sessions panel**, from the bar, shows each session attached to central reef, live:
   - the headless sessions `reef loop run` started, whose loops it starts, pauses and stops and
     whose questions and plans it answers;

@@ -32,8 +32,8 @@ reef-draw = { workspace = true }
 # the layout's direction and paths, which the canvas's arrows are drawn along
 reef-layout = { workspace = true }
 web-sys = { version = "0.3", features = [
-  "Document", "DomRect", "DomTokenList", "Element", "EventSource", "EventTarget", "HtmlElement", "NodeList",
-  "Performance", "PointerEvent", "ScrollIntoViewOptions", "ScrollLogicalPosition", "Storage",
+  "Clipboard", "Document", "DomRect", "DomTokenList", "Element", "EventSource", "EventTarget", "HtmlElement",
+  "Navigator", "NodeList", "Performance", "PointerEvent", "ScrollIntoViewOptions", "ScrollLogicalPosition", "Storage",
   "WheelEvent", "Window", "console",
 ], optional = true }
 wasm-bindgen = { version = "0.2", optional = true }

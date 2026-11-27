@@ -379,6 +379,67 @@ fn the_queue_moves_an_entry_with_one_row() -> anyhow::Result<()> {
     })
 }
 
+/// The node menu's server function sets a node's status over the version it read, writes
+/// nothing for a status the node has already, and refuses a group, whose status is its members'
+#[test]
+fn a_status_is_set_over_the_version_read() -> anyhow::Result<()> {
+    use reef_app::calls::{StatusSet, node_text, set_status};
+    use reef_model::Status;
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // a plan of A1, and a group G1 of one member put beside it through the CLI
+        let repo = fx.project("statused", &["only"]).await?;
+        let file = fx.dir.join("statused-g1.yaml");
+        std::fs::write(
+            &file,
+            "id: G1\ntitle: \"G1 A group\"\ndescription:\n  why: \"only has no group.\"\n  what: \"only has one.\"\nnodes:\n- id: M1\n  title: \"M1 Its member\"\n  description:\n    why: \"G1 is empty.\"\n    what: \"G1 has a member.\"\n",
+        )?;
+        let file = file.to_str().expect("the file is a utf-8 path");
+        fx.reef(&repo, &["node", "put", file, "--plan", "only"])
+            .await?;
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        // the status a node is at, as the editor reads it
+        let read = || async {
+            node_text("statused".into(), "only".into(), "A1".into())
+                .await
+                .map_err(failed)
+        };
+        let set = |id: &str, status: Status| {
+            set_status("statused".into(), "only".into(), id.to_string(), status)
+        };
+        // A1 blocked is written over the version read, a version later
+        let before = read().await?;
+        match set("A1", Status::Blocked).await.map_err(failed)? {
+            StatusSet::Applied { version } => assert!(version > before.version, "{version}"),
+            other => panic!("blocking A1 was {other:?}"),
+        }
+        let blocked = read().await?;
+        assert!(blocked.yaml.contains("status: blocked"), "{}", blocked.yaml);
+        // blocked again writes nothing
+        let again = set("A1", Status::Blocked).await.map_err(failed)?;
+        assert_eq!(again, StatusSet::Unchanged);
+        assert_eq!(read().await?.version, blocked.version);
+        // back to do, the default, its status is left out of its YAML
+        let undone = set("A1", Status::Todo).await.map_err(failed)?;
+        assert!(matches!(undone, StatusSet::Applied { .. }), "{undone:?}");
+        let todo = read().await?;
+        assert!(!todo.yaml.contains("status:"), "{}", todo.yaml);
+        // a group's status is its members', and a node the plan lacks has none
+        assert_eq!(
+            set("G1", Status::Done).await.map_err(failed)?,
+            StatusSet::Group
+        );
+        assert_eq!(
+            set("NOPE", Status::Done).await.map_err(failed)?,
+            StatusSet::NotInPlan
+        );
+        // the member is a node like any other
+        let member = set("M1", Status::InProgress).await.map_err(failed)?;
+        assert!(matches!(member, StatusSet::Applied { .. }), "{member:?}");
+        anyhow::Ok(())
+    })
+}
+
 /// A node's captured revisions are served by the app's server functions, each listing its files,
 /// and each file's hunks fetched alone, as the Changes tab opens it
 #[test]

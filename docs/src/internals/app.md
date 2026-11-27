@@ -22,6 +22,13 @@ the pages and the JSON API alike.
   or what it was reopened after. The canvas reads the plan's threads once a change, for all
   three.
 
+- **A right-click opens a node's menu** (C100). The SVG keeps what each press landed on, a
+  right-click's too, and its `contextmenu` opens the menu for that box, group or group head,
+  preventing the browser's own; on nothing, the browser's shows. The menu is HTML beside the
+  diagram, placed as the charts' tooltip is, so the boxes' markup stays reef-view's. A fixed
+  backdrop under it closes it on the next press, wheel or right-click. Its queue items call
+  `Queue::edit` as the sidebar's buttons do, and its status is set by `calls::set_status`,
+  which puts the node back over the version it read, as `reef status` does, and refuses a group.
 - **A node's Decisions tab** lists every plan its sessions asked approval for, with its verdict
   and feedback, and every question with the choice picked, each saying where and when it was
   answered, and follows the plan's stream for new ones.

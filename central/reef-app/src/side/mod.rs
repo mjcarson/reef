@@ -59,6 +59,45 @@ pub enum Tab {
     Edit,
 }
 
+impl Tab {
+    /// Every tab, in the order the sidebar shows them
+    pub const ALL: [Tab; 7] = [
+        Tab::Details,
+        Tab::Changes,
+        Tab::Comments,
+        Tab::Decisions,
+        Tab::History,
+        Tab::Timeline,
+        Tab::Edit,
+    ];
+
+    /// The tab's name, as the sidebar labels it
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Details => "Details",
+            Tab::Changes => "Changes",
+            Tab::Comments => "Comments",
+            Tab::Decisions => "Decisions",
+            Tab::History => "History",
+            Tab::Timeline => "Timeline",
+            Tab::Edit => "Edit",
+        }
+    }
+
+    /// The tab's name in lower case, for a page's attributes
+    pub fn key(self) -> &'static str {
+        match self {
+            Tab::Details => "details",
+            Tab::Changes => "changes",
+            Tab::Comments => "comments",
+            Tab::Decisions => "decisions",
+            Tab::History => "history",
+            Tab::Timeline => "timeline",
+            Tab::Edit => "edit",
+        }
+    }
+}
+
 /// What the Changes tab shows of the selected node, kept while another tab is open and let go
 /// when another node is selected
 #[derive(Debug, Clone, Copy, PartialEq)]

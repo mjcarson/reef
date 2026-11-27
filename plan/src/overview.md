@@ -290,6 +290,63 @@ nodes:
   - feature: A double-click on a collapsed group in the example book opens it
     status: met
     test: spikes/x6-view/check.py
+- id: C100
+  title: C100 A node's menu on the canvas
+  status: done
+  needs:
+  - C25
+  - C55
+  docs:
+  - design/app.md#the-node-menu
+  description:
+    why: Queuing a node, setting its status or opening one of its tabs means selecting it and working through the sidebar, and a right-click on a box opens the browser's own menu.
+    what: Right-clicking a box or group on a plan's canvas opens a menu that queues it first or last or takes it off, sets its status, opens its sidebar at a tab, and copies its id.
+    details: |
+      `central/reef-app/src/canvas/menu.rs`: `NodeMenu`, opened by `View::menu`. The SVG now keeps
+      what a non-primary press landed on as its `last_hit` too, and its `oncontextmenu` opens the menu
+      for a box, group frame or group head (`Hit::Item` or `Hit::Toggle`), preventing the browser's
+      menu; a right-click on nothing leaves the browser's alone. The menu is HTML beside `ChartTip`,
+      placed as it is and kept inside the view, so the boxes' markup and `tests/diagram.rs`'s parity
+      are unchanged. A fixed backdrop under it closes it on the next press, wheel or right-click, so a
+      press outside never selects or pans; Escape closes it from the menu or the canvas, before the
+      canvas's Escape deselects, and closing gives the view the keyboard back.
+
+      Its items: Queue first, Queue last (`QueueEdit::Add` at `Top`/`Bottom`) and, for a queued node,
+      Off the queue, through the page's `Queue` as the sidebar's buttons are; a status chip each for
+      to do, in progress, blocked and done, the node's own marked, none for a group; a button for each
+      sidebar tab (`Tab::ALL`), which selects the node at that tab; and Copy id, through `dom::copy`
+      (`navigator.clipboard`, with web-sys's `Navigator` and `Clipboard` features), which says so
+      where the page has no clipboard. A status pick stays open until it is answered and says why
+      where it wrote nothing.
+
+      `calls::set_status` (`POST /app/status`) reads the plan, refuses a group (`StatusSet::Group`)
+      and a node the plan lacks, writes nothing for a status the node has (`Unchanged`), and otherwise
+      puts the node back over the version it read with the new status, as `reef status` does,
+      answering `Applied`, `Stale` or `Refused`. `tests/app.rs::a_status_is_set_over_the_version_read`
+      covers it. `check.py::c100_the_node_menu` right-clicks W1 to queue it last, then first, then
+      off, checking the panel and `reef queue ls` each time; finds G1's head offering the queue and no
+      status; closes a menu with Escape and with a press on another box, which selects nothing; blocks
+      L1 and sets it back to do, read through `reef node get`; opens W2's Comments tab; and reads L1's
+      id back from the clipboard.
+  acceptance:
+  - feature: Right-clicking a node opens its menu in place of the browser's, and Queue first or Queue last puts it at that end of the plan's queue, `reef queue ls` agreeing
+    status: met
+    test: central/reef-app/check.py::c100_the_node_menu
+  - feature: The menu takes a queued node off the queue, and offers that only for a queued node
+    status: met
+    test: central/reef-app/check.py::c100_the_node_menu
+  - feature: The menu sets a node's status, and a group's menu offers no status
+    status: met
+    test: central/reef-app/check.py::c100_the_node_menu
+  - integration: A status set through the app is written over the version read, an unchanged one writes nothing, and a group's is refused
+    status: met
+    test: central/reef-app/tests/app.rs::a_status_is_set_over_the_version_read
+  - feature: The menu opens the node's sidebar at the tab picked, and copies the node's id
+    status: met
+    test: central/reef-app/check.py::c100_the_node_menu
+  - feature: Escape, or a press outside the menu, closes it and selects nothing
+    status: met
+    test: central/reef-app/check.py::c100_the_node_menu
 ---
 # Centralized reef
 

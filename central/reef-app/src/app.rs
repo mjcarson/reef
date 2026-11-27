@@ -193,6 +193,19 @@ button.reef-app-timeline-open:hover { text-decoration: underline; }
 .reef-app-open-where { font-size: 0.8rem; color: var(--muted); }
 .reef-app-open-text { overflow-wrap: anywhere; }
 .reef-app-open-none { padding: 4px 10px; }
+.reef-app-menu-backdrop { position: fixed; inset: 0; z-index: 19; }
+.reef-app-menu { position: absolute; z-index: 20; width: 248px; max-width: calc(100% - 8px); box-sizing: border-box; padding: 4px 0; font-size: 0.85rem; color: var(--fg); background: var(--theme-popup-bg, var(--bg)); border: 1px solid var(--theme-popup-border, var(--reef-border)); border-radius: 6px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25); }
+.reef-app-menu-head { padding: 4px 10px 6px; color: var(--muted); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--line); }
+.reef-app-menu-items { display: flex; flex-direction: column; padding: 2px 0; }
+.reef-app-menu-item { display: block; width: 100%; padding: 4px 10px; border: none; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.reef-app-menu-item:hover, .reef-app-menu-item:focus-visible { background: var(--theme-hover, var(--reef-frame)); outline: none; }
+.reef-app-menu-label { padding: 4px 10px 2px; font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; border-top: 1px solid var(--line); }
+.reef-app-menu-items + .reef-app-menu-label, .reef-app-menu-head + .reef-app-menu-label { border-top: none; }
+.reef-app-menu-chips { display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 10px 6px; }
+.reef-app-menu-chips .reef-button.on { border-color: var(--reef-ready); font-weight: 600; }
+.reef-app-menu-chips .reef-button:disabled { cursor: default; }
+.reef-app-menu-chips + .reef-app-menu-items { border-top: 1px solid var(--line); }
+.reef-app-menu-problem { margin: 4px 10px; font-size: 0.8rem; overflow-wrap: anywhere; }
 .reef-app-sessions, .reef-app-sessions-toggle, .reef-app-user, .reef-app-account { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
 .reef-app-sessions-toggle { margin-left: auto; }
 .reef-app-waiting { margin-left: 0.35rem; font-size: 0.75rem; color: var(--links); }
