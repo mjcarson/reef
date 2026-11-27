@@ -8,6 +8,7 @@ use crate::queue::{QueuePanel, use_queue};
 use crate::session::{SessionPanel, SessionsButton, use_runners};
 use crate::sign_in::{CallFailed, SignedInAs};
 use dioxus::prelude::*;
+use reef_api::{PlanInfo, Project};
 
 /// The theme reef.css reads with no fallback, which mdbook's themes define and a page outside
 /// mdbook lacks, and the shell's own layout
@@ -45,6 +46,11 @@ code { font-size: 0.92em; }
 .reef-app-repo { margin: 0.2rem 0 0.6rem; color: var(--muted); font-family: monospace; font-size: 0.85rem; overflow-wrap: anywhere; }
 .reef-app-plans { margin: 0; padding-left: 1.2rem; }
 .reef-app-plans li { margin: 0.2rem 0; }
+.reef-app-branch { margin-left: 0.5rem; color: var(--muted); font-family: monospace; font-size: 0.8rem; }
+.reef-app-plan-switch { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: baseline; }
+.reef-app-plan-tab { font-size: 0.85rem; padding: 0.1rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; text-decoration: none; color: var(--fg); background: var(--panel); }
+.reef-app-plan-tab.on { border-color: var(--links); }
+.reef-app-plan-tab .reef-app-branch { margin-left: 0.35rem; }
 .reef-app-muted { color: var(--muted); }
 .reef-app-error { color: #c0392b; }
 .reef-app-plan { display: flex; flex-direction: column; height: 100vh; }
@@ -345,7 +351,7 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
         .registered
         .as_ref()
         .and_then(|registered| registered.author.describe());
-    let plans: Vec<(String, Route, String)> = listing
+    let plans: Vec<(String, Route, String, String)> = listing
         .plans
         .iter()
         .map(|info| {
@@ -360,7 +366,9 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
                 .and_then(|registered| registered.author.describe())
                 .map(|who| format!("Listed by {who}"))
                 .unwrap_or_default();
-            (info.name.plan.clone(), route, listed)
+            // and what it follows, beside it
+            let follows = follows(&listing.project, info);
+            (info.name.plan.clone(), route, listed, follows)
         })
         .collect();
     rsx! {
@@ -381,10 +389,81 @@ fn ProjectEntry(listing: ProjectPlans) -> Element {
                 }
             } else {
                 ul { class: "reef-app-plans",
-                    for (name, route, listed) in plans {
+                    for (name, route, listed, follows) in plans {
                         li { key: "{name}", title: "{listed}",
                             Link { to: route, "{name}" }
+                            span { class: "reef-app-branch", "{follows}" }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// What a plan follows, as the picker and the switcher show it: its branch and the commit last
+/// fetched of it, or its project's working tree
+///
+/// # Arguments
+///
+/// * `project` - The plan's project
+/// * `info` - The plan
+fn follows(project: &Project, info: &PlanInfo) -> String {
+    let branch = info.branch.as_deref();
+    match (&project.remote, branch) {
+        // a remote project's branch, where it was last fetched
+        (Some(remote), branch) => {
+            let name = branch.unwrap_or(&remote.branch);
+            match remote.commit_of(branch) {
+                Some(commit) => format!("{name} @ {}", reef_api::project::short(commit)),
+                None => format!("{name}, not fetched yet"),
+            }
+        }
+        // a local project's branch, or its working tree
+        (None, Some(branch)) => branch.to_string(),
+        (None, None) => "working tree".to_string(),
+    }
+}
+
+/// The plan page's switcher: each plan of the project, with the branch it follows, the one shown
+/// marked and each other a link to its page
+///
+/// # Arguments
+///
+/// * `listing` - The project and its plans
+/// * `plan` - The plan shown
+#[component]
+fn PlanSwitch(listing: ProjectPlans, plan: String) -> Element {
+    // each plan's name, its route, what it follows, and whether it is the one shown
+    let tabs: Vec<(String, Route, String, bool)> = listing
+        .plans
+        .iter()
+        .map(|info| {
+            let route = Route::PlanPage {
+                project: info.name.project.clone(),
+                plan: info.name.plan.clone(),
+            };
+            let follows = follows(&listing.project, info);
+            (
+                info.name.plan.clone(),
+                route,
+                follows,
+                info.name.plan == plan,
+            )
+        })
+        .collect();
+    rsx! {
+        nav { class: "reef-app-plan-switch", "aria-label": "The plans of {listing.project.name}",
+            for (name, route, follows, on) in tabs {
+                if on {
+                    span { key: "{name}", class: "reef-app-plan-tab on", "aria-current": "page",
+                        "{name}"
+                        span { class: "reef-app-branch", "{follows}" }
+                    }
+                } else {
+                    Link { key: "{name}", class: "reef-app-plan-tab", to: route,
+                        "{name}"
+                        span { class: "reef-app-branch", "{follows}" }
                     }
                 }
             }
@@ -419,8 +498,10 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
             .await
             .map(|payload| -> Keyed { (name, payload) })
     });
-    // the project's queue, which the panel shows and the sidebar edits
-    use_queue(project);
+    // the project and its plans, each with the branch it follows, for the bar's switcher
+    let siblings = use_resource(move || calls::project_plans(project()));
+    // the plan's queue, which the panel shows and the sidebar edits
+    use_queue(project, plan);
     // and its runners, which the bar counts and the sessions panel shows
     use_runners(project);
     let (project_now, plan_now) = (project(), plan());
@@ -429,6 +510,9 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
             header { class: "reef-app-bar",
                 Link { to: Route::Picker {}, "← Plans" }
                 strong { class: "reef-app-plan-name", "{project}/{plan}" }
+                if let Some(Ok(listing)) = &*siblings.read() {
+                    PlanSwitch { listing: listing.clone(), plan: plan_now.clone() }
+                }
                 if let Some(Err(error)) = &*info.read() {
                     CallFailed { error: error.clone(), doing: "Reading the plan" }
                 }
@@ -436,7 +520,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                 SignedInAs {}
             }
             div { class: "reef-app-stage",
-                QueuePanel { project }
+                QueuePanel { project, plan }
                 // a key holds only on a block's first node, so the canvas is one of its own
                 {
                     rsx! {

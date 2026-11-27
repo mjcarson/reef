@@ -3,8 +3,8 @@
 //! The stream is live only, so it says that something changed, not what the plan is now. Each
 //! change bumps a counter, and whatever reads the counter reads the plan again: a put or a whole
 //! plan written, a gap the stream says it left, and a reconnect, since nothing is sent again
-//! after a dropped connection. A project's queue spans its plans, and whether an entry is ready
-//! moves with any of them, so the queue follows the whole project's stream.
+//! after a dropped connection. Each plan has a queue of its own, and whether its entries are
+//! ready moves with that plan alone, so the queue follows the plan's stream too.
 //!
 //! A node's work, its captured revisions and its comments, changes apart from its plan. The plan's stream bumps
 //! a counter of its own for those, [`WorkChanges`], so a capture reads the Changes tab again
@@ -72,6 +72,7 @@ const PLAN_KINDS: &[&str] = &[
     "nodes-put",
     "pages-put",
     "plan-written",
+    "plan-branched",
     "project-fetched",
     "missed",
 ];
@@ -108,13 +109,13 @@ struct Counter {
     docs: bool,
 }
 
-/// The changes that mean reading a project's queue again: an edit of it, a plan listed, or any
-/// change to a plan or the docs its plans read, which can make an entry ready or waiting
-const PROJECT_KINDS: &[&str] = &[
+/// The changes that mean reading a plan's queue again: an edit of it, or any change to the plan
+/// or the docs it reads, which can make an entry ready or waiting
+const QUEUE_KINDS: &[&str] = &[
     "queue-changed",
-    "plan-added",
     "nodes-put",
     "plan-written",
+    "plan-branched",
     "project-fetched",
     "missed",
 ];
@@ -199,23 +200,24 @@ pub fn use_work_changes() -> ReadSignal<u64> {
     }
 }
 
-/// Counts the changes to a project announced since the page opened, its queue's and every
-/// plan's, following its stream again when the route names another project
+/// Counts the changes to a plan's queue announced since the page opened, and to the plan and
+/// the docs it reads, following its stream again when the route names another plan
 ///
-/// A resource that reads the count reads the project's queue again after each change.
+/// A resource that reads the count reads the plan's queue again after each change.
 ///
 /// # Arguments
 ///
-/// * `project` - The project
-pub fn use_project_changes(project: ReadSignal<String>) -> ReadSignal<u64> {
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+pub fn use_queue_changes(project: ReadSignal<String>, plan: ReadSignal<String>) -> ReadSignal<u64> {
     // how many changes have come, and the stream they come on
     let count = use_signal(|| 0u64);
     let mut stream = use_signal(|| None::<Follow>);
-    // follow the project the route names, every plan of it
+    // follow the plan the route names, its queue's changes among them
     use_effect(move || {
-        let url = reef_api::paths::changes(Some(&project()), None);
+        let url = reef_api::paths::changes(Some(&project()), Some(&plan()));
         let counters = [Counter {
-            kinds: PROJECT_KINDS,
+            kinds: QUEUE_KINDS,
             count,
             docs: true,
         }];

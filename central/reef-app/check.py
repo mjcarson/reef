@@ -1,6 +1,6 @@
 """Drives reef-app in headless Chromium, over plans put through the `reef` CLI.
 
-Each step checks one of M4's to M10's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
+Each step checks one of M4's to M11's criteria, or how the app shows a node's work, in the browser, printing `ok` or `FAILED` and what
 it saw; the script exits 1 if any failed. Every server speaks HTTPS, with reef's own certificate made
 under its directory's `certs`, so nothing touches the user's own, and every browser context takes
 that certificate unchecked. C48's sign-in runs last, on a server of its own that asks every caller
@@ -1094,8 +1094,8 @@ def first_entry_is(page, node):
 
 def c25_a_drag_writes_one_row(page):
     """C25: the last entry dragged above the first writes that entry's row alone, and the CLI agrees."""
-    # three entries across the project's plans, queued from the terminal
-    for node in ["check/first/A1", "check/second/A1", "check/draws/L1"]:
+    # three entries of the plan's own queue, queued from the terminal
+    for node in ["check/draws/W2", "check/draws/W3", "check/draws/L1"]:
         reef("queue", "add", node)
     page.goto(URL + "/plans/check/draws")
     wait_drawn(page)
@@ -1161,6 +1161,116 @@ def c25_keys_and_the_sidebar_queue(page):
           and seen["queued first"] == (["check/draws/L1", *rest],) * 2,
           seen)
 
+
+
+def plan_tabs(page):
+    """The plan page's switcher: each tab's plan, the branch it shows, and whether it is the one shown."""
+    return page.eval_on_selector_all(
+        ".reef-app-plan-switch .reef-app-plan-tab",
+        "tabs => tabs.map(t => [t.firstChild.textContent, t.querySelector('.reef-app-branch')?.textContent,"
+        " t.classList.contains('on')])")
+
+
+def c96_plans_side_by_side(page):
+    """C96: the picker and the plan page's switcher show each plan's branch, the switcher moves between plans,
+    and each plan's page shows its own queue alone."""
+    # a plan following `b2` beside the check's others, a node of it queued
+    git("branch", "b2")
+    reef("plan", "new", "side", "--branch", "b2")
+    put("side", node_yaml("S1", "S1 The side's first"))
+    reef("queue", "add", "check/side/S1")
+    seen = {}
+    # the picker names what each plan follows
+    page.goto(URL + "/")
+    page.wait_for_selector(".reef-app-plans a:text-is('side')")
+    seen["picker"] = page.eval_on_selector_all(
+        ".reef-app-plans li", "items => items.map(li => [li.querySelector('a').textContent,"
+        " li.querySelector('.reef-app-branch')?.textContent])")
+    # the plan page's switcher lists the project's plans, the one shown marked
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    page.wait_for_selector(".reef-app-plan-switch .reef-app-plan-tab.on")
+    page.wait_for_selector(".reef-app-queue-entry")
+    seen["draws tabs"] = plan_tabs(page)
+    seen["draws queue"] = panel_order(page)
+    page.screenshot(path=str(SHOTS / "reef-app-plan-switch.png"))
+    # moving to `side` shows its page, its tab marked, and its own queue alone
+    page.click(".reef-app-plan-switch a.reef-app-plan-tab:has-text('side')")
+    page.wait_for_url(URL + "/plans/check/side")
+    page.wait_for_function(
+        "() => document.querySelector('.reef-app-plan-switch .on')?.firstChild.textContent === 'side'",
+        timeout=10000)
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('.reef-app-queue-entry')].map(e => e.dataset.node).join() === 'check/side/S1'",
+        timeout=10000)
+    seen["side name"] = page.inner_text(".reef-app-plan-name")
+    seen["side queue"] = panel_order(page)
+    page.screenshot(path=str(SHOTS / "reef-app-plan-side.png"))
+    picker = dict(seen["picker"])
+    tabs = {name: (branch, on) for name, branch, on in seen["draws tabs"]}
+    check("C96 the app moves between a project's plans, each showing its branch and its own queue",
+          picker.get("side") == "b2" and picker.get("draws") == "working tree"
+          and tabs.get("draws") == ("working tree", True) and tabs.get("side") == ("b2", False)
+          and "check/side/S1" not in seen["draws queue"] and len(seen["draws queue"]) > 0
+          and seen["side name"] == "check/side" and seen["side queue"] == ["check/side/S1"],
+          seen)
+
+
+def c96_a_fetch_reloads_only_its_branchs_plan(page):
+    """C96: a fetch that moves one branch reloads the page of the plan that follows it, and not its sibling's."""
+    # a remote repo with `main` and `b2`, registered by its URL, with a plan following each
+    remote = WORK / "branches"
+    if remote.exists():
+        shutil.rmtree(remote)
+    bare, work = remote / "remote.git", remote / "work"
+    run("git", "init", "-q", "--bare", "-b", "main", bare)
+    run("git", "clone", "-q", bare, work)
+
+    def wgit(*args):
+        """Runs git in the remote's work clone as the check's own author."""
+        return run("git", "-C", work, "-c", "user.name=reef", "-c", "user.email=reef@example.invalid", *args)
+
+    wgit("checkout", "-q", "-b", "main")
+    (work / "README.md").write_text("# Branches\n")
+    wgit("add", ".")
+    wgit("commit", "-q", "-m", "main")
+    wgit("push", "-q", "origin", "main")
+    wgit("checkout", "-q", "-b", "b2")
+    wgit("push", "-q", "origin", "b2")
+    reef("project", "add", "branches", "--url", f"file://{bare}")
+    for plan, branch in [("p1", None), ("p2", "b2")]:
+        reef("plan", "new", plan, "--project", "branches", *(["--branch", branch] if branch else []))
+        path = WORK / f"put-branches-{plan}.yaml"
+        path.write_text(node_yaml("A1", f"A1 The first of {plan}"))
+        reef("node", "put", str(path), "--project", "branches", "--plan", plan)
+    # a tab on each plan's page, in a context of their own, each counting the payloads it reads
+    reads = {"p1": 0, "p2": 0}
+    tabs = {}
+    context = page.context.browser.new_context(ignore_https_errors=True)
+    for plan in reads:
+        tab = context.new_page()
+        tab.on("request", lambda request, plan=plan: request.url.find("/app/payload") >= 0
+               and request.url.find(f"plan={plan}") >= 0 and reads.__setitem__(plan, reads[plan] + 1))
+        tab.goto(URL + f"/plans/branches/{plan}")
+        wait_drawn(tab)
+        tabs[plan] = tab
+    tabs["p1"].wait_for_timeout(1000)
+    before = dict(reads)
+    # a push to `b2`, then a fetch, moves `b2` alone
+    (work / "README.md").write_text("# Branches\n\nMoved.\n")
+    wgit("commit", "-q", "-am", "b2 moved")
+    wgit("push", "-q", "origin", "b2")
+    fetched = reef("project", "fetch", "--project", "branches")
+    # p2's page reads its payload again, and p1's never does
+    deadline = time.monotonic() + 10
+    while reads["p2"] == before["p2"] and time.monotonic() < deadline:
+        tabs["p2"].wait_for_timeout(200)
+    tabs["p1"].wait_for_timeout(1500)
+    after = dict(reads)
+    context.close()
+    check("C96 a fetch reloads only the plan whose branch moved",
+          after["p2"] > before["p2"] and after["p1"] == before["p1"] and "`b2` moved" in fetched,
+          {"before": before, "after": after, "fetched": fetched})
 
 # Claude Code as `reef loop run` runs it, played over stream-json for the session checks: on the
 # loop's kickoff it takes the node with reef's own `loop take`, asks what the play asks and waits
@@ -2404,6 +2514,8 @@ def main():
                 c20_a_stale_save_shows_the_newer,
                 c25_a_drag_writes_one_row,
                 c25_keys_and_the_sidebar_queue,
+                c96_plans_side_by_side,
+                c96_a_fetch_reloads_only_its_branchs_plan,
                 c28_a_linked_page_shows_in_the_sidebar,
                 c28_an_edited_page_shows_live,
                 c68_a_node_link_opens_its_node,

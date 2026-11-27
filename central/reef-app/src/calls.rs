@@ -243,25 +243,57 @@ pub async fn payload(project: String, plan: String) -> Result<Payload, ServerFnE
         .map_err(failed)
 }
 
-/// A project's queue: each entry with its rank, and whether next takes it, and if not why
+/// A plan's own queue: each of its entries with its rank, and whether next takes it, and if not
+/// why
 ///
 /// # Arguments
 ///
-/// * `project` - The project whose queue it is
-#[get("/app/queue?project")]
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+#[get("/app/queue?project&plan")]
 #[cfg_attr(
     feature = "server",
     tracing::instrument(name = "calls::queue", skip_all, err(Debug))
 )]
-pub async fn queue(project: String) -> Result<QueueListing, ServerFnError> {
-    // refused for a project that isn't registered
+pub async fn queue(project: String, plan: String) -> Result<QueueListing, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    // refused for a plan that isn't listed
     crate::server::service()
-        .queue(&project)
+        .plan_queue(&name)
         .await
         .map_err(failed)
 }
 
-/// Edits a project's queue: puts a node in it, moves one, or takes one off, writing its one row
+/// One project and its plans, each with the branch it follows, for the plan page's switcher
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+#[get("/app/plans?project")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::project_plans", skip_all, err(Debug))
+)]
+pub async fn project_plans(project: String) -> Result<ProjectPlans, ServerFnError> {
+    // the project, with its remote, and the plans it lists
+    let service = crate::server::service();
+    let found = service
+        .projects()
+        .await
+        .map_err(failed)?
+        .into_iter()
+        .find(|listed| listed.name == project)
+        .ok_or_else(|| ServerFnError::new(format!("project `{project}` is not registered")))?;
+    let plans = service.plans(&project).await.map_err(failed)?;
+    Ok(ProjectPlans {
+        project: found,
+        plans,
+    })
+}
+
+/// Edits a plan's queue: puts a node in it, moves one, or takes one off among its plan's own
+/// entries, writing its one row
 ///
 /// A node that isn't queued, or isn't in its plan, is an answer, not a failure, and changes
 /// nothing.

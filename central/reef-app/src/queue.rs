@@ -1,10 +1,10 @@
-//! The queue panel: the project's order of work, beside the plan, reordered by dragging
+//! The queue panel: the plan's order of work, beside it, reordered by dragging
 //!
-//! - **One queue a project, outside the plan's key.** The panel sits beside the canvas in the
-//!   plan's page, so moving between a project's plans keeps it as it is, and the sidebar's
-//!   buttons reach it through context.
-//! - **Followed on the project's stream.** An entry is ready or waits on any of the project's
-//!   plans, so the queue is read again after any change to the project, not just its own edits.
+//! - **One queue a plan, outside the canvas's key.** Each plan has a queue of its own, which the
+//!   panel shows beside the canvas in the plan's page, read again when the route names another
+//!   plan, and the sidebar's buttons reach it through context.
+//! - **Followed on the plan's stream.** An entry is ready or waits on its own plan alone, so the
+//!   queue is read again after any change to the plan or its queue, not just its own edits.
 //! - **A drag is one move.** It writes the one row of the entry moved, placed after the entry
 //!   it was dropped below, or at the top. The place is worked out by name from the queue as the
 //!   drag began, so a change read mid-drag can't put it elsewhere.
@@ -13,7 +13,7 @@
 
 use crate::calls;
 use crate::canvas::dom::{self, El};
-use crate::live::use_project_changes;
+use crate::live::use_queue_changes;
 use dioxus::prelude::*;
 use reef_api::{Listed, Place, Placed, QueueEdit, QueueListing, Queued};
 use reef_model::next::needs_lines;
@@ -22,7 +22,7 @@ use reef_model::{EntryState, NodeName};
 /// How far a press must move before it is a drag rather than a click, in CSS pixels
 const MIN_DRAG: f64 = 4.0;
 
-/// A project's queue as the page reads it, shared through context with whatever edits it
+/// A plan's queue as the page reads it, shared through context with whatever edits it
 #[derive(Clone, Copy)]
 pub struct Queue {
     /// The project whose queue it is
@@ -69,19 +69,20 @@ impl Queue {
     }
 }
 
-/// Reads a project's queue, again after each change to the project, and shares it with the
-/// page below
+/// Reads a plan's queue, again after each change to the plan or its queue, and shares it with
+/// the page below
 ///
 /// # Arguments
 ///
-/// * `project` - The project whose queue it is
-pub fn use_queue(project: ReadSignal<String>) -> Queue {
-    // the project's changes, any of which can make an entry ready or waiting
-    let changes = use_project_changes(project);
-    // read in the client alone, as the payload is, after each change
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it, which the route can change under the page
+pub fn use_queue(project: ReadSignal<String>, plan: ReadSignal<String>) -> Queue {
+    // the plan's changes, any of which can make an entry ready or waiting
+    let changes = use_queue_changes(project, plan);
+    // read in the client alone, as the payload is, after each change and each plan routed to
     let listing = use_resource(move || async move {
         let _ = changes();
-        calls::queue(project()).await
+        calls::queue(project(), plan()).await
     });
     let problem = use_signal(|| None::<String>);
     use_context_provider(|| Queue {
@@ -126,13 +127,15 @@ impl Drag {
     }
 }
 
-/// The queue panel: each entry, its place, its state and why it waits, to drag into order
+/// The queue panel: each entry of the plan's queue, its place, its state and why it waits, to
+/// drag into order
 ///
 /// # Arguments
 ///
-/// * `project` - The project whose queue it is
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan whose queue it is
 #[component]
-pub fn QueuePanel(project: ReadSignal<String>) -> Element {
+pub fn QueuePanel(project: ReadSignal<String>, plan: ReadSignal<String>) -> Element {
     let queue = use_context::<Queue>();
     let drag = use_signal(|| None::<Drag>);
     let problem = queue.problem.read().clone();
@@ -176,7 +179,7 @@ pub fn QueuePanel(project: ReadSignal<String>) -> Element {
         }
     };
     rsx! {
-        aside { class: "reef-app-queue", "aria-label": "The queue of {project}",
+        aside { class: "reef-app-queue", "aria-label": "The queue of {project}/{plan}",
             h2 { class: "reef-app-queue-head", "Queue" }
             if let Some(problem) = problem {
                 p { class: "reef-app-error reef-app-queue-problem", "{problem}" }

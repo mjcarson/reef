@@ -350,7 +350,9 @@ fn the_queue_moves_an_entry_with_one_row() -> anyhow::Result<()> {
                 .map(|listed| (listed.entry.node.to_string(), listed.rank))
                 .collect()
         };
-        let before = ranks(queue("queued".into()).await.map_err(failed)?);
+        let before = ranks(queue("queued".into(), "first".into()).await.map_err(failed)?);
+        // `first`'s queue alone, A1 then B1
+        assert_eq!(before.len(), 2, "{before:?}");
         // B1 to the top, as a drag does it
         let edit = QueueEdit::Move {
             node: "queued/first/B1".parse()?,
@@ -358,11 +360,11 @@ fn the_queue_moves_an_entry_with_one_row() -> anyhow::Result<()> {
         };
         let moved = edit_queue("queued".into(), edit).await.map_err(failed)?;
         assert!(matches!(moved, Queued::Applied { .. }), "{moved:?}");
-        let after = ranks(queue("queued".into()).await.map_err(failed)?);
-        // B1 is first, under a rank of its own, and the others' rows are as they were
+        let after = ranks(queue("queued".into(), "first".into()).await.map_err(failed)?);
+        // B1 is first, under a rank of its own, and A1's row is as it was
         assert_eq!(after[0].0, "queued/first/B1");
-        assert_ne!(after[0].1, before[2].1);
-        assert_eq!(&after[1..], &before[..2]);
+        assert_ne!(after[0].1, before[1].1);
+        assert_eq!(&after[1..], &before[..1]);
         // and the CLI lists it first
         let ls = fx.reef(&repo, &["queue", "ls"]).await?;
         assert!(ls.starts_with("1. queued/first/B1 "), "{ls}");
