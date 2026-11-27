@@ -8,6 +8,7 @@ deployed, so the next upgrade can read it.
 ```sh
 cargo install --locked --git https://github.com/mjcarson/reef --branch CentralizedPlanner reefadm
 reefadm deploy                     # a team server on this host
+reefadm --host europa deploy       # the same, on another host over ssh
 reefadm deploy --user              # one person's server, as reef's own plan runs
 reefadm --dry-run deploy           # every step it would take, taking none
 ```
@@ -53,6 +54,31 @@ reef is up at https://reef.example.com:12443 for other hosts, and https://127.0.
 `https://127.0.0.1:12180`, with no config file, no sign-in and no sudo. It turns lingering on,
 so reef keeps running after you log out. `--cores` and `--memory` write a config to
 `~/.config/reef/config.toml`, and nothing else does.
+
+## From another machine
+
+`--host` runs any reefadm command on another host over ssh, with its prompts on your terminal:
+
+```sh
+reefadm --host europa deploy               # deploy europa from here
+reefadm --host ada@reef.example.com status # anything ssh reaches
+```
+
+- **It uses your `ssh`,** so `~/.ssh/config`, your agent and ProxyJump all apply. It needs to
+  sign in without asking for ssh's own password, with a key or an agent. sudo's prompts and
+  reefadm's reach your terminal through `ssh -t`.
+- **reefadm runs there as a copy of itself,** kept in `~/.cache/reefadm/reefadm` and sent again
+  whenever it differs. Every argument but `--host` goes with it, and its exit code comes back
+  as yours.
+- **If the copy can't run there,** on another architecture or a glibc older than the one it was
+  built against, reefadm says why and builds itself there instead, after asking. It installs a C compiler, curl and git from the
+  host's packages if they're missing, then rustup, then runs `cargo install` from the reef that
+  the command's `--repo` and `--ref` name.
+- **Paths name files on that host,** such as `restore FILE` or `--cert`, except
+  `--password-file`. That one is read here and sent to a file only you can read there, which
+  is removed once the command is done.
+- **`--dry-run` still copies reefadm there,** or builds it there, and that reefadm changes
+  nothing else.
 
 ## Upgrading
 

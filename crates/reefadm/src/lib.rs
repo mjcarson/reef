@@ -9,6 +9,7 @@
 //! reefadm status                    # its release, unit, ports, data and certificate
 //! reefadm backup                    # its data, copied while it is stopped; `restore FILE` back
 //! reefadm recover ada               # a lost admin, from the store itself
+//! reefadm --host europa deploy      # any of these, on another host over ssh
 //! ```
 //!
 //! It fetches reef at a ref, and shoal and glommio beside it at the revs reef's
@@ -31,6 +32,7 @@ pub mod exec;
 pub mod health;
 pub mod layout;
 pub mod release;
+pub mod remote;
 pub mod schema;
 pub mod secret;
 pub mod served;
@@ -47,6 +49,23 @@ use exec::Runner;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::SystemTime;
+
+/// An exit code a command ends with having said why already, such as another host's reefadm's
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exit(pub u8);
+
+impl std::fmt::Display for Exit {
+    /// Names the exit code
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write to
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exited {}", self.0)
+    }
+}
+
+impl std::error::Error for Exit {}
 
 /// The environment reefadm runs in, read once, so a test can give it one of its own
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -140,6 +159,36 @@ impl Cx<'_> {
     }
 }
 
+/// Runs one command line on another host over ssh, ending as it ended there
+///
+/// A dry run is the other host's to take, so the runner here runs for real: it copies reefadm
+/// there and runs it with `--dry-run`, which changes nothing else.
+///
+/// # Arguments
+///
+/// * `host` - The host, as ssh reaches it
+/// * `args` - The command line's arguments, after the program's name, `--host` among them
+/// * `yes` - Whether `--yes` was given
+/// * `runner` - Everything it does here goes through this
+/// * `env` - The environment it runs in
+/// * `now` - When it runs
+pub fn run_on(
+    host: &str,
+    args: &[String],
+    yes: bool,
+    runner: &mut dyn Runner,
+    env: Env,
+    now: SystemTime,
+) -> Result<()> {
+    let mut cx = Cx {
+        runner,
+        env,
+        yes,
+        now,
+    };
+    remote::run(&mut cx, host, args)
+}
+
 /// Runs one command line
 ///
 /// # Arguments
@@ -155,6 +204,10 @@ pub fn run(cli: Cli, runner: &mut dyn Runner, env: Env, now: SystemTime) -> Resu
         yes: cli.yes,
         now,
     };
+    // another host's command line is its own, which only `run_on` has whole
+    if let Some(host) = &cli.host {
+        anyhow::bail!("--host {host} runs through `reefadm::run_on`, with the whole command line");
+    }
     match cli.command {
         cli::Command::Deploy(args) => commands::deploy::deploy(&mut cx, &args),
         cli::Command::Upgrade(args) => commands::upgrade::upgrade(&mut cx, &args),

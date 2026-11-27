@@ -356,6 +356,13 @@ pub trait Runner {
     /// * `cmd` - The command
     fn attempt(&mut self, cmd: &Cmd) -> Result<Output>;
 
+    /// Runs a command on the terminal, as the admin would, returning its exit code
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command
+    fn interact(&mut self, cmd: &Cmd) -> Result<Option<i32>>;
+
     /// Writes a file whole
     ///
     /// # Arguments
@@ -618,6 +625,20 @@ impl Runner for Real {
         Ok(output)
     }
 
+    /// Echoes a step, runs it on the terminal, and returns its exit code
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command
+    fn interact(&mut self, cmd: &Cmd) -> Result<Option<i32>> {
+        self.say(&format!("$ {}", cmd.shown()));
+        let output = self.exec(cmd, false)?;
+        if output.code.is_none() && !output.stderr.is_empty() {
+            bail!("`{}` failed: {}", cmd.shown(), output.stderr);
+        }
+        Ok(output.code)
+    }
+
     /// Writes a file in place, through a staged copy and `install` when root writes it
     ///
     /// # Arguments
@@ -817,6 +838,16 @@ impl<R: Runner> Runner for Dry<R> {
         Ok(Output::printed(""))
     }
 
+    /// Shows the step, as if it succeeded
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command
+    fn interact(&mut self, cmd: &Cmd) -> Result<Option<i32>> {
+        self.inner.say(&format!("would run: {}", cmd.shown()));
+        Ok(Some(0))
+    }
+
     /// Shows the file, and what it would hold
     ///
     /// # Arguments
@@ -1001,6 +1032,17 @@ impl Runner for Script {
         let shown = cmd.shown();
         self.log.push(format!("run: {shown}"));
         Ok(Script::find(&self.attempts, &shown).unwrap_or_else(|| Output::printed("")))
+    }
+
+    /// Records the step, ending as the attempts' table says, else with 0
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command
+    fn interact(&mut self, cmd: &Cmd) -> Result<Option<i32>> {
+        let shown = cmd.shown();
+        self.log.push(format!("run: {shown}"));
+        Ok(Script::find(&self.attempts, &shown).map_or(Some(0), |output| output.code))
     }
 
     /// Records the file

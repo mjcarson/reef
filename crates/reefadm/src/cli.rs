@@ -9,6 +9,9 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "reefadm", version, about)]
 pub struct Cli {
+    /// Run on another host over ssh, as `ssh HOST` reaches it, with its prompts here
+    #[arg(long, global = true, value_name = "HOST")]
+    pub host: Option<String>,
     /// Show every step without taking any: probes run, changes are only shown
     #[arg(long, global = true)]
     pub dry_run: bool,
