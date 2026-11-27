@@ -3,7 +3,12 @@
 #![allow(dead_code)]
 
 use reefadm::exec::Script;
+use reefadm::layout::{Kind, Layout, Mode};
+use reefadm::served::{Served, TeamFlags};
+use reefadm::sources::Manifest;
+use reefadm::state::{Release, State};
 use reefadm::{Cli, Env};
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// When every scripted deploy runs: 2026-11-27 07:22:58 UTC
@@ -126,4 +131,85 @@ pub fn fresh() -> Script {
 pub fn run(script: &mut Script, line: &[&str]) -> anyhow::Result<()> {
     let cli = Cli::from_args(std::iter::once("reefadm").chain(line.iter().copied()))?;
     reefadm::run(cli, script, env(), now())
+}
+
+/// The release reefadm deployed before
+pub const OLD: &str = "111111111111-20261120000000";
+
+/// ProjectRow's fingerprint, as this commit's schema pins it
+pub const PROJECT_ROW: &str = "12832186597557680855";
+
+/// The team server's paths on the scripted host
+pub fn layout() -> Layout {
+    Layout::new(Mode::System, &Env::from_pairs([("HOME", "/home/ada")])).unwrap()
+}
+
+/// The old release, with the tables it recorded
+///
+/// # Arguments
+///
+/// * `project_row` - ProjectRow's fingerprint as it recorded it
+pub fn old(project_row: &str) -> Release {
+    Release {
+        name: OLD.into(),
+        reef: "1111111111111111111111111111111111111111".into(),
+        shoal: "dbfb82e25b8143aa8a6e3e8748022c5194990e5f".into(),
+        glommio: "25d2c35240d0ef753cfdcd3a58078f3b17e132dd".into(),
+        toolchain: Manifest::built_in().toolchain,
+        deployed: 1_795_000_000,
+        schema: Some("1".into()),
+        tables: BTreeMap::from([("ProjectRow".to_string(), project_row.to_string())]),
+    }
+}
+
+/// A fresh host, then everything a team deploy of the old release left on it
+///
+/// # Arguments
+///
+/// * `running` - The release it runs
+pub fn deployed(running: Release) -> Script {
+    let mut script = fresh();
+    let layout = layout();
+    // reefadm's record, the config it wrote and its unit
+    let state = State {
+        mode: Mode::System,
+        kind: Kind::App,
+        repo: "https://github.com/mjcarson/reef.git".into(),
+        reference: "CentralizedPlanner".into(),
+        release: running,
+        previous: None,
+        first_admin: Some("ada".into()),
+        src: None,
+    };
+    script.prints(
+        "cat /etc/reef/reefadm.toml",
+        toml::to_string(&state).unwrap(),
+    );
+    let flags = TeamFlags {
+        names: vec!["reef.example.com".into()],
+        port: 12443,
+        own_cert: false,
+        cores: 2,
+        memory: "256MiB".into(),
+    };
+    script.prints(
+        "cat /etc/reef/config.toml",
+        Served::team(&layout, &flags).text().unwrap(),
+    );
+    script.prints(
+        "cat /etc/systemd/system/reef.service",
+        reefadm::unit::text(&layout, Kind::App, false),
+    );
+    // its checkout of reef, and the commit's schema pin
+    script.prints(format!("test -e {SRC}"), "");
+    script.prints(format!("git -C {SRC}/reef rev-parse --git-dir"), ".git\n");
+    script.prints(
+        format!("cat {SRC}/reef/central/reef-service/src/schema.rs"),
+        include_str!("../../../../central/reef-service/src/schema.rs"),
+    );
+    // the data a backup holds
+    for path in ["shoal", "clones", "certs"] {
+        script.prints(format!("sudo test -e /var/lib/reef/{path}"), "");
+    }
+    script
 }

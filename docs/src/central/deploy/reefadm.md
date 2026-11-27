@@ -96,6 +96,36 @@ stay, so `reefadm deploy` later puts reef back over them. `--purge` removes thos
 account's home and its ssh keys, but never the backups, and it says where they are. Both ask
 first.
 
+## Administering
+
+```sh
+reefadm status                     # its release, unit, ports, data, certificate and memlock
+reefadm logs -f                    # the unit's journal, followed
+reefadm backup                     # its data, copied while it is stopped
+reefadm restore FILE               # a backup put back, what was there moved aside
+reefadm recover ada                # ada an admin again, with a new password
+```
+
+- **`status`** shows the deployed release and its ref, the unit's state, whether each port
+  answers and whether it asks callers to sign in, the size of the data and the clones, the free
+  disk, when reef's own certificate ends, and the unit's locked-memory limit. It exits 1 when
+  the unit isn't running or a port doesn't answer, naming each, so a monitor can run it.
+- **`backup`** stops reef, writes `reef-<date>T<time>-<release>.tar.gz` to `/var/backups/reef`
+  (or `--to DIR`), and starts reef again. The tarball holds the data, the clones, reef's
+  certificates and the `reef` account's `.ssh` and `.gitconfig`, readable by root alone, with
+  a manifest naming the release that wrote them. Each path is kept absolute, since every
+  project keeps its clone's path.
+- **`restore`** asks first. If the backup was written by a schema the running release can't read,
+  or with another shard count, it says so in the question. It stops reef, moves the data aside as
+  `*.before-restore-<time>`, unpacks the backup where it was taken from, gives it to the account,
+  and starts reef again.
+- **`recover`** asks for the new password, or reads `--password-file`, then stops reef and runs
+  `reef-serve recover` as the account with the password on its input ([A lost
+  admin](../admin/lost-admin.md)). Then it starts reef again, whatever recover did.
+
+Each takes `--user` for one person's user unit; without it, reefadm picks the team server, else
+the user unit if that's all there is.
+
 ## What goes where
 
 | | team | user |

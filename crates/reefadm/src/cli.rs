@@ -65,6 +65,81 @@ pub enum Command {
     Upgrade(UpgradeArgs),
     /// Remove what deploy put here, keeping the data and config unless --purge
     Uninstall(UninstallArgs),
+    /// Say how reef is doing: its release, its unit, each port, its data and its certificate
+    ///
+    /// It exits 1, naming each, when the unit isn't running or a port doesn't answer.
+    Status(StatusArgs),
+    /// Show reef's journal since boot, or follow it
+    Logs(LogsArgs),
+    /// Back reef's data up, stopping it while it is copied
+    ///
+    /// The tarball holds the store, the clones, reef's certificates and, on a team server, the
+    /// `reef` account's ssh keys and git config, readable by root alone.
+    Backup(BackupArgs),
+    /// Put a backup back over reef's data, moving what is there aside
+    Restore(RestoreArgs),
+    /// Make a user an admin again with a new password, from the store itself
+    ///
+    /// For when no admin can sign in. It stops reef while it runs, since the store is locked.
+    Recover(RecoverArgs),
+}
+
+/// What `reefadm status` is told
+#[derive(Debug, Clone, Args)]
+pub struct StatusArgs {
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+}
+
+/// What `reefadm logs` is told
+#[derive(Debug, Clone, Args)]
+pub struct LogsArgs {
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+    /// Keep showing what it says
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+    /// How many of its last lines to show
+    #[arg(long, short = 'n', default_value_t = 100)]
+    pub lines: u32,
+}
+
+/// What `reefadm backup` is told
+#[derive(Debug, Clone, Args)]
+pub struct BackupArgs {
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+    /// The directory to write it in [default: /var/backups/reef, or ~/.local/state/reef/backups]
+    #[arg(long, value_name = "DIR")]
+    pub to: Option<PathBuf>,
+}
+
+/// What `reefadm restore` is told
+#[derive(Debug, Clone, Args)]
+pub struct RestoreArgs {
+    /// The backup to put back
+    #[arg(value_name = "FILE")]
+    pub file: PathBuf,
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+}
+
+/// What `reefadm recover` is told
+#[derive(Debug, Clone, Args)]
+pub struct RecoverArgs {
+    /// The user to make an admin again, or to add as one if no user has the name
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+    /// Read the new password from a file, rather than asking twice
+    #[arg(long, value_name = "PATH")]
+    pub password_file: Option<PathBuf>,
 }
 
 /// What `reefadm upgrade` is told

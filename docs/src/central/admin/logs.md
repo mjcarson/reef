@@ -1,5 +1,9 @@
 # Logs and health
 
+On a server reefadm deployed, `reefadm status` says all of this at once and exits 1 when reef
+isn't serving, and `reefadm logs` shows the journal ([With reefadm](../deploy/reefadm.md#administering)).
+By hand:
+
 ```sh
 journalctl -u reef -b              # where it listens, sign-in, and any warning about its config
 curl https://reef.example.com:12443/api/v1/me      # {"required":true}: up, and asking callers to sign in

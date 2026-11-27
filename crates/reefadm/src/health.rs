@@ -114,28 +114,63 @@ pub fn wait(
         _ => ca,
     };
     let pem = crate::exec::read(runner, &trusted, crate::exec::As::Me)?.map(String::into_bytes);
-    // loopback, as this host's CLI reaches it
-    let loopback = Ask {
-        url: format!("https://{}/api/v1/me", served.loopback()),
-        ca: pem.clone(),
-        resolve: None,
-    };
+    // loopback first, as this host's CLI reaches it, then the port other hosts reach
+    let mut asks = asks(served, hostname, pem).into_iter();
+    let loopback = asks.next().expect("loopback is always asked");
     let me = match ask(runner, &loopback)? {
         Ok(me) => me,
         Err(error) => return failed(runner, layout, &error),
     };
-    // and the port other hosts reach, by the name they call it
-    if let Some((name, address)) = tls_ask(served, hostname) {
-        let outside = Ask {
-            url: format!("https://{name}:{}/api/v1/me", address.port()),
-            ca: pem,
-            resolve: Some((name, address)),
-        };
+    for outside in asks {
         if let Err(error) = ask(runner, &outside)? {
             return failed(runner, layout, &error);
         }
     }
     Ok(me)
+}
+
+/// Where a server is asked: loopback, as this host's CLI reaches it, then the TLS port by the
+/// name other hosts call it, each trusting reef's CA
+///
+/// # Arguments
+///
+/// * `served` - reef's config
+/// * `hostname` - This host's name
+/// * `pem` - reef's CA, as PEM, if it could be read
+pub fn asks(served: &Served, hostname: &str, pem: Option<Vec<u8>>) -> Vec<Ask> {
+    let mut asks = vec![Ask {
+        url: format!("https://{}/api/v1/me", served.loopback()),
+        ca: pem.clone(),
+        resolve: None,
+    }];
+    if let Some((name, address)) = tls_ask(served, hostname) {
+        asks.push(Ask {
+            url: format!("https://{name}:{}/api/v1/me", address.port()),
+            ca: pem,
+            resolve: Some((name, address)),
+        });
+    }
+    asks
+}
+
+/// reef's CA as this host's CLI trusts it: a team server's readable copy, else the one in the
+/// certificates' directory, if it can be read
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `layout` - The deployment's paths
+/// * `served` - reef's config
+pub fn trusted(
+    runner: &mut dyn Runner,
+    layout: &Layout,
+    served: &Served,
+) -> Result<Option<Vec<u8>>> {
+    let ca = match &layout.ca_copy {
+        Some(copy) => copy.clone(),
+        None => served.certs(layout).join("ca.pem"),
+    };
+    Ok(crate::exec::read(runner, &ca, crate::exec::As::Me)?.map(String::into_bytes))
 }
 
 /// Asks a port until it answers, or says why it never did

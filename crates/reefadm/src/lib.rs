@@ -6,6 +6,9 @@
 //! reefadm --dry-run deploy          # every step it would take, taking none
 //! reefadm upgrade                   # to the ref's newest commit, put back if it doesn't come up
 //! reefadm uninstall                 # what deploy put here, keeping the data unless --purge
+//! reefadm status                    # its release, unit, ports, data and certificate
+//! reefadm backup                    # its data, copied while it is stopped; `restore FILE` back
+//! reefadm recover ada               # a lost admin, from the store itself
 //! ```
 //!
 //! It fetches reef at a ref, and shoal and glommio beside it at the revs reef's
@@ -156,5 +159,10 @@ pub fn run(cli: Cli, runner: &mut dyn Runner, env: Env, now: SystemTime) -> Resu
         cli::Command::Deploy(args) => commands::deploy::deploy(&mut cx, &args),
         cli::Command::Upgrade(args) => commands::upgrade::upgrade(&mut cx, &args),
         cli::Command::Uninstall(args) => commands::uninstall::uninstall(&mut cx, &args),
+        cli::Command::Status(args) => commands::status::status(&mut cx, &args),
+        cli::Command::Logs(args) => commands::status::logs(&mut cx, &args),
+        cli::Command::Backup(args) => commands::backups::take(&mut cx, &args),
+        cli::Command::Restore(args) => commands::backups::restore(&mut cx, &args),
+        cli::Command::Recover(args) => commands::recover::recover(&mut cx, &args),
     }
 }

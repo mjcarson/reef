@@ -62,6 +62,22 @@ pub fn dated(now: SystemTime) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}{minute:02}{second:02}")
 }
 
+/// A moment's UTC date, as `YYYY-mm-dd`
+///
+/// # Arguments
+///
+/// * `secs` - Seconds since the epoch
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(reefadm::release::day(1_795_764_178), "2026-11-27");
+/// ```
+pub fn day(secs: u64) -> String {
+    let (year, month, day, _, _, _) = civil(UNIX_EPOCH + std::time::Duration::from_secs(secs));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 /// A moment's UTC date and time, by Howard Hinnant's days-to-civil algorithm
 ///
 /// # Arguments

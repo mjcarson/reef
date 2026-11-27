@@ -1,7 +1,9 @@
 # A lost admin
 
 If no admin can sign in, recover one on the server itself, from the store. Never do this over
-the API. The service holds its data directory, so stop it first:
+the API. On a server reefadm deployed, `reefadm recover ada` does all of it, stopping and starting
+the unit around it ([With reefadm](../deploy/reefadm.md#administering)). By hand, the service
+holds its data directory, so stop it first:
 
 ```sh
 sudo systemctl stop reef

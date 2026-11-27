@@ -1,6 +1,10 @@
 # Backups
 
-A backup is the data directory and the clones, copied while the service is stopped:
+On a server reefadm deployed, `reefadm backup` does this and `reefadm restore FILE` puts one back
+([With reefadm](../deploy/reefadm.md#administering)). The backup holds the certificates and the
+account's ssh keys too, is readable by root alone, and says which release wrote it.
+
+By hand, a backup is the data directory and the clones, copied while the service is stopped:
 
 ```sh
 sudo systemctl stop reef
