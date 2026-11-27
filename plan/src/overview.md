@@ -426,6 +426,8 @@ nodes:
     at-most: 50.0
 - id: M14
   title: M14 Clients that keep up
+  docs:
+  - ../../docs/src/central/using/updates.md
   nodes:
   - id: C116
     title: C116 A static reef in every release
