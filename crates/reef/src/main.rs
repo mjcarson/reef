@@ -13,21 +13,31 @@
 //! reef accept C18 1 met        # mark its first criterion met, `--test` naming the test
 //! reef check                   # the plan's problems, exiting 1 if it has any
 //! reef next                    # the work ready to start, and what the rest waits on
+//! reef test -- --nocapture     # cargo test as given, told to central reef as it goes
 //! reef mcp                     # serve these as MCP tools over stdio, for Claude Code
 //! reef skill                   # write the Claude skill that works the plan through them
 //! reef claude install          # set the repo up for the loop: MCP entry, hooks and skill
 //! ```
 
-use clap::Parser;
-use reef::Cli;
+use reef::{Cli, Exit, Killed};
 use std::process::ExitCode;
 
-/// Runs one command, printing its error and exiting 1 if it fails
+/// Runs one command, printing its error and exiting 1 if it fails, or ending as a command asks,
+/// as `reef test` ends as cargo did
 fn main() -> ExitCode {
     // clap prints usage and exits 2 on a command line it can't read
-    let cli = Cli::parse();
+    let cli = Cli::parse_args(std::env::args_os());
     match execute(cli) {
         Ok(()) => ExitCode::SUCCESS,
+        // a command's own exit code, or the signal it ends by, says all it has to
+        Err(error) if error.downcast_ref::<Exit>().is_some() => {
+            let code = error.downcast_ref::<Exit>().map_or(1, |exit| exit.0);
+            ExitCode::from(code)
+        }
+        Err(error) if error.downcast_ref::<Killed>().is_some() => {
+            let signal = error.downcast_ref::<Killed>().map_or(0, |killed| killed.0);
+            reef::test_run::die_by(signal)
+        }
         Err(error) => {
             eprintln!("reef: {error:#}");
             ExitCode::FAILURE

@@ -8,6 +8,21 @@
   ([Set the repo up for Claude Code](../projects/claude.md)),
   or by hand with `reef node capture`. Each capture is a revision of the node, which the app's
   Changes tab shows.
+- **Run a node's tests with `reef test`,** which runs `cargo test` with the same arguments,
+  `--` and libtest's after it included, and tells central reef how far they have got:
+
+  ```sh
+  reef test --workspace -- --nocapture
+  ```
+
+  - **What it shows is cargo's,** colours and progress bar in a terminal, and it exits with
+    cargo's code. reef's own options, such as `--conf`, go before `test`.
+  - **The total is known before a test runs:** the binaries are built and listed first, so a
+    filter, `--ignored` and `--skip` are counted as the run will run them.
+  - **The run is told on the node this worktree is on,** the one `reef work` shows, with each
+    binary's counts and each failure's output.
+  - **Telling central reef is best-effort.** Where the checkout is no registered project's, or
+    the server doesn't answer, `reef test` says so once and the tests run as they would have.
 - **Comments are threads** on a revision's lines, or on the node:
 
   ```sh

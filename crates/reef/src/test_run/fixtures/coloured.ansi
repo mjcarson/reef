@@ -1,0 +1,69 @@
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 0.00s
+[1m[92m     Running[0m unittests src/lib.rs (target/debug/build/fixture/7950858fa0e8ef59/out/fixture-7950858fa0e8ef59)
+
+running 4 tests
+test tests::adds ... [32mok(B[m
+test tests::ignored ... [33mignored, needs a network(B[m
+test tests::prints_then_fails ... [31mFAILED(B[m
+test tests::prints_then_passes ... [32mok(B[m
+
+successes:
+
+---- tests::prints_then_passes stdout ----
+all is well
+
+
+successes:
+    tests::adds
+    tests::prints_then_passes
+
+failures:
+
+---- tests::prints_then_fails stdout ----
+about to fail
+
+thread 'tests::prints_then_fails' (854158) panicked at src/lib.rs:27:9:
+assertion `left == right` failed: one and one
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::prints_then_fails
+
+test result: [31mFAILED(B[m. 2 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[91merror[0m: test failed, to rerun pass `--lib`
+[1m[92m     Running[0m tests/more.rs (target/debug/build/fixture/923d9bcc8af59bc5/out/more-923d9bcc8af59bc5)
+
+running 2 tests
+test more_one ... [32mok(B[m
+test more_two ... [32mok(B[m
+
+successes:
+
+---- more_two stdout ----
+more output
+
+
+successes:
+    more_one
+    more_two
+
+test result: [32mok(B[m. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fixture
+
+running 1 test
+test src/lib.rs - add (line 5) ... [32mok(B[m
+
+successes:
+
+successes:
+    src/lib.rs - add (line 5)
+
+test result: [32mok(B[m. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[91merror[0m: 1 target failed:
+    `--lib`

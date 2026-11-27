@@ -398,8 +398,10 @@ repo being tested doesn't change, and its tests run as they always did where ree
 ### Design choices
 
 - **A wrapper, not a change to the tests.** `reef test [ARGS]` runs `cargo test [ARGS]` as given,
-  under a pty so its colours and the order of its lines stay what the terminal would show, and
-  exits with cargo's code. `cargo test` itself still runs anywhere.
+  under a pty where a terminal watches, so its colours and the order of its lines stay what the
+  terminal would show, and through a pipe for each stream elsewhere, as a tool would read cargo.
+  It exits with cargo's code, or by the signal that ended cargo. `cargo test` itself still runs
+  anywhere.
 - **Telling central is best-effort.** Reports go from a task beside the run. Where no project is
   found or nothing answers, `reef test` says so once on stderr and the tests run as they would
   have; a report that fails is dropped, never waited on.

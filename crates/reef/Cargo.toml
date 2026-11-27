@@ -22,9 +22,10 @@ toml = "1"
 # CA the service on this host made, and any the config names, at the version central's tests
 # resolve
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
-# reqwest's runtime, which the MCP server runs on too, over standard input and output, and
-# the clear's injector, which runs zellij, tmux and `claude agents` and waits between looks
-tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util", "process", "signal", "sync", "time"] }
+# reqwest's runtime, which the MCP server runs on too, over standard input and output,
+# the clear's injector, which runs zellij, tmux and `claude agents` and waits between looks, and
+# `reef test`, which reads cargo's pty as it becomes readable
+tokio = { version = "1", features = ["rt", "macros", "io-std", "io-util", "net", "process", "signal", "sync", "time"] }
 # the MCP server: its tools by rmcp's router, served over stdio, as X4's stub served them
 rmcp = { version = "3.11", features = ["server", "transport-io", "macros"] }
 # each tool's arguments as the JSON schema its listing carries
@@ -39,3 +40,8 @@ gix = { version = "=0.90.0", default-features = false, features = ["blob-diff", 
 # through cc, as ring already does here
 tree-sitter = "=0.27.2"
 tree-sitter-rust = "=0.24.2"
+# `reef test`'s pty, sized as the terminal and passing cargo's bytes as written, and the signals
+# it passes on to cargo, at the version the lockfile already resolves
+rustix = { version = "1", features = ["pty", "termios", "process"] }
+# `reef test` ending by the signal that ended cargo, its default action put back first
+libc = "0.2"

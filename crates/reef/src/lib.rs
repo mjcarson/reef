@@ -36,6 +36,9 @@
 //! - **Decisions** ([`decisions`]): each plan a session asked approval for and its verdict, and
 //!   each question and the answer picked, read from its transcript, which Stop and SessionEnd
 //!   keep with the nodes they were made on.
+//! - **Test runs** ([`test_run`]): `reef test` runs `cargo test` as given, its output shown as
+//!   cargo would show it, each binary's tests counted before any runs, and the run told to
+//!   central reef as it goes where it answers, exiting with cargo's code ([`Exit`]).
 //! - **Comments** ([`comment`]): a plan's threads listed whole, replied in, and resolved by
 //!   hand, the revision that answered one linked to it.
 //! - **The queue** ([`queue`]): the user's order of work across a project's plans, added to,
@@ -108,9 +111,11 @@ pub mod run;
 pub mod skill;
 pub mod start;
 pub mod task;
+pub mod test_run;
 pub mod work;
 pub mod worktree;
 
 pub use cli::{Cli, run};
 pub use client::Client;
 pub use conf::Conf;
+pub use test_run::{Exit, Killed};

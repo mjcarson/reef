@@ -16,6 +16,7 @@
 //! reef [--conf PATH] page rm <PATH> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] start <ID> [--base BRANCH] [--restart] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] work [ID] [--project NAME] [--plan NAME]
+//! reef [--conf PATH] test [ARGS]...
 //! reef [--conf PATH] comment ls [--node ID] [--all] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] comment reply <N> <TEXT> [--project NAME] [--plan NAME]
 //! reef [--conf PATH] comment resolve <N> [--node ID] [--revision N] [--reply TEXT] [--project NAME] [--plan NAME]
@@ -76,12 +77,15 @@
 //! worktree-create` makes that worktree for `claude -w <id>`. `loop run` runs a loop's sessions
 //! headless, unless it is typed in a Claude Code session, which it attaches to central reef
 //! instead, as `loop detach` lets go of it. The capture hooks work on the node the working directory's worktree is on, and do
-//! nothing where there is none. `import` picks the project the book is in, and lists the plan
-//! `--plan` names if it isn't listed. `export` picks the project the new book's directory is in.
-//! `skill` writes into the repo that holds its directory, and `claude install` into the checkout
-//! that holds its directory, and neither needs reef's config or its service. Every command sends
-//! the token `login` kept for the service, from the file `--credentials` names, else `$REEF_TOKEN`,
-//! else the file `$REEF_CREDENTIALS` names, else `$XDG_CONFIG_HOME/reef/credentials.toml`.
+//! nothing where there is none. `test` runs `cargo test` with every argument after it, as typed,
+//! and tells the run to the project the working directory picks, on the node its worktree is on,
+//! where central reef answers; reef's own options go before it. `import` picks the project the book
+//! is in, and lists the plan `--plan` names if it isn't listed. `export` picks the project the new
+//! book's directory is in. `skill` writes into the repo that holds its directory, and `claude
+//! install` into the checkout that holds its directory, and neither needs reef's config or its
+//! service. Every command sends the token `login` kept for the service, from the file
+//! `--credentials` names, else `$REEF_TOKEN`, else the file `$REEF_CREDENTIALS` names, else
+//! `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
 use clap::{Args, Parser, Subcommand};
 use reef_api::work::on_worktree;
@@ -155,8 +159,65 @@ impl Cli {
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
     {
-        <Cli as Parser>::try_parse_from(args)
+        // `reef test`'s arguments are kept as typed, a leading `--` clap takes included
+        let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+        let cli = <Cli as Parser>::try_parse_from(&args)?;
+        Ok(cli.typed(&args))
     }
+
+    /// Parses a command line, the program's name first, printing usage and exiting on one it
+    /// can't read, as clap's own parse does
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line, such as `std::env::args_os()`
+    pub fn parse_args<I, T>(args: I) -> Cli
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        // `reef test`'s arguments are kept as typed, a leading `--` clap takes included
+        let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+        <Cli as Parser>::parse_from(&args).typed(&args)
+    }
+
+    /// The command line as parsed, `reef test`'s arguments replaced by those typed after
+    /// `test`, since clap takes a `--` that comes first, which cargo needs to see
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line, the program's name first
+    fn typed(mut self, args: &[OsString]) -> Cli {
+        if let Command::Test { args: parsed } = &mut self.command
+            && let Some(typed) = test_tail(args)
+        {
+            *parsed = typed;
+        }
+        self
+    }
+}
+
+/// The arguments typed after `test`, past reef's own options, if the command is `reef test`
+///
+/// # Arguments
+///
+/// * `args` - The command line, the program's name first
+fn test_tail(args: &[OsString]) -> Option<Vec<OsString>> {
+    let mut rest = args.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        match arg.to_str() {
+            // reef's own options, and the value each takes
+            Some("--conf" | "--credentials") => {
+                rest.next();
+            }
+            Some(option)
+                if option.starts_with("--conf=") || option.starts_with("--credentials=") => {}
+            // the command, and everything after it, as typed
+            Some("test") => return Some(rest.cloned().collect()),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// reef's commands
@@ -206,6 +267,21 @@ pub enum Command {
         /// The plan a node named is in, if not the project's only plan
         #[command(flatten)]
         pick: PlanPick,
+    },
+    /// Run `cargo test` with these arguments, as given, telling central reef how far it has got
+    ///
+    /// Its output is cargo's, through a pty where a terminal watches, and it exits with cargo's
+    /// code. Each test binary's tests are counted before any runs, and the run is told on the
+    /// node this worktree is on. Where no project is found or central reef doesn't answer, it
+    /// says so once and the tests run as they would have. reef's own options go before `test`.
+    Test {
+        /// cargo test's arguments, `--` and libtest's after it included
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "ARGS"
+        )]
+        args: Vec<OsString>,
     },
     /// List a plan's comment threads, reply in them, and resolve them by the changes that
     /// answered them
@@ -1055,6 +1131,17 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
     if let Command::Claude(ClaudeCommand::Install { dir }) = &cli.command {
         return claude::install(&cwd.join(dir), out).map(|_| ());
     }
+    // nor can they stop the tests, which run whether or not central reef hears of them
+    if let Command::Test { args } = cli.command {
+        let tests = crate::test_run::Tests {
+            conf: cli.conf.map(|path| cwd.join(path)),
+            credentials: cli.credentials.map(|path| cwd.join(path)),
+            cwd: cwd.to_path_buf(),
+            args,
+            mode: crate::test_run::Mode::detect(),
+        };
+        return crate::test_run::run(tests, out, &mut std::io::stderr()).await;
+    }
     // the config named, read from the working directory, else the one the service reads
     let named = cli.conf.map(|path| cwd.join(path));
     let mut conf = Conf::load(named.as_deref())?;
@@ -1515,6 +1602,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         // written above, before the config was read
         Command::Skill { .. } => unreachable!("the skill is written before the config is read"),
         Command::Claude(_) => unreachable!("a repo is set up before the config is read"),
+        Command::Test { .. } => unreachable!("the tests run before the config is read"),
     }
 }
 
@@ -3406,6 +3494,35 @@ mod tests {
         // it writes into a checkout, not a project's plan
         assert!(Cli::try_parse_from(["reef", "claude", "install", "--project", "r"]).is_err());
         assert!(Cli::try_parse_from(["reef", "claude"]).is_err());
+    }
+
+    /// `reef test` keeps every argument typed after it, a leading `--` included, and reef's own
+    /// options before it are reef's
+    #[test]
+    fn test_keeps_its_arguments_as_typed() {
+        // the arguments after `test`, for the command parsed
+        let typed = |line: &[&str]| match Cli::from_args(line).unwrap().command {
+            Command::Test { args } => args,
+            other => panic!("parsed as {other:?}"),
+        };
+        // a leading `--`, which clap alone would take
+        assert_eq!(
+            typed(&["reef", "test", "--", "--nocapture"]),
+            ["--", "--nocapture"]
+        );
+        assert_eq!(
+            typed(&["reef", "test", "-p", "x", "--", "--ignored"]),
+            ["-p", "x", "--", "--ignored"]
+        );
+        assert!(typed(&["reef", "test"]).is_empty());
+        // reef's own options before it
+        let cli = Cli::from_args(["reef", "--conf", "c.toml", "test", "--workspace"]).unwrap();
+        assert_eq!(cli.conf.as_deref(), Some(Path::new("c.toml")));
+        assert!(matches!(cli.command, Command::Test { args } if args == ["--workspace"]));
+        assert_eq!(
+            typed(&["reef", "--credentials=k.toml", "test", "--", "a"]),
+            ["--", "a"]
+        );
     }
 
     /// The first column is padded to its widest cell
