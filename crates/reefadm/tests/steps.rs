@@ -235,6 +235,45 @@ fn a_host_reef_is_on_already_stops_a_deploy() {
     assert!(error.to_string().contains("10 GiB free"), "{error}");
 }
 
+/// A host other than Ubuntu 26.04 is told it is untested, and deployed all the same
+#[test]
+fn a_host_other_than_ubuntu_2604_is_told_so() {
+    let told = |os_release: Option<&str>| {
+        let mut script = fresh();
+        if let Some(text) = os_release {
+            script.prints("cat /etc/os-release", text);
+        }
+        run(&mut script, &["deploy"]).unwrap();
+        script
+            .said
+            .into_iter()
+            .find(|line| line.starts_with("reefadm is made for Ubuntu 26.04"))
+    };
+    assert_eq!(
+        told(Some(
+            "PRETTY_NAME=\"Ubuntu 24.04.3 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nID=ubuntu\n"
+        ))
+        .as_deref(),
+        Some(
+            "reefadm is made for Ubuntu 26.04, and this host runs Ubuntu 24.04.3 LTS: it goes on, untested here"
+        )
+    );
+    assert!(
+        told(Some(
+            "PRETTY_NAME=\"Fedora Linux 43\"\nID=fedora\nVERSION_ID=43\n"
+        ))
+        .is_some()
+    );
+    // 26.04 itself, and a host that doesn't say, are deployed without a word
+    assert_eq!(
+        told(Some(
+            "PRETTY_NAME=\"Ubuntu Resolute Raccoon\"\nVERSION_ID=\"26.04\"\nID=ubuntu\n"
+        )),
+        None
+    );
+    assert_eq!(told(None), None);
+}
+
 /// A user unit deploys with no sudo, no account and no config, on loopback alone
 #[test]
 fn a_user_unit_deploys_without_root() {

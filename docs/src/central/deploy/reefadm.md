@@ -13,8 +13,9 @@ reefadm deploy --user              # one person's server, as reef's own plan run
 reefadm --dry-run deploy           # every step it would take, taking none
 ```
 
-Run it as yourself, on a Linux host with systemd. It puts `sudo` in front of only the steps
-that need root, and asks for sudo's password again before them if the build outlasted it. The
+Run it as yourself, on Ubuntu 26.04, which is what reefadm is made and tested for. On another
+Linux with systemd it says so and goes on. It puts `sudo` in front of only the steps that need
+root, and asks for sudo's password again before them if the build outlasted it. The
 first build takes a while, and about 12 GiB of disk for the checkouts, their builds and the
 toolchains; reefadm wants 15 GiB free before it starts one. Before that, it asks for the first
 admin's password, so the build can run unattended. It also asks before it installs packages
@@ -70,10 +71,11 @@ reefadm --host ada@reef.example.com status # anything ssh reaches
 - **reefadm runs there as a copy of itself,** kept in `~/.cache/reefadm/reefadm` and sent again
   whenever it differs. Every argument but `--host` goes with it, and its exit code comes back
   as yours.
-- **If the copy can't run there,** on another architecture or a glibc older than the one it was
-  built against, reefadm says why and builds itself there instead, after asking. It installs a C compiler, curl and git from the
-  host's packages if they're missing, then rustup, then runs `cargo install` from the reef that
-  the command's `--repo` and `--ref` name.
+- **If the copy can't run there,** as when you run reefadm from a Mac, from another architecture,
+  or from a newer system than the host's, reefadm says why and builds itself there instead, after
+  asking. It installs a C compiler, curl and git from the host's packages if they're missing,
+  then rustup, then runs `cargo install` from the reef that the command's `--repo` and `--ref`
+  name.
 - **Paths name files on that host,** such as `restore FILE` or `--cert`, except
   `--password-file`. That one is read here and sent to a file only you can read there, which
   is removed once the command is done.

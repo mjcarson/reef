@@ -40,6 +40,9 @@ const LATER_BUILD_GIB: u64 = 5;
 /// Each shard's memory budget, unless deploy is told another
 const MEMORY: &str = "256MiB";
 
+/// The Ubuntu release reefadm is made and tested for
+pub const UBUNTU: &str = "26.04";
+
 /// Deploys reef on this host
 ///
 /// # Arguments
@@ -65,6 +68,7 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     let overrides = sources::overrides(&args.sources)?;
     // everything that would stop it partway, before anything changes
     let kept = super::kept_config(cx.runner, &layout)?;
+    supported(cx.runner)?;
     let problems = preflight(cx, &layout, &systemd, kept.as_ref(), args, &src)?;
     stop_for(cx, &problems)?;
     let hostname = super::hostname(cx.runner)?;
@@ -259,6 +263,32 @@ pub(super) fn room(runner: &mut dyn Runner, layout: &Layout, src: &Path) -> Resu
         )),
         _ => None,
     })
+}
+
+/// Says when this host isn't the Ubuntu reefadm is made for, and goes on
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+pub(super) fn supported(runner: &mut dyn Runner) -> Result<()> {
+    // os-release names the system, each value quoted or not
+    let Some(text) = exec::read(runner, Path::new("/etc/os-release"), As::Me)? else {
+        return Ok(());
+    };
+    let field = |key: &str| {
+        text.lines()
+            .filter_map(|line| line.split_once('='))
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.trim().trim_matches('"').to_string())
+    };
+    let ubuntu = field("ID").as_deref() == Some("ubuntu");
+    if !(ubuntu && field("VERSION_ID").as_deref() == Some(UBUNTU)) {
+        runner.say(&format!(
+            "reefadm is made for Ubuntu {UBUNTU}, and this host runs {}: it goes on, untested here",
+            field("PRETTY_NAME").unwrap_or_else(|| "another system".to_string())
+        ));
+    }
+    Ok(())
 }
 
 /// Stops on a preflight's problems, or in a dry run, says them and goes on

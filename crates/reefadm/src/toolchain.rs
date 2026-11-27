@@ -1,7 +1,7 @@
 //! What building reef needs on the host, installed where it is missing
 //!
-//! git 2.29 or later, a C compiler (glommio compiles liburing), curl for rustup, and tar for
-//! backups come from the host's packages, through apt-get or dnf after asking. rustup comes
+//! git, a C compiler (glommio compiles liburing), curl for rustup, and tar for backups come
+//! from the host's packages, through apt-get or dnf after asking. rustup comes
 //! from its installer after asking, then the toolchains `central/sources.toml` names: a stable
 //! at least as new as it says, and the pinned nightly. The app also needs the wasm target and
 //! dx 0.7.10, which cargo builds, against openssl's headers, found through pkg-config.
@@ -14,9 +14,6 @@ use std::path::Path;
 
 /// The dx the app is built with, which reef-app's Dioxus version needs exactly
 pub const DX: &str = "0.7.10";
-
-/// The oldest git that clones remote projects as the service needs
-const GIT_AT_LEAST: (u32, u32) = (2, 29);
 
 /// Something a build needs, and the package each package manager installs it from
 struct Needed {
@@ -119,7 +116,6 @@ pub fn ensure(
     yes: bool,
 ) -> Result<()> {
     packages(runner, &NEEDED, yes)?;
-    git_new_enough(runner)?;
     rust(runner, manifest, yes)?;
     if kind == Kind::App {
         app(runner, manifest, src, yes)?;
@@ -188,27 +184,6 @@ fn packages(runner: &mut dyn Runner, needed: &[Needed], yes: bool) -> Result<()>
             false => Cmd::new("dnf").args(["install", "-q", "-y"]),
         };
         runner.run(&install.args(&packages).root())?;
-    }
-    Ok(())
-}
-
-/// Refuses a git older than the service needs to clone remote projects
-///
-/// # Arguments
-///
-/// * `runner` - The runner
-fn git_new_enough(runner: &mut dyn Runner) -> Result<()> {
-    // git clones remote projects as the service needs only from 2.29
-    let git = runner.probe(&Cmd::new("git").arg("--version"))?;
-    if let Some(found) = version(&git.stdout)
-        && found.as_slice() < [GIT_AT_LEAST.0, GIT_AT_LEAST.1].as_slice()
-    {
-        bail!(
-            "reef needs git {}.{} or later, and this host has {}",
-            GIT_AT_LEAST.0,
-            GIT_AT_LEAST.1,
-            git.stdout.trim()
-        );
     }
     Ok(())
 }

@@ -186,6 +186,7 @@ pub fn adopt(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     }
     let found = find(cx.runner, &layout, &systemd)?;
     cx.runner.say(&describe(&layout, &found));
+    deploy::supported(cx.runner)?;
     // everything that would stop it partway, before anything changes
     let problems = preflight(cx.runner, &layout, &found, &src)?;
     deploy::stop_for(cx, &problems)?;
