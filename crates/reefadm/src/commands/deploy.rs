@@ -47,6 +47,10 @@ const MEMORY: &str = "256MiB";
 /// * `cx` - The runner, the environment and the time
 /// * `args` - What deploy was told
 pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
+    // an install made by hand is taken over rather than deployed beside
+    if args.adopt {
+        return super::adopt::adopt(cx, args);
+    }
     let mode = match args.user {
         true => Mode::User,
         false => Mode::System,
@@ -140,7 +144,7 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
         src: args.src.clone(),
     };
     state.write(cx.runner, &layout)?;
-    summary(cx, &layout, &served, &hostname, &name);
+    summary(cx, &layout, &served, &hostname, &name, true);
     Ok(())
 }
 
@@ -149,7 +153,7 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
 /// # Arguments
 ///
 /// * `rev` - The commit
-fn short(rev: &str) -> String {
+pub(super) fn short(rev: &str) -> String {
     rev.chars().take(12).collect()
 }
 
@@ -200,8 +204,8 @@ fn preflight(
     let ours = unit.as_deref().is_none_or(unit::ours);
     if !ours {
         problems.push(format!(
-            "{} wasn't written by reefadm: reef was installed here by hand, and reefadm can't \
-             take over such an install yet",
+            "{} wasn't written by reefadm: reef was installed here by hand, and `reefadm deploy \
+             --adopt` takes it over",
             layout.unit.display()
         ));
     }
@@ -226,7 +230,20 @@ fn preflight(
             }
         }
     }
-    // room for the build: a first one needs far more than one over the same checkouts
+    // room for the build
+    problems.extend(room(runner, layout, src)?);
+    Ok(problems)
+}
+
+/// Whether the disk has room for a build, or the problem if it hasn't
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `layout` - The deployment's paths
+/// * `src` - The sources directory
+pub(super) fn room(runner: &mut dyn Runner, layout: &Layout, src: &Path) -> Result<Option<String>> {
+    // a first build needs far more than one over the same checkouts
     let built_before = exec::exists(runner, &src.join("reef/central/target/release"), As::Me)?;
     let needed = if built_before {
         LATER_BUILD_GIB
@@ -234,16 +251,14 @@ fn preflight(
         FIRST_BUILD_GIB
     };
     let room = existing(runner, src, &layout.home)?;
-    if let Some(free) = free_gib(runner, &room)?
-        && free < needed
-    {
-        problems.push(format!(
+    Ok(match free_gib(runner, &room)? {
+        Some(free) if free < needed => Some(format!(
             "{} has {free} GiB free, and building reef there needs about {needed} GiB: free some, \
              or build elsewhere with --src",
             room.display()
-        ));
-    }
-    Ok(problems)
+        )),
+        _ => None,
+    })
 }
 
 /// Stops on a preflight's problems, or in a dry run, says them and goes on
@@ -252,7 +267,7 @@ fn preflight(
 ///
 /// * `cx` - The runner
 /// * `problems` - What would stop it
-fn stop_for(cx: &mut Cx, problems: &[String]) -> Result<()> {
+pub(super) fn stop_for(cx: &mut Cx, problems: &[String]) -> Result<()> {
     match (problems.is_empty(), cx.runner.dry()) {
         (true, _) => Ok(()),
         (false, true) => {
@@ -273,7 +288,7 @@ fn stop_for(cx: &mut Cx, problems: &[String]) -> Result<()> {
 /// # Arguments
 ///
 /// * `runner` - The runner
-fn listening(runner: &mut dyn Runner) -> Result<Vec<u16>> {
+pub(super) fn listening(runner: &mut dyn Runner) -> Result<Vec<u16>> {
     // ss's local address is its fourth column, its port after the last colon
     let output = runner.probe(&Cmd::new("ss").args(["-Hltn"]))?;
     Ok(output
@@ -532,7 +547,13 @@ fn check_shards(runner: &mut dyn Runner, layout: &Layout, served: &Served) -> Re
 /// * `systemd` - Its unit
 /// * `kind` - The server it runs
 /// * `low` - Whether a port it serves is under 1024
-fn start(cx: &mut Cx, layout: &Layout, systemd: &Systemd, kind: Kind, low: bool) -> Result<()> {
+pub(super) fn start(
+    cx: &mut Cx,
+    layout: &Layout,
+    systemd: &Systemd,
+    kind: Kind,
+    low: bool,
+) -> Result<()> {
     let user = cx.user();
     let runner = &mut *cx.runner;
     // the unit, written only when it changed
@@ -661,9 +682,17 @@ fn firewall(cx: &mut Cx, port: u16) -> Result<()> {
 /// * `served` - reef's config
 /// * `hostname` - This host's name
 /// * `name` - The release's name
-fn summary(cx: &mut Cx, layout: &Layout, served: &Served, hostname: &str, name: &str) {
+/// * `fresh` - Whether reef is new here, with no project yet
+pub(super) fn summary(
+    cx: &mut Cx,
+    layout: &Layout,
+    served: &Served,
+    hostname: &str,
+    name: &str,
+    fresh: bool,
+) {
     let loopback = format!("https://{}", served.loopback());
-    let lines = match (
+    let mut lines = match (
         layout.mode,
         health::tls_ask(served, hostname),
         &layout.ca_copy,
@@ -682,15 +711,15 @@ fn summary(cx: &mut Cx, layout: &Layout, served: &Served, hostname: &str, name: 
                 "  this host's CLI: `export REEF_CONFIG={}`",
                 layout.config.display()
             ),
-            "  next, from a project's repo: `reef project add NAME`".to_string(),
         ],
-        _ => vec![
-            format!(
-                "reef is up at {loopback}, from release {name}, where `reef` finds it as it is"
-            ),
-            "  next, from a project's repo: `reef project add NAME`".to_string(),
-        ],
+        _ => vec![format!(
+            "reef is up at {loopback}, from release {name}, where `reef` finds it as it is"
+        )],
     };
+    // a reef new here has no project yet
+    if fresh {
+        lines.push("  next, from a project's repo: `reef project add NAME`".to_string());
+    }
     for line in lines {
         cx.runner.say(&line);
     }

@@ -1,5 +1,6 @@
 //! reefadm's commands, one module each, and what they share
 
+pub mod adopt;
 pub mod backups;
 pub mod deploy;
 pub mod recover;

@@ -238,6 +238,16 @@ pub struct DeployArgs {
     /// Where the checkouts are kept and built [default: ~/.local/share/reefadm/src]
     #[arg(long, value_name = "DIR")]
     pub src: Option<PathBuf>,
+    /// Take over reef installed here by hand, keeping its config and data, and backing it up first
+    ///
+    /// The unit, the server it runs and its config are read from the install itself, so none of
+    /// a fresh deploy's flags for them apply.
+    #[arg(long, conflicts_with_all = ["api_only", "names", "port", "cert", "key", "cores", "memory", "first_admin", "no_admin", "password_file"])]
+    pub adopt: bool,
+    /// The reef commit the install made by hand was built from, whose schema its data was
+    /// written with, so adopt can tell whether the new release reads it
+    #[arg(long, requires = "adopt", value_name = "REV")]
+    pub from_rev: Option<String>,
 }
 
 #[cfg(test)]
@@ -283,6 +293,20 @@ mod tests {
         assert!(Cli::from_args(["reefadm", "deploy", "--cert", "c.pem"]).is_err());
         assert!(
             Cli::from_args(["reefadm", "deploy", "--no-admin", "--first-admin", "ada"]).is_err()
+        );
+        // an install taken over keeps its own config, so none of a fresh one's flags apply
+        assert!(Cli::from_args(["reefadm", "deploy", "--adopt", "--port", "443"]).is_err());
+        assert!(Cli::from_args(["reefadm", "deploy", "--from-rev", "abc"]).is_err());
+        assert!(
+            Cli::from_args([
+                "reefadm",
+                "deploy",
+                "--user",
+                "--adopt",
+                "--from-rev",
+                "abc"
+            ])
+            .is_ok()
         );
     }
 }

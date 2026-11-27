@@ -80,6 +80,42 @@ reefadm --host ada@reef.example.com status # anything ssh reaches
 - **`--dry-run` still copies reefadm there,** or builds it there, and that reefadm changes
   nothing else.
 
+## Taking over an install made by hand
+
+A server set up by hand, as the rest of this chapter does it, has no record of reefadm's, so
+`reefadm upgrade` can't move it. `--adopt` takes it over, keeping its config and its data:
+
+```sh
+reefadm deploy --adopt                        # the team server's system unit
+reefadm deploy --adopt --from-rev 70c1531     # naming the commit it was built from
+reefadm deploy --user --adopt                 # your own user unit, as localhost.md makes it
+```
+
+- **It reads the install as systemd runs it,** drop-ins and all: the server the unit starts,
+  the account it runs as, and the config it reads. That is `--conf`, else `REEF_CONFIG=`, else
+  the default under that account's home. A team server must run as the `reef` account, whose
+  home is `/var/lib/reef`, as [Building and installing](build.md) makes it.
+- **It checks the schema before building,** when it can tell which one the data was written with.
+  `--from-rev` names the reef commit the install was built from. Without it, a reef-serve new
+  enough to say its schema says it. Otherwise reefadm says it can't tell, and relies on the
+  backup it takes.
+- **It keeps the install before changing anything.** Once the new release is built, it stops
+  reef and backs it up to `/var/backups/reef`. It keeps the unit beside reefadm's as
+  `reef.service.before-reefadm`, and copies the commands and the app to `releases/adopted`,
+  which reefadm never prunes. The app's old directory, such as `/opt/reef/app`, isn't used
+  any more; it's yours to remove.
+- **The config is kept as it is,** unless reefadm wouldn't read it the same. A config elsewhere,
+  or one that left a path such as `[shoal] data` to reef's default, is written to
+  `/etc/reef/config.toml` naming that path, since reefadm's unit sets no `XDG_*` variables. The
+  one that was there is kept as `config.toml.before-reefadm`.
+- **If the new release doesn't come up,** it puts the install back as it was: its unit, its
+  commands, its config, and its data from the backup. It starts it again if it was running.
+- **A server that served plain HTTP,** as reef did before it served HTTPS, now serves HTTPS.
+  adopt says so. Each client's `url` needs `https://`, and a client on another host needs reef's CA
+  as `ca` ([Certificates](certificates.md)).
+
+From then on it is reefadm's: `reefadm upgrade` moves it, and `reefadm status` reads it.
+
 ## Upgrading
 
 ```sh

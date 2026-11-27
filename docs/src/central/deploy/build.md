@@ -1,7 +1,9 @@
 # Building and installing
 
 `reefadm deploy` runs these builds and installs them as a release ([With reefadm](reefadm.md)),
-from checkouts at the commits `central/sources.toml` pins. This page does the same by hand.
+from checkouts at the commits `central/sources.toml` pins. This page does the same by hand. An
+install made this way can be handed to reefadm later with `reefadm deploy --adopt` ([Taking over
+an install made by hand](reefadm.md#taking-over-an-install-made-by-hand)).
 
 ## Build
 
