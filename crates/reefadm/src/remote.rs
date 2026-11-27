@@ -1,15 +1,16 @@
-//! `reefadm --host HOST …`: any command run on another host over ssh, its prompts on this terminal
+//! `reefadm --host HOST …`: a command on another host over ssh, its prompts on this terminal
 //!
-//! reefadm runs there as it would here, with every argument but `--host`: it is a copy of this
-//! binary, kept in `~/.cache/reefadm/reefadm` on HOST and sent again over ssh's input when it
-//! differs. Where the copy can't run, on another architecture or an older glibc, reefadm is
-//! built there instead, from the reef the command names (`--repo`, `--ref`), after asking:
-//! a C compiler, curl and git from the host's packages if it lacks them, rustup, then `cargo
-//! install`. ssh is the system's, so `~/.ssh/config`, the agent and ProxyJump all apply, and it
-//! gets a terminal when this one has one, for sudo's prompts and reef's.
+//! reefadm reaches the host with the system's `ssh`, so `~/.ssh/config`, the agent and ProxyJump
+//! all apply, and copies this binary to `~/.cache/reefadm/reefadm` there, sent again over ssh's
+//! input when it differs. The copy must be built for plain x86-64, so it runs on any target and
+//! asks the target's own CPU what it has: a reefadm built with `-C target-cpu=native`, as an
+//! exported `RUSTFLAGS` builds it, is refused before it is copied.
 //!
-//! Paths name files on HOST, but for `--password-file`, which is read here and sent to a file
-//! only the admin can read there, removed once the command is done.
+//! `deploy`, `deploy --adopt` and `upgrade` are built here and installed there
+//! ([`crate::commands::hosted`]). Every other command runs there as it would here, with every
+//! argument but `--host`, and a terminal when this one has one, for sudo's prompts and reef's.
+//! Paths name files on HOST, but for `--password-file`, which is read here and sent to a file only
+//! the admin can read there, removed once the command is done.
 
 use crate::exec::{Cmd, quote};
 use crate::{Cx, Exit, sources};
@@ -18,9 +19,6 @@ use std::io::IsTerminal;
 
 /// Where reefadm's copy is kept on the other host, under its home
 const COPY: &str = ".cache/reefadm/reefadm";
-
-/// Where reefadm is built on the other host when the copy can't run there, under its home
-const BUILT: &str = ".cache/reefadm/cargo";
 
 /// The arguments to run on the other host: every one but `--host` and its value
 ///
@@ -127,22 +125,45 @@ pub fn line(reefadm: &str, args: &[String]) -> String {
 ///
 /// * `host` - The host, as ssh reaches it
 /// * `script` - What its shell runs
-fn ssh(host: &str, script: &str) -> Cmd {
+pub fn ssh(host: &str, script: &str) -> Cmd {
     Cmd::new("ssh").args(["-o", "BatchMode=yes", host, "--", script])
 }
 
-/// Runs a command line on another host, ending as it ended there
+/// reefadm's copy on a host, and where the admin's home is there
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct There {
+    /// The host, as ssh reaches it
+    pub host: String,
+    /// The admin's home there
+    pub home: String,
+    /// reefadm's copy there
+    pub reefadm: String,
+}
+
+/// Reaches a host and copies this reefadm there, refusing a host it can't run on, or a reefadm
+/// built for a newer CPU than plain x86-64
 ///
 /// # Arguments
 ///
 /// * `cx` - The runner and the environment
 /// * `host` - The host, as ssh reaches it
-/// * `args` - The command line's arguments, after the program's name
-pub fn run(cx: &mut Cx, host: &str, args: &[String]) -> Result<()> {
-    let mut args = forwarded(args);
+/// * `compiled` - The features this reefadm was compiled with beyond plain x86-64's
+pub fn reach(cx: &mut Cx, host: &str, compiled: &[&str]) -> Result<There> {
+    // a copy that runs on any x86-64 CPU, or none
+    if !compiled.is_empty() {
+        bail!(
+            "this reefadm was built for this machine's CPU, with {}, as an exported RUSTFLAGS \
+             builds it, so its copy may not run on {host}: rebuild it with RUSTFLAGS unset, as \
+             `env -u RUSTFLAGS cargo install --locked --git {} --branch {} reefadm`",
+            compiled.join(", "),
+            sources::REPO,
+            sources::REF
+        );
+    }
     // the host, reached without asking, and where its home is
     let found = cx
         .runner
+        .real()
         .probe(&ssh(host, "uname -sm; printf '%s\\n' \"$HOME\""))?;
     if !found.ok() {
         bail!(
@@ -153,76 +174,130 @@ pub fn run(cx: &mut Cx, host: &str, args: &[String]) -> Result<()> {
     }
     let mut lines = found.stdout.lines();
     let (system, home) = (
-        lines.next().unwrap_or_default(),
-        lines.next().unwrap_or_default(),
+        lines.next().unwrap_or_default().trim().to_string(),
+        lines.next().unwrap_or_default().trim().to_string(),
     );
     let here = format!("Linux {}", std::env::consts::ARCH);
-    // reefadm there: this binary's copy, else one built there
-    let reefadm = match system.trim() == here {
-        true => copied(cx, host, home)?,
-        false => None,
-    };
-    let reefadm = match reefadm {
-        Some(reefadm) => reefadm,
-        None => built(cx, host, home, system.trim(), &args)?,
-    };
+    if system != here {
+        bail!("{host} is {system}, and reefadm builds for and runs on {here}, as this machine is");
+    }
+    let reefadm = copied(cx, host, &home)?;
+    Ok(There {
+        host: host.to_string(),
+        home,
+        reefadm,
+    })
+}
+
+/// Runs a command line on another host, ending as it ended there
+///
+/// # Arguments
+///
+/// * `cx` - The runner and the environment
+/// * `host` - The host, as ssh reaches it
+/// * `args` - The command line's arguments, after the program's name
+/// * `compiled` - The features this reefadm was compiled with beyond plain x86-64's
+pub fn run(cx: &mut Cx, host: &str, args: &[String], compiled: &[&str]) -> Result<()> {
+    let mut args = forwarded(args);
+    let there = reach(cx, host, compiled)?;
     // a password file is read here, and sent where only the admin can read it there
     let secret = match value(&args, "--password-file") {
         Some(file) => {
             let password =
                 std::fs::read(file).with_context(|| format!("reading the password file {file}"))?;
-            let there = format!("{home}/.cache/reefadm/password-{}", std::process::id());
-            let script = format!(
-                "umask 077 && mkdir -p {} && cat > {}",
-                quote(&format!("{home}/.cache/reefadm")),
-                quote(&there)
-            );
-            cx.runner.run(&ssh(host, &script).stdin(password))?;
+            let there = send(cx, &there, &password)?;
             args = replaced(&args, "--password-file", &there);
             Some(there)
         }
         None => None,
     };
     // the command there, with a terminal when this one has one, for sudo's and reef's prompts
+    let code = cx
+        .runner
+        .real()
+        .interact(&terminal(host, &line(&there.reefadm, &args)));
+    // the password gone again, however it ended
+    if let Some(file) = secret {
+        let _ = cx
+            .runner
+            .real()
+            .run(&ssh(host, &format!("rm -f {}", quote(&file))));
+    }
+    ended(host, code?)
+}
+
+/// Sends a secret to a file on a host that only the admin can read, returning its path there
+///
+/// # Arguments
+///
+/// * `cx` - The runner
+/// * `there` - The host and the admin's home there
+/// * `secret` - The secret
+pub fn send(cx: &mut Cx, there: &There, secret: &[u8]) -> Result<String> {
+    let file = format!(
+        "{}/.cache/reefadm/password-{}",
+        there.home,
+        std::process::id()
+    );
+    let script = format!(
+        "umask 077 && mkdir -p {} && cat > {}",
+        quote(&format!("{}/.cache/reefadm", there.home)),
+        quote(&file)
+    );
+    cx.runner
+        .real()
+        .run(&ssh(&there.host, &script).stdin(secret.to_vec()))?;
+    Ok(file)
+}
+
+/// `ssh` to the host for a command with prompts: with a terminal when this one has one
+///
+/// # Arguments
+///
+/// * `host` - The host, as ssh reaches it
+/// * `line` - What its shell runs
+pub fn terminal(host: &str, line: &str) -> Cmd {
     let mut cmd = Cmd::new("ssh");
     if std::io::stdin().is_terminal() {
         cmd = cmd.arg("-t");
     }
-    let code = cx
-        .runner
-        .interact(&cmd.args([host, "--", &line(&reefadm, &args)]));
-    // the password gone again, however it ended
-    if let Some(there) = secret {
-        let _ = cx
-            .runner
-            .run(&ssh(host, &format!("rm -f {}", quote(&there))));
-    }
-    match code? {
+    cmd.args([host, "--", line])
+}
+
+/// Ends as a command on another host ended: its exit code, or the signal it was ended by
+///
+/// # Arguments
+///
+/// * `host` - The host
+/// * `code` - Its exit code, or none for a signal
+pub fn ended(host: &str, code: Option<i32>) -> Result<()> {
+    match code {
         Some(0) => Ok(()),
         Some(code) => Err(Exit(u8::try_from(code).unwrap_or(1)).into()),
         None => bail!("reefadm on {host} was ended by a signal"),
     }
 }
 
-/// This binary's copy on the host, sent again if it differs, or none if it can't run there
+/// This binary's copy on the host, sent again if it differs, refused if it can't run there
 ///
 /// # Arguments
 ///
 /// * `cx` - The runner
 /// * `host` - The host
 /// * `home` - The admin's home there
-fn copied(cx: &mut Cx, host: &str, home: &str) -> Result<Option<String>> {
+fn copied(cx: &mut Cx, host: &str, home: &str) -> Result<String> {
+    let runner = cx.runner.real();
     let path = format!("{home}/{COPY}");
     // this binary's digest, and its copy's there
     let exe = std::env::current_exe().context("finding reefadm's own binary")?;
-    let here = cx.runner.probe(&Cmd::new("sha256sum").arg(&exe))?;
+    let here = runner.probe(&Cmd::new("sha256sum").arg(&exe))?;
     let digest = here
         .stdout
         .split_whitespace()
         .next()
         .unwrap_or_default()
         .to_string();
-    let there = cx.runner.probe(&ssh(
+    let there = runner.probe(&ssh(
         host,
         &format!("sha256sum {} 2>/dev/null", quote(&path)),
     ))?;
@@ -238,86 +313,22 @@ fn copied(cx: &mut Cx, host: &str, home: &str) -> Result<Option<String>> {
             next = quote(&next),
             path = quote(&path)
         );
-        cx.runner.say(&format!("copying reefadm to {host}:{path}"));
-        cx.runner.run(&ssh(host, &script).stdin(bytes))?;
+        runner.say(&format!("copying reefadm to {host}:{path}"));
+        runner.run(&ssh(host, &script).stdin(bytes))?;
     }
     // a copy that runs there is the one used
-    let runs = cx
-        .runner
-        .probe(&ssh(host, &format!("{} --version", quote(&path))))?;
-    match runs.ok() || cx.runner.dry() {
-        true => Ok(Some(path)),
-        false => {
-            // the last line says why, since ssh's own warnings come first
-            let why = runs
-                .stderr
-                .lines()
-                .map(str::trim)
-                .rfind(|line| !line.is_empty())
-                .unwrap_or("it exited without saying why");
-            cx.runner
-                .say(&format!("reefadm's copy can't run on {host}: {why}"));
-            Ok(None)
-        }
+    let runs = runner.probe(&ssh(host, &format!("{} --version", quote(&path))))?;
+    if !runs.ok() {
+        // the last line says why, since ssh's own warnings come first
+        let why = runs
+            .stderr
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or("it exited without saying why");
+        bail!("reefadm's copy can't run on {host}: {why}: reefadm runs on Ubuntu 26.04");
     }
-}
-
-/// reefadm built on the host, from the reef the command names, after asking
-///
-/// # Arguments
-///
-/// * `cx` - The runner
-/// * `host` - The host
-/// * `home` - The admin's home there
-/// * `system` - What `uname -sm` says there
-/// * `args` - The command's arguments, whose `--repo` and `--ref` name the reef to build
-fn built(cx: &mut Cx, host: &str, home: &str, system: &str, args: &[String]) -> Result<String> {
-    let repo = value(args, "--repo").unwrap_or(sources::REPO);
-    let reference = value(args, "--ref").unwrap_or(sources::REF);
-    cx.runner.say(&format!(
-        "this reefadm can't run on {host} ({system}), so one is built there from {repo} at \
-         {reference}"
-    ));
-    let question = format!(
-        "build reefadm on {host}, installing a C compiler, curl, git and rustup there if it lacks \
-         them?"
-    );
-    if !cx.confirm(&question)? {
-        bail!("reefadm can't run on {host}: install it there, then run it there");
-    }
-    // a commit is fetched as a rev, anything else as a branch
-    let which = match reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit()) {
-        true => "--rev",
-        false => "--branch",
-    };
-    let root = format!("{home}/{BUILT}");
-    let script = format!(
-        "set -e; \
-         if ! command -v cc >/dev/null || ! command -v curl >/dev/null || ! command -v git >/dev/null; then \
-           if command -v apt-get >/dev/null; then sudo apt-get update -q && \
-             sudo DEBIAN_FRONTEND=noninteractive apt-get install -q -y build-essential curl git; \
-           elif command -v dnf >/dev/null; then sudo dnf install -q -y gcc curl git; fi; \
-         fi; \
-         if [ ! -x \"$HOME/.cargo/bin/cargo\" ]; then \
-           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable; \
-         fi; \
-         \"$HOME/.cargo/bin/cargo\" install --locked --git {repo} {which} {reference} reefadm --root {root}",
-        repo = quote(repo),
-        reference = quote(reference),
-        root = quote(&root),
-    );
-    let mut cmd = Cmd::new("ssh");
-    if std::io::stdin().is_terminal() {
-        cmd = cmd.arg("-t");
-    }
-    match cx.runner.interact(&cmd.args([host, "--", &script]))? {
-        Some(0) => Ok(format!("{root}/bin/reefadm")),
-        code => bail!(
-            "building reefadm on {host} failed{}",
-            code.map(|code| format!(" with exit code {code}"))
-                .unwrap_or_default()
-        ),
-    }
+    Ok(path)
 }
 
 #[cfg(test)]

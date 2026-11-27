@@ -411,6 +411,10 @@ pub trait Runner {
 
     /// Whether changes are only shown, not made
     fn dry(&self) -> bool;
+
+    /// The runner that makes changes, even in a dry run: for the few steps a dry run of another
+    /// host takes for real, copying reefadm there and asking it what it would do
+    fn real(&mut self) -> &mut dyn Runner;
 }
 
 /// Runs everything for real, as the admin, with sudo only where a step needs it
@@ -800,6 +804,11 @@ impl Runner for Real {
     fn dry(&self) -> bool {
         false
     }
+
+    /// This one, which makes them
+    fn real(&mut self) -> &mut dyn Runner {
+        self
+    }
 }
 
 /// Runs another runner's probes, and only shows its changes
@@ -925,6 +934,11 @@ impl<R: Runner> Runner for Dry<R> {
     /// Changes are only shown
     fn dry(&self) -> bool {
         true
+    }
+
+    /// The runner it wraps, whose changes are made
+    fn real(&mut self) -> &mut dyn Runner {
+        &mut self.inner
     }
 }
 
@@ -1117,6 +1131,11 @@ impl Runner for Script {
     /// Changes are recorded as if made
     fn dry(&self) -> bool {
         false
+    }
+
+    /// This one, which records them
+    fn real(&mut self) -> &mut dyn Runner {
+        self
     }
 }
 

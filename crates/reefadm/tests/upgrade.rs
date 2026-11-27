@@ -73,7 +73,8 @@ fn a_schema_that_changed_a_table_is_refused_before_the_build() {
     );
 }
 
-/// The commits the running release was built from need no upgrade
+/// The commits and the CPU class the running release was built from and for need no upgrade, and
+/// another class does
 #[test]
 fn the_same_commits_need_no_upgrade() {
     let manifest = Manifest::built_in();
@@ -81,8 +82,9 @@ fn the_same_commits_need_no_upgrade() {
     running.reef = "992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90".into();
     running.shoal = manifest.shoal.rev;
     running.glommio = manifest.glommio.rev;
-    let mut script = deployed(running);
-    run(&mut script, &["upgrade"]).unwrap();
+    running.build = Some(reefadm::cpu::Class::named("x86-64-v3").flags);
+    let mut script = deployed(running.clone());
+    run(&mut script, &["upgrade", "--target-cpu", "x86-64-v3"]).unwrap();
     assert!(
         script
             .said
@@ -90,6 +92,17 @@ fn the_same_commits_need_no_upgrade() {
             .any(|line| line.contains("nothing to upgrade"))
     );
     assert!(!script.steps().iter().any(|step| step.contains("cargo")));
+    // the same commits for another CPU are built again
+    let mut script = deployed(running);
+    run(&mut script, &["upgrade", "--target-cpu", "x86-64-v4"]).unwrap();
+    assert!(
+        script
+            .steps()
+            .iter()
+            .any(|step| step.contains("target-cpu=x86-64-v4") && step.contains("cargo +")),
+        "{:#?}",
+        script.steps()
+    );
 }
 
 /// A deployed host, its new release staged as the first half of an upgrade left it

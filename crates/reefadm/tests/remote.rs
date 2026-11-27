@@ -1,4 +1,7 @@
-//! `reefadm --host`, step by step, against a scripted pair of hosts
+//! `reefadm --host` for a command that runs there, step by step, against a scripted pair of hosts
+//!
+//! The commands that build, `deploy` and `upgrade`, are built here and shipped there, which
+//! `tests/ship.rs` checks.
 
 use reefadm::exec::{Output, Script};
 use reefadm::{Env, Exit};
@@ -14,7 +17,8 @@ fn run(script: &mut Script, line: &[&str]) -> anyhow::Result<()> {
     let args: Vec<String> = line.iter().map(|word| word.to_string()).collect();
     let env = Env::from_pairs([("HOME", "/home/ada"), ("USER", "ada")]);
     let now = UNIX_EPOCH + Duration::from_secs(1_795_764_178);
-    reefadm::run_on("europa", &args, true, script, env, now)
+    // a reefadm built for plain x86-64, whatever this test was compiled for
+    reefadm::run_on_with("europa", &args, true, script, env, now, &[])
 }
 
 /// europa, reached over ssh with a key, on this host's architecture, with a copy of this reefadm
@@ -54,16 +58,16 @@ fn a_command_runs_there_through_the_copy() {
             "--host",
             "europa",
             "--dry-run",
-            "deploy",
-            "--name",
-            "reef example",
+            "backup",
+            "--to",
+            "/srv/reef backups",
         ],
     )
     .unwrap();
     assert_eq!(
         script.steps(),
         [
-            "run: ssh europa -- '/home/ada/.cache/reefadm/reefadm --dry-run deploy --name '\\''reef example'\\'''"
+            "run: ssh europa -- '/home/ada/.cache/reefadm/reefadm --dry-run backup --to '\\''/srv/reef backups'\\'''"
         ]
     );
 }
@@ -101,7 +105,8 @@ fn a_password_file_is_sent_and_removed() {
         &[
             "--host",
             "europa",
-            "deploy",
+            "recover",
+            "ada",
             "--password-file",
             &file.display().to_string(),
         ],
@@ -116,39 +121,24 @@ fn a_password_file_is_sent_and_removed() {
                 "run: ssh -o BatchMode=yes europa -- 'umask 077 && mkdir -p /home/ada/.cache/reefadm && cat > {there}'"
             ),
             format!(
-                "run: ssh europa -- '/home/ada/.cache/reefadm/reefadm deploy --password-file {there}'"
+                "run: ssh europa -- '/home/ada/.cache/reefadm/reefadm recover ada --password-file {there}'"
             ),
             format!("run: ssh -o BatchMode=yes europa -- 'rm -f {there}'"),
         ]
     );
 }
 
-/// A host the copy can't run on gets reefadm built there, from the reef the command names
+/// A host of another architecture, or one the copy won't run on, is refused, saying why past
+/// ssh's own warnings
 #[test]
-fn a_host_the_copy_cant_run_on_builds_its_own() {
+fn a_host_the_copy_cant_run_on_is_refused() {
     let mut script = europa("Linux aarch64", "abc123");
-    run(&mut script, &["--host", "europa", "deploy", "--ref", "v2"]).unwrap();
-    let steps = script.steps();
-    assert_eq!(steps.len(), 2, "{steps:#?}");
-    assert!(
-        steps[0].contains(
-            "install --locked --git https://github.com/mjcarson/reef.git --branch v2 reefadm \
-             --root /home/ada/.cache/reefadm/cargo"
-        ),
-        "{}",
-        steps[0]
-    );
-    assert_eq!(
-        steps[1],
-        "run: ssh europa -- '/home/ada/.cache/reefadm/cargo/bin/reefadm deploy --ref v2'"
-    );
-    assert!(
-        script
-            .said
-            .iter()
-            .any(|line| line.contains("can't run on europa (Linux aarch64)"))
-    );
-    // and one that won't run there is built too, saying why past ssh's own warnings
+    let error = run(&mut script, &["--host", "europa", "status"])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("europa is Linux aarch64"), "{error}");
+    assert!(script.steps().is_empty(), "{:?}", script.steps());
+    // and one whose glibc is too old for the copy
     let mut script = europa(&format!("Linux {}", std::env::consts::ARCH), "abc123");
     script.answer(
         "ssh -o BatchMode=yes europa -- '/home/ada/.cache/reefadm/reefadm --version'",
@@ -158,17 +148,40 @@ fn a_host_the_copy_cant_run_on_builds_its_own() {
              `GLIBC_2.39' not found (required by /home/ada/.cache/reefadm/reefadm)\n",
         ),
     );
-    run(&mut script, &["--host", "europa", "status"]).unwrap();
+    let error = run(&mut script, &["--host", "europa", "status"])
+        .unwrap_err()
+        .to_string();
     assert!(
-        script
-            .said
-            .iter()
-            .any(|line| line.contains("can't run on europa: ") && line.contains("GLIBC_2.39")),
-        "{:?}",
-        script.said
+        error.contains("can't run on europa: ") && error.contains("GLIBC_2.39"),
+        "{error}"
     );
-    assert_eq!(
-        script.steps().last().copied(),
-        Some("run: ssh europa -- '/home/ada/.cache/reefadm/cargo/bin/reefadm status'")
+    assert!(script.steps().is_empty());
+}
+
+/// A reefadm built for this machine's CPU, as an exported RUSTFLAGS builds it, isn't copied
+/// anywhere, since its copy may not run there
+#[test]
+fn a_reefadm_built_for_this_cpu_is_never_copied() {
+    let mut script = europa(&format!("Linux {}", std::env::consts::ARCH), "old");
+    let args: Vec<String> = ["--host", "europa", "status"].map(String::from).to_vec();
+    let env = Env::from_pairs([("HOME", "/home/ada")]);
+    let now = UNIX_EPOCH + Duration::from_secs(1_795_764_178);
+    let error = reefadm::run_on_with(
+        "europa",
+        &args,
+        true,
+        &mut script,
+        env,
+        now,
+        &["avx2", "bmi2"],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("built for this machine's CPU, with avx2, bmi2")
+            && error.contains("RUSTFLAGS unset"),
+        "{error}"
     );
+    assert!(script.steps().is_empty());
+    assert!(script.probed.is_empty(), "{:?}", script.probed);
 }

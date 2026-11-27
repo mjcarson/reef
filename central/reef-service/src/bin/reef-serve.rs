@@ -237,6 +237,7 @@ fn version(json: bool) -> String {
                 .iter()
                 .map(|(name, fingerprint)| serde_json::json!([name, fingerprint]))
                 .collect::<Vec<_>>(),
+            "features": compiled_features(),
         })
         .to_string(),
         // a line for the schema, then one for each table
@@ -249,6 +250,83 @@ fn version(json: bool) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
     }
+}
+
+/// The x86-64 features this binary was compiled with, which a CPU it runs on must have
+///
+/// reefadm builds a release for the target's CPU, and refuses to install one whose features the
+/// target lacks; the names are the ones its own run-time detection asks a CPU about.
+fn compiled_features() -> Vec<&'static str> {
+    // each feature, as the compiler was told
+    macro_rules! compiled {
+        ($($name:tt),* $(,)?) => {
+            [$(($name, cfg!(target_feature = $name))),*]
+        };
+    }
+    compiled!(
+        "aes",
+        "pclmulqdq",
+        "rdrand",
+        "rdseed",
+        "sse",
+        "sse2",
+        "sse3",
+        "ssse3",
+        "sse4.1",
+        "sse4.2",
+        "sse4a",
+        "sha",
+        "sha512",
+        "sm3",
+        "sm4",
+        "avx",
+        "avx2",
+        "avx512f",
+        "avx512cd",
+        "avx512bw",
+        "avx512dq",
+        "avx512vl",
+        "avx512ifma",
+        "avx512vbmi",
+        "avx512vpopcntdq",
+        "avx512vbmi2",
+        "gfni",
+        "vaes",
+        "vpclmulqdq",
+        "avx512vnni",
+        "avx512bitalg",
+        "avx512bf16",
+        "avx512vp2intersect",
+        "avx512fp16",
+        "avxvnni",
+        "avxifma",
+        "avxneconvert",
+        "avxvnniint8",
+        "avxvnniint16",
+        "f16c",
+        "fma",
+        "bmi1",
+        "bmi2",
+        "lzcnt",
+        "tbm",
+        "popcnt",
+        "fxsr",
+        "xsave",
+        "xsaveopt",
+        "xsaves",
+        "xsavec",
+        "cmpxchg16b",
+        "kl",
+        "widekl",
+        "adx",
+        "rtm",
+        "movbe",
+        "ermsb",
+    )
+    .into_iter()
+    .filter(|(_, on)| *on)
+    .map(|(name, _)| name)
+    .collect()
 }
 
 /// Says a store another process holds is the running service's, and to stop it first
@@ -506,6 +584,12 @@ mod tests {
             serde_json::json!(["ProjectRow", 12832186597557680855u64])
         );
         assert_eq!(tables.len(), 16);
+        // and the x86-64 features it was compiled with, every x86-64 having sse2
+        let features = printed["features"].as_array().unwrap();
+        assert!(
+            features.contains(&serde_json::json!("sse2")),
+            "{features:?}"
+        );
         // and the plain form says the same a line each
         let plain = version(false);
         let mut lines = plain.lines();

@@ -1,25 +1,63 @@
 # With reefadm
 
 `reefadm` does everything in this chapter with one command. It fetches reef, shoal and glommio,
-installs the toolchains they need, builds the CLI, reef-serve and reef-app, and installs them
-with a unit, a config, a readable copy of reef's CA and the first admin. It records what it
-deployed, so the next upgrade can read it.
+installs the toolchains they need, builds the CLI, reef-serve and reef-app for the CPU of the
+host they'll run on, and installs them there with a unit, a config, a readable copy of reef's CA
+and the first admin. It records what it deployed, so the next upgrade can read it.
 
 ```sh
-cargo install --locked --git https://github.com/mjcarson/reef --branch CentralizedPlanner reefadm
+env -u RUSTFLAGS cargo install --locked --git https://github.com/mjcarson/reef --branch CentralizedPlanner reefadm
 reefadm deploy                     # a team server on this host
-reefadm --host europa deploy       # the same, on another host over ssh
+reefadm --host europa deploy       # the same on another host, built here for its CPU
 reefadm deploy --user              # one person's server, as reef's own plan runs
 reefadm --dry-run deploy           # every step it would take, taking none
 ```
 
-Run it as yourself, on Ubuntu 26.04, which is what reefadm is made and tested for. On another
-Linux with systemd it says so and goes on. It puts `sudo` in front of only the steps that need
-root, and asks for sudo's password again before them if the build outlasted it. The
-first build takes a while, and about 12 GiB of disk for the checkouts, their builds and the
-toolchains; reefadm wants 15 GiB free before it starts one. Before that, it asks for the first
-admin's password, so the build can run unattended. It also asks before it installs packages
-or rustup. `--yes` answers yes to every question.
+**Install reefadm with `RUSTFLAGS` unset.** A `RUSTFLAGS="-C target-cpu=native"` exported in your
+shell would build reefadm for your own CPU. reefadm copies itself to every host it deploys to,
+and asks each host's CPU what it has, so it must be built to run on any x86-64. `--host`
+refuses to copy a reefadm built otherwise.
+
+**The machine you run reefadm on builds.** That machine needs Ubuntu 26.04 x86-64, and the disk
+for the build: about 12 GiB for the checkouts, their builds and the toolchains, so reefadm wants
+15 GiB free before it starts one. It asks before it installs packages or rustup there. The
+server needs only Ubuntu 26.04, systemd and sudo, with no toolchain at all. When you run reefadm
+on the server itself, the server is the machine that builds.
+
+Run it as yourself. On a Linux other than Ubuntu 26.04 it says so and goes on, untested. It puts
+`sudo` in front of only the steps that need root, and asks for sudo's password again before them
+if the build outlasted it. Before the build, it asks for the first admin's password, so the build
+can run unattended. `--yes` answers yes to every question.
+
+## Built for the target's CPU
+
+reefadm builds the server for exactly what the CPU it will run on has. It names no vendor and
+no model.
+
+- **The target is asked.** reefadm's copy there asks its CPU which instruction-set features it
+  has, through the CPU itself (CPUID) and the OS's support for the wider registers. A deploy on
+  the server itself asks this machine's CPU.
+- **The build uses what both machines have.** The flags also reach build scripts that run on the
+  machine that builds, and the built reef-serve runs there to say its schema. So a feature the
+  target has and the builder lacks is left out, and reefadm names it.
+- **The flags are the highest x86-64 level the CPU reaches, plus each other feature.** The level
+  is `x86-64-v2`, `v3` or `v4`. Each feature beyond it that the pinned nightly knows is added as
+  `+name`:
+
+  ```
+  building the server for `-C target-cpu=x86-64-v4 -C target-feature=+aes,+gfni,+sha,+vaes`
+  ```
+
+- **A CPU without AES-NI is refused,** since shoal's hashing is built with it.
+- **`--target-cpu NAME`** builds for a CPU rustc names instead, such as `x86-64-v3` for a whole
+  fleet at once.
+- **Only reef-serve and reef-app are built for the target.** The `reef` CLI and reefadm are built
+  for any x86-64, once.
+- **The build is checked.** reefadm reads back the flags cargo compiled each server with, and
+  refuses a release they didn't reach. On the target, it refuses a release whose reef-serve was
+  compiled with a feature that CPU lacks.
+- **The release records its flags.** An upgrade builds again when the target's flags change,
+  even at the same commit.
 
 ## A team server
 
@@ -58,10 +96,11 @@ so reef keeps running after you log out. `--cores` and `--memory` write a config
 
 ## From another machine
 
-`--host` runs any reefadm command on another host over ssh, with its prompts on your terminal:
+`--host` runs a reefadm command on another host over ssh, with its prompts on your terminal:
 
 ```sh
-reefadm --host europa deploy               # deploy europa from here
+reefadm --host europa deploy               # deploy europa from here, built here
+reefadm --host europa upgrade              # and upgrade it, built here again
 reefadm --host ada@reef.example.com status # anything ssh reaches
 ```
 
@@ -69,18 +108,25 @@ reefadm --host ada@reef.example.com status # anything ssh reaches
   sign in without asking for ssh's own password, with a key or an agent. sudo's prompts and
   reefadm's reach your terminal through `ssh -t`.
 - **reefadm runs there as a copy of itself,** kept in `~/.cache/reefadm/reefadm` and sent again
-  whenever it differs. Every argument but `--host` goes with it, and its exit code comes back
-  as yours.
-- **If the copy can't run there,** as when you run reefadm from a Mac, from another architecture,
-  or from a newer system than the host's, reefadm says why and builds itself there instead, after
-  asking. It installs a C compiler, curl and git from the host's packages if they're missing,
-  then rustup, then runs `cargo install` from the reef that the command's `--repo` and `--ref`
-  name.
+  whenever it differs. A host of another architecture, or one the copy won't run on, is refused,
+  saying why.
+- **`deploy`, `deploy --adopt` and `upgrade` are built here.** In order:
+  1. The copy says what the host has: its CPU's features, its OS, reefadm's record there, and
+     anything that would stop the command, such as a port in use. A problem stops it before
+     anything is built.
+  2. reefadm builds here, for that CPU.
+  3. It ships the release there as one tar, into `~/.cache/reefadm/shipped`.
+  4. The copy installs it there, and the shipped files are removed.
+  - Only the flags about the server go there. `--src`, `--repo`, `--ref` and `--source` name this
+    machine's checkouts.
+- **Every other command runs there,** with every argument but `--host`, and its exit code comes
+  back as yours.
 - **Paths name files on that host,** such as `restore FILE` or `--cert`, except
   `--password-file`. That one is read here and sent to a file only you can read there, which
   is removed once the command is done.
-- **`--dry-run` still copies reefadm there,** or builds it there, and that reefadm changes
-  nothing else.
+- **`--dry-run`** still copies reefadm there and asks it what the host has. It then shows the
+  build and the ship, and runs the install there as a dry run of its own, which changes
+  nothing.
 
 ## Taking over an install made by hand
 
@@ -133,9 +179,10 @@ reefadm upgrade --ref v0.2         # another branch, tag or commit
 
 It runs in two halves:
 
-1. **The admin's reefadm fetches and builds.** It fetches reef at `--ref`, which defaults to the
-   ref the server was deployed from. If the commits are the running release's, there's nothing
-   to do unless `--rebuild` is given. Before building, it compares the new commit's schema with
+1. **The admin's reefadm fetches and builds,** on the machine it runs on, for the server's CPU;
+   with `--host`, it ships the release there. It fetches reef at `--ref`, which defaults to the
+   ref the server was deployed from. If the commits and the CPU's flags are the running
+   release's, there's nothing to do unless `--rebuild` is given. Before building, it compares the new commit's schema with
    the tables the running release recorded. A table added is fine. A table changed or dropped is
    refused, naming it, since shoal can't migrate a table ([When the store's schema
    changes](../admin/schema-changes.md)). Then it builds and stages the new release.
@@ -207,7 +254,17 @@ the user unit if that's all there is.
 | config | `/etc/reef/config.toml` | none, unless a flag needs one |
 | data, clones, certificates | `/var/lib/reef/{shoal,clones,certs}` | `~/.local/share/reef/{shoal,clones,certs}` |
 | reefadm's record | `/etc/reef/reefadm.toml` | `~/.local/share/reef/reefadm.toml` |
-| the checkouts it builds | `~/.local/share/reefadm/src`, or `--src` | the same |
+
+On the machine that builds:
+
+| | |
+|---|---|
+| the checkouts | `~/.local/share/reefadm/src`, or `--src` |
+| each CPU's build of the servers | `src/reef/central/target/cpu-<level>-<hash>`, the three built last kept |
+| a release staged to ship | `~/.local/share/reefadm/out` |
+
+On a host deployed with `--host`, a shipped release waits in `~/.cache/reefadm/shipped` until
+it is installed, and reefadm's copy is `~/.cache/reefadm/reefadm`.
 
 - **A release holds the binaries and the app.** Each build becomes a release named for its
   reef commit and the time it was built. reefadm copies it in whole, then points `current` at it.
@@ -216,8 +273,10 @@ the user unit if that's all there is.
   drop-in (`sudo systemctl edit reef`).
 - **The checkouts sit side by side,** as central's build needs. reef is fetched at `--ref` from
   `--repo`. shoal and glommio are fetched at the commits that reef commit's
-  `central/sources.toml` pins, and `--source shoal=URL` fetches one from elsewhere. The
-  toolchains are the ones the same file names.
+  `central/sources.toml` pins, and `--source shoal=URL` fetches one from elsewhere. A pinned
+  commit its branch no longer holds, as when the branch's history was rewritten, is fetched by
+  itself, and reefadm says so, since the pin is due to move. The toolchains are the ones the
+  same file names.
 
 ## When it stops
 
@@ -229,7 +288,7 @@ and names `reefadm upgrade` instead.
 Before changing anything, it refuses in these cases, and says what to change:
 - systemd doesn't answer;
 - the ports are taken;
-- the disk is too small for the build;
+- the disk of the machine that builds is too small for the build;
 - a `reef.service` exists that reefadm didn't write, such as one set up by hand from this chapter.
 
 When the server doesn't answer, reefadm prints the last lines of the unit's journal.

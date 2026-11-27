@@ -20,13 +20,14 @@ fn main() -> ExitCode {
     let env = Env::from_process();
     let mut real = Real::new(&env);
     let now = SystemTime::now();
-    // another host's command runs there as given; a dry run here shows changes it won't make
-    let done = match (&cli.host, cli.dry_run) {
-        (Some(host), _) => {
-            let args: Vec<String> = std::env::args().skip(1).collect();
-            let host = host.clone();
-            reefadm::run_on(&host, &args, cli.yes, &mut real, env, now)
+    // another host's command is built here or runs there; a dry run shows the changes here it
+    // won't make, and asks the other host what it would do
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let done = match (cli.host.clone(), cli.dry_run) {
+        (Some(host), true) => {
+            reefadm::run_on(&host, &args, cli.yes, &mut Dry { inner: real }, env, now)
         }
+        (Some(host), false) => reefadm::run_on(&host, &args, cli.yes, &mut real, env, now),
         (None, true) => reefadm::run(cli, &mut Dry { inner: real }, env, now),
         (None, false) => reefadm::run(cli, &mut real, env, now),
     };

@@ -19,14 +19,18 @@
 //! 5. **The record,** the old release kept as the one before, then every other release pruned.
 
 use crate::cli::UpgradeArgs;
+use crate::compile::Built;
+use crate::cpu::{self, Class};
 use crate::exec::{self, As, Cmd, Runner};
 use crate::layout::Layout;
 use crate::release::{self, Record};
 use crate::schema::{Schema, Verdict};
 use crate::served::Served;
+use crate::ship::{self, Facts};
+use crate::sources::{self, Manifest};
 use crate::state::Release;
 use crate::systemd::Systemd;
-use crate::{Cx, backup, compile, health, sources, toolchain};
+use crate::{Cx, backup, health};
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
@@ -41,7 +45,16 @@ pub fn upgrade(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
     if let Some(name) = &args.finish {
         return finish(cx, args, name);
     }
+    // what a builder elsewhere needs to know of this host, said, with nothing changed
+    if args.facts {
+        return facts(cx, args);
+    }
     let (layout, state) = super::deployed(cx, args.user)?;
+    // a release built elsewhere for this host's CPU, shipped here
+    if let Some(dir) = &args.shipped {
+        let (record, built) = ship::shipped(cx.runner, dir, state.kind)?;
+        return hand_over(cx, args, &layout, &built, &record);
+    }
     // the checkouts deploy used, unless told others
     let src = args
         .src
@@ -54,16 +67,20 @@ pub fn upgrade(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
         .clone()
         .unwrap_or_else(|| state.reference.clone());
     let overrides = sources::overrides(&args.sources)?;
-    // reef at the new ref, and what its commit pins
+    // reef at the new ref, what its commit pins, and the class this machine's CPU is built for
     cx.runner
         .say(&format!("fetching reef at {reference} from {repo}"));
     let (reef, manifest) = sources::fetch_reef(cx.runner, &src, &repo, &reference)?;
+    let class = ship::prepare(
+        cx,
+        &manifest,
+        state.kind,
+        &src,
+        &cpu::detected(),
+        args.target_cpu.as_deref(),
+    )?;
     let running = &state.release;
-    let same = reef == running.reef
-        && manifest.shoal.rev == running.shoal
-        && manifest.glommio.rev == running.glommio
-        && manifest.toolchain == running.toolchain;
-    if same && !args.rebuild {
+    if same(&reef, &manifest, &class, running) && !args.rebuild {
         cx.runner.say(&format!(
             "reef is at {} already, as release {}: nothing to upgrade",
             short(&reef),
@@ -78,54 +95,103 @@ pub fn upgrade(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
         None if cx.runner.dry() => {}
         None => bail!("reef's commit {reef} has no {}", pin.display()),
     }
-    // the toolchains, the siblings and the build, as deploy does
-    toolchain::ensure(cx.runner, &manifest, state.kind, &src, cx.yes)?;
-    let revs = sources::fetch_siblings(cx.runner, &src, &reef, &manifest, &overrides)?;
-    cx.runner.say(&format!(
-        "building reef {} with shoal {} and glommio {}",
-        short(&revs.reef),
-        short(&revs.shoal),
-        short(&revs.glommio)
-    ));
-    let built = compile::build(cx.runner, &src, &manifest.toolchain, state.kind)?;
-    // the built server's own word on its schema, which the record keeps
-    let schema = Schema::of_binary(cx.runner, &built.serve)?;
+    // the siblings and the build, as deploy does, then the built server's own word on its schema
+    let (revs, built, schema) =
+        ship::make(cx, &src, &reef, &manifest, &overrides, state.kind, &class)?;
     if let Some(schema) = &schema {
         check_schema(cx, running, schema, args.fresh)?;
     }
+    let record = ship::record(
+        cx,
+        &repo,
+        &reference,
+        state.kind,
+        revs,
+        &manifest,
+        &class,
+        schema.as_ref(),
+    );
+    hand_over(cx, args, &layout, &built, &record)?;
+    after(cx, &src, running, &record.release)
+}
+
+/// Whether a commit, its pins and a class are the running release's, which needs no upgrade
+///
+/// # Arguments
+///
+/// * `reef` - reef's commit
+/// * `manifest` - What it pins
+/// * `class` - The CPU class it would be built for
+/// * `running` - The running release
+pub(crate) fn same(reef: &str, manifest: &Manifest, class: &Class, running: &Release) -> bool {
+    reef == running.reef
+        && manifest.shoal.rev == running.shoal
+        && manifest.glommio.rev == running.glommio
+        && manifest.toolchain == running.toolchain
+        && running.build.as_deref() == Some(class.flags.as_str())
+}
+
+/// Says what a builder elsewhere needs to know of this host for an upgrade: its record
+///
+/// # Arguments
+///
+/// * `cx` - The runner and the environment
+/// * `args` - What upgrade was told
+fn facts(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
+    let mut facts = Facts::here(cx)?;
+    match super::deployed(cx, args.user) {
+        Ok((_, state)) => {
+            facts.kind = Some(state.kind);
+            facts.state = Some(state);
+        }
+        Err(error) => facts.problems.push(format!("{error:#}")),
+    }
+    facts.say(cx.runner)
+}
+
+/// Stages a new release and hands over to its own reefadm, which makes it the one in use
+///
+/// # Arguments
+///
+/// * `cx` - The runner, the environment and the time
+/// * `args` - What upgrade was told
+/// * `layout` - The deployment's paths
+/// * `built` - The release's files
+/// * `record` - What it was built from
+fn hand_over(
+    cx: &mut Cx,
+    args: &UpgradeArgs,
+    layout: &Layout,
+    built: &Built,
+    record: &Record,
+) -> Result<()> {
     if layout.mode == crate::layout::Mode::System {
         cx.runner.elevate()?;
     }
-    let name = release::name(&revs.reef, cx.now);
-    let record = Record {
-        repo,
-        reference,
-        kind: state.kind,
-        release: Release {
-            name: name.clone(),
-            reef: revs.reef,
-            shoal: revs.shoal,
-            glommio: revs.glommio,
-            toolchain: manifest.toolchain,
-            deployed: 0,
-            schema: None,
-            tables: Default::default(),
-        }
-        .with_schema(schema.as_ref()),
-    };
-    let dir = release::stage(cx.runner, &layout, &built, &record)?;
+    let name = record.release.name.clone();
+    let dir = release::stage(cx.runner, layout, built, record)?;
     // the new release's reefadm finishes it, so its unit and its steps are the ones taken; a
     // dry run shows them as this one would take them
     match cx.runner.dry() {
-        true => finish(cx, args, &name)?,
-        false => cx.runner.run(&finish_command(&dir, args, &name, cx.yes))?,
+        true => finish(cx, args, &name),
+        false => cx.runner.run(&finish_command(&dir, args, &name, cx.yes)),
     }
-    // what users and their repos need once the server moved
+}
+
+/// Says what users and their repos need once the server moved
+///
+/// # Arguments
+///
+/// * `cx` - The runner
+/// * `src` - The sources directory, reef's checkout among it
+/// * `old` - The release upgraded from
+/// * `new` - The release upgraded to
+pub(crate) fn after(cx: &mut Cx, src: &Path, old: &Release, new: &Release) -> Result<()> {
     let skill = cx.runner.probe(
         &Cmd::new("git")
             .arg("-C")
             .arg(src.join("reef"))
-            .args(["diff", "--quiet", &running.reef, &record.release.reef])
+            .args(["diff", "--quiet", &old.reef, &new.reef])
             .args(["--", "crates/reef/assets/skill"]),
     )?;
     cx.runner
@@ -156,7 +222,12 @@ fn short(rev: &str) -> String {
 /// * `running` - The running release, whose tables are recorded
 /// * `new` - The new schema
 /// * `fresh` - Whether the upgrade starts a new data directory
-fn check_schema(cx: &mut Cx, running: &Release, new: &Schema, fresh: bool) -> Result<()> {
+pub(crate) fn check_schema(
+    cx: &mut Cx,
+    running: &Release,
+    new: &Schema,
+    fresh: bool,
+) -> Result<()> {
     // a release whose tables weren't recorded can't be compared, so it is said and passed
     if running.tables.is_empty() {
         cx.runner.say(&format!(

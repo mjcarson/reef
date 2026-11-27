@@ -18,15 +18,18 @@
 //!     partway is run again rather than upgraded.
 
 use crate::cli::DeployArgs;
+use crate::compile::Built;
 use crate::exec::{ACCOUNT, As, Cmd, File, Runner};
 use crate::layout::{Kind, Layout, Mode};
-use crate::schema::Schema;
+use crate::release::Record;
 use crate::secret::Secret;
 use crate::served::{CORES, Explicit, LOOPBACK, Served, TLS_PORT, TeamFlags, port_of};
-use crate::state::{Release, State};
+use crate::ship::{self, Facts};
+use crate::state::State;
 use crate::systemd::Systemd;
-use crate::{Cx, compile, exec, health, release, sources, toolchain, unit};
+use crate::{Cx, cpu, exec, health, release, sources, unit};
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -66,57 +69,38 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     let systemd = Systemd::of(&layout);
     let src = args.src.clone().unwrap_or_else(|| layout.src.clone());
     let overrides = sources::overrides(&args.sources)?;
-    // everything that would stop it partway, before anything changes
     let kept = super::kept_config(cx.runner, &layout)?;
+    // what a builder elsewhere needs to know of this host, said, with nothing changed
+    if args.facts {
+        let mut facts = Facts::here(cx)?;
+        facts.problems = preflight(cx, &layout, &systemd, kept.as_ref(), args, &src, false)?;
+        facts.kind = Some(kind);
+        return facts.say(cx.runner);
+    }
+    // everything that would stop it partway, before anything changes; a release shipped here
+    // was built elsewhere, which had the room for it
     supported(cx.runner)?;
-    let problems = preflight(cx, &layout, &systemd, kept.as_ref(), args, &src)?;
+    let building = args.shipped.is_none();
+    let problems = preflight(cx, &layout, &systemd, kept.as_ref(), args, &src, building)?;
     stop_for(cx, &problems)?;
     let hostname = super::hostname(cx.runner)?;
     // the first admin's password now, so the build runs unattended
     let admin = first_admin(cx, args, mode)?;
-    // reef at its ref, and the siblings and toolchains its commit names
-    cx.runner.say(&format!(
-        "fetching reef at {} from {}",
-        args.reference, args.repo
-    ));
-    let (reef, manifest) = sources::fetch_reef(cx.runner, &src, &args.repo, &args.reference)?;
-    toolchain::ensure(cx.runner, &manifest, kind, &src, cx.yes)?;
-    let revs = sources::fetch_siblings(cx.runner, &src, &reef, &manifest, &overrides)?;
-    // the build, which takes a while the first time
-    cx.runner.say(&format!(
-        "building reef {} with shoal {} and glommio {}",
-        short(&revs.reef),
-        short(&revs.shoal),
-        short(&revs.glommio)
-    ));
-    let built = compile::build(cx.runner, &src, &manifest.toolchain, kind)?;
+    // the release: shipped here built, or built here for this machine's CPU
+    let (mut record, built) = match &args.shipped {
+        Some(dir) => ship::shipped(cx.runner, dir, kind)?,
+        None => build_here(cx, args, kind, &src, &overrides)?,
+    };
     // root's steps from here on, which the build may have outlasted sudo's timestamp for
     if mode == Mode::System {
         cx.runner.elevate()?;
     }
-    let name = release::name(&revs.reef, cx.now);
-    let schema = Schema::of_binary(cx.runner, &built.serve)?;
-    let deployed = cx
+    let name = record.release.name.clone();
+    record.release.deployed = cx
         .now
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or(0);
-    let record = release::Record {
-        repo: args.repo.clone(),
-        reference: args.reference.clone(),
-        kind,
-        release: Release {
-            name: name.clone(),
-            reef: revs.reef,
-            shoal: revs.shoal,
-            glommio: revs.glommio,
-            toolchain: manifest.toolchain,
-            deployed,
-            schema: None,
-            tables: Default::default(),
-        }
-        .with_schema(schema.as_ref()),
-    };
     let dir = release::stage(cx.runner, &layout, &built, &record)?;
     release::activate(cx.runner, &layout, &dir)?;
     // the account, its directories and the config, or a user's config if a flag needs one
@@ -152,13 +136,48 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     Ok(())
 }
 
-/// A commit's first 12 characters
+/// Builds a release here, for this machine's CPU: reef at its ref, the toolchains, the siblings
+/// and the build
 ///
 /// # Arguments
 ///
-/// * `rev` - The commit
-pub(super) fn short(rev: &str) -> String {
-    rev.chars().take(12).collect()
+/// * `cx` - The runner, the environment and the time
+/// * `args` - What deploy was told
+/// * `kind` - The server it builds
+/// * `src` - The sources directory
+/// * `overrides` - The siblings fetched from elsewhere
+fn build_here(
+    cx: &mut Cx,
+    args: &DeployArgs,
+    kind: Kind,
+    src: &Path,
+    overrides: &BTreeMap<String, String>,
+) -> Result<(Record, Built)> {
+    cx.runner.say(&format!(
+        "fetching reef at {} from {}",
+        args.reference, args.repo
+    ));
+    let (reef, manifest) = sources::fetch_reef(cx.runner, src, &args.repo, &args.reference)?;
+    let class = ship::prepare(
+        cx,
+        &manifest,
+        kind,
+        src,
+        &cpu::detected(),
+        args.target_cpu.as_deref(),
+    )?;
+    let (revs, built, schema) = ship::make(cx, src, &reef, &manifest, overrides, kind, &class)?;
+    let record = ship::record(
+        cx,
+        &args.repo,
+        &args.reference,
+        kind,
+        revs,
+        &manifest,
+        &class,
+        schema.as_ref(),
+    );
+    Ok((record, built))
 }
 
 /// Everything that would stop a deploy partway, a line each
@@ -171,6 +190,7 @@ pub(super) fn short(rev: &str) -> String {
 /// * `kept` - The config a deploy before this one left
 /// * `args` - What deploy was told
 /// * `src` - The sources directory
+/// * `building` - Whether the build is here, which needs room for it
 fn preflight(
     cx: &mut Cx,
     layout: &Layout,
@@ -178,6 +198,7 @@ fn preflight(
     kept: Option<&Served>,
     args: &DeployArgs,
     src: &Path,
+    building: bool,
 ) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let runner = &mut *cx.runner;
@@ -234,8 +255,10 @@ fn preflight(
             }
         }
     }
-    // room for the build
-    problems.extend(room(runner, layout, src)?);
+    // room for the build, where it is built
+    if building {
+        problems.extend(room(runner, layout, src)?);
+    }
     Ok(problems)
 }
 

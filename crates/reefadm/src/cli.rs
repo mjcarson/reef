@@ -175,6 +175,16 @@ pub struct UpgradeArgs {
     /// Finish an upgrade to a staged release, as the new release's reefadm
     #[arg(long, hide = true, value_name = "RELEASE")]
     pub finish: Option<String>,
+    /// Build the server for this CPU, as rustc names it, rather than for the features the
+    /// target's own CPU has
+    #[arg(long, value_name = "CPU")]
+    pub target_cpu: Option<String>,
+    /// Install the release shipped to this directory instead of building one, as `--host` does
+    #[arg(long, hide = true, value_name = "DIR")]
+    pub shipped: Option<PathBuf>,
+    /// Say what a builder elsewhere needs to know of this host, as a line of JSON, changing nothing
+    #[arg(long, hide = true)]
+    pub facts: bool,
 }
 
 /// What `reefadm uninstall` is told
@@ -248,6 +258,16 @@ pub struct DeployArgs {
     /// written with, so adopt can tell whether the new release reads it
     #[arg(long, requires = "adopt", value_name = "REV")]
     pub from_rev: Option<String>,
+    /// Build the server for this CPU, as rustc names it, rather than for the features the
+    /// target's own CPU has
+    #[arg(long, value_name = "CPU")]
+    pub target_cpu: Option<String>,
+    /// Install the release shipped to this directory instead of building one, as `--host` does
+    #[arg(long, hide = true, value_name = "DIR")]
+    pub shipped: Option<PathBuf>,
+    /// Say what a builder elsewhere needs to know of this host, as a line of JSON, changing nothing
+    #[arg(long, hide = true)]
+    pub facts: bool,
 }
 
 #[cfg(test)]

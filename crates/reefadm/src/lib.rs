@@ -28,6 +28,7 @@ pub mod backup;
 pub mod cli;
 pub mod commands;
 pub mod compile;
+pub mod cpu;
 pub mod exec;
 pub mod health;
 pub mod layout;
@@ -36,6 +37,7 @@ pub mod remote;
 pub mod schema;
 pub mod secret;
 pub mod served;
+pub mod ship;
 pub mod sources;
 pub mod state;
 pub mod systemd;
@@ -161,8 +163,9 @@ impl Cx<'_> {
 
 /// Runs one command line on another host over ssh, ending as it ended there
 ///
-/// A dry run is the other host's to take, so the runner here runs for real: it copies reefadm
-/// there and runs it with `--dry-run`, which changes nothing else.
+/// `deploy`, `deploy --adopt` and `upgrade` are built here for the host's CPU and installed there;
+/// any other command runs there as it would here. A dry run copies reefadm there and asks it what
+/// it would do, which changes nothing else.
 ///
 /// # Arguments
 ///
@@ -180,13 +183,49 @@ pub fn run_on(
     env: Env,
     now: SystemTime,
 ) -> Result<()> {
+    run_on_with(host, args, yes, runner, env, now, &cpu::compiled())
+}
+
+/// Runs one command line on another host as [`run_on`] does, for a reefadm compiled with the
+/// features given beyond plain x86-64's, which the copy it sends there must have none of
+///
+/// # Arguments
+///
+/// * `host` - The host, as ssh reaches it
+/// * `args` - The command line's arguments, after the program's name, `--host` among them
+/// * `yes` - Whether `--yes` was given
+/// * `runner` - Everything it does here goes through this
+/// * `env` - The environment it runs in
+/// * `now` - When it runs
+/// * `compiled` - The features this reefadm was compiled with beyond plain x86-64's
+pub fn run_on_with(
+    host: &str,
+    args: &[String],
+    yes: bool,
+    runner: &mut dyn Runner,
+    env: Env,
+    now: SystemTime,
+    compiled: &[&str],
+) -> Result<()> {
     let mut cx = Cx {
         runner,
         env,
         yes,
         now,
     };
-    remote::run(&mut cx, host, args)
+    // the commands that build are built here, and the rest run there
+    let cli = Cli::from_args(std::iter::once("reefadm".to_string()).chain(args.iter().cloned()))?;
+    match &cli.command {
+        cli::Command::Deploy(deploy) if deploy.shipped.is_none() && !deploy.facts => {
+            commands::hosted::deploy(&mut cx, host, deploy, compiled)
+        }
+        cli::Command::Upgrade(upgrade)
+            if upgrade.finish.is_none() && upgrade.shipped.is_none() && !upgrade.facts =>
+        {
+            commands::hosted::upgrade(&mut cx, host, upgrade, compiled)
+        }
+        _ => remote::run(&mut cx, host, args, compiled),
+    }
 }
 
 /// Runs one command line

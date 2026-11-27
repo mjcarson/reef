@@ -10,16 +10,23 @@ use common::{REWRITE, SRC, env, fresh, git, now, run};
 use reefadm::Cli;
 use reefadm::exec::{Dry, Output};
 
-/// A team server deploys on a fresh host as the book's Deploying chapter would, step by step
+/// A team server deploys on a fresh host as the book's Deploying chapter would, step by step, its
+/// servers built for the CPU named, here as for a fleet, so the steps don't hang on this one's
 #[test]
 fn a_team_server_deploys_on_a_fresh_host() {
     let mut script = fresh();
-    run(&mut script, &["deploy"]).unwrap();
+    run(&mut script, &["deploy", "--target-cpu", "x86-64-v3"]).unwrap();
     let steps = script.steps().join("\n");
     let manifest = reefadm::sources::Manifest::built_in();
     let release = "/opt/reef/releases/992226c4a1b2-20261127072258";
-    let web = format!("{SRC}/reef/central/target/dx/reef-app/release/web");
+    let class = reefadm::cpu::Class::named("x86-64-v3");
+    let target = format!("{SRC}/reef/central/target/{}", class.dir());
+    let web = format!("{target}/dx/reef-app/release/web");
     let liburing = format!("GLOMMIO_LIBURING_DIR={SRC}/glommio/glommio/liburing");
+    let for_class = format!(
+        "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS='{}' CARGO_TARGET_DIR={target}",
+        class.flags
+    );
     let expected = [
         // the checkouts: reef, then its siblings at their pins
         format!("run: mkdir -p {SRC}"),
@@ -36,20 +43,20 @@ fn a_team_server_deploys_on_a_fresh_host() {
         // the three builds
         format!("run: {liburing} cargo +stable build --release --locked -p reef -p reefadm  (in {SRC}/reef)"),
         format!(
-            "run: {liburing} cargo +{tc} build --release --locked -p reef-service --features embedded \
-             --bin reef-serve  (in {SRC}/reef/central)",
+            "run: {liburing} {for_class} cargo +{tc} build --release --locked -p reef-service \
+             --features embedded --bin reef-serve  (in {SRC}/reef/central)",
             tc = manifest.toolchain
         ),
         format!(
-            "run: {liburing} RUSTUP_TOOLCHAIN={tc} dx build --release @server --platform server \
-             --features embedded  (in {SRC}/reef/central/reef-app)",
+            "run: {liburing} {for_class} RUSTUP_TOOLCHAIN={tc} dx build --release @server \
+             --platform server --features embedded  (in {SRC}/reef/central/reef-app)",
             tc = manifest.toolchain
         ),
         // the release, made current, with the commands through it
         format!("run: sudo rm -rf {release}.new"),
         format!("run: sudo install -d -m 0755 {release}.new/bin"),
         format!("run: sudo install -m 0755 {SRC}/reef/target/release/reef {release}.new/bin/reef"),
-        format!("run: sudo install -m 0755 {SRC}/reef/central/target/release/reef-serve {release}.new/bin/reef-serve"),
+        format!("run: sudo install -m 0755 {target}/release/reef-serve {release}.new/bin/reef-serve"),
         format!("run: sudo install -m 0755 {SRC}/reef/target/release/reefadm {release}.new/bin/reefadm"),
         format!("run: sudo install -d -m 0755 {release}.new/app"),
         format!("run: sudo cp -R {web}/server {web}/public {release}.new/app"),
@@ -118,6 +125,10 @@ fn a_team_server_deploys_on_a_fresh_host() {
         "{state}"
     );
     assert!(state.contains("first_admin = \"ada\""), "{state}");
+    assert!(
+        state.contains(&format!("build = \"{}\"", class.flags)),
+        "{state}"
+    );
     // and the admin is told where it is
     assert!(
         script

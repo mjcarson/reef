@@ -20,14 +20,16 @@
 
 use super::deploy;
 use crate::cli::DeployArgs;
+use crate::compile::Built;
 use crate::exec::{self, ACCOUNT, As, Ask, Cmd, File, Runner};
 use crate::layout::{Kind, Layout, Mode, UNIT};
 use crate::release::{self, COMMANDS, Record};
 use crate::schema::{Schema, Verdict};
 use crate::served::{Served, port_of};
+use crate::ship::{self, Facts};
 use crate::state::{Release, State};
 use crate::systemd::Systemd;
-use crate::{Cx, backup, compile, health, sources, toolchain, unit};
+use crate::{Cx, backup, cpu, health, sources, unit};
 use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -232,6 +234,10 @@ pub fn adopt(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     let systemd = Systemd::of(&layout);
     let src = args.src.clone().unwrap_or_else(|| layout.src.clone());
     let overrides = sources::overrides(&args.sources)?;
+    // what a builder elsewhere needs to know of this install, said, with nothing changed
+    if args.facts {
+        return facts(cx, args, &layout, &systemd, &src);
+    }
     // the install, as systemd says it runs
     if !systemd.answers(cx.runner)? {
         bail!("systemd doesn't answer here, so there is no unit of reef's to take over");
@@ -239,77 +245,32 @@ pub fn adopt(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     let found = find(cx.runner, &layout, &systemd)?;
     cx.runner.say(&describe(&layout, &found));
     deploy::supported(cx.runner)?;
-    // everything that would stop it partway, before anything changes
-    let problems = preflight(cx.runner, &layout, &found, &src)?;
+    // everything that would stop it partway, before anything changes; a release shipped here
+    // was built elsewhere, which had the room for it
+    let building = args.shipped.is_none();
+    let problems = preflight(cx.runner, &layout, &found, &src, building)?;
     deploy::stop_for(cx, &problems)?;
     let hostname = super::hostname(cx.runner)?;
-    // reef at its ref, and the schema the install's data was written with against its commit's
-    cx.runner.say(&format!(
-        "fetching reef at {} from {}",
-        args.reference, args.repo
-    ));
-    let (reef, manifest) = sources::fetch_reef(cx.runner, &src, &args.repo, &args.reference)?;
-    let old = old_schema(cx.runner, &layout, &src, &found, args.from_rev.as_deref())?;
-    let adopted = Release {
-        name: ADOPTED.to_string(),
-        reef: args
-            .from_rev
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string()),
-        shoal: "unknown".to_string(),
-        glommio: "unknown".to_string(),
-        toolchain: "unknown".to_string(),
-        deployed: 0,
-        schema: None,
-        tables: Default::default(),
-    }
-    .with_schema(old.as_ref());
-    let pin = src.join("reef/central/reef-service/src/schema.rs");
-    match exec::read(cx.runner, &pin, As::Me)? {
-        Some(source) => check(cx, &adopted, &Schema::from_pin(&source)?, true)?,
-        None if cx.runner.dry() => {}
-        None => bail!("reef's commit {reef} has no {}", pin.display()),
-    }
-    // the toolchains, the siblings and the build, as deploy does
-    toolchain::ensure(cx.runner, &manifest, found.kind, &src, cx.yes)?;
-    let revs = sources::fetch_siblings(cx.runner, &src, &reef, &manifest, &overrides)?;
-    cx.runner.say(&format!(
-        "building reef {} with shoal {} and glommio {}",
-        deploy::short(&revs.reef),
-        deploy::short(&revs.shoal),
-        deploy::short(&revs.glommio)
-    ));
-    let built = compile::build(cx.runner, &src, &manifest.toolchain, found.kind)?;
-    let schema = Schema::of_binary(cx.runner, &built.serve)?;
-    if let Some(schema) = &schema {
-        check(cx, &adopted, schema, false)?;
-    }
+    // the release, and the install made by hand as a release of its own
+    let (mut record, built, adopted) = match &args.shipped {
+        Some(dir) => {
+            let (record, built) = ship::shipped(cx.runner, dir, found.kind)?;
+            let adopted = ship::adopted(cx.runner, dir)?
+                .unwrap_or_else(|| adopted_release(args.from_rev.as_deref(), None));
+            (record, built, adopted)
+        }
+        None => build_here(cx, args, &layout, &found, &src, &overrides)?,
+    };
     // root's steps from here on, which the build may have outlasted sudo's timestamp for
     if mode == Mode::System {
         cx.runner.elevate()?;
     }
-    let name = release::name(&revs.reef, cx.now);
-    let deployed = cx
+    let name = record.release.name.clone();
+    record.release.deployed = cx
         .now
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or(0);
-    let record = Record {
-        repo: args.repo.clone(),
-        reference: args.reference.clone(),
-        kind: found.kind,
-        release: Release {
-            name: name.clone(),
-            reef: revs.reef,
-            shoal: revs.shoal,
-            glommio: revs.glommio,
-            toolchain: manifest.toolchain,
-            deployed,
-            schema: None,
-            tables: Default::default(),
-        }
-        .with_schema(schema.as_ref()),
-    };
     let dir = release::stage(cx.runner, &layout, &built, &record)?;
     // whether it served plain HTTP, as a reef before C87 did, while it still runs
     let plain = found.active && !cx.runner.dry() && plain_http(cx.runner, &found.served);
@@ -370,6 +331,146 @@ pub fn adopt(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     deploy::summary(cx, &layout, &served, &hostname, &name, false);
     notes(cx, &layout, &found, plain, saved.as_deref());
     Ok(())
+}
+
+/// Builds the release here, for this machine's CPU, checking the schema the install wrote its
+/// data with against the new commit's, before the build and after it
+///
+/// # Arguments
+///
+/// * `cx` - The runner, the environment and the time
+/// * `args` - What deploy was told
+/// * `layout` - The deployment's paths
+/// * `found` - The install
+/// * `src` - The sources directory
+/// * `overrides` - The siblings fetched from elsewhere
+fn build_here(
+    cx: &mut Cx,
+    args: &DeployArgs,
+    layout: &Layout,
+    found: &Found,
+    src: &Path,
+    overrides: &BTreeMap<String, String>,
+) -> Result<(Record, Built, Release)> {
+    // reef at its ref, and the schema the install's data was written with against its commit's
+    cx.runner.say(&format!(
+        "fetching reef at {} from {}",
+        args.reference, args.repo
+    ));
+    let (reef, manifest) = sources::fetch_reef(cx.runner, src, &args.repo, &args.reference)?;
+    let old = match &args.from_rev {
+        Some(rev) => pin_at(cx.runner, src, rev)?,
+        None => own_word(cx.runner, layout, found)?,
+    };
+    let adopted = adopted_release(args.from_rev.as_deref(), old.as_ref());
+    check_pin(cx, src, &reef, &adopted)?;
+    // the toolchains, the siblings and the build, as deploy does
+    let class = ship::prepare(
+        cx,
+        &manifest,
+        found.kind,
+        src,
+        &cpu::detected(),
+        args.target_cpu.as_deref(),
+    )?;
+    let (revs, built, schema) =
+        ship::make(cx, src, &reef, &manifest, overrides, found.kind, &class)?;
+    if let Some(schema) = &schema {
+        check(cx, &adopted, schema, false)?;
+    }
+    let record = ship::record(
+        cx,
+        &args.repo,
+        &args.reference,
+        found.kind,
+        revs,
+        &manifest,
+        &class,
+        schema.as_ref(),
+    );
+    Ok((record, built, adopted))
+}
+
+/// Refuses a commit whose schema pin can't read what the install wrote, before it is built
+///
+/// # Arguments
+///
+/// * `cx` - The runner
+/// * `src` - The sources directory, reef's checkout at the commit among it
+/// * `reef` - The commit
+/// * `adopted` - The install, as a release, its tables recorded if they are known
+pub(crate) fn check_pin(cx: &mut Cx, src: &Path, reef: &str, adopted: &Release) -> Result<()> {
+    let pin = src.join("reef/central/reef-service/src/schema.rs");
+    match exec::read(cx.runner, &pin, As::Me)? {
+        Some(source) => check(cx, adopted, &Schema::from_pin(&source)?, true),
+        None if cx.runner.dry() => Ok(()),
+        None => bail!("reef's commit {reef} has no {}", pin.display()),
+    }
+}
+
+/// The install made by hand, as a release of its own: the commit it was built from if the admin
+/// named it, and the schema its data was written with if it is known
+///
+/// # Arguments
+///
+/// * `from_rev` - The commit it was built from
+/// * `schema` - The schema its data was written with
+pub(crate) fn adopted_release(from_rev: Option<&str>, schema: Option<&Schema>) -> Release {
+    Release {
+        name: ADOPTED.to_string(),
+        reef: from_rev.unwrap_or("unknown").to_string(),
+        shoal: "unknown".to_string(),
+        glommio: "unknown".to_string(),
+        toolchain: "unknown".to_string(),
+        deployed: 0,
+        schema: None,
+        tables: Default::default(),
+        build: None,
+    }
+    .with_schema(schema)
+}
+
+/// Says what a builder elsewhere needs to know of an install to take it over: the server it runs,
+/// whatever would stop adopt, and the schema its own reef-serve says
+///
+/// The reads root alone may make are left out, since this runs with no terminal to ask sudo's
+/// password on: adopt finds the install again as root once the release is shipped.
+///
+/// # Arguments
+///
+/// * `cx` - The runner and the environment
+/// * `args` - What deploy was told
+/// * `layout` - The deployment's paths
+/// * `systemd` - The unit's manager
+/// * `src` - The sources directory
+fn facts(
+    cx: &mut Cx,
+    args: &DeployArgs,
+    layout: &Layout,
+    systemd: &Systemd,
+    src: &Path,
+) -> Result<()> {
+    let mut facts = Facts::here(cx)?;
+    if !systemd.answers(cx.runner)? {
+        facts.problems.push(
+            "systemd doesn't answer there, so there is no unit of reef's to take over".into(),
+        );
+        return facts.say(cx.runner);
+    }
+    match find(cx.runner, layout, systemd) {
+        Ok(found) => {
+            facts.kind = Some(found.kind);
+            facts.problems = preflight(cx.runner, layout, &found, src, false)?;
+            // the schema as the old reef-serve says it, unless the admin named the commit
+            if args.from_rev.is_none()
+                && let Some(schema) = own_word(cx.runner, layout, &found)?
+            {
+                facts.tables = adopted_release(None, Some(&schema)).tables;
+            }
+        }
+        Err(error) => facts.problems.push(format!("{error:#}")),
+    }
+    facts.say(cx.runner)
 }
 
 /// reef as systemd runs it, refusing a unit reefadm wrote or one it can't take over
@@ -651,6 +752,7 @@ fn preflight(
     layout: &Layout,
     found: &Found,
     src: &Path,
+    building: bool,
 ) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     // a deployment reefadm made is upgraded
@@ -675,47 +777,47 @@ fn preflight(
             }
         }
     }
-    // room for the build
-    problems.extend(deploy::room(runner, layout, src)?);
+    // room for the build, where it is built
+    if building {
+        problems.extend(deploy::room(runner, layout, src)?);
+    }
     Ok(problems)
 }
 
-/// The schema the install's data was written with: the pin at a commit of reef's, else the old
-/// reef-serve's own word, if it is new enough to say it
+/// The schema reef's commit pinned, as the checkout here holds its history
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `src` - The sources directory, reef's checkout among it
+/// * `rev` - The commit
+pub(crate) fn pin_at(runner: &mut dyn Runner, src: &Path, rev: &str) -> Result<Option<Schema>> {
+    let shown = runner.probe(
+        &Cmd::new("git")
+            .arg("-C")
+            .arg(src.join("reef"))
+            .arg("show")
+            .arg(format!("{rev}:central/reef-service/src/schema.rs")),
+    )?;
+    match (shown.ok(), runner.dry()) {
+        (true, _) => Schema::from_pin(&shown.stdout).map(Some),
+        (false, true) => Ok(None),
+        (false, false) => bail!(
+            "reef's history has no schema at {rev}: {}",
+            shown.stderr.trim()
+        ),
+    }
+}
+
+/// The schema the install's own reef-serve says, which it does since C109 and refuses the word
+/// before
 ///
 /// # Arguments
 ///
 /// * `runner` - The runner
 /// * `layout` - The deployment's paths
-/// * `src` - The sources directory, reef's checkout among it
 /// * `found` - The install
-/// * `from_rev` - The commit it was built from, if the admin named it
-fn old_schema(
-    runner: &mut dyn Runner,
-    layout: &Layout,
-    src: &Path,
-    found: &Found,
-    from_rev: Option<&str>,
-) -> Result<Option<Schema>> {
-    // the pin at the commit named, which reef's history holds
-    if let Some(rev) = from_rev {
-        let shown = runner.probe(
-            &Cmd::new("git")
-                .arg("-C")
-                .arg(src.join("reef"))
-                .arg("show")
-                .arg(format!("{rev}:central/reef-service/src/schema.rs")),
-        )?;
-        return match (shown.ok(), runner.dry()) {
-            (true, _) => Schema::from_pin(&shown.stdout).map(Some),
-            (false, true) => Ok(None),
-            (false, false) => bail!(
-                "reef's history has no schema at {rev}: {}",
-                shown.stderr.trim()
-            ),
-        };
-    }
-    // else the old reef-serve, which says it since C109, and refuses the word before
+fn own_word(runner: &mut dyn Runner, layout: &Layout, found: &Found) -> Result<Option<Schema>> {
     let serve = match found.kind {
         Kind::Serve => found.program.clone(),
         Kind::App => layout.bin.join("reef-serve"),
@@ -734,7 +836,7 @@ fn old_schema(
 /// * `adopted` - The install, as a release, its tables recorded if they are known
 /// * `new` - The new commit's schema
 /// * `say_unknown` - Whether to say that the old schema isn't known, which is said once
-fn check(cx: &mut Cx, adopted: &Release, new: &Schema, say_unknown: bool) -> Result<()> {
+pub(crate) fn check(cx: &mut Cx, adopted: &Release, new: &Schema, say_unknown: bool) -> Result<()> {
     if adopted.tables.is_empty() {
         if say_unknown {
             cx.runner.say(

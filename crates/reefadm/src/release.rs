@@ -143,10 +143,29 @@ pub fn stage(
     built: &Built,
     record: &Record,
 ) -> Result<PathBuf> {
-    let owner = layout.owner();
+    stage_in(runner, &layout.releases, layout.owner(), built, record)
+}
+
+/// Copies a build into a new release under its own name in a directory of releases, as whoever
+/// owns them, and returns the release's directory
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `releases` - The directory of releases, such as the layout's, or one a build is shipped from
+/// * `owner` - Who writes there
+/// * `built` - What the build made
+/// * `record` - What it was built from, its name among it
+pub fn stage_in(
+    runner: &mut dyn Runner,
+    releases: &Path,
+    owner: As,
+    built: &Built,
+    record: &Record,
+) -> Result<PathBuf> {
     let name = &record.release.name;
-    let release = layout.releases.join(name);
-    let staged = layout.releases.join(format!("{name}.new"));
+    let release = releases.join(name);
+    let staged = releases.join(format!("{name}.new"));
     // whatever a stage that stopped partway left, gone first
     runner.run(&Cmd::new("rm").arg("-rf").arg(&staged).by(owner))?;
     runner.run(
@@ -359,6 +378,7 @@ mod tests {
                 deployed: 0,
                 schema: None,
                 tables: Default::default(),
+                build: None,
             },
         };
         let release = stage(&mut script, &layout, &built, &record).unwrap();

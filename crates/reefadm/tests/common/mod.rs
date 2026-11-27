@@ -24,6 +24,12 @@ pub fn env() -> Env {
 /// The sources directory on the scripted host
 pub const SRC: &str = "/home/ada/.local/share/reefadm/src";
 
+/// What the nightly prints of the features it builds for: rustc's own, then LLVM's
+pub const KNOWN: &str = "Features supported by rustc for this target:\n    aes   - Enable AES.\n    \
+                         avx2   - Enable AVX2.\n    sha   - Enable SHA.\n    gfni   - Enable GFNI.\n\n\
+                         Code-generation features supported by LLVM for this target:\n    \
+                         retpoline   - Retpolines.\n";
+
 /// How the manifest has git fetch glommio's liburing
 pub const REWRITE: &str =
     "-c url.https://github.com/axboe/liburing.git.insteadOf=git://git.kernel.dk/liburing";
@@ -65,12 +71,17 @@ pub fn fresh() -> Script {
     );
     script.prints(
         format!("{} rev-parse HEAD", git("shoal")),
-        "dbfb82e25b8143aa8a6e3e8748022c5194990e5f\n",
+        "e40b08f27a0367a1aae9b3709fa2185e491cf2ab\n",
     );
     script.prints(
         format!("{} rev-parse HEAD", git("glommio")),
         "25d2c35240d0ef753cfdcd3a58078f3b17e132dd\n",
     );
+    // each sibling's branch holds its pinned commit
+    let pins = reefadm::sources::Manifest::built_in();
+    for (dir, rev) in [("shoal", &pins.shoal.rev), ("glommio", &pins.glommio.rev)] {
+        script.prints(format!("{} cat-file -e '{rev}^{{commit}}'", git(dir)), "");
+    }
     script.prints(
         format!("cat {SRC}/reef/central/sources.toml"),
         include_str!("../../../../central/sources.toml"),
@@ -104,9 +115,18 @@ pub fn fresh() -> Script {
         format!("git -C {SRC}/reef diff --quiet -- central/Cargo.lock"),
         "",
     );
-    // the reef-serve built says its schema
+    // the nightly lists the features it builds for, as rustc's first section
     script.prints(
-        format!("{SRC}/reef/central/target/release/reef-serve version --json"),
+        format!(
+            "RUSTUP_AUTO_INSTALL=0 rustup run {} rustc --print target-features --target \
+             x86_64-unknown-linux-gnu",
+            manifest.toolchain
+        ),
+        KNOWN,
+    );
+    // the reef-serve built for any class says its schema
+    script.prints(
+        format!("{SRC}/reef/central/target/cpu-*"),
         r#"{"schema":13509127152932721421,"tables":[["ProjectRow",12832186597557680855]]}"#,
     );
     // the server makes its CA once it starts, and nobody is signed in yet
@@ -153,12 +173,13 @@ pub fn old(project_row: &str) -> Release {
     Release {
         name: OLD.into(),
         reef: "1111111111111111111111111111111111111111".into(),
-        shoal: "dbfb82e25b8143aa8a6e3e8748022c5194990e5f".into(),
+        shoal: "e40b08f27a0367a1aae9b3709fa2185e491cf2ab".into(),
         glommio: "25d2c35240d0ef753cfdcd3a58078f3b17e132dd".into(),
         toolchain: Manifest::built_in().toolchain,
         deployed: 1_795_000_000,
         schema: Some("1".into()),
         tables: BTreeMap::from([("ProjectRow".to_string(), project_row.to_string())]),
+        build: None,
     }
 }
 

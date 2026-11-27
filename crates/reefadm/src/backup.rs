@@ -240,6 +240,7 @@ mod tests {
             deployed: 0,
             schema: None,
             tables: Default::default(),
+            build: None,
         }
     }
 

@@ -1,7 +1,10 @@
 # Building and installing
 
 `reefadm deploy` runs these builds and installs them as a release ([With reefadm](reefadm.md)),
-from checkouts at the commits `central/sources.toml` pins. This page does the same by hand. An
+from checkouts at the commits `central/sources.toml` pins. It builds the servers for the target
+CPU's own features, on the machine reefadm runs on, rather than `native` on the server ([Built
+for the target's CPU](reefadm.md#built-for-the-targets-cpu)). This page does the same by hand,
+building on the server itself. An
 install made this way can be handed to reefadm later with `reefadm deploy --adopt` ([Taking over
 an install made by hand](reefadm.md#taking-over-an-install-made-by-hand)).
 

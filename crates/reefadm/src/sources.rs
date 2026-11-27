@@ -177,6 +177,22 @@ fn checkout(
         )?;
     }
     runner.run(&git(dir, rewrite).args(["fetch", "--quiet", "origin", fetch]))?;
+    // a pinned commit the branch no longer holds, as when its history was rewritten, is fetched
+    // by itself, which a host like GitHub serves while it keeps the commit
+    if at != "FETCH_HEAD" && !runner.dry() {
+        let held = runner.probe(
+            &git(dir, rewrite)
+                .args(["cat-file", "-e"])
+                .arg(format!("{at}^{{commit}}")),
+        )?;
+        if !held.ok() {
+            runner.say(&format!(
+                "{fetch} at {url} no longer holds {at}, so it is fetched by itself: its history \
+                 was rewritten, or the pin is behind it"
+            ));
+            runner.run(&git(dir, rewrite).args(["fetch", "--quiet", "origin", at]))?;
+        }
+    }
     runner.run(&git(dir, rewrite).args(["checkout", "--quiet", "--force", "--detach", at]))?;
     // the commit it is at, which a dry run can't know before it is fetched
     let head = runner.probe(&git(dir, rewrite).args(["rev-parse", "HEAD"]))?;
@@ -319,9 +335,17 @@ mod tests {
     fn siblings_are_cloned_then_fetched_at_their_rev() {
         let manifest = Manifest::built_in();
         let mut script = Script::default();
-        // shoal is there already; glommio isn't
+        // shoal is there already, its branch holding its pin; glommio isn't, and its branch was
+        // rewritten past its pin
         let git = "git -c url.https://github.com/axboe/liburing.git.insteadOf=git://git.kernel.dk/liburing";
         script.prints(format!("{git} -C /src/shoal rev-parse --git-dir"), ".git\n");
+        script.prints(
+            format!(
+                "{git} -C /src/shoal cat-file -e '{}^{{commit}}'",
+                manifest.shoal.rev
+            ),
+            "",
+        );
         script.prints(format!("{git} -C /src/shoal rev-parse HEAD"), "aaa\n");
         script.prints(format!("{git} -C /src/glommio rev-parse HEAD"), "bbb\n");
         let revs = fetch_siblings(
@@ -357,6 +381,10 @@ mod tests {
                 ),
                 format!("{git} -C /src/glommio fetch --quiet origin ZeroCopyDmaStreamWriter"),
                 format!(
+                    "{git} -C /src/glommio fetch --quiet origin {}",
+                    manifest.glommio.rev
+                ),
+                format!(
                     "{git} -C /src/glommio checkout --quiet --force --detach {}",
                     manifest.glommio.rev
                 ),
@@ -366,5 +394,15 @@ mod tests {
             ]
         );
         assert!(!script.dry());
+        // and it says why the pin was fetched by itself
+        assert!(
+            script
+                .said
+                .iter()
+                .any(|line| line.starts_with("ZeroCopyDmaStreamWriter at ")
+                    && line.contains("no longer holds")),
+            "{:?}",
+            script.said
+        );
     }
 }

@@ -13,7 +13,7 @@ stable_at_least = "1.98"
 [shoal]
 url = "https://github.com/mjcarson/shoal.git"
 branch = "ScanSupport"
-rev = "dbfb82e25b8143aa8a6e3e8748022c5194990e5f"
+rev = "e40b08f27a0367a1aae9b3709fa2185e491cf2ab"
 
 # glommio, shoal's runtime, from its branch with zero-copy DMA stream writes: shoal names
 # `../glommio/glommio`; its liburing is a submodule its build compiles

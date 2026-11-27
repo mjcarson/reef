@@ -3,6 +3,7 @@
 pub mod adopt;
 pub mod backups;
 pub mod deploy;
+pub mod hosted;
 pub mod recover;
 pub mod status;
 pub mod uninstall;

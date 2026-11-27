@@ -58,6 +58,9 @@ pub struct Release {
     /// Each table's fingerprint, by row type, if they are known
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tables: BTreeMap<String, String>,
+    /// The flags its central builds were compiled with, for the CPU it was built for, if known
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
 }
 
 impl Release {
@@ -135,12 +138,13 @@ mod tests {
             release: Release {
                 name: "992226c4a1b2-20261127072258".into(),
                 reef: "992226c".into(),
-                shoal: "dbfb82e".into(),
+                shoal: "e40b08f".into(),
                 glommio: "25d2c35".into(),
                 toolchain: "nightly-2026-08-21".into(),
                 deployed: 1_795_764_178,
                 schema: None,
                 tables: Default::default(),
+                build: None,
             }
             .with_schema(Some(&schema)),
             previous: None,
