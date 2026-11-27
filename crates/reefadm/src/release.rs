@@ -8,9 +8,11 @@
 //! a running server keeps the release it started from, since the kernel resolves the link once.
 
 use crate::compile::Built;
-use crate::exec::{Cmd, Runner};
-use crate::layout::Layout;
-use anyhow::Result;
+use crate::exec::{As, Cmd, File, Runner};
+use crate::layout::{Kind, Layout};
+use crate::state::Release;
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -92,22 +94,41 @@ fn civil(now: SystemTime) -> (i64, u32, u32, u32, u32, u32) {
     )
 }
 
-/// Copies a build into a new release, swaps `current` to it and links the commands, returning
-/// the release's directory
+/// What a release was built from, kept in it as `release.toml`, which the reefadm it holds reads
+/// to finish an upgrade
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
+    /// Where reef was fetched from
+    pub repo: String,
+    /// The ref it was fetched at
+    #[serde(rename = "ref")]
+    pub reference: String,
+    /// The server it runs
+    pub kind: Kind,
+    /// Its name, revs, toolchain and schema
+    pub release: Release,
+}
+
+/// The file in each release that records what it was built from
+pub const RECORD: &str = "release.toml";
+
+/// Copies a build into a new release under its own name, recording what it was built from, and
+/// returns the release's directory; nothing uses it until it is activated
 ///
 /// # Arguments
 ///
 /// * `runner` - The runner
 /// * `layout` - The deployment's paths
 /// * `built` - What the build made
-/// * `name` - The release's name
-pub fn install(
+/// * `record` - What it was built from, its name among it
+pub fn stage(
     runner: &mut dyn Runner,
     layout: &Layout,
     built: &Built,
-    name: &str,
+    record: &Record,
 ) -> Result<PathBuf> {
     let owner = layout.owner();
+    let name = &record.release.name;
     let release = layout.releases.join(name);
     let staged = layout.releases.join(format!("{name}.new"));
     // whatever a stage that stopped partway left, gone first
@@ -147,6 +168,14 @@ pub fn install(
                 .by(owner),
         )?;
     }
+    // what it was built from, for the reefadm it holds
+    runner.write(&File {
+        path: staged.join(RECORD),
+        text: toml::to_string(record).context("writing a release's record")?,
+        mode: 0o644,
+        runs_as: owner,
+        owner: None,
+    })?;
     // a whole release, under its own name
     runner.run(
         &Cmd::new("mv")
@@ -155,7 +184,19 @@ pub fn install(
             .arg(&release)
             .by(owner),
     )?;
-    swap(runner, layout, &release)?;
+    Ok(release)
+}
+
+/// Makes a release the one in use: `current` swapped to it, and the commands linked through it
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `layout` - The deployment's paths
+/// * `release` - The release's directory
+pub fn activate(runner: &mut dyn Runner, layout: &Layout, release: &Path) -> Result<()> {
+    let owner = layout.owner();
+    swap(runner, layout, release)?;
     // the commands, through current, so the next swap moves them too
     runner.run(
         &Cmd::new("install")
@@ -172,7 +213,62 @@ pub fn install(
                 .by(owner),
         )?;
     }
-    Ok(release)
+    Ok(())
+}
+
+/// Reads what a release was built from
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `layout` - The deployment's paths
+/// * `name` - The release's name
+pub fn record(runner: &mut dyn Runner, layout: &Layout, name: &str) -> Result<Record> {
+    let path = layout.releases.join(name).join(RECORD);
+    let Some(text) = crate::exec::read(runner, &path, As::Me)? else {
+        bail!(
+            "{} isn't there, so {name} isn't a release reefadm staged",
+            path.display()
+        );
+    };
+    toml::from_str(&text).with_context(|| format!("reading {}", path.display()))
+}
+
+/// Removes every release but those kept, and any a running process was started from
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `layout` - The deployment's paths
+/// * `keep` - The releases to keep by name: the current one and the one before it
+pub fn prune(runner: &mut dyn Runner, layout: &Layout, keep: &[&str]) -> Result<()> {
+    let owner = layout.owner();
+    // every release there is
+    let listed = runner.probe(&Cmd::new("ls").arg("-1").arg(&layout.releases))?;
+    // and every program running, since a long-lived `reef mcp` starts itself again from its own
+    let running = runner.probe(
+        &Cmd::new("sh")
+            .args(["-c", "readlink /proc/[0-9]*/exe 2>/dev/null; true"])
+            .by(owner),
+    )?;
+    for name in listed
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let dir = layout.releases.join(name);
+        let in_use = running
+            .stdout
+            .lines()
+            .any(|exe| Path::new(exe).starts_with(&dir));
+        // an install taken over is kept for its admin to remove
+        if keep.contains(&name) || in_use || name == "adopted" {
+            continue;
+        }
+        runner.run(&Cmd::new("rm").arg("-rf").arg(&dir).by(owner))?;
+    }
+    Ok(())
 }
 
 /// Points `current` at a release, by renaming a new link over the old one
@@ -203,11 +299,12 @@ pub fn swap(runner: &mut dyn Runner, layout: &Layout, release: &Path) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{dated, install, name};
+    use super::{Record, activate, dated, name, prune, stage};
     use crate::Env;
     use crate::compile::Built;
     use crate::exec::Script;
-    use crate::layout::{Layout, Mode};
+    use crate::layout::{Kind, Layout, Mode};
+    use crate::state::Release;
     use std::time::{Duration, UNIX_EPOCH};
 
     /// The date of a moment is the calendar's, across a leap day and the epoch
@@ -233,7 +330,23 @@ mod tests {
             web: Some("/b/web".into()),
         };
         let mut script = Script::default();
-        let release = install(&mut script, &layout, &built, "r1").unwrap();
+        let record = Record {
+            repo: "r".into(),
+            reference: "main".into(),
+            kind: Kind::App,
+            release: Release {
+                name: "r1".into(),
+                reef: "a".into(),
+                shoal: "b".into(),
+                glommio: "c".into(),
+                toolchain: "nightly".into(),
+                deployed: 0,
+                schema: None,
+                tables: Default::default(),
+            },
+        };
+        let release = stage(&mut script, &layout, &built, &record).unwrap();
+        activate(&mut script, &layout, &release).unwrap();
         assert_eq!(release, std::path::Path::new("/opt/reef/releases/r1"));
         assert_eq!(
             script.steps(),
@@ -245,6 +358,7 @@ mod tests {
                 "run: sudo install -m 0755 /b/reefadm /opt/reef/releases/r1.new/bin/reefadm",
                 "run: sudo install -d -m 0755 /opt/reef/releases/r1.new/app",
                 "run: sudo cp -R /b/web/server /b/web/public /opt/reef/releases/r1.new/app",
+                "write: sudo write /opt/reef/releases/r1.new/release.toml (644)",
                 "run: sudo mv -T /opt/reef/releases/r1.new /opt/reef/releases/r1",
                 "run: sudo ln -sfnT /opt/reef/releases/r1 /opt/reef/current.new",
                 "run: sudo mv -T /opt/reef/current.new /opt/reef/current",
@@ -254,5 +368,25 @@ mod tests {
                 "run: sudo ln -sfn /opt/reef/current/bin/reefadm /usr/local/bin/reefadm",
             ]
         );
+        // and its record reads back
+        script.prints(
+            "cat /opt/reef/releases/r1/release.toml",
+            script.files[0].text.clone(),
+        );
+        assert_eq!(super::record(&mut script, &layout, "r1").unwrap(), record);
+    }
+
+    /// Pruning keeps the releases asked for, any a process runs from, and an adopted install
+    #[test]
+    fn pruning_keeps_what_is_in_use() {
+        let layout = Layout::new(Mode::System, &Env::from_pairs([("HOME", "/home/ada")])).unwrap();
+        let mut script = Script::default();
+        script.prints("ls -1 /opt/reef/releases", "r1\nr2\nr3\nr4\nadopted\n");
+        script.prints(
+            "sudo sh -c 'readlink /proc/[0-9]*/exe 2>/dev/null; true'",
+            "/usr/bin/zsh\n/opt/reef/releases/r2/bin/reef\n",
+        );
+        prune(&mut script, &layout, &["r4", "r3"]).unwrap();
+        assert_eq!(script.steps(), ["run: sudo rm -rf /opt/reef/releases/r1"]);
     }
 }

@@ -1,8 +1,11 @@
 # When the store's schema changes
 
 Shoal can't migrate a table yet. A version that adds a table reads the old data as it is. A
-version that changes an existing row needs a fresh data directory. Before upgrading, read what
-changed in `central/reef-service/src/schema.rs` since the running version. reef's own history of
+version that changes an existing row needs a fresh data directory. `reefadm upgrade` compares
+the new commit's schema with the tables the running release recorded before it builds anything,
+and refuses one that changed or dropped a table, naming it; `--fresh` then moves the data
+aside, never deleting it, and starts on an empty directory, for step 4 below. By hand, before
+upgrading, read what changed in `central/reef-service/src/schema.rs` since the running version. reef's own history of
 which changes needed one is in [reef's own plan](../../internals/own-plan.md).
 
 Only a plan's nodes and pages carry over to a fresh data directory, through an export and an

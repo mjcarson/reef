@@ -56,6 +56,59 @@ pub enum Command {
     /// It fetches and builds reef here, which takes a while the first time, and asks before
     /// installing packages or rustup.
     Deploy(DeployArgs),
+    /// Move the reef reefadm deployed here to a later commit, or build it again
+    ///
+    /// It fetches reef at --ref (by default the ref it was deployed from), refuses a commit whose
+    /// schema changed a table the data was written with, builds it, backs the data up, makes the
+    /// new release current and restarts. If the new release doesn't come up, the old one goes
+    /// back, with the backup restored.
+    Upgrade(UpgradeArgs),
+    /// Remove what deploy put here, keeping the data and config unless --purge
+    Uninstall(UninstallArgs),
+}
+
+/// What `reefadm upgrade` is told
+#[derive(Debug, Clone, Args)]
+pub struct UpgradeArgs {
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+    /// The branch, tag or commit of reef to upgrade to [default: the one deployed from]
+    #[arg(long = "ref", value_name = "REF")]
+    pub reference: Option<String>,
+    /// Where reef is fetched from [default: where it was deployed from]
+    #[arg(long, value_name = "URL")]
+    pub repo: Option<String>,
+    /// Fetch shoal or glommio from another URL than central/sources.toml names, as NAME=URL
+    #[arg(long = "source", value_name = "NAME=URL")]
+    pub sources: Vec<String>,
+    /// Where the checkouts are kept and built [default: ~/.local/share/reefadm/src]
+    #[arg(long, value_name = "DIR")]
+    pub src: Option<PathBuf>,
+    /// Build and install a new release even when the commits are the running one's
+    #[arg(long)]
+    pub rebuild: bool,
+    /// Take no backup of the data before the new release starts
+    #[arg(long)]
+    pub no_backup: bool,
+    /// Start on a fresh data directory, the old one moved aside, for a schema that can't read it
+    #[arg(long)]
+    pub fresh: bool,
+    /// Finish an upgrade to a staged release, as the new release's reefadm
+    #[arg(long, hide = true, value_name = "RELEASE")]
+    pub finish: Option<String>,
+}
+
+/// What `reefadm uninstall` is told
+#[derive(Debug, Clone, Args)]
+pub struct UninstallArgs {
+    /// The admin's user unit, rather than the team server
+    #[arg(long)]
+    pub user: bool,
+    /// Remove the data, the clones, the certificates, the config, the account and the checkouts
+    /// too, keeping only the backups
+    #[arg(long)]
+    pub purge: bool,
 }
 
 /// What `reefadm deploy` is told
@@ -132,7 +185,9 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.dry_run && cli.yes);
-        let Command::Deploy(args) = cli.command;
+        let Command::Deploy(args) = cli.command else {
+            panic!("deploy reads as deploy");
+        };
         assert_eq!(args.names, ["reef.example.com", "10.0.0.5"]);
         assert_eq!(args.port, Some(443));
         assert_eq!(args.reference, "CentralizedPlanner");

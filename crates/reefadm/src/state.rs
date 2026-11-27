@@ -32,6 +32,9 @@ pub struct State {
     /// The first admin deploy added, if it added one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_admin: Option<String>,
+    /// Where the checkouts are kept, when deploy was told somewhere other than the default
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<std::path::PathBuf>,
 }
 
 /// One release
@@ -142,6 +145,7 @@ mod tests {
             .with_schema(Some(&schema)),
             previous: None,
             first_admin: Some("ada".into()),
+            src: None,
         };
         let text = toml::to_string(&state).unwrap();
         assert!(text.contains("ref = \"CentralizedPlanner\""), "{text}");

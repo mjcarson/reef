@@ -4,6 +4,8 @@
 //! reefadm deploy                    # a team server on this host: a system unit, sign-in, a TLS port
 //! reefadm deploy --user             # one person's server: a user unit on loopback
 //! reefadm --dry-run deploy          # every step it would take, taking none
+//! reefadm upgrade                   # to the ref's newest commit, put back if it doesn't come up
+//! reefadm uninstall                 # what deploy put here, keeping the data unless --purge
 //! ```
 //!
 //! It fetches reef at a ref, and shoal and glommio beside it at the revs reef's
@@ -18,6 +20,7 @@
 //! - **Each step looks before it acts,** so a deploy that stopped partway, run again, carries on
 //!   from there.
 
+pub mod backup;
 pub mod cli;
 pub mod commands;
 pub mod compile;
@@ -151,5 +154,7 @@ pub fn run(cli: Cli, runner: &mut dyn Runner, env: Env, now: SystemTime) -> Resu
     };
     match cli.command {
         cli::Command::Deploy(args) => commands::deploy::deploy(&mut cx, &args),
+        cli::Command::Upgrade(args) => commands::upgrade::upgrade(&mut cx, &args),
+        cli::Command::Uninstall(args) => commands::uninstall::uninstall(&mut cx, &args),
     }
 }

@@ -54,6 +54,48 @@ reef is up at https://reef.example.com:12443 for other hosts, and https://127.0.
 so reef keeps running after you log out. `--cores` and `--memory` write a config to
 `~/.config/reef/config.toml`, and nothing else does.
 
+## Upgrading
+
+```sh
+reefadm upgrade                    # the ref it was deployed from, at its newest commit
+reefadm upgrade --ref v0.2         # another branch, tag or commit
+```
+
+It runs in two halves:
+
+1. **The admin's reefadm fetches and builds.** It fetches reef at `--ref`, which defaults to the
+   ref the server was deployed from. If the commits are the running release's, there's nothing
+   to do unless `--rebuild` is given. Before building, it compares the new commit's schema with
+   the tables the running release recorded. A table added is fine. A table changed or dropped is
+   refused, naming it, since shoal can't migrate a table ([When the store's schema
+   changes](../admin/schema-changes.md)). Then it builds and stages the new release.
+2. **The new release's reefadm swaps it in.** Its own unit and steps are the ones used. It stops
+   reef, writes a backup to `/var/backups/reef` (skip it with `--no-backup`), makes the new
+   release current, rewrites the unit if its text changed, starts it and waits for both ports to
+   answer. If the new release doesn't come up, it puts the old release back, restores the backup
+   over whatever the new one wrote, keeping that aside as `*.failed-<time>`, and fails saying why.
+
+Each release keeps the one before it, so the next upgrade can go back to it. Older releases
+are removed, but never one a running process still uses. When it's done, upgrade each user's
+`reef` too. When reef's skill changed between the two commits, upgrade says so: run `reef claude
+install` again in each repo.
+
+`--fresh` upgrades to a schema that can't read the data. It moves the data and the clones aside
+and starts empty. Export every plan first, and import them again after, as [When the store's
+schema changes](../admin/schema-changes.md) says.
+
+## Uninstalling
+
+```sh
+reefadm uninstall                  # the unit, the releases, the commands and the record
+reefadm uninstall --purge          # and the data, the config, the account and the checkouts
+```
+
+Without `--purge`, the config, the data, the clones, reef's certificates and the `reef` account
+stay, so `reefadm deploy` later puts reef back over them. `--purge` removes those too, with the
+account's home and its ssh keys, but never the backups, and it says where they are. Both ask
+first.
+
 ## What goes where
 
 | | team | user |

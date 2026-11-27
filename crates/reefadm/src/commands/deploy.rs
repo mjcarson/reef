@@ -60,10 +60,10 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     let src = args.src.clone().unwrap_or_else(|| layout.src.clone());
     let overrides = sources::overrides(&args.sources)?;
     // everything that would stop it partway, before anything changes
-    let kept = kept_config(cx.runner, &layout)?;
+    let kept = super::kept_config(cx.runner, &layout)?;
     let problems = preflight(cx, &layout, &systemd, kept.as_ref(), args, &src)?;
     stop_for(cx, &problems)?;
-    let hostname = hostname(cx.runner)?;
+    let hostname = super::hostname(cx.runner)?;
     // the first admin's password now, so the build runs unattended
     let admin = first_admin(cx, args, mode)?;
     // reef at its ref, and the siblings and toolchains its commit names
@@ -87,39 +87,16 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
         cx.runner.elevate()?;
     }
     let name = release::name(&revs.reef, cx.now);
-    let dir = release::install(cx.runner, &layout, &built, &name)?;
-    let schema = Schema::of_binary(cx.runner, &dir.join("bin/reef-serve"))?;
-    // the account, its directories and the config, or a user's config if a flag needs one
-    let served = match mode {
-        Mode::System => team(cx, &layout, args, kept, &hostname)?,
-        Mode::User => user_config(cx, &layout, args, kept)?,
-    };
-    check_shards(cx.runner, &layout, &served)?;
-    // the unit, then the server answering on both ports
-    let low = [served.tls_port(), port_of(&served.loopback())]
-        .into_iter()
-        .flatten()
-        .any(|port| port < 1024);
-    start(cx, &layout, &systemd, kind, low)?;
-    health::wait(cx.runner, &layout, &served, &hostname)?;
-    // the first admin, signed in from here
-    if let Some((name, password)) = &admin {
-        add_admin(cx, &layout, name, password)?;
-    }
-    if let (Mode::System, Some(port)) = (mode, served.tls_port()) {
-        firewall(cx, port)?;
-    }
-    // the record, last, so a deploy that stopped partway is run again
+    let schema = Schema::of_binary(cx.runner, &built.serve)?;
     let deployed = cx
         .now
         .duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or(0);
-    let state = State {
-        mode,
-        kind,
+    let record = release::Record {
         repo: args.repo.clone(),
         reference: args.reference.clone(),
+        kind,
         release: Release {
             name: name.clone(),
             reef: revs.reef,
@@ -131,8 +108,36 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
             tables: Default::default(),
         }
         .with_schema(schema.as_ref()),
+    };
+    let dir = release::stage(cx.runner, &layout, &built, &record)?;
+    release::activate(cx.runner, &layout, &dir)?;
+    // the account, its directories and the config, or a user's config if a flag needs one
+    let served = match mode {
+        Mode::System => team(cx, &layout, args, kept, &hostname)?,
+        Mode::User => user_config(cx, &layout, args, kept)?,
+    };
+    check_shards(cx.runner, &layout, &served)?;
+    // the unit, then the server answering on both ports
+    let low = super::low_port(&served);
+    start(cx, &layout, &systemd, kind, low)?;
+    health::wait(cx.runner, &layout, &served, &hostname)?;
+    // the first admin, signed in from here
+    if let Some((name, password)) = &admin {
+        add_admin(cx, &layout, name, password)?;
+    }
+    if let (Mode::System, Some(port)) = (mode, served.tls_port()) {
+        firewall(cx, port)?;
+    }
+    // the record, last, so a deploy that stopped partway is run again
+    let state = State {
+        mode,
+        kind,
+        repo: record.repo,
+        reference: record.reference,
+        release: record.release,
         previous: None,
         first_admin: admin.map(|(name, _)| name),
+        src: args.src.clone(),
     };
     state.write(cx.runner, &layout)?;
     summary(cx, &layout, &served, &hostname, &name);
@@ -146,20 +151,6 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
 /// * `rev` - The commit
 fn short(rev: &str) -> String {
     rev.chars().take(12).collect()
-}
-
-/// The config a deploy before this one left, if there is one
-///
-/// # Arguments
-///
-/// * `runner` - The runner
-/// * `layout` - The deployment's paths
-fn kept_config(runner: &mut dyn Runner, layout: &Layout) -> Result<Option<Served>> {
-    // a team server's is readable by everyone, since it holds no secret
-    match exec::read(runner, &layout.config, As::Me)? {
-        Some(text) => Ok(Some(Served::read(&text, &layout.config)?)),
-        None => Ok(None),
-    }
 }
 
 /// Everything that would stop a deploy partway, a line each
@@ -326,23 +317,6 @@ fn free_gib(runner: &mut dyn Runner, dir: &Path) -> Result<Option<u64>> {
         .and_then(|line| line.split_whitespace().nth(3))
         .and_then(|kib| kib.parse::<u64>().ok())
         .map(|kib| kib / (1024 * 1024)))
-}
-
-/// This host's name: its fully qualified one, else its own
-///
-/// # Arguments
-///
-/// * `runner` - The runner
-fn hostname(runner: &mut dyn Runner) -> Result<String> {
-    // `hostname -f` fails, or says localhost, on a host whose /etc/hosts doesn't name it
-    for cmd in [Cmd::new("hostname").arg("-f"), Cmd::new("hostname")] {
-        let output = runner.probe(&cmd)?;
-        let name = output.stdout.trim();
-        if output.ok() && !name.is_empty() && !name.starts_with("localhost") {
-            return Ok(name.to_string());
-        }
-    }
-    Ok("localhost".to_string())
 }
 
 /// The first admin's name and password, for a team server that adds one
@@ -562,18 +536,7 @@ fn start(cx: &mut Cx, layout: &Layout, systemd: &Systemd, kind: Kind, low: bool)
     let user = cx.user();
     let runner = &mut *cx.runner;
     // the unit, written only when it changed
-    let text = unit::text(layout, kind, low);
-    let had = exec::read(runner, &layout.unit, As::Me)?;
-    if had.as_deref() != Some(text.as_str()) {
-        runner.write(&File {
-            path: layout.unit.clone(),
-            text,
-            mode: 0o644,
-            runs_as: layout.owner(),
-            owner: None,
-        })?;
-        runner.run(&systemd.daemon_reload())?;
-    }
+    super::write_unit(runner, layout, systemd, kind, low)?;
     // started, or restarted onto the release just made current
     match systemd.is_active(runner)? {
         true => {

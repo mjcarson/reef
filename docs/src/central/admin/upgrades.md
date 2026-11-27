@@ -1,6 +1,10 @@
 # Upgrades
 
-A new version is a rebuild, a reinstall and a restart. Back up first ([Backups](backups.md)), so
+A server reefadm deployed upgrades with one command, `reefadm upgrade`
+([With reefadm](../deploy/reefadm.md#upgrading)), which backs up first and puts the old release back
+if the new one doesn't come up.
+
+By hand, a new version is a rebuild, a reinstall and a restart. Back up first ([Backups](backups.md)), so
 you can go back to the old binaries and their data.
 
 From reef's checkout:

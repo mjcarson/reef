@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// A schema: its id and its tables, in the order it serves them
@@ -108,9 +109,114 @@ impl Schema {
     }
 }
 
+/// How a new schema's tables compare with the ones a data directory was written with
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Verdict {
+    /// Tables the new schema adds, which it starts empty
+    pub added: Vec<String>,
+    /// Tables whose rows changed shape, which it can't read back
+    pub changed: Vec<String>,
+    /// Tables it no longer has
+    pub removed: Vec<String>,
+}
+
+impl Verdict {
+    /// Compares the tables a release recorded with a new schema's
+    ///
+    /// # Arguments
+    ///
+    /// * `old` - The running release's tables, each fingerprint as recorded
+    /// * `new` - The new schema
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reefadm::schema::{Schema, Verdict};
+    /// use std::collections::BTreeMap;
+    ///
+    /// let old = BTreeMap::from([("NodeRow".to_string(), "1".to_string())]);
+    /// let new = Schema { id: 9, tables: vec![("NodeRow".into(), 1), ("UserRow".into(), 2)] };
+    /// let verdict = Verdict::between(&old, &new);
+    /// assert_eq!(verdict.added, ["UserRow"]);
+    /// assert!(verdict.reads_back());
+    /// ```
+    pub fn between(old: &BTreeMap<String, String>, new: &Schema) -> Self {
+        let mut verdict = Verdict::default();
+        // each new table is either kept as it was, changed, or new
+        for (name, fingerprint) in &new.tables {
+            match old.get(name) {
+                Some(kept) if *kept == fingerprint.to_string() => {}
+                Some(_) => verdict.changed.push(name.clone()),
+                None => verdict.added.push(name.clone()),
+            }
+        }
+        // and each old table the new schema doesn't have is gone
+        verdict.removed = old
+            .keys()
+            .filter(|name| !new.tables.iter().any(|(table, _)| table == *name))
+            .cloned()
+            .collect();
+        verdict
+    }
+
+    /// Whether the new schema reads back what the old one wrote: tables only added
+    pub fn reads_back(&self) -> bool {
+        self.changed.is_empty() && self.removed.is_empty()
+    }
+
+    /// What moved, said plainly, for a refusal
+    pub fn said(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.changed.is_empty() {
+            parts.push(format!("changed {}", self.changed.join(", ")));
+        }
+        if !self.removed.is_empty() {
+            parts.push(format!("removed {}", self.removed.join(", ")));
+        }
+        if !self.added.is_empty() {
+            parts.push(format!("added {}", self.added.join(", ")));
+        }
+        parts.join("; ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Schema;
+    use super::{Schema, Verdict};
+    use std::collections::BTreeMap;
+
+    /// A table added passes, and a table changed or gone is refused by name
+    #[test]
+    fn a_table_added_passes_and_one_changed_or_gone_is_refused() {
+        let old = BTreeMap::from([
+            ("NodeRow".to_string(), "1".to_string()),
+            ("PageRow".to_string(), "2".to_string()),
+            ("LoopRow".to_string(), "3".to_string()),
+        ]);
+        // the same tables, and one more, read back
+        let added = Schema {
+            id: 2,
+            tables: vec![
+                ("NodeRow".into(), 1),
+                ("PageRow".into(), 2),
+                ("LoopRow".into(), 3),
+                ("EditRow".into(), 4),
+            ],
+        };
+        let verdict = Verdict::between(&old, &added);
+        assert!(verdict.reads_back(), "{verdict:?}");
+        assert_eq!(verdict.added, ["EditRow"]);
+        // a row that changed shape, and a table dropped, don't
+        let moved = Schema {
+            id: 3,
+            tables: vec![("NodeRow".into(), 10), ("PageRow".into(), 2)],
+        };
+        let verdict = Verdict::between(&old, &moved);
+        assert!(!verdict.reads_back());
+        assert_eq!(verdict.changed, ["NodeRow"]);
+        assert_eq!(verdict.removed, ["LoopRow"]);
+        assert_eq!(verdict.said(), "changed NodeRow; removed LoopRow");
+    }
 
     /// This commit's pin reads, with every table it lists
     #[test]
