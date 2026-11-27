@@ -59,6 +59,7 @@
 //! reef [--conf PATH] token revoke [ID]... [--others]
 //! reef skill [DIR] [--print]
 //! reef claude install [DIR]
+//! reef version [--json]
 //! ```
 //!
 //! The working directory picks the project: the registered project whose repo holds it, its main
@@ -83,7 +84,7 @@
 //! is in, and lists the plan `--plan` names if it isn't listed. `export` picks the project the new
 //! book's directory is in. `skill` writes into the repo that holds its directory, and `claude
 //! install` into the checkout that holds its directory, and neither needs reef's config or its
-//! service. Every command sends the token `login` kept for the service, from the file
+//! service, nor does `version`, which prints the build this binary is. Every command sends the token `login` kept for the service, from the file
 //! `--credentials` names, else `$REEF_TOKEN`, else the file `$REEF_CREDENTIALS` names, else
 //! `$XDG_CONFIG_HOME/reef/credentials.toml`.
 
@@ -121,6 +122,7 @@ use crate::run as runner;
 use crate::skill;
 use crate::start;
 use crate::task;
+use crate::update;
 use crate::work;
 
 /// reef's terminal client: projects, plans and nodes, through the service's JSON API
@@ -444,6 +446,16 @@ pub enum Command {
     /// List and revoke the tokens that sign a user in
     #[command(subcommand)]
     Token(TokenCommand),
+    /// Print which build this `reef` is: its version, and the commit it was built from and that
+    /// commit's date, if it was stamped with them
+    ///
+    /// A release's `reef` is stamped; one `cargo install` built is not.
+    Version {
+        /// Print it as JSON: `version`, `commit`, `committed` in seconds since the epoch, and
+        /// `target`
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What can be done with the service's users
@@ -1131,6 +1143,10 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
     if let Command::Claude(ClaudeCommand::Install { dir }) = &cli.command {
         return claude::install(&cwd.join(dir), out).map(|_| ());
     }
+    // nor saying which build this is, which a server asks of its client before it serves it
+    if let Command::Version { json } = &cli.command {
+        return update::version(*json, out);
+    }
     // nor can they stop the tests, which run whether or not central reef hears of them
     if let Command::Test { args } = cli.command {
         let tests = crate::test_run::Tests {
@@ -1603,6 +1619,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Skill { .. } => unreachable!("the skill is written before the config is read"),
         Command::Claude(_) => unreachable!("a repo is set up before the config is read"),
         Command::Test { .. } => unreachable!("the tests run before the config is read"),
+        Command::Version { .. } => unreachable!("the build is printed before the config is read"),
     }
 }
 

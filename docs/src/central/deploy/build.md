@@ -21,6 +21,17 @@ env -u RUSTFLAGS RUSTUP_TOOLCHAIN=nightly \
   dx build --release @server --platform server --features embedded
 ```
 
+- **The CLI reefadm builds is static and stamped.** It needs `musl-tools` and stable's
+  `x86_64-unknown-linux-musl` target, and its commit and that commit's time, which `reef version`
+  prints:
+
+  ```sh
+  REEF_COMMIT=$(git rev-parse HEAD) REEF_COMMITTED=$(git show -s --format=%ct HEAD) \
+    CARGO_PROFILE_RELEASE_STRIP=symbols env -u RUSTFLAGS \
+    cargo build --release --locked --target x86_64-unknown-linux-musl -p reef
+  # target/x86_64-unknown-linux-musl/release/reef
+  ```
+
 - **Run the server builds from `central`**, not from reef's root. cargo reads
   `central/.cargo/config.toml`, which shoal's hashing needs, only from there.
 - **Unset `RUSTFLAGS` for dx.** dx passes it to the wasm build too, where `-Ctarget-cpu=native`

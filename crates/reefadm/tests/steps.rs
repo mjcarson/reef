@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{REWRITE, SRC, env, fresh, git, now, run};
+use common::{COMMITTED, REWRITE, SRC, env, fresh, git, now, run};
 use reefadm::Cli;
 use reefadm::exec::{Dry, Output};
 
@@ -40,8 +40,13 @@ fn a_team_server_deploys_on_a_fresh_host() {
         format!("run: {} fetch --quiet origin ZeroCopyDmaStreamWriter", git("glommio")),
         format!("run: {} checkout --quiet --force --detach {}", git("glommio"), manifest.glommio.rev),
         format!("run: {} submodule update --quiet --init --recursive --force", git("glommio")),
-        // the three builds
-        format!("run: {liburing} cargo +stable build --release --locked -p reef -p reefadm  (in {SRC}/reef)"),
+        // the four builds: reefadm, the static CLI stamped with its commit, and the servers
+        format!("run: {liburing} cargo +stable build --release --locked -p reefadm  (in {SRC}/reef)"),
+        format!(
+            "run: {liburing} REEF_COMMIT=992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+             REEF_COMMITTED={COMMITTED} CARGO_PROFILE_RELEASE_STRIP=symbols cargo +stable build \
+             --release --locked --target x86_64-unknown-linux-musl -p reef  (in {SRC}/reef)"
+        ),
         format!(
             "run: {liburing} {for_class} cargo +{tc} build --release --locked -p reef-service \
              --features embedded --bin reef-serve  (in {SRC}/reef/central)",
@@ -55,7 +60,10 @@ fn a_team_server_deploys_on_a_fresh_host() {
         // the release, made current, with the commands through it
         format!("run: sudo rm -rf {release}.new"),
         format!("run: sudo install -d -m 0755 {release}.new/bin"),
-        format!("run: sudo install -m 0755 {SRC}/reef/target/release/reef {release}.new/bin/reef"),
+        format!(
+            "run: sudo install -m 0755 {SRC}/reef/target/x86_64-unknown-linux-musl/release/reef \
+             {release}.new/bin/reef"
+        ),
         format!("run: sudo install -m 0755 {target}/release/reef-serve {release}.new/bin/reef-serve"),
         format!("run: sudo install -m 0755 {SRC}/reef/target/release/reefadm {release}.new/bin/reefadm"),
         format!("run: sudo install -d -m 0755 {release}.new/app"),

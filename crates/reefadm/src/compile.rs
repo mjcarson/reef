@@ -1,7 +1,11 @@
-//! The three builds a release is made of, as the book's Building page runs them
+//! The builds a release is made of, as the book's Building page runs them
 //!
-//! - **The CLI and reefadm**, on stable, from reef's root, for plain x86-64, so one build serves
+//! - **reefadm**, on stable, from reef's root, for plain x86-64 and glibc, so one build serves
 //!   every target and reefadm's copy runs on any of them.
+//! - **The CLI**, on stable, from reef's root, for plain x86-64 and musl, statically linked and
+//!   its symbols stripped, so the copy central reef serves its users runs on any x86-64 Linux.
+//!   It is stamped with reef's commit and that commit's time ([`Stamp`]), which `reef version`
+//!   prints and its updater orders builds by.
 //! - **reef-serve**, on the pinned nightly with shoal's engine linked in, from `central`.
 //! - **reef-app's server and its browser client**, through dx, from `central/reef-app`.
 //!
@@ -13,7 +17,8 @@
 //! build the flags didn't reach is refused rather than shipped to a CPU it may crash on.
 //!
 //! Each build's environment drops whatever would override the workspace's own settings or move
-//! its artifacts: `RUSTFLAGS` and its kin, `CARGO_TARGET_DIR` and `RUSTUP_TOOLCHAIN`. glommio's
+//! its artifacts: `RUSTFLAGS` and its kin, `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET` and
+//! `RUSTUP_TOOLCHAIN`. glommio's
 //! build is pointed at the liburing reefadm checked out, so it never fetches it itself. cargo's
 //! builds take `--locked`, so a lockfile out of step with the pinned siblings stops the build
 //! rather than changing the checkout.
@@ -22,6 +27,7 @@ use crate::cpu::Class;
 use crate::exec::{Cmd, Runner, quote};
 use crate::layout::Kind;
 use crate::sources;
+use crate::toolchain::MUSL;
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
@@ -31,16 +37,46 @@ pub const TARGET_RUSTFLAGS: &str = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFL
 /// How many classes' target directories are kept, the most recently built first
 const CLASSES_KEPT: usize = 3;
 
+/// The variable the musl CLI's rustflags would go in, which none of its builds set
+const MUSL_RUSTFLAGS: &str = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS";
+
 /// The variables that would override the workspaces' own build settings or move their artifacts
-const UNSET: [&str; 7] = [
+const UNSET: [&str; 9] = [
     "RUSTFLAGS",
     "CARGO_ENCODED_RUSTFLAGS",
     "CARGO_BUILD_RUSTFLAGS",
     TARGET_RUSTFLAGS,
+    MUSL_RUSTFLAGS,
     "CARGO_TARGET_DIR",
     "CARGO_BUILD_TARGET_DIR",
+    "CARGO_BUILD_TARGET",
     "RUSTUP_TOOLCHAIN",
 ];
+
+/// What the CLI is stamped with: the reef commit it is built from, and when that commit was made
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stamp {
+    /// reef's commit
+    pub commit: String,
+    /// When it was made, in seconds since the epoch, which a dry run can't know before its fetch
+    pub committed: Option<i64>,
+}
+
+impl Stamp {
+    /// A build command stamped with this, through the variables the CLI reads at compile time
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The CLI's build
+    fn on(&self, cmd: Cmd) -> Cmd {
+        // the commit, then its time where it is known
+        let cmd = cmd.env("REEF_COMMIT", &self.commit);
+        match self.committed {
+            Some(committed) => cmd.env("REEF_COMMITTED", committed.to_string()),
+            None => cmd,
+        }
+    }
+}
 
 /// What a build made, in the checkout it was built in
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +124,8 @@ pub fn class_dir(src: &Path, class: &Class) -> PathBuf {
     src.join("reef/central/target").join(class.dir())
 }
 
-/// Builds the CLI, reefadm, reef-serve and, for the app, reef-app, the last two for a CPU class
+/// Builds reefadm, the static CLI, reef-serve and, for the app, reef-app, the last two for a CPU
+/// class
 ///
 /// # Arguments
 ///
@@ -97,28 +134,39 @@ pub fn class_dir(src: &Path, class: &Class) -> PathBuf {
 /// * `toolchain` - The nightly the server builds on
 /// * `kind` - The server being built
 /// * `class` - The CPU class the server is built for
+/// * `stamp` - The commit the CLI is stamped with, and its time
 pub fn build(
     runner: &mut dyn Runner,
     src: &Path,
     toolchain: &str,
     kind: Kind,
     class: &Class,
+    stamp: &Stamp,
 ) -> Result<Built> {
     let reef = src.join("reef");
     let central = reef.join("central");
     let target = class_dir(src, class);
-    // the CLI and reefadm, on stable, from reef's root
+    // reefadm, on stable, from reef's root, for glibc, as its copy on a target needs
     runner.run(
         &clean(Cmd::new("cargo"), src)
+            .args(["+stable", "build", "--release", "--locked", "-p", "reefadm"])
+            .cwd(&reef),
+    )?;
+    // the CLI, on stable, from reef's root, static for musl, stamped and stripped; the strip is
+    // this build's alone, so reefadm's build above keeps its symbols
+    runner.run(
+        &stamp
+            .on(clean(Cmd::new("cargo"), src))
+            .env("CARGO_PROFILE_RELEASE_STRIP", "symbols")
             .args([
                 "+stable",
                 "build",
                 "--release",
                 "--locked",
+                "--target",
+                MUSL,
                 "-p",
                 "reef",
-                "-p",
-                "reefadm",
             ])
             .cwd(&reef),
     )?;
@@ -182,7 +230,7 @@ pub fn build(
     // the classes built longest ago, gone, since each is a whole build
     prune(runner, &central.join("target"))?;
     Ok(Built {
-        reef: reef.join("target/release/reef"),
+        reef: reef.join("target").join(MUSL).join("release/reef"),
         reefadm: reef.join("target/release/reefadm"),
         serve: target.join("release/reef-serve"),
         web,
@@ -296,7 +344,7 @@ fn prune(runner: &mut dyn Runner, targets: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build, class_dir};
+    use super::{Stamp, build, class_dir};
     use crate::cpu::Class;
     use crate::exec::Script;
     use crate::layout::Kind;
@@ -316,8 +364,17 @@ mod tests {
         )
     }
 
+    /// The stamp every test's CLI is built with: a commit, and its time
+    fn stamp() -> Stamp {
+        Stamp {
+            commit: "992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string(),
+            committed: Some(1_795_700_000),
+        }
+    }
+
     /// The central builds take the class's flags for the host's triple alone, in the class's own
-    /// target directory, and the CLI's and reefadm's build takes neither
+    /// target directory, reefadm's build takes neither, and the CLI's is static, stamped and
+    /// stripped
     #[test]
     fn the_central_builds_take_the_class_in_a_directory_of_its_own() {
         let class = Class::named("x86-64-v3");
@@ -338,6 +395,7 @@ mod tests {
             "nightly-2026-08-21",
             Kind::App,
             &class,
+            &stamp(),
         )
         .unwrap();
         let liburing = "GLOMMIO_LIBURING_DIR=/src/glommio/glommio/liburing";
@@ -349,7 +407,12 @@ mod tests {
             script.steps(),
             [
                 format!(
-                    "run: {liburing} cargo +stable build --release --locked -p reef -p reefadm  (in /src/reef)"
+                    "run: {liburing} cargo +stable build --release --locked -p reefadm  (in /src/reef)"
+                ),
+                format!(
+                    "run: {liburing} REEF_COMMIT=992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+                     REEF_COMMITTED=1795700000 CARGO_PROFILE_RELEASE_STRIP=symbols cargo +stable \
+                     build --release --locked --target x86_64-unknown-linux-musl -p reef  (in /src/reef)"
                 ),
                 format!(
                     "run: {liburing} {for_class} cargo +nightly-2026-08-21 build --release --locked -p \
@@ -365,6 +428,10 @@ mod tests {
         assert_eq!(built.web, Some(dir.join("dx/reef-app/release/web")));
         assert_eq!(built.serve, dir.join("release/reef-serve"));
         assert_eq!(built.reefadm, Path::new("/src/reef/target/release/reefadm"));
+        assert_eq!(
+            built.reef,
+            Path::new("/src/reef/target/x86_64-unknown-linux-musl/release/reef")
+        );
         // a server the flags didn't reach, `native` last, is refused
         let mut script = Script::default();
         script.prints(
@@ -377,6 +444,7 @@ mod tests {
             "nightly",
             Kind::Serve,
             &class,
+            &stamp(),
         )
         .unwrap_err()
         .to_string();
@@ -391,8 +459,15 @@ mod tests {
     fn a_moved_lockfile_stops_it_and_old_classes_go() {
         let class = Class::named("x86-64-v2");
         let mut script = Script::default();
-        let error =
-            build(&mut script, Path::new("/src"), "nightly", Kind::App, &class).unwrap_err();
+        let error = build(
+            &mut script,
+            Path::new("/src"),
+            "nightly",
+            Kind::App,
+            &class,
+            &stamp(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("central/Cargo.lock"), "{error}");
         // reef-serve alone builds no app and reads no lockfile, and the oldest classes go
         let mut script = Script::default();
@@ -406,11 +481,24 @@ mod tests {
             "nightly",
             Kind::Serve,
             &class,
+            &Stamp {
+                committed: None,
+                ..stamp()
+            },
         )
         .unwrap();
         assert_eq!(built.web, None);
+        // a time a dry run couldn't know is left out of the stamp
+        assert!(
+            script.steps()[1].starts_with(
+                "run: GLOMMIO_LIBURING_DIR=/src/glommio/glommio/liburing REEF_COMMIT=992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90 \
+                 CARGO_PROFILE_RELEASE_STRIP=symbols cargo"
+            ),
+            "{:?}",
+            script.steps()
+        );
         assert_eq!(
-            script.steps()[2..],
+            script.steps()[3..],
             [
                 "run: rm -rf /src/reef/central/target/cpu-d",
                 "run: rm -rf /src/reef/central/target/cpu-e"

@@ -24,6 +24,9 @@ pub fn env() -> Env {
 /// The sources directory on the scripted host
 pub const SRC: &str = "/home/ada/.local/share/reefadm/src";
 
+/// When the scripted host's reef commit was made, in seconds since the epoch: 2026-11-26
+pub const COMMITTED: i64 = 1_795_700_000;
+
 /// What the nightly prints of the features it builds for: rustc's own, then LLVM's
 pub const KNOWN: &str = "Features supported by rustc for this target:\n    aes   - Enable AES.\n    \
                          avx2   - Enable AVX2.\n    sha   - Enable SHA.\n    gfni   - Enable GFNI.\n\n\
@@ -69,6 +72,14 @@ pub fn fresh() -> Script {
         format!("{} rev-parse HEAD", git("reef")),
         "992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90\n",
     );
+    // and when reef's was made, which its CLI is stamped with
+    script.prints(
+        format!(
+            "{} show -s --format=%ct 992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            git("reef")
+        ),
+        format!("{COMMITTED}\n"),
+    );
     script.prints(
         format!("{} rev-parse HEAD", git("shoal")),
         "e40b08f27a0367a1aae9b3709fa2185e491cf2ab\n",
@@ -88,10 +99,14 @@ pub fn fresh() -> Script {
     );
     // every tool and toolchain a build needs
     let manifest = reefadm::sources::Manifest::built_in();
-    for command in ["git", "cc", "curl", "tar"] {
+    for command in ["git", "cc", "musl-gcc", "curl", "tar"] {
         script.prints(format!("{command} --version"), "git version 2.43.0\n");
     }
     script.prints("RUSTUP_AUTO_INSTALL=0 rustup --version", "rustup 1.28.2\n");
+    script.prints(
+        "RUSTUP_AUTO_INSTALL=0 rustup target list --installed --toolchain stable",
+        "x86_64-unknown-linux-gnu\nx86_64-unknown-linux-musl\n",
+    );
     script.prints(
         "RUSTUP_AUTO_INSTALL=0 rustup toolchain list",
         format!(

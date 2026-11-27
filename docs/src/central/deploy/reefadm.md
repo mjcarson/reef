@@ -1,9 +1,10 @@
 # With reefadm
 
 `reefadm` does everything in this chapter with one command. It fetches reef, shoal and glommio,
-installs the toolchains they need, builds the CLI, reef-serve and reef-app for the CPU of the
-host they'll run on, and installs them there with a unit, a config, a readable copy of reef's CA
-and the first admin. It records what it deployed, so the next upgrade can read it.
+installs the toolchains they need, builds reef-serve and reef-app for the CPU of the host they'll
+run on and a static CLI for any x86-64 Linux, and installs them there with a unit, a config, a
+readable copy of reef's CA and the first admin. It records what it deployed, so the next upgrade
+can read it.
 
 ```sh
 env -u RUSTFLAGS cargo install --locked --git https://github.com/mjcarson/reef --branch CentralizedPlanner reefadm
@@ -20,7 +21,9 @@ refuses to copy a reefadm built otherwise.
 
 **The machine you run reefadm on builds.** That machine needs Ubuntu 26.04 x86-64, and the disk
 for the build: about 12 GiB for the checkouts, their builds and the toolchains, so reefadm wants
-15 GiB free before it starts one. It asks before it installs packages or rustup there. The
+15 GiB free before it starts one. It asks before it installs packages or rustup there: git,
+build-essential, `musl-tools` for the static CLI, curl and tar, then rustup's stable with its
+`x86_64-unknown-linux-musl` target and the pinned nightly. The
 server needs only Ubuntu 26.04, systemd and sudo, with no toolchain at all. When you run reefadm
 on the server itself, the server is the machine that builds.
 
@@ -52,7 +55,9 @@ no model.
 - **`--target-cpu NAME`** builds for a CPU rustc names instead, such as `x86-64-v3` for a whole
   fleet at once.
 - **Only reef-serve and reef-app are built for the target.** The `reef` CLI and reefadm are built
-  for any x86-64, once.
+  for any x86-64, once. The CLI is a static musl build, its symbols stripped, so it runs on any
+  x86-64 Linux whatever its glibc. It is stamped with reef's commit and when that commit was
+  made, which `reef version` prints.
 - **The build is checked.** reefadm reads back the flags cargo compiled each server with, and
   refuses a release they didn't reach. On the target, it refuses a release whose reef-serve was
   compiled with a feature that CPU lacks.

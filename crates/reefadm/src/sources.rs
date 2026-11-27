@@ -251,6 +251,32 @@ pub fn fetch_reef(
     Ok((rev, manifest))
 }
 
+/// When a reef commit was made, in seconds since the epoch, as its checkout says, which the CLI
+/// is stamped with, or `None` in a dry run, whose checkout may not be fetched yet
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `src` - The sources directory
+/// * `rev` - reef's commit, as [`fetch_reef`] returned it
+pub fn committed(runner: &mut dyn Runner, src: &Path, rev: &str) -> Result<Option<i64>> {
+    // the committer's time, which orders one release's CLI against another's
+    let shown = runner.probe(
+        &git(&src.join("reef"), &BTreeMap::new())
+            .args(["show", "-s", "--format=%ct"])
+            .arg(rev),
+    )?;
+    match (shown.stdout.trim().parse::<i64>(), runner.dry()) {
+        (Ok(seconds), _) if shown.ok() => Ok(Some(seconds)),
+        (_, true) => Ok(None),
+        _ => bail!(
+            "reefadm couldn't read when reef's commit {rev} was made, which its CLI is stamped \
+             with: {}",
+            shown.stderr.trim()
+        ),
+    }
+}
+
 /// Fetches shoal and glommio at their revs beside reef, returning every commit
 ///
 /// # Arguments

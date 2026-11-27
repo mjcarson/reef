@@ -11,7 +11,7 @@
 //!   whose reef-serve was compiled with a feature this CPU lacks, and the command installs it as
 //!   it would one built here.
 
-use crate::compile::{self, Built};
+use crate::compile::{self, Built, Stamp};
 use crate::cpu::{self, Class};
 use crate::exec::{self, As, Cmd, File, Runner, quote};
 use crate::layout::Kind;
@@ -200,7 +200,12 @@ pub fn make(
         short(&revs.shoal),
         short(&revs.glommio)
     ));
-    let built = compile::build(cx.runner, src, &manifest.toolchain, kind, class)?;
+    // the CLI is stamped with reef's commit and when it was made, which its updater orders by
+    let stamp = Stamp {
+        commit: revs.reef.clone(),
+        committed: sources::committed(cx.runner, src, &revs.reef)?,
+    };
+    let built = compile::build(cx.runner, src, &manifest.toolchain, kind, class, &stamp)?;
     // its own word on its schema, which the builder may run, since it has every feature it uses
     let schema = Schema::of_binary(cx.runner, &built.serve)?;
     Ok((revs, built, schema))

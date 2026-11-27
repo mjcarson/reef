@@ -424,6 +424,92 @@ nodes:
   - perf: Reading C100's commit's diff and outlining it, as a capture does, takes at most 50 ms
     metric: capture-diff-ms
     at-most: 50.0
+- id: M14
+  title: M14 Clients that keep up
+  nodes:
+  - id: C116
+    title: C116 A static reef in every release
+    status: done
+    needs:
+    - C115
+    description:
+      why: A release's `bin/reef` is a glibc build nobody downloads, and no `reef` binary knows which commit it was built from, so nothing can tell an old client from a new one.
+      what: Every release ships a static musl `reef` for plain x86-64, stamped with its commit and that commit's time, which `reef version` prints.
+      details: |
+        - **The stamp** (`reef_api::Build`, `reef::update::BUILD`): `REEF_COMMIT` and
+          `REEF_COMMITTED` (unix seconds) read with `option_env!`, and the target from
+          `std::env::consts` and `cfg!(target_env)`. `reef version [--json]` prints it before any
+          config is read.
+        - **The build** (`reefadm::compile`): the stable build splits in two. reefadm stays a plain
+          glibc build; `reef` builds for `x86_64-unknown-linux-musl` with the stamp and
+          `CARGO_PROFILE_RELEASE_STRIP=symbols`. The commit's time is probed where reef's checkout
+          is fetched (`git show -s --format=%ct`).
+        - **The toolchain**: `musl-gcc` from `musl-tools` (ring and tree-sitter compile C), and the
+          musl target added to stable.
+    acceptance:
+    - unit: An unstamped build prints `(not stamped)`, and a stamped one its commit and date, as text and as JSON
+      status: met
+      test: crates/reef/src/update.rs::tests::a_build_prints_its_stamp_or_its_lack; crates/reef-api/src/build.rs::tests::a_stamp_needs_the_commit_and_its_time
+    - unit: reefadm builds reefadm for glibc and reef for musl with the stamp and the strip, and installs `bin/reef` from the musl target
+      status: met
+      test: crates/reefadm/src/compile.rs::tests::the_central_builds_take_the_class_in_a_directory_of_its_own; crates/reefadm/tests/steps.rs::a_team_server_deploys_on_a_fresh_host
+    - unit: A host without musl-gcc or stable's musl target gets them, and a ready host installs nothing
+      status: met
+      test: crates/reefadm/src/toolchain.rs::tests::a_ready_host_installs_nothing; crates/reefadm/src/toolchain.rs::tests::a_bare_host_gets_everything_after_asking
+    - feature: A musl build here is static and `reef version --json` prints its stamp
+      status: met
+      test: 'by hand: REEF_COMMIT=dc5e68c… REEF_COMMITTED=1795809468 CARGO_PROFILE_RELEASE_STRIP=symbols cargo +stable build --release --locked --target x86_64-unknown-linux-musl -p reef built in 24 s; file says static-pie linked, stripped, ldd says statically linked, and reef version --json printed the commit and time; that binary read europa''s project over HTTPS'
+  - id: C117
+    title: C117 Central reef serves its client
+    needs:
+    - C116
+    description:
+      why: A new machine has to build `reef` from source to reach central reef, and a client can't tell whether the server it calls has a newer one.
+      what: Central reef serves the stamped `reef` from its release, and its build, to anyone, and names that build in a header on every API response.
+      details: |
+        - **Finding it** (`reef_service::client::Served::find`): `[client] reef`, else
+          `bin/reef` beside the running release's, asked `version --json` once with a timeout and
+          kept only if stamped.
+        - **Routes**: `GET /api/v1/client` answers the `Build`, `GET /api/v1/client/reef` the bytes.
+          Both answer without a token, so a machine can fetch it before signing in.
+        - **The header**: `reef-client: <commit> <committed>` on every API response, when a client
+          is served.
+        - **Config**: a `[client]` table, `reef` for the service, `update` for the CLI, since the two
+          may share one file.
+    acceptance:
+    - integration: A service given a stamped client serves its build and its bytes, and names it in a header on API responses
+    - integration: Both client routes answer without a token on a server that requires sign-in
+    - integration: With no client, the route says not found and responses carry no header
+    - unit: An unstamped build is refused as the served client
+  - id: C118
+    title: C118 reef updates itself
+    needs:
+    - C117
+    description:
+      why: After central reef is upgraded every user must reinstall `reef` by hand, and an old one only finds out through a missing route.
+      what: A stamped `reef` that sees its server serve a newer build replaces itself in the background, and `reef update` does it by hand, a reefadm release's own copy left to reefadm.
+      details: |
+        - **Noticing**: `Client::send_as` reads `reef-client`. A stamped build older than it, with
+          `[client] update` on and a binary reef may replace, spawns `reef update --auto` once a
+          process, detached, its log `update.log`.
+        - **`reef update [--check] [--force]`**: newer only by commit time; an older build with
+          `--force`; an unstamped build by hand always. `--auto` is quiet, takes `update.lock`, and
+          keeps `update.toml` so a failed commit waits an hour.
+        - **Installing**: streamed next to the target, made executable and synced, run with
+          `version --json` to check its commit, then renamed over the target. Any failure leaves
+          the old binary.
+        - **Replaced while running**: `update::own_exe` strips Linux's ` (deleted)`, so a
+          long-lived `reef mcp` spawns its followers from the new binary.
+        - **The skill**: SessionStart says to run `reef claude install` when the repo's skill isn't
+          the one this binary writes.
+    acceptance:
+    - unit: Builds order by commit time, stamped or not, older, equal and newer
+    - unit: The header reads as a commit and its time, and anything else as nothing
+    - unit: A binary in a reefadm release is never replaced
+    - unit: A replaced binary's path drops Linux's ` (deleted)`
+    - unit: An install swaps in a binary that says the wanted commit, and refuses one that doesn't, leaving the original
+    - integration: '`reef update --force` against a server with a client swaps the target'
+    - feature: A stamped reef on another host follows its server's upgrade by itself, and reefadm's own copy, an unstamped build and `update = false` stay put
 ---
 # Centralized reef
 

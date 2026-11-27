@@ -1,9 +1,10 @@
 //! What building reef needs on the host, installed where it is missing
 //!
-//! git, a C compiler (glommio compiles liburing), curl for rustup, and tar for backups come
-//! from the host's packages, through apt-get or dnf after asking. rustup comes
-//! from its installer after asking, then the toolchains `central/sources.toml` names: a stable
-//! at least as new as it says, and the pinned nightly. The app also needs the wasm target and
+//! git, a C compiler (glommio compiles liburing), musl's (ring and tree-sitter compile C into
+//! the static CLI), curl for rustup, and tar for backups come from the host's packages, through
+//! apt-get or dnf after asking. rustup comes from its installer after asking, then the
+//! toolchains `central/sources.toml` names: a stable at least as new as it says, with the musl
+//! target the CLI is built for, and the pinned nightly. The app also needs the wasm target and
 //! dx 0.7.10, which cargo builds, against openssl's headers, found through pkg-config.
 
 use crate::exec::{Cmd, Runner};
@@ -14,6 +15,9 @@ use std::path::Path;
 
 /// The dx the app is built with, which reef-app's Dioxus version needs exactly
 pub const DX: &str = "0.7.10";
+
+/// The target the CLI is built for: static, so it runs on any x86-64 Linux, whatever its glibc
+pub const MUSL: &str = "x86_64-unknown-linux-musl";
 
 /// Something a build needs, and the package each package manager installs it from
 struct Needed {
@@ -28,7 +32,7 @@ struct Needed {
 }
 
 /// Every command a build needs from the host's packages
-const NEEDED: [Needed; 4] = [
+const NEEDED: [Needed; 5] = [
     Needed {
         what: "git",
         probe: &["git", "--version"],
@@ -40,6 +44,12 @@ const NEEDED: [Needed; 4] = [
         probe: &["cc", "--version"],
         apt: "build-essential",
         dnf: "gcc",
+    },
+    Needed {
+        what: "musl-gcc",
+        probe: &["musl-gcc", "--version"],
+        apt: "musl-tools",
+        dnf: "musl-gcc",
     },
     Needed {
         what: "curl",
@@ -188,7 +198,7 @@ fn packages(runner: &mut dyn Runner, needed: &[Needed], yes: bool) -> Result<()>
     Ok(())
 }
 
-/// Installs rustup, a new enough stable and the pinned nightly
+/// Installs rustup, a new enough stable with the musl target, and the pinned nightly
 ///
 /// # Arguments
 ///
@@ -230,6 +240,18 @@ fn rust(runner: &mut dyn Runner, manifest: &Manifest, yes: bool) -> Result<()> {
             "--profile",
             "minimal",
         ]))?;
+    }
+    // the static CLI is built on stable for musl, once stable is there
+    let installed = match new_enough {
+        true => {
+            runner
+                .probe(&rustup().args(["target", "list", "--installed", "--toolchain", "stable"]))?
+                .stdout
+        }
+        false => String::new(),
+    };
+    if !installed.lines().any(|line| line.trim() == MUSL) {
+        runner.run(&Cmd::new("rustup").args(["target", "add", MUSL, "--toolchain", "stable"]))?;
     }
     // and the nightly the server builds on, by its date
     if !listed.iter().any(|name| is(name, &manifest.toolchain)) {
@@ -360,10 +382,15 @@ mod tests {
         let manifest = Manifest::built_in();
         let mut script = Script::default();
         // every command answers, at versions new enough
-        for command in ["git", "cc", "curl", "tar"] {
+        for command in ["git", "cc", "musl-gcc", "curl", "tar"] {
             script.prints(format!("{command} --version"), "git version 2.43.0\n");
         }
         script.prints("RUSTUP_AUTO_INSTALL=0 rustup --version", "rustup 1.28.2\n");
+        // and stable builds for musl already
+        script.prints(
+            "RUSTUP_AUTO_INSTALL=0 rustup target list --installed --toolchain stable",
+            "x86_64-unknown-linux-gnu\nx86_64-unknown-linux-musl\n",
+        );
         script.prints(
             "RUSTUP_AUTO_INSTALL=0 rustup toolchain list",
             format!(
@@ -406,9 +433,10 @@ mod tests {
             script.steps(),
             [
                 "run: sudo DEBIAN_FRONTEND=noninteractive apt-get update -q".to_string(),
-                "run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -q -y git build-essential curl tar".to_string(),
+                "run: sudo DEBIAN_FRONTEND=noninteractive apt-get install -q -y git build-essential musl-tools curl tar".to_string(),
                 "run: sh -c 'curl --proto '\\''=https'\\'' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable'".to_string(),
                 "run: rustup toolchain install stable --profile minimal".to_string(),
+                "run: rustup target add x86_64-unknown-linux-musl --toolchain stable".to_string(),
                 format!("run: rustup toolchain install {tc} --profile minimal"),
                 format!("run: rustup target add wasm32-unknown-unknown --toolchain {tc}"),
                 "run: sudo DEBIAN_FRONTEND=noninteractive apt-get update -q".to_string(),
@@ -416,12 +444,9 @@ mod tests {
                 "run: cargo +stable install dioxus-cli --version 0.7.10 --locked --target-dir /src/target-dx".to_string(),
             ]
         );
-        assert!(
-            script
-                .said
-                .iter()
-                .any(|line| line.starts_with("asked: building reef needs git, cc, curl, tar"))
-        );
+        assert!(script.said.iter().any(|line| {
+            line.starts_with("asked: building reef needs git, cc, musl-gcc, curl, tar")
+        }));
     }
 
     /// An answer of no stops before anything is installed

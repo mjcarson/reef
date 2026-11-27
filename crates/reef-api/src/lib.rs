@@ -37,6 +37,8 @@
 //! - **History** ([`history`]): who made each edit of a node, a page or a queue, what it changed
 //!   and when.
 //! - **Changes** ([`change`]): what the change stream tells of each write.
+//! - **Builds** ([`build`]): which build of `reef` a binary is, its commit and the commit's time,
+//!   as `reef version --json` prints it and central reef serves it.
 //! - **Errors** ([`error`]): what a route answers when it can't do what was asked.
 //! - **Paths** ([`paths`]): every route's path, for the router and for clients to agree on.
 //! - **Prompts** (`prompt`, with the `prompt` feature): asking for a password on the terminal,
@@ -46,6 +48,7 @@
 //! The service serves HTTPS to localhost, at [`DEFAULT_ADDRESS`] unless reef's config names
 //! another, with a certificate of its own, and other hosts where its `[api.tls]` says.
 
+pub mod build;
 pub mod change;
 pub mod comment;
 pub mod config;
@@ -67,6 +70,7 @@ pub mod test_run;
 pub mod user;
 pub mod work;
 
+pub use build::Build;
 pub use change::{Change, FollowedThread, PutNode, PutPage};
 pub use comment::{
     COMMENT_BODY_MAX, Comment, Commented, MarkReview, MarkThread, Marked, NewReply, NewThread,

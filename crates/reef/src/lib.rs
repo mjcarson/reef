@@ -80,6 +80,8 @@
 //!   server each in a file private to the user, and sent with every request.
 //! - **Signing in** ([`login`]): `reef login`, `logout` and `whoami`, and adding and listing the
 //!   service's users, a password asked for on the terminal with echo off.
+//! - **This build** ([`update`]): the commit a release's `reef` was stamped with and that
+//!   commit's time, which `reef version` prints.
 //!
 //! The binary is a thin `main` over [`run`], so the service's tests drive the same commands
 //! against a service they serve.
@@ -112,6 +114,7 @@ pub mod skill;
 pub mod start;
 pub mod task;
 pub mod test_run;
+pub mod update;
 pub mod work;
 pub mod worktree;
 
