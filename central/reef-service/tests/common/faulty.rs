@@ -6,9 +6,9 @@
 
 use reef_model::PlanName;
 use reef_service::schema::{
-    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanBranchRow,
-    PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
-    WorkRow,
+    ActivityRow, CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow,
+    PlanBranchRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow,
+    TokenRow, UserRow, WorkRow,
 };
 use reef_service::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -785,16 +785,41 @@ impl<B: Backend> Backend for Faulty<B> {
         self.inner.edits(project, subject, older, limit).await
     }
 
-    /// Writes edit rows, failing first if asked to
+    /// Writes edit rows and the activity rows beside them, failing first if asked to
     ///
     /// # Arguments
     ///
-    /// * `rows` - The rows to write
-    async fn write_edits(&self, rows: Vec<EditRow>) -> anyhow::Result<()> {
-        // a fault armed for this write stops it before any row is written
+    /// * `rows` - The edit rows to write
+    /// * `activity` - The activity rows to write with them
+    async fn write_edits(
+        &self,
+        rows: Vec<EditRow>,
+        activity: Vec<ActivityRow>,
+    ) -> anyhow::Result<()> {
+        // a fault armed for this write stops it before any row is written, its activity too
         if self.faults.fail_edit_write.swap(false, Ordering::SeqCst) {
-            anyhow::bail!("killed before writing {} edit rows", rows.len());
+            anyhow::bail!(
+                "killed before writing {} edit rows and {} activity rows",
+                rows.len(),
+                activity.len()
+            );
         }
-        self.inner.write_edits(rows).await
+        self.inner.write_edits(rows, activity).await
+    }
+
+    /// Reads a plan's activity rows, newest first, after a key if one is named
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `older` - The key to read the rows after, or `None` for the newest
+    /// * `limit` - The most rows to read
+    async fn activity(
+        &self,
+        plan: &PlanName,
+        older: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ActivityRow>> {
+        self.inner.activity(plan, older, limit).await
     }
 }

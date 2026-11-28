@@ -576,14 +576,14 @@ mod tests {
     fn version_prints_the_schema_and_each_table() {
         // one object, the id exact past 2^53
         let printed: serde_json::Value = serde_json::from_str(&version(true)).unwrap();
-        assert_eq!(printed["schema"].as_u64(), Some(13509127152932721421));
+        assert_eq!(printed["schema"].as_u64(), Some(3127319649985226656));
         // each table as a name and its fingerprint, in the schema's order
         let tables = printed["tables"].as_array().unwrap();
         assert_eq!(
             tables[0],
             serde_json::json!(["ProjectRow", 12832186597557680855u64])
         );
-        assert_eq!(tables.len(), 16);
+        assert_eq!(tables.len(), 17);
         // and the x86-64 features it was compiled with, every x86-64 having sse2
         let features = printed["features"].as_array().unwrap();
         assert!(
@@ -593,8 +593,8 @@ mod tests {
         // and the plain form says the same a line each
         let plain = version(false);
         let mut lines = plain.lines();
-        assert_eq!(lines.next(), Some("schema 13509127152932721421"));
+        assert_eq!(lines.next(), Some("schema 3127319649985226656"));
         assert_eq!(lines.next(), Some("ProjectRow 12832186597557680855"));
-        assert_eq!(lines.count(), 15);
+        assert_eq!(lines.count(), 16);
     }
 }

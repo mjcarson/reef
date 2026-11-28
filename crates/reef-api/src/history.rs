@@ -12,6 +12,9 @@
 //! Acts on what has no history of its own are kept the same way (C89): a project's and a
 //! plan's registration, each act on a project's loops and sessions ([`LoopAct`]), and each act
 //! on reef's users ([`UserAct`]).
+//!
+//! Each write to a plan's nodes or pages also keeps one plan-wide entry (C119), an [`Activity`]:
+//! when, who, which nodes and pages, and which nodes went done.
 
 use reef_model::{Met, NodeName, Status};
 use serde::{Deserialize, Serialize};
@@ -122,6 +125,32 @@ impl Logged {
         let parts: Vec<String> = self.edits.iter().map(Edited::describe).collect();
         parts.join("; ")
     }
+}
+
+/// One write to a plan's nodes or pages, as its plan keeps it: when, who, what it touched, and
+/// which nodes it took to done (C119)
+///
+/// A plan's entries are kept beside its nodes' and pages' histories, one a write, so when a plan
+/// last changed and what went done in a window are read without reading every node's history.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activity {
+    /// When it was made, in milliseconds since the epoch
+    pub at: u64,
+    /// Who made it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
+    /// Whether it came of writing the whole plan at once, as an import does
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub whole_plan: bool,
+    /// The ids of the nodes it added, changed, removed or moved, in the order it told them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<String>,
+    /// The ids of those it took to done: set done, or added done
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done: Vec<String>,
+    /// The paths of the pages it added, edited or removed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pages: Vec<String>,
 }
 
 /// One part of what a write changed

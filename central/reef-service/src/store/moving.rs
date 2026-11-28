@@ -342,11 +342,13 @@ impl<B: Backend> Store<B> {
                 subject: history::node_subject(&from.node(id)?),
                 version: None,
                 edits: vec![relisted.clone()],
+                went_done: false,
             });
             pending.push(history::Pending {
                 subject: history::node_subject(&to.node(id)?),
                 version: Some(*version),
                 edits: vec![relisted.clone()],
+                went_done: false,
             });
         }
         self.keep_edits(project, author, false, pending).await;
@@ -506,7 +508,8 @@ impl<B: Backend> Store<B> {
                 })
                 .collect();
             for bundle in bundles(copies, |row| row.subject.len() + row.record.len()) {
-                self.backend.write_edits(bundle).await?;
+                // a plan's activity stays the plan's, so a copy carries none
+                self.backend.write_edits(bundle, Vec::new()).await?;
             }
             if ended || older.is_none() {
                 return Ok(());

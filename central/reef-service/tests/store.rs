@@ -130,4 +130,6 @@ suite!(
     a_start_is_kept_in_its_nodes_history,
     loop_acts_keep_a_history,
     rows_kept_before_c89_name_nobody,
+    a_plan_answers_its_last_update_and_its_nodes_done,
+    a_plan_never_written_answers_its_listing,
 );

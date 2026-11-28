@@ -223,16 +223,16 @@ mod tests {
     fn this_commits_pin_reads() {
         let source = include_str!("../../../central/reef-service/src/schema.rs");
         let pin = Schema::from_pin(source).unwrap();
-        assert_eq!(pin.id, 13509127152932721421);
+        assert_eq!(pin.id, 3127319649985226656);
         assert_eq!(
             pin.tables[0],
             ("ProjectRow".to_string(), 12832186597557680855)
         );
         assert_eq!(
             pin.tables.last().map(|(name, _)| name.as_str()),
-            Some("PlanBranchRow")
+            Some("ActivityRow")
         );
-        assert_eq!(pin.tables.len(), 16);
+        assert_eq!(pin.tables.len(), 17);
         // and a file with no pin says so
         assert!(Schema::from_pin("fn main() {}").is_err());
     }

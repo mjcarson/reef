@@ -6,16 +6,18 @@
 //! changed, newest first.
 
 use reef_api::{
-    Author, Edited, HISTORY_MAX, HistoryQuery, NodePut, NodeRemove, PageEdit, PageWrite, Place,
-    PlanWrite, Puts, QueueEdit, Writer,
+    Activity, Author, Edited, HISTORY_MAX, HistoryQuery, NodePut, NodeRemove, PageEdit, PageWrite,
+    Place, PlanWrite, Puts, QueueEdit, Updated, Writer,
 };
 use reef_api::{LoopEdit, LoopEdited, Pane};
 use reef_model::accept::{Criterion, Kind};
-use reef_model::{Diagnostic, Met, Status};
-use reef_service::schema::{LOOPS, LoopRow, PROJECTS, ProjectRow, USERS, UserRow};
+use reef_model::{Diagnostic, Met, PlanName, Status};
+use reef_service::schema::{ActivityRow, LOOPS, LoopRow, PROJECTS, ProjectRow, USERS, UserRow};
 use reef_service::{
     Backend, Checked, Expect, NodeWrite, PageEdited, Proposal, Queued, Rewrite, StartWork, Started,
 };
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{Fx, Reopen, work};
 
@@ -836,5 +838,259 @@ pub async fn rows_kept_before_c89_name_nobody<B: Reopen>(fx: Fx<B>) -> anyhow::R
     assert!(fx.store.registered("older").await.is_none());
     let plan = reef_model::PlanName::new("older", "main")?;
     assert!(fx.store.plan_registered(&plan).await.is_none());
+    Ok(())
+}
+
+/// A day in milliseconds, the window the front page counts done nodes in
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// Now, in milliseconds since the epoch
+fn now_ms() -> u64 {
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is past the epoch");
+    u64::try_from(since.as_millis()).expect("the time fits in 64 bits")
+}
+
+/// Writes a batch of puts to a plan as an author, checking it was written
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `plan` - The plan to write
+/// * `puts` - The puts, each with the version its writer read
+/// * `author` - Who writes them
+async fn put_all<B: Reopen>(
+    fx: &Fx<B>,
+    plan: &PlanName,
+    puts: Vec<NodePut>,
+    author: &Author,
+) -> anyhow::Result<()> {
+    let checked = fx
+        .store
+        .put_checked(plan, puts, author, no_problems)
+        .await?;
+    anyhow::ensure!(
+        matches!(checked, Checked::Applied { .. }),
+        "the puts weren't written: {checked:?}"
+    );
+    Ok(())
+}
+
+/// A node at a status, read at a version
+///
+/// # Arguments
+///
+/// * `id` - Its id
+/// * `order` - Where it falls in its plan's order
+/// * `status` - Its status
+/// * `read` - The version read, or `None` for a new node
+fn at_status(id: &str, order: u64, status: Status, read: Option<u64>) -> NodePut {
+    let mut node = work(id, order);
+    node.spec.status = Some(status);
+    NodePut::new(node, read)
+}
+
+/// When a plan was last written and by whom, as the history of the write it names keeps it
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+/// * `node` - The id of a node the newest write changed
+async fn newest_edit<B: Reopen>(fx: &Fx<B>, node: &str) -> anyhow::Result<(u64, Option<String>)> {
+    let history = fx
+        .store
+        .node_history(&fx.plan.node(node)?, &HistoryQuery::default())
+        .await?;
+    let newest = history.edits.first().expect("the node has a history");
+    Ok((newest.at, newest.author.describe()))
+}
+
+/// When the case's plan was last written and by whom, as the plan answers it
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+async fn last_update<B: Reopen>(fx: &Fx<B>) -> anyhow::Result<(u64, Option<String>)> {
+    let updated = fx
+        .store
+        .plan_updated(&fx.plan)
+        .await?
+        .expect("the plan was updated");
+    Ok((updated.at, updated.author.describe()))
+}
+
+/// A plan answers when it was last written and by whom, and counts its nodes done in the last
+/// day: one set back since isn't counted, one added done is, and one that went done two days ago
+/// counts in a window that holds then alone
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_plan_answers_its_last_update_and_its_nodes_done<B: Reopen>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    let (ada, bob) = (by("ada", Writer::User), by("bob", Writer::User));
+    let plan = fx.plan.clone();
+    // ada adds C1, C2 and C4
+    let added = vec![
+        NodePut::new(work("C1", 0), None),
+        NodePut::new(work("C2", 1), None),
+        NodePut::new(work("C4", 2), None),
+    ];
+    put_all(&fx, &plan, added, &ada).await?;
+    assert_eq!(last_update(&fx).await?, newest_edit(&fx, "C4").await?);
+    // C4 went done two days ago: its put keeps no history, and an entry then says so
+    fx.faults.fail_next_edit_write();
+    put_all(
+        &fx,
+        &plan,
+        vec![at_status("C4", 2, Status::Done, Some(1))],
+        &ada,
+    )
+    .await?;
+    let then = now_ms() - 2 * DAY_MS;
+    let old = Activity {
+        at: then,
+        author: ada.clone(),
+        nodes: vec!["C4".to_string()],
+        done: vec!["C4".to_string()],
+        ..Activity::default()
+    };
+    let row = ActivityRow {
+        project: plan.project.clone(),
+        plan: plan.plan.clone(),
+        key: format!("{:020}.{:016x}", u64::MAX - then, 0),
+        record: serde_json::to_string(&old)?,
+    };
+    fx.store
+        .backend()
+        .write_edits(Vec::new(), vec![row])
+        .await?;
+    // bob marks C1 and C2 done in one batch, the plan's last update
+    let done = vec![
+        at_status("C1", 0, Status::Done, Some(1)),
+        at_status("C2", 1, Status::Done, Some(1)),
+    ];
+    put_all(&fx, &plan, done, &bob).await?;
+    let (at, author) = last_update(&fx).await?;
+    assert_eq!(
+        (at, author.as_deref()),
+        (newest_edit(&fx, "C1").await?.0, Some("bob"))
+    );
+    // the whole plan is written again as ada, as it stands with C3 added done
+    let nodes = fx.store.list(&plan).await?.nodes;
+    let mut write: Vec<NodeWrite> = nodes.into_iter().map(NodeWrite::from).collect();
+    let mut c3 = work("C3", 3);
+    c3.spec.status = Some(Status::Done);
+    write.push(c3);
+    let rewrite = fx
+        .store
+        .write_plan_checked(
+            &plan,
+            PlanWrite {
+                nodes: write,
+                pages: None,
+            },
+            &ada,
+            no_problems,
+        )
+        .await?;
+    assert!(matches!(rewrite, Rewrite::Applied(_)), "{rewrite:?}");
+    assert_eq!(last_update(&fx).await?, newest_edit(&fx, "C3").await?);
+    // and ada sets C2 back in progress
+    let c2 = fx.store.get(&plan, "C2").await?.expect("C2 is there");
+    let back = at_status("C2", 1, Status::InProgress, Some(c2.version));
+    put_all(&fx, &plan, vec![back], &ada).await?;
+    assert_eq!(last_update(&fx).await?, newest_edit(&fx, "C2").await?);
+    // the last day's done are C1 and C3, in the plan's order: C2 is set back, and C4 went done
+    // before it
+    let now = now_ms();
+    let last_day = fx.store.plan_done(&plan, now - DAY_MS..u64::MAX).await?;
+    assert_eq!(last_day, ["C1", "C3"]);
+    // three days hold C4 too, and the day two days ago holds it alone
+    let three_days = fx
+        .store
+        .plan_done(&plan, now - 3 * DAY_MS..u64::MAX)
+        .await?;
+    assert_eq!(three_days, ["C1", "C4", "C3"]);
+    let that_day = fx
+        .store
+        .plan_done(&plan, then - DAY_MS / 2..then + DAY_MS / 2)
+        .await?;
+    assert_eq!(that_day, ["C4"]);
+    // a window with nothing in it, or none at all, counts none
+    assert!(
+        fx.store
+            .plan_done(&plan, 1..then - DAY_MS)
+            .await?
+            .is_empty()
+    );
+    assert!(fx.store.plan_done(&plan, now..now).await?.is_empty());
+    // a page's edit is an update too, and the store opened again reads the same
+    let page = PageEdit::Put {
+        page: PageWrite::new("design/a.md", "# A\n"),
+        read: None,
+    };
+    let edited = fx
+        .store
+        .edit_page_checked(&plan, page, &bob, no_problems)
+        .await?;
+    assert!(matches!(edited, PageEdited::Applied { .. }), "{edited:?}");
+    let paged = fx
+        .store
+        .page_history(&plan, "design/a.md", &HistoryQuery::default())
+        .await?;
+    let told = (paged.edits[0].at, Some("bob".to_string()));
+    assert_eq!(last_update(&fx).await?, told);
+    let fx = fx.reopen().await?;
+    assert_eq!(last_update(&fx).await?, told);
+    let reopened = fx.store.plan_done(&plan, now - DAY_MS..u64::MAX).await?;
+    assert_eq!(reopened, ["C1", "C3"]);
+    Ok(())
+}
+
+/// A plan none of whose writes was kept answers its listing as its last update, until a write
+/// of it is kept
+///
+/// # Arguments
+///
+/// * `fx` - The store and its plan
+pub async fn a_plan_never_written_answers_its_listing<B: Reopen>(fx: Fx<B>) -> anyhow::Result<()> {
+    let (ada, bob) = (by("ada", Writer::User), by("bob", Writer::User));
+    // ada lists a plan, which answers its listing
+    let plan = PlanName::new(&fx.plan.project, "fresh")?;
+    assert!(fx.store.add_plan(&plan, &ada).await?);
+    let listed = fx
+        .store
+        .plan_registered(&plan)
+        .await
+        .expect("its listing is kept");
+    assert_eq!(listed.author.describe().as_deref(), Some("ada"));
+    let listing = Some(Updated::from(listed));
+    assert_eq!(fx.store.plan_updated(&plan).await?, listing);
+    // a write whose history failed to keep, as one before C119 kept none, leaves it so
+    fx.faults.fail_next_edit_write();
+    put_all(
+        &fx,
+        &plan,
+        vec![at_status("C1", 0, Status::Done, None)],
+        &bob,
+    )
+    .await?;
+    assert_eq!(fx.store.plan_updated(&plan).await?, listing);
+    assert!(fx.store.plan_done(&plan, 0..u64::MAX).await?.is_empty());
+    // and its next write that is kept answers in its place
+    put_all(&fx, &plan, vec![NodePut::new(work("C2", 1), None)], &bob).await?;
+    let history = fx
+        .store
+        .node_history(&plan.node("C2")?, &HistoryQuery::default())
+        .await?;
+    let updated = fx.store.plan_updated(&plan).await?.expect("it was written");
+    assert_eq!(updated.at, history.edits[0].at);
+    assert_eq!(updated.author.describe().as_deref(), Some("bob"));
+    // while a plan neither listed nor written answers none
+    let never = PlanName::new(&fx.plan.project, "never")?;
+    assert_eq!(fx.store.plan_updated(&never).await?, None);
     Ok(())
 }

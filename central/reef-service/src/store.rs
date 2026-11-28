@@ -49,6 +49,7 @@
 //!   name with their password's hash, added under one lock and judged against every user, and a
 //!   token under its hash alone, so no token is ever stored.
 
+mod activity;
 mod branches;
 mod comment;
 mod decision;
@@ -1435,6 +1436,7 @@ impl<B: Backend> Store<B> {
             subject: history::page_subject(plan, path),
             version,
             edits: vec![edited],
+            went_done: false,
         };
         self.keep_edits(&plan.project, author, false, vec![pending])
             .await;
@@ -1717,6 +1719,7 @@ impl<B: Backend> Store<B> {
                     subject,
                     version: None,
                     edits: vec![edited.clone()],
+                    went_done: false,
                 })
                 .collect();
             self.keep_edits(project, author, false, pending).await;

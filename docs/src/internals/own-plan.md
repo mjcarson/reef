@@ -82,4 +82,7 @@ reef claude install                        # the MCP entry, the hooks and the sk
   C48's `UserRow` and `TokenRow`: its binary read back a plan the one before it wrote. Nor did
   C49's `RemoteRow`, which keeps a remote project's URL beside its `ProjectRow` rather than in
   it, nor C92's `PlanBranchRow`, which keeps a plan's branch beside its `PlanRow`: its binary
-  read back a plan, a node and a queue entry the one before C87 wrote.
+  read back a plan, a node and a queue entry the one before C87 wrote. Nor did C119's
+  `ActivityRow`, which keeps each plan's activity beside its edits: its binary opened the data
+  directory a reef-serve from before C50 wrote, added an admin to it, and served its plan's 99
+  nodes back.

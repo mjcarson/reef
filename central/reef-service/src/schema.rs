@@ -1,17 +1,18 @@
 //! reef's shoal schema: projects, plans, each revision's nodes and pages, each project's queue,
 //! its nodes' work records, each node's captured revisions and their files, each plan's
 //! comments, the terminal loops, the users and the tokens they sign in with, the git remotes
-//! projects were registered by, who made each edit of a node, a page or a queue, and the branch
-//! each plan follows
+//! projects were registered by, who made each edit of a node, a page or a queue, the branch
+//! each plan follows, and each plan's activity
 //!
 //! Shoal on its `ScanSupport` branch has no client table scans, so everything reef lists sits in
 //! a partition whose key it already knows. All projects share one constant partition, a project's
 //! plans sit in that project's, a plan's nodes and its pages each sit in a partition of their
 //! revision, and a project's queue and its work records each sit in a partition of their own. A
 //! node's revisions sit in the node's partition, and each revision's files in the revision's.
-//! Every loop shares one constant partition, as projects do, sorted by the pane it feeds, and so
-//! do every user, sorted by name, every token, sorted by its hash, and every remote, sorted by its
-//! project's name.
+//! Each subject's edits sit in a partition of the subject's, and each plan's activity in one of
+//! the plan's, both newest first. Every loop shares one constant partition, as projects do,
+//! sorted by the pane it feeds, and so do every user, sorted by name, every token, sorted by its
+//! hash, and every remote, sorted by its project's name.
 //! Sort keys are a single `String` there, so each table sorts by a name, an id, a path, a rank, a
 //! node's name within its project, or a revision's number padded to sort as a number does.
 //!
@@ -562,6 +563,35 @@ pub struct EditRow {
     pub record: String,
 }
 
+/// One write to a plan's nodes or pages, kept plan-wide: when, who, which nodes and pages, and
+/// which nodes it took to done (C119)
+///
+/// A plan's entries share its partition, keyed as its edits are, so the newest sorts first: its
+/// last update is a get with a limit of one, and a window of time is the keys between two
+/// stamps. An entry shares its key with the write's own [`EditRow`]s, and is written in the same
+/// bundle as the first of them. A row is written once and never changed, so it has no version.
+/// Its record is one JSON field, so what an entry keeps can change without changing this table.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct ActivityRow {
+    /// The project the plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The plan's name within its project
+    #[shoal(partition)]
+    pub plan: String,
+    /// `u64::MAX` less the write's stamp, padded to twenty digits so the newest sorts first, then
+    /// `.` and the store's random number in sixteen hex digits, as an [`EditRow`]'s key is
+    #[shoal(sort)]
+    pub key: String,
+    /// The entry as JSON: when, who, whether it wrote the whole plan, the nodes and pages it
+    /// touched, and the nodes it took to done
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -603,6 +633,8 @@ pub struct Reef {
     pub edits: PersistentSortedTable<EditRow, FileSystem>,
     /// Each project's plans' branches, by plan
     pub plan_branches: PersistentSortedTable<PlanBranchRow, FileSystem>,
+    /// Each plan's writes to its nodes and pages, newest first
+    pub activity: PersistentSortedTable<ActivityRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -611,7 +643,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 13509127152932721421;
+    const SCHEMA_ID: u64 = 3127319649985226656;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -631,6 +663,7 @@ mod tests {
         ("RemoteRow", 9724887961174009599),
         ("EditRow", 1157834751091248219),
         ("PlanBranchRow", 17338340728770613526),
+        ("ActivityRow", 13988560892749056052),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

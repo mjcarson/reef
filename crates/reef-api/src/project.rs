@@ -23,6 +23,31 @@ pub struct Registered {
     pub author: Author,
 }
 
+/// When a plan was last written, and by whom: its newest write to its nodes or pages, else its
+/// listing, for a plan none of whose writes was kept (C119)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Updated {
+    /// When, in milliseconds since the epoch
+    pub at: u64,
+    /// Who wrote it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub author: Author,
+}
+
+impl From<Registered> for Updated {
+    /// A plan's listing, as its last update until a write of it is kept
+    ///
+    /// # Arguments
+    ///
+    /// * `registered` - When the plan was listed, and by whom
+    fn from(registered: Registered) -> Self {
+        Updated {
+            at: registered.at,
+            author: registered.author,
+        }
+    }
+}
+
 /// A project: a name, and the repo its plans describe
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {

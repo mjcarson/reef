@@ -29,11 +29,11 @@ use reef_api::{
     PageEdit, PageWrite, Pane, Registered, UserAct,
 };
 use reef_model::accept::Criterion;
-use reef_model::{Description, NodeName, NodeSpec, PlanName};
+use reef_model::{Description, NodeName, NodeSpec, PlanName, Status};
 use std::collections::{BTreeSet, HashMap};
 use tracing::instrument;
 
-use super::{Store, bundles, work::now_ms};
+use super::{Store, activity, bundles, work::now_ms};
 use crate::backend::Backend;
 use crate::schema::{
     EditRow, LOOPS_SUBJECT, PROJECT_SUBJECT, QUEUE_SUBJECT, SERVER_PROJECT, USERS_SUBJECT,
@@ -67,6 +67,9 @@ pub struct Pending {
     pub version: Option<u64>,
     /// What the write changed of it
     pub edits: Vec<Edited>,
+    /// Whether the write took the subject, a node, to done: its status set done, or the node
+    /// added done, which its plan's activity counts
+    pub went_done: bool,
 }
 
 /// The subject a node's edits are kept under, which a node removed and added again shares
@@ -114,7 +117,7 @@ pub fn plan_subject(plan: &PlanName) -> String {
 ///
 /// * `stamp` - The write's stamp
 /// * `nonce` - The store's random number
-fn edit_key(stamp: u64, nonce: u64) -> String {
+pub(super) fn edit_key(stamp: u64, nonce: u64) -> String {
     format!("{:020}.{nonce:016x}", u64::MAX - stamp)
 }
 
@@ -152,6 +155,22 @@ fn is_cursor(text: &str) -> bool {
         && nonce
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Whether a write took a node to done: its status set done, or the node added done
+///
+/// # Arguments
+///
+/// * `edits` - What the write changed of the node
+/// * `after` - The node as the write leaves it
+pub fn went_done(edits: &[Edited], after: &NodeWrite) -> bool {
+    edits.iter().any(|edit| match edit {
+        // its status set done from anything else, since an unchanged one is no edit
+        Edited::Status { to, .. } => *to == Some(Status::Done),
+        // or added done already
+        Edited::Added => after.spec.status == Some(Status::Done),
+        _ => false,
+    })
 }
 
 /// What a put changed of a node: added if it is new, else each part it changed, or nothing for
@@ -339,6 +358,7 @@ pub fn batch_edits(
         pending.push(Pending {
             subject: node_subject(&node),
             version: Some(*version),
+            went_done: went_done(&edits, &put.node),
             edits,
         });
     }
@@ -349,6 +369,7 @@ pub fn batch_edits(
             subject: node_subject(&node),
             version: None,
             edits: vec![Edited::Removed],
+            went_done: false,
         });
     }
     Ok(pending)
@@ -383,6 +404,7 @@ pub fn plan_edits(
         pending.push(Pending {
             subject: node_subject(&name),
             version: Some(*version),
+            went_done: went_done(&edits, node),
             edits,
         });
     }
@@ -402,6 +424,7 @@ pub fn plan_edits(
             subject: node_subject(&name),
             version: None,
             edits: vec![Edited::Removed],
+            went_done: false,
         });
     }
     // and its pages the same way, if it carries them
@@ -417,6 +440,7 @@ pub fn plan_edits(
                 subject: page_subject(plan, &page.path),
                 version: Some(*version),
                 edits: vec![edit],
+                went_done: false,
             });
         }
         let kept: BTreeSet<&str> = pages.iter().map(|(page, _)| page.path.as_str()).collect();
@@ -430,6 +454,7 @@ pub fn plan_edits(
                 subject: page_subject(plan, path),
                 version: None,
                 edits: vec![Edited::Removed],
+                went_done: false,
             });
         }
     }
@@ -477,10 +502,12 @@ impl<B: Backend> Store<B> {
         stamp
     }
 
-    /// Keeps a write's entries in their subjects' histories, once the write has landed
+    /// Keeps a write's entries in their subjects' histories, once the write has landed, and an
+    /// entry in the activity of each plan whose nodes or pages it wrote
     ///
     /// A history that fails to keep is warned of and leaves the write standing, so this never
     /// fails the write it records. It answers the stamp the entries were kept at, if any were.
+    /// Each plan's entry shares the write's key, and goes in the first bundle of its edits.
     ///
     /// # Arguments
     ///
@@ -503,11 +530,14 @@ impl<B: Backend> Store<B> {
         // one stamp for the whole write, each subject in a partition of its own
         let at = self.stamp();
         let key = edit_key(at, self.edit_nonce);
+        // each plan's entry, told from the subjects of its nodes and pages
+        let activity = activity::activity_rows(project, &key, at, author, whole_plan, &pending);
         let mut rows = Vec::with_capacity(pending.len());
         for Pending {
             subject,
             version,
             edits,
+            ..
         } in pending
         {
             let logged = Logged {
@@ -529,9 +559,12 @@ impl<B: Backend> Store<B> {
                 }
             }
         }
-        // a bundle at a time, the first failure ending it with the rest left out
+        // a bundle at a time, the plans' entries in the first, the first failure ending it with
+        // the rest left out
+        let mut activity = Some(activity);
         for bundle in bundles(rows, |row| row.subject.len() + row.record.len()) {
-            if let Err(error) = self.backend.write_edits(bundle).await {
+            let beside = activity.take().unwrap_or_default();
+            if let Err(error) = self.backend.write_edits(bundle, beside).await {
                 tracing::warn!(
                     project,
                     error = %format!("{error:#}"),
@@ -567,6 +600,7 @@ impl<B: Backend> Store<B> {
                 pane: pane.clone(),
                 act,
             }],
+            went_done: false,
         };
         self.keep_edits(project, author, false, vec![pending]).await;
     }
@@ -588,6 +622,7 @@ impl<B: Backend> Store<B> {
                 name: name.to_string(),
                 act,
             }],
+            went_done: false,
         };
         self.keep_edits(SERVER_PROJECT, author, false, vec![pending])
             .await;
@@ -611,6 +646,7 @@ impl<B: Backend> Store<B> {
             subject,
             version: None,
             edits: vec![Edited::Added],
+            went_done: false,
         };
         // when it was kept, if it was
         let at = self

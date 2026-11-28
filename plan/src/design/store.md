@@ -420,3 +420,34 @@ own.
   history.
 - **Who placed each queue entry is read from the queue's history,** its newest edit that queued
   or moved the node, among the newest 200.
+
+## A plan's activity
+
+When a plan last changed, by whom, and what went done today couldn't be asked without reading
+every node's history, since a history is a partition a subject and a plan's row carries no times
+([C119](../milestones/m15.md)). The plan explorer needs all three for every plan
+([The plan explorer](app.md#the-plan-explorer)).
+
+### Design choices
+
+- **A table of its own, a partition a plan.** An `ActivityRow` sits under its project and plan,
+  keyed as an edit is, so the newest sorts first. It joined the schema last, so no other table's
+  fingerprint moved, and no data directory is replaced for it.
+- **Told from the write's history, under its key.** `keep_edits` already names each subject a
+  write changed, so a plan's entry is told from its `node/<plan>/<id>` and `page/<plan>/<path>`
+  subjects: the nodes and pages it touched, and the nodes it took to done. Every path that
+  writes a plan's nodes or pages keeps one this way: a put, a batch, a whole-plan write, a page's
+  edit and a move, which keeps one in each plan. A start writes a work record rather than the
+  node, so it keeps none.
+- **Going done is set done or added done.** A node whose status a write set done, or that a write
+  added already done, went done in it. A node moved in done counts in neither plan, since its
+  going done was its old plan's.
+- **In the same bundle as the write's first edits, kept as they are.** It is kept once the write
+  has landed and fails with its edits, so a write whose history failed to keep stands with no
+  entry.
+- **A last update, else the listing.** A plan answers its newest entry as its last update, and a
+  plan none of whose writes was kept, such as one written only before C119, answers its listing
+  until its next write.
+- **Done in a window is done now.** A window is read from its end back, a page at a time, and
+  stops at the first entry older than its start. Of the nodes its entries took to done, only
+  those done now count, so one set back or removed since isn't counted.

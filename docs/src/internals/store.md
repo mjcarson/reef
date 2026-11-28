@@ -83,6 +83,14 @@ is the twin's oracle.
   so a store opened again never takes a key the last one wrote. A history that fails to keep is
   warned of, and leaves its write standing. Only what changed is kept: a put that left its node
   as it was, or a whole-plan write's nodes and pages left so, keep nothing.
+- **Each write to a plan's nodes or pages keeps one entry in the plan's activity** (C119,
+  `ActivityRow`): when, who, the nodes and pages it touched, and the nodes it took to done, set
+  done or added done. `keep_edits` tells it from the write's `node/…` and `page/…` subjects, a
+  start's left out. It is kept under the write's own key, in the first bundle of its edits, and
+  fails with them. `Store::plan_updated` reads the newest entry, else the plan's listing.
+  `Store::plan_done` reads a window from its end back, a page at a time, stopping at the first
+  entry older than its start, and counts only the nodes done now, so one set back isn't counted.
+  A node moved in done counts in neither plan, since its going done was its old plan's.
 - **Every loop is a row of one partition** (`Store::edit_loop`), under its pane's key, so a
   pane keeps one loop. Every change reads them all under one lock and writes the one row, a
   start `if_absent` and anything else by version, so two loops taking one node at once are

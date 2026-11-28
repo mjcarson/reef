@@ -253,6 +253,7 @@ impl<B: Backend> Store<B> {
             subject: history::plan_subject(plan),
             version: None,
             edits: vec![Edited::Branched { from, to: branch }],
+            went_done: false,
         };
         self.keep_edits(&plan.project, author, false, vec![pending])
             .await;

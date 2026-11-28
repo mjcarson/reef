@@ -82,7 +82,9 @@ pub use decision::{
     Decided, Decision, DecisionKind, DecisionsRecorded, Outcome, RecordDecisions, Via,
 };
 pub use error::{ApiError, ErrorCode};
-pub use history::{Edited, HISTORY_MAX, HistoryPage, HistoryQuery, Logged, LoopAct, UserAct};
+pub use history::{
+    Activity, Edited, HISTORY_MAX, HistoryPage, HistoryQuery, Logged, LoopAct, UserAct,
+};
 pub use loops::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Member, Pane};
 pub use node::{
     Checked, Listing, MoveNodes, Moved, NodePut, NodeRemove, NodeWrite, PlanWrite, Puts, Refusal,
@@ -95,7 +97,7 @@ pub use page::{
 };
 pub use project::{
     AddedPlan, AddedProject, BranchFetched, Branched, Fetched, NewPlan, NewProject, NewRemote,
-    PlanBranch, PlanInfo, Project, Registered, Remote, Tip,
+    PlanBranch, PlanInfo, Project, Registered, Remote, Tip, Updated,
 };
 pub use queue::{Listed, Place, Placed, QueueEdit, QueueListing, Queued, Ranked};
 pub use revision::{

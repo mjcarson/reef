@@ -9,9 +9,9 @@ use reef_model::PlanName;
 use std::future::Future;
 
 use crate::schema::{
-    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanBranchRow,
-    PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
-    WorkRow,
+    ActivityRow, CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow,
+    PlanBranchRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow,
+    TokenRow, UserRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -637,12 +637,33 @@ pub trait Backend: Send + Sync {
         limit: usize,
     ) -> impl Future<Output = anyhow::Result<Vec<EditRow>>> + Send;
 
-    /// Writes edit rows over whatever is stored under their keys, every answer checked
+    /// Writes edit rows, and the plan-wide activity rows beside them, over whatever is stored
+    /// under their keys, in one bundle, every answer checked
     ///
     /// The writes are not atomic: one that fails partway leaves the rows before it written.
     ///
     /// # Arguments
     ///
-    /// * `rows` - The rows to write
-    fn write_edits(&self, rows: Vec<EditRow>) -> impl Future<Output = anyhow::Result<()>> + Send;
+    /// * `rows` - The edit rows to write
+    /// * `activity` - The activity rows to write with them
+    fn write_edits(
+        &self,
+        rows: Vec<EditRow>,
+        activity: Vec<ActivityRow>,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+
+    /// Reads a plan's activity rows, newest first, after a key if one is named, at most a number
+    /// of them
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `older` - The key to read the rows after, not including it, or `None` for the newest
+    /// * `limit` - The most rows to read
+    fn activity(
+        &self,
+        plan: &PlanName,
+        older: Option<&str>,
+        limit: usize,
+    ) -> impl Future<Output = anyhow::Result<Vec<ActivityRow>>> + Send;
 }

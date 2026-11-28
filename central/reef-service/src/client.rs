@@ -13,16 +13,17 @@ use tracing::instrument;
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use crate::conf::Conf;
 use crate::schema::{
-    CommentRow, CommentRowDelete, CommentRowFilter, CommentRowGet, DecisionRow, DecisionRowDelete,
-    DecisionRowFilter, DecisionRowGet, EditRow, EditRowGet, LOOPS, LoopRow, LoopRowDelete,
-    LoopRowFilter, LoopRowGet, NodeKey, NodeRow, NodeRowDelete, NodeRowFilter, NodeRowGet,
-    PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter, PageRowGet, PlanBranchRow,
-    PlanBranchRowFilter, PlanBranchRowGet, PlanRow, PlanRowFilter, PlanRowGet, PlanRowUpdate,
-    ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter, QueueRowGet, REMOTES,
-    ReefClient, ReefQueryKinds, RemoteRow, RemoteRowFilter, RemoteRowGet, RevisionFileRow,
-    RevisionFileRowDelete, RevisionFileRowGet, RevisionRow, RevisionRowDelete, RevisionRowFilter,
-    RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter, TokenRowGet, USERS, UserRow,
-    UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowDelete, WorkRowFilter, WorkRowGet,
+    ActivityRow, ActivityRowGet, CommentRow, CommentRowDelete, CommentRowFilter, CommentRowGet,
+    DecisionRow, DecisionRowDelete, DecisionRowFilter, DecisionRowGet, EditRow, EditRowGet, LOOPS,
+    LoopRow, LoopRowDelete, LoopRowFilter, LoopRowGet, NodeKey, NodeRow, NodeRowDelete,
+    NodeRowFilter, NodeRowGet, PROJECTS, PageKey, PageRow, PageRowDelete, PageRowFilter,
+    PageRowGet, PlanBranchRow, PlanBranchRowFilter, PlanBranchRowGet, PlanRow, PlanRowFilter,
+    PlanRowGet, PlanRowUpdate, ProjectRow, ProjectRowGet, QueueRow, QueueRowDelete, QueueRowFilter,
+    QueueRowGet, REMOTES, ReefClient, ReefQueryKinds, RemoteRow, RemoteRowFilter, RemoteRowGet,
+    RevisionFileRow, RevisionFileRowDelete, RevisionFileRowGet, RevisionRow, RevisionRowDelete,
+    RevisionRowFilter, RevisionRowGet, TOKENS, TokenRow, TokenRowDelete, TokenRowFilter,
+    TokenRowGet, USERS, UserRow, UserRowDelete, UserRowFilter, UserRowGet, WorkRow, WorkRowDelete,
+    WorkRowFilter, WorkRowGet,
 };
 
 #[cfg(feature = "embedded")]
@@ -1148,20 +1149,30 @@ impl Backend for ShoalBackend {
         self.read::<_, EditRow>(get).await
     }
 
-    /// Writes edit rows over whatever is stored under their keys, every answer checked
+    /// Writes edit rows, and the plan-wide activity rows beside them, over whatever is stored
+    /// under their keys, in one bundle, every answer checked
     ///
     /// # Arguments
     ///
-    /// * `rows` - The rows to write
+    /// * `rows` - The edit rows to write
+    /// * `activity` - The activity rows to write with them
     #[instrument(name = "ShoalBackend::write_edits", skip_all, err(Debug))]
-    async fn write_edits(&self, rows: Vec<EditRow>) -> anyhow::Result<()> {
+    async fn write_edits(
+        &self,
+        rows: Vec<EditRow>,
+        activity: Vec<ActivityRow>,
+    ) -> anyhow::Result<()> {
         // nothing to send is nothing to check
-        if rows.is_empty() {
+        if rows.is_empty() && activity.is_empty() {
             return Ok(());
         }
-        // one bundle, whose every answer `exec` checks, which draining its stream would not
+        // one bundle of both tables' rows, whose every answer `exec` checks, which draining its
+        // stream would not
         let mut bundle = self.client.query();
         for row in rows {
+            bundle.add_mut(row);
+        }
+        for row in activity {
             bundle.add_mut(row);
         }
         self.client
@@ -1169,6 +1180,32 @@ impl Backend for ShoalBackend {
             .await
             .map_err(|error| anyhow::anyhow!("writing edit rows failed: {error:?}"))?;
         Ok(())
+    }
+
+    /// Reads a plan's activity rows, newest first, after a key if one is named, at most a number
+    /// of them
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `older` - The key to read the rows after, not including it, or `None` for the newest
+    /// * `limit` - The most rows to read
+    #[instrument(name = "ShoalBackend::activity", skip_all, err(Debug))]
+    async fn activity(
+        &self,
+        plan: &PlanName,
+        older: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ActivityRow>> {
+        // a plan's activity sits in its partition, newest first, so the limit stops at the oldest
+        // wanted
+        let partition = (plan.project.clone(), plan.plan.clone());
+        let mut get = ActivityRowGet::new(vec![partition]).limit(limit);
+        // a cursor starts the walk past the last row of the page before
+        if let Some(older) = older {
+            get = get.sort_range(SortRange::after(older.to_string()));
+        }
+        self.read::<_, ActivityRow>(get).await
     }
 }
 

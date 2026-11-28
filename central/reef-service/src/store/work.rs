@@ -191,6 +191,7 @@ impl<B: Backend> Store<B> {
                     subject: history::node_subject(node),
                     version: None,
                     edits: vec![started],
+                    went_done: false,
                 };
                 self.keep_edits(project, author, false, vec![pending]).await;
                 Ok(Started::Recorded {

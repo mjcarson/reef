@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use crate::schema::{
-    CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow, PlanBranchRow,
-    PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow, TokenRow, UserRow,
-    WorkRow,
+    ActivityRow, CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow,
+    PlanBranchRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow,
+    TokenRow, UserRow, WorkRow,
 };
 use crate::schema::{LOOPS, PROJECTS, REMOTES, TOKENS, USERS};
 
@@ -64,6 +64,8 @@ struct Tables {
     edits: BTreeMap<SubjectPartition, BTreeMap<String, EditRow>>,
     /// Each project's plans' branches, by plan name
     plan_branches: BTreeMap<String, BTreeMap<String, PlanBranchRow>>,
+    /// Each plan's activity, by their keys, which count down so the newest sorts first
+    activity: BTreeMap<PlanPartition, BTreeMap<String, ActivityRow>>,
 }
 
 /// Removes a row from a table by its partition and sort key, and the partition with it once
@@ -144,6 +146,21 @@ impl MemoryBackend {
         self.tables()
             .edits
             .entry((project.to_string(), subject.to_string()))
+            .or_default()
+            .insert(row.key.clone(), row);
+    }
+
+    /// Stores an activity row in a plan's partition other than its own, as a hash collision would
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan whose partition the row lands in
+    /// * `row` - The row, keyed by its own sort key as any other
+    pub fn plant_activity(&self, plan: &PlanName, row: ActivityRow) {
+        // under the partition named, at the row's own sort key
+        self.tables()
+            .activity
+            .entry((plan.project.clone(), plan.plan.clone()))
             .or_default()
             .insert(row.key.clone(), row);
     }
@@ -1231,12 +1248,18 @@ impl Backend for MemoryBackend {
             .collect())
     }
 
-    /// Writes edit rows over whatever is stored under their keys
+    /// Writes edit rows, and the plan-wide activity rows beside them, over whatever is stored
+    /// under their keys
     ///
     /// # Arguments
     ///
-    /// * `rows` - The rows to write
-    async fn write_edits(&self, rows: Vec<EditRow>) -> anyhow::Result<()> {
+    /// * `rows` - The edit rows to write
+    /// * `activity` - The activity rows to write with them
+    async fn write_edits(
+        &self,
+        rows: Vec<EditRow>,
+        activity: Vec<ActivityRow>,
+    ) -> anyhow::Result<()> {
         let mut tables = self.tables();
         // each into its own partition, as its keys hash
         for row in rows {
@@ -1247,6 +1270,47 @@ impl Backend for MemoryBackend {
                 .or_default()
                 .insert(row.key.clone(), row);
         }
+        // and each plan's entry into the plan's
+        for row in activity {
+            let key = (row.project.clone(), row.plan.clone());
+            tables
+                .activity
+                .entry(key)
+                .or_default()
+                .insert(row.key.clone(), row);
+        }
         Ok(())
+    }
+
+    /// Reads a plan's activity rows, newest first, after a key if one is named, at most a number
+    /// of them
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `older` - The key to read the rows after, not including it, or `None` for the newest
+    /// * `limit` - The most rows to read
+    async fn activity(
+        &self,
+        plan: &PlanName,
+        older: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ActivityRow>> {
+        let tables = self.tables();
+        // the plan's partition in sort order, which is newest first
+        let key = (plan.project.clone(), plan.plan.clone());
+        let Some(partition) = tables.activity.get(&key) else {
+            return Ok(Vec::new());
+        };
+        // past the cursor if one is named, as shoal's range after it is, cut at the limit
+        let start = match older {
+            Some(older) => Bound::Excluded(older.to_string()),
+            None => Bound::Unbounded,
+        };
+        Ok(partition
+            .range((start, Bound::Unbounded))
+            .map(|(_, row)| row.clone())
+            .take(limit)
+            .collect())
     }
 }
