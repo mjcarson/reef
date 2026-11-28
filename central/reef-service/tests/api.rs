@@ -77,6 +77,8 @@ suite!(
     plan_summaries_count_nodes_and_name_their_activity,
     a_plans_state_is_testing_sessions_or_no_sessions,
     a_plan_is_active_while_work_goes_on,
+    the_book_answers_a_plans_chapters,
+    a_plan_naming_no_docs_answers_its_root_and_pages,
 );
 
 /// A config listening on this host's loopback port alone, over HTTPS, with reef's own

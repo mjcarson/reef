@@ -61,6 +61,9 @@ pub struct BranchProposal {
     pub from: Option<String>,
     /// The branch it would follow, or `None` for its project's own
     pub to: Option<String>,
+    /// The docs it names, read under the same lock, whose chapters must still be there at the
+    /// new branch, or `None` for none (C122)
+    pub docs: Option<String>,
 }
 
 /// What came of a change to a plan's branch that the store judged
@@ -210,6 +213,7 @@ impl<B: Backend> Store<B> {
             pages: pages.into_iter().map(PageWrite::from).collect(),
             from: from.clone(),
             to: branch.clone(),
+            docs: self.plan_docs(plan).await?,
         };
         // judged at both branches, and nothing written if the new one adds a problem
         let problems = check(proposal).await?;

@@ -592,6 +592,33 @@ pub struct ActivityRow {
     pub record: String,
 }
 
+/// The docs a plan names: the folder or summary its book is read from (C122)
+///
+/// A project's plans' docs share its partition, sorted by plan name, so every plan's docs are
+/// read with one partition, as the plans and their branches are. A plan with no row names no
+/// docs, so its book is its root node, then its pages, as every plan's was before this table, so
+/// `PlanRow` needed no new field. Its record is one JSON field, so what it keeps can change
+/// without changing this table. It is set `if_absent` for a plan that has none and over the
+/// version read to change it.
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Reef")]
+pub struct PlanDocsRow {
+    /// The project the plan belongs to
+    #[shoal(partition)]
+    pub project: String,
+    /// The plan's name within its project, which sorts the partition
+    #[shoal(sort)]
+    pub plan: String,
+    /// Bumped by every write of this row, so a later write can name the one it read
+    #[shoal(filter)]
+    pub version: u64,
+    /// What the plan names as JSON: its docs, or none
+    pub record: String,
+}
+
 /// reef's database
 ///
 /// With `embedded` this is the full schema, which also generates the client. Without it only the
@@ -635,6 +662,8 @@ pub struct Reef {
     pub plan_branches: PersistentSortedTable<PlanBranchRow, FileSystem>,
     /// Each plan's writes to its nodes and pages, newest first
     pub activity: PersistentSortedTable<ActivityRow, FileSystem>,
+    /// Each project's plans' docs, by plan
+    pub plan_docs: PersistentSortedTable<PlanDocsRow, FileSystem>,
 }
 
 #[cfg(test)]
@@ -643,7 +672,7 @@ mod tests {
     use shoal::shared::traits::QuerySupport;
 
     /// The schema's structural id, which moves with any change to a row, a table or a projection
-    const SCHEMA_ID: u64 = 3127319649985226656;
+    const SCHEMA_ID: u64 = 14478251474438974043;
 
     /// Each table's fingerprint, in the order the schema serves them
     const TABLES: &[(&str, u64)] = &[
@@ -664,6 +693,7 @@ mod tests {
         ("EditRow", 1157834751091248219),
         ("PlanBranchRow", 17338340728770613526),
         ("ActivityRow", 13988560892749056052),
+        ("PlanDocsRow", 12682439399945079619),
     ];
 
     /// The schema is pinned, so changing it is a deliberate act that needs a fresh data directory

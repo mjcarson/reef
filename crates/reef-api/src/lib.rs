@@ -96,9 +96,9 @@ pub use page::{
     check_page_path,
 };
 pub use project::{
-    AddedPlan, AddedProject, BranchFetched, Branched, Fetched, LiveRun, LiveSession, NewPlan,
-    NewProject, NewRemote, NodeCounts, PlanBranch, PlanInfo, PlanState, PlanSummary, Project,
-    Registered, Remote, Tip, Updated, Working,
+    AddedPlan, AddedProject, BranchFetched, Branched, DocsNamed, Fetched, LiveRun, LiveSession,
+    NewPlan, NewProject, NewRemote, NodeCounts, PlanBranch, PlanDocs, PlanInfo, PlanState,
+    PlanSummary, Project, Registered, Remote, Tip, Updated, Working,
 };
 pub use queue::{Listed, Place, Placed, QueueEdit, QueueListing, Queued, Ranked};
 pub use revision::{

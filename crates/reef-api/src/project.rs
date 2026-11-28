@@ -185,6 +185,10 @@ pub struct PlanInfo {
     /// The branches it followed before, the latest last
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub was: Vec<String>,
+    /// The docs it names, a folder or a summary from the root of its docs, or `None` for none,
+    /// so its book is its root node, then its pages (C122)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
 }
 
 /// One of a project's plans summed up, as the plan explorer shows it (C120)
@@ -246,6 +250,7 @@ impl PlanSummary {
     ///     registered: None,
     ///     branch: None,
     ///     was: Vec::new(),
+    ///     docs: None,
     /// };
     /// let quiet = PlanSummary::new(plan, None, NodeCounts::default(), None, vec![], vec![], vec![], vec![]);
     /// assert_eq!(quiet.state, PlanState::NoSessions);
@@ -575,6 +580,32 @@ pub enum Branched {
     Refused(Vec<Diagnostic>),
 }
 
+/// A request to name a plan's docs, or to clear them so its book is its root node, then its
+/// pages (C122)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanDocs {
+    /// The folder or summary to read, from the root of the plan's docs: a path ending `.md` is
+    /// a summary and any other a folder. `None` names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
+}
+
+/// What came of naming a plan's docs
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DocsNamed {
+    /// The plan reads its docs there now
+    Applied {
+        /// The plan as its listing names it now
+        plan: PlanInfo,
+        /// Whether that changed what it names; a plan set to the docs it names already is left
+        /// as it is
+        changed: bool,
+    },
+    /// The docs aren't there, or reading them would add problems, so nothing changed
+    Refused(Vec<Diagnostic>),
+}
+
 /// What came of listing a plan
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddedPlan {
@@ -585,13 +616,14 @@ pub struct AddedPlan {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedProject, BranchFetched, Branched, Fetched, LiveRun, LiveSession, NewProject,
-        NodeCounts, PlanBranch, PlanInfo, PlanState, PlanSummary, Project, Remote, Tip, Updated,
-        Working,
+        AddedProject, BranchFetched, Branched, DocsNamed, Fetched, LiveRun, LiveSession,
+        NewProject, NodeCounts, PlanBranch, PlanDocs, PlanInfo, PlanState, PlanSummary, Project,
+        Remote, Tip, Updated, Working,
     };
     use crate::session::SessionState;
     use crate::test_run::RunState;
     use crate::user::Author;
+    use reef_model::Diagnostic;
     use reef_model::PlanName;
     use serde_json::json;
 
@@ -633,6 +665,7 @@ mod tests {
             revision: 3,
             branch: None,
             was: Vec::new(),
+            docs: None,
         };
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value, json!({"name": "reef/central", "revision": 3}));
@@ -678,6 +711,56 @@ mod tests {
             serde_json::to_value(&missing).unwrap(),
             json!({"no-branch": {"branch": "gone", "reason": "no such branch"}})
         );
+    }
+
+    /// A request to name a plan's docs names them, or leaves them out to clear them, and each
+    /// answer is pinned, since clients match on it
+    #[test]
+    fn plan_docs_names_its_docs_or_none() {
+        // check a folder to name serializes as its path
+        let set = PlanDocs {
+            docs: Some("docs/".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&set).unwrap(),
+            json!({"docs": "docs/"})
+        );
+        // check clearing the docs leaves `docs` out and reads back as itself
+        let clear = PlanDocs { docs: None };
+        assert_eq!(serde_json::to_value(&clear).unwrap(), json!({}));
+        assert_eq!(
+            serde_json::from_value::<PlanDocs>(json!({})).unwrap(),
+            clear
+        );
+        // check a plan's listing names the docs it reads once they are applied
+        let plan = PlanInfo {
+            name: PlanName::new("reef", "central").unwrap(),
+            revision: 1,
+            registered: None,
+            branch: None,
+            was: Vec::new(),
+            docs: Some("docs".to_string()),
+        };
+        let applied = DocsNamed::Applied {
+            plan,
+            changed: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&applied).unwrap(),
+            json!({"applied": {"plan": {"name": "reef/central", "revision": 1, "docs": "docs"}, "changed": true}})
+        );
+        // check a refusal lists check's problems and reads back as itself
+        let refused = DocsNamed::Refused(vec![Diagnostic {
+            source: "reef/central".to_string(),
+            line: None,
+            message: "the plan's docs: `gone` isn't there".to_string(),
+        }]);
+        let value = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            value["refused"][0]["message"],
+            json!("the plan's docs: `gone` isn't there")
+        );
+        assert_eq!(serde_json::from_value::<DocsNamed>(value).unwrap(), refused);
     }
 
     /// A remote project names its URL, branch and commit, and a local one's JSON is as it was
@@ -792,6 +875,7 @@ mod tests {
             revision: 3,
             branch: None,
             was: Vec::new(),
+            docs: None,
         };
         let ada = Author {
             user: Some("ada".to_string()),

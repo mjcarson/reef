@@ -19,6 +19,7 @@
 | `EditRow` | (project, subject: `node/<plan>/<id>`, `page/<plan>/<path>`, `plan/<plan>`, `queue`, `project` or `loops`; or the empty project's `users`) | `u64::MAX` less the edit's stamp, padded, then the store's random number | the edit or act as JSON: who made it, when, the version it left and what it changed |
 | `PlanBranchRow` | project | plan name | a `version`, and what the plan follows as JSON: its branch, or none for its project's own |
 | `ActivityRow` | (project, plan) | the write's `EditRow` key | one write to the plan's nodes or pages as JSON: who made it, when, whether it wrote the whole plan, the nodes and pages it touched, and the nodes it took to done |
+| `PlanDocsRow` | project | plan name | a `version`, and the docs the plan names as JSON: a folder or a summary, or none for its root node and pages |
 
 `schema::tests::fingerprint_is_pinned` pins it. Shoal can't migrate a table yet, so a change to a
 row needs a fresh data directory, and then a new pin.

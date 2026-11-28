@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crate::backend::{Backend, Expect, Pointers, Refusal, RevisionKey, RowKey, Written};
 use crate::schema::{
     ActivityRow, CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow,
-    PlanBranchRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow,
-    TokenRow, UserRow, WorkRow,
+    PlanBranchRow, PlanDocsRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow,
+    RevisionRow, TokenRow, UserRow, WorkRow,
 };
 use crate::schema::{LOOPS, PROJECTS, REMOTES, TOKENS, USERS};
 
@@ -66,6 +66,8 @@ struct Tables {
     plan_branches: BTreeMap<String, BTreeMap<String, PlanBranchRow>>,
     /// Each plan's activity, by their keys, which count down so the newest sorts first
     activity: BTreeMap<PlanPartition, BTreeMap<String, ActivityRow>>,
+    /// Each project's plans' docs, by plan name
+    plan_docs: BTreeMap<String, BTreeMap<String, PlanDocsRow>>,
 }
 
 /// Removes a row from a table by its partition and sort key, and the partition with it once
@@ -1210,6 +1212,44 @@ impl Backend for MemoryBackend {
         if let Err(refusal) = holds(stored, expect) {
             return Ok(Written::Refused(refusal));
         }
+        partition.insert(row.plan.clone(), row);
+        Ok(Written::Applied)
+    }
+
+    /// Reads the docs rows of a project's plans, in plan order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    async fn plan_docs(&self, project: &str) -> anyhow::Result<Vec<PlanDocsRow>> {
+        // lock the tables for the read
+        let tables = self.tables();
+        // read every row in the project's own partition, or none if it has no partition yet
+        Ok(tables
+            .plan_docs
+            .get(project)
+            .map(|partition| partition.values().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Writes one plan's docs row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    async fn write_plan_docs(&self, row: PlanDocsRow, expect: Expect) -> anyhow::Result<Written> {
+        // lock the tables for the write
+        let mut tables = self.tables();
+        // find the row's own partition by its project, making it if this is its first row
+        let partition = tables.plan_docs.entry(row.project.clone()).or_default();
+        // check the condition against the version stored under the row's plan, refusing the
+        // write if it doesn't hold
+        let stored = partition.get(&row.plan).map(|stored| stored.version);
+        if let Err(refusal) = holds(stored, expect) {
+            return Ok(Written::Refused(refusal));
+        }
+        // store the row under its plan, over any row there
         partition.insert(row.plan.clone(), row);
         Ok(Written::Applied)
     }

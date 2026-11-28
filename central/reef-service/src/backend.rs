@@ -10,8 +10,8 @@ use std::future::Future;
 
 use crate::schema::{
     ActivityRow, CommentRow, DecisionRow, EditRow, LoopRow, NodeKey, NodeRow, PageKey, PageRow,
-    PlanBranchRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow, RevisionRow,
-    TokenRow, UserRow, WorkRow,
+    PlanBranchRow, PlanDocsRow, PlanRow, ProjectRow, QueueRow, RemoteRow, RevisionFileRow,
+    RevisionRow, TokenRow, UserRow, WorkRow,
 };
 
 /// Why a conditional write was refused, kept in `reef-api` since a stale put's answer names it
@@ -617,6 +617,28 @@ pub trait Backend: Send + Sync {
     fn write_plan_branch(
         &self,
         row: PlanBranchRow,
+        expect: Expect,
+    ) -> impl Future<Output = anyhow::Result<Written>> + Send;
+
+    /// Reads the docs rows of a project's plans, in plan order
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    fn plan_docs(
+        &self,
+        project: &str,
+    ) -> impl Future<Output = anyhow::Result<Vec<PlanDocsRow>>> + Send;
+
+    /// Writes one plan's docs row, if the condition holds of the row stored under its key
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to write
+    /// * `expect` - What must be stored under its key for it to be written
+    fn write_plan_docs(
+        &self,
+        row: PlanDocsRow,
         expect: Expect,
     ) -> impl Future<Output = anyhow::Result<Written>> + Send;
 

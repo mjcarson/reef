@@ -16,12 +16,21 @@
 use gix::ObjectId;
 use reef_api::Project;
 use reef_render::paths::join;
-use reef_render::{DocSource, Headings, RepoSource, leaves};
-use std::collections::VecDeque;
+use reef_render::{DocSource, Entry, Headings, RepoSource, leaves};
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// How many symlinks one read follows before it gives up, as a loop of them would never end
 const LINK_HOPS: usize = 8;
+
+/// What a path names at a commit, once its symlinks are followed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Found {
+    /// A directory, by its tree's id
+    Tree(ObjectId),
+    /// A file, by its blob's id
+    Blob(ObjectId),
+}
 
 /// Docs read at one commit of a bare clone
 pub struct TreeSource {
@@ -58,16 +67,17 @@ impl TreeSource {
         Ok(TreeSource { repo, tree })
     }
 
-    /// The blob a path names at this commit, following symlinks that stay in the tree
+    /// The tree or blob a path names at this commit, following symlinks that stay in the tree,
+    /// the empty path naming the commit's own tree
     ///
     /// Each part of the path is looked up in turn, so a symlink to a directory is followed as a
     /// working tree would follow it. A link to an absolute path, or one whose target climbs out of
-    /// the tree, names nothing, as does a directory or a submodule.
+    /// the tree, names nothing, as does a submodule.
     ///
     /// # Arguments
     ///
-    /// * `path` - The doc's path from the repo's root
-    fn blob(&self, path: &str) -> Option<ObjectId> {
+    /// * `path` - The path from the repo's root
+    fn entry(&self, path: &str) -> Option<Found> {
         // a path that climbs out, or starts from somewhere else, is refused as written
         if leaves(path) {
             return None;
@@ -75,19 +85,22 @@ impl TreeSource {
         // the parts still to look up, and the directories already walked into
         let mut rest: VecDeque<String> = parts(path);
         let mut walked: Vec<String> = Vec::new();
-        let mut tree = self.repo.find_tree(self.tree).ok()?;
+        // start the walk at the commit's own tree
+        let mut at = self.tree;
+        let mut tree = self.repo.find_tree(at).ok()?;
         let mut hops = 0;
         while let Some(part) = rest.pop_front() {
             // the entry this part names in the directory walked to
             let entry = tree.lookup_entry([part.as_str()]).ok()??;
             let mode = entry.mode();
             if mode.is_tree() {
-                // a directory, walked into, if the path goes on
-                tree = self.repo.find_tree(entry.object_id()).ok()?;
+                // walk into the directory this part names
+                at = entry.object_id();
+                tree = self.repo.find_tree(at).ok()?;
                 walked.push(part);
             } else if mode.is_blob() {
-                // a file, which is the doc only if the path ends here
-                return rest.is_empty().then(|| entry.object_id());
+                // stop at the file, which the path names only if no parts are left after it
+                return rest.is_empty().then(|| Found::Blob(entry.object_id()));
             } else if mode.is_link() {
                 // a symlink's target, from the directory it is in, then the rest of the path
                 hops += 1;
@@ -108,14 +121,83 @@ impl TreeSource {
                 // looked up again from the root
                 rest = parts(&followed);
                 walked.clear();
-                tree = self.repo.find_tree(self.tree).ok()?;
+                at = self.tree;
+                tree = self.repo.find_tree(at).ok()?;
             } else {
                 // a submodule's commit is in another repo
                 return None;
             }
         }
-        // a path that ends at a directory names no doc
-        None
+        // name the tree of the directory the path ended at
+        Some(Found::Tree(at))
+    }
+
+    /// The blob a path names at this commit, following symlinks that stay in the tree
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The doc's path from the repo's root
+    fn blob(&self, path: &str) -> Option<ObjectId> {
+        // look the path up and keep only a file, since a directory names no doc
+        match self.entry(path)? {
+            Found::Blob(id) => Some(id),
+            Found::Tree(_) => None,
+        }
+    }
+
+    /// The files and folders of a directory at this commit, by name, its dotfiles left out
+    ///
+    /// A blob is a file and a tree a folder. A symlink is listed as what it leads to, and left
+    /// out if that is out of the tree or nothing, and a submodule is left out.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory's path from the repo's root, empty for the root
+    fn entries(&self, dir: &str) -> Vec<Entry> {
+        // find the tree the path names, listing nothing if it names no directory
+        let Some(Found::Tree(at)) = self.entry(dir) else {
+            return Vec::new();
+        };
+        // open that tree, listing nothing if it can't be read
+        let Ok(tree) = self.repo.find_tree(at) else {
+            return Vec::new();
+        };
+        // gather each entry by name, so the listing comes out sorted, with whether it is a folder
+        let mut entries: BTreeMap<String, bool> = BTreeMap::new();
+        for entry in tree.iter().flatten() {
+            // skip a name that isn't text, or a dotfile, as a book's walk skips them
+            let Ok(name) = std::str::from_utf8(entry.filename()) else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            // tell a folder from a file by the entry's mode
+            let mode = entry.mode();
+            let folder = if mode.is_tree() {
+                true
+            } else if mode.is_blob() {
+                false
+            } else if mode.is_link() {
+                // list a symlink as what it leads to, skipping one that leads out of the tree
+                // or to nothing
+                match self.entry(&join(dir, name)) {
+                    Some(Found::Tree(_)) => true,
+                    Some(Found::Blob(_)) => false,
+                    None => continue,
+                }
+            } else {
+                // skip a submodule, since its files are in another repo
+                continue;
+            };
+            // keep the entry under its name
+            entries.insert(name.to_string(), folder);
+        }
+        // return the entries in name order
+        entries
+            .into_iter()
+            .map(|(name, folder)| Entry { name, folder })
+            .collect()
     }
 }
 
@@ -157,6 +239,16 @@ impl DocSource for TreeSource {
             true => Err("leaves the repo".to_string()),
             false => Ok(path.to_string()),
         }
+    }
+
+    /// The files and folders of a directory at this commit, by name
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory's path from the repo's root
+    fn list(&self, dir: &str) -> Vec<Entry> {
+        // list the directory's entries at this commit
+        self.entries(dir)
     }
 }
 
@@ -378,6 +470,19 @@ impl DocSource for RepoDocs {
         match self {
             RepoDocs::WorkingTree(source) => source.place(path),
             RepoDocs::Commit(source) => source.place(path),
+        }
+    }
+
+    /// The files and folders of a directory of the working tree or at the commit
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory's path from the repo's root
+    fn list(&self, dir: &str) -> Vec<Entry> {
+        // list the directory from the working tree or the commit, whichever the docs are read from
+        match self {
+            RepoDocs::WorkingTree(source) => source.list(dir),
+            RepoDocs::Commit(source) => source.list(dir),
         }
     }
 }

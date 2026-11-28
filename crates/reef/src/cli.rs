@@ -94,10 +94,11 @@
 use clap::{Args, Parser, Subcommand};
 use reef_api::work::on_worktree;
 use reef_api::{
-    AddedProject, Attach, BranchFetched, Branched, Fetched, Pane, PlanInfo, PlanSummary, Project,
-    SessionState, WorkRecord, Writer,
+    AddedProject, Attach, BranchFetched, Branched, DocsNamed, Fetched, Pane, PlanInfo, PlanSummary,
+    Project, SessionState, WorkRecord, Writer,
 };
-use reef_model::{Met, PlanName, Status};
+use reef_model::{Book, BookFrom, BookItem, Met, PlanName, Status};
+use reef_render::chapters::shown_docs;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -633,6 +634,21 @@ pub enum PlanCommand {
         /// Follow the branch the plan's branch was merged into, as this checkout's history says
         #[arg(long, conflicts_with_all = ["branch", "clear"])]
         merged: bool,
+        /// The project the plan is in, if not the working directory's
+        #[command(flatten)]
+        pick: Pick,
+    },
+    /// Name the docs a plan reads as its book, a folder or a summary, unless they aren't there;
+    /// with neither a path nor `--clear`, print what it names and its chapters
+    Docs {
+        /// The plan's name within its project
+        name: String,
+        /// The folder, or the summary in mdbook's format, from the root of its docs: its pages
+        /// over its repo's files. A path ending `.md` is a summary, and `.` the root.
+        path: Option<String>,
+        /// Name no docs, so its book is its root node, then its pages
+        #[arg(long, conflicts_with = "path")]
+        clear: bool,
         /// The project the plan is in, if not the working directory's
         #[command(flatten)]
         pick: Pick,
@@ -1227,6 +1243,12 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
             true => plan_merged(&client, cwd, &name, &pick, out).await,
             false => plan_branch(&client, cwd, &name, branch, &pick, out).await,
         },
+        Command::Plan(PlanCommand::Docs {
+            name,
+            path,
+            clear,
+            pick,
+        }) => plan_docs(&client, cwd, &name, path, clear, &pick, out).await,
         Command::Node(NodeCommand::Put { file, pick }) => {
             // the YAML first, so a file that can't be read asks nothing of the service
             let text = node::read_input(cwd, file.as_deref())?;
@@ -1976,6 +1998,159 @@ async fn plan_branch<W: Write>(
     branched(client, &project, &plan, branch, out).await
 }
 
+/// Names the docs a plan of the picked project reads as its book, or clears them, or prints
+/// what it names and its chapters
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `cwd` - The working directory
+/// * `name` - The plan's name within its project
+/// * `path` - The folder or summary to name, if one was
+/// * `clear` - Whether to name none
+/// * `pick` - The project named, if one was
+/// * `out` - Where to print what came of it
+async fn plan_docs<W: Write>(
+    client: &Client,
+    cwd: &Path,
+    name: &str,
+    path: Option<String>,
+    clear: bool,
+    pick: &Pick,
+    out: &mut W,
+) -> anyhow::Result<()> {
+    // find the project to use and build the plan's full name, which checks the name is valid
+    let project = picked(client, cwd, pick).await?;
+    let plan = PlanName::new(project.name.clone(), name)?;
+    // print the plan's book as an outline when neither a path nor `--clear` was given
+    if path.is_none() && !clear {
+        let book = client.book(&plan).await?;
+        return print_book(&plan, &book, out);
+    }
+    // ask the service to name or clear the plan's docs, checked against the whole plan first
+    match client.set_plan_docs(&plan, path).await? {
+        DocsNamed::Applied {
+            plan: info,
+            changed,
+        } => {
+            // say "already" when the plan named these docs before
+            let already = match changed {
+                true => "",
+                false => " already",
+            };
+            // print the docs the plan names now, or that it names none
+            match &info.docs {
+                Some(docs) => writeln!(
+                    out,
+                    "`{plan}` reads its docs from `{}`{already}",
+                    shown_docs(docs)
+                )?,
+                None => writeln!(
+                    out,
+                    "`{plan}` names no docs{already}: its book is its root node, then its pages"
+                )?,
+            }
+            Ok(())
+        }
+        DocsNamed::Refused(problems) => {
+            // fail with each problem the docs would add on an indented line of its own
+            let lines: Vec<String> = problems
+                .iter()
+                .map(|problem| format!("  {problem}"))
+                .collect();
+            anyhow::bail!(
+                "`{plan}` names what it did, since those docs would add these problems:\n{}",
+                lines.join("\n")
+            )
+        }
+    }
+}
+
+/// Prints what a plan's book is read from, then its chapters as an outline: each chapter by its
+/// number, title and doc, indented by its depth, each part as `# title`, and each separator as
+/// `---`
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+/// * `book` - Its book
+/// * `out` - Where to print it
+fn print_book<W: Write>(plan: &PlanName, book: &Book, out: &mut W) -> anyhow::Result<()> {
+    // print where the book is read from
+    match &book.from {
+        BookFrom::Folder { path } | BookFrom::Summary { path } => {
+            writeln!(out, "`{plan}` reads its docs from `{}`", shown_docs(path))?;
+        }
+        BookFrom::Plan => writeln!(
+            out,
+            "`{plan}` names no docs: its book is its root node, then its pages"
+        )?,
+    }
+    // print the title its summary gives it, if it has one
+    if let Some(title) = &book.title {
+        writeln!(out, "titled {title}")?;
+    }
+    // say so when the book has no chapters at all
+    if book.items.is_empty() {
+        writeln!(out, "it has no chapters")?;
+    }
+    // print each item, with a chapter's own items indented beneath it
+    for line in outline(&book.items) {
+        writeln!(out, "{line}")?;
+    }
+    Ok(())
+}
+
+/// A book's items as an outline's lines: each chapter by its number, title and doc, or the node
+/// it shows, indented two spaces a level, each part as `# title`, and each separator as `---`
+///
+/// # Arguments
+///
+/// * `items` - The book's items
+fn outline(items: &[BookItem]) -> Vec<String> {
+    /// Adds each item's lines at a depth
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - The items
+    /// * `depth` - How deep they are
+    /// * `out` - Where each line is added
+    fn walk(items: &[BookItem], depth: usize, out: &mut Vec<String>) {
+        // indent each line two spaces for every level deep it is
+        let indent = "  ".repeat(depth);
+        for item in items {
+            match item {
+                BookItem::Chapter(chapter) => {
+                    // start with the chapter's number, which a prefix or suffix chapter lacks
+                    let mut line = indent.clone();
+                    if !chapter.number.is_empty() {
+                        line.push_str(&chapter.shown_number());
+                        line.push(' ');
+                    }
+                    // add its title, then the doc or node it shows, if any
+                    line.push_str(&chapter.title);
+                    match (&chapter.path, &chapter.node) {
+                        (Some(path), _) => line.push_str(&format!(" ({path})")),
+                        (None, Some(node)) => line.push_str(&format!(" (node {node})")),
+                        (None, None) => {}
+                    }
+                    out.push(line);
+                    // add the chapters nested under it one level deeper
+                    walk(&chapter.items, depth + 1, out);
+                }
+                // print a part's title as a heading
+                BookItem::Part { title } => out.push(format!("{indent}# {title}")),
+                // print a separator as a rule
+                BookItem::Separator => out.push(format!("{indent}---")),
+            }
+        }
+    }
+    // walk the book's items from the top level down
+    let mut out = Vec::new();
+    walk(items, 0, &mut out);
+    out
+}
+
 /// Moves a plan of the picked project to the branch its branch was merged into, as the working
 /// directory's checkout's history says
 ///
@@ -2269,12 +2444,16 @@ async fn plan_ls<W: Write>(
 /// * `project` - The plan's project
 /// * `info` - The plan as its listing names it
 fn listed(project: &Project, info: &PlanInfo) -> String {
-    // its revision and what it follows
+    // start the line with the plan's revision and the branch it follows
     let mut line = format!(
         "revision {}, {}",
         info.revision,
         follows(project, info.branch.as_deref())
     );
+    // add the docs the plan names, if it names any
+    if let Some(docs) = &info.docs {
+        line.push_str(&format!(", docs `{}`", shown_docs(docs)));
+    }
     // and who listed it, if that is known
     if let Some(listed) = info
         .registered
@@ -2904,6 +3083,7 @@ mod tests {
             registered: None,
             branch: branch.map(str::to_string),
             was: Vec::new(),
+            docs: None,
         }
     }
 
@@ -3094,6 +3274,23 @@ mod tests {
         assert!(Cli::try_parse_from(["reef", "plan", "branch", "app", "--clear"]).is_ok());
         assert!(Cli::try_parse_from(["reef", "plan", "branch", "app"]).is_err());
         assert!(Cli::try_parse_from(["reef", "plan", "branch", "app", "dev", "--clear"]).is_err());
+        // parse a path to name as the plan's docs
+        let docs = Cli::try_parse_from(["reef", "plan", "docs", "app", "docs/"]);
+        match docs.unwrap().command {
+            Command::Plan(PlanCommand::Docs {
+                name, path, clear, ..
+            }) => {
+                assert_eq!(
+                    (name.as_str(), path.as_deref(), clear),
+                    ("app", Some("docs/"), false)
+                );
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        // accept `--clear` or neither, which prints the book, but refuse a path with `--clear`
+        assert!(Cli::try_parse_from(["reef", "plan", "docs", "app", "--clear"]).is_ok());
+        assert!(Cli::try_parse_from(["reef", "plan", "docs", "app"]).is_ok());
+        assert!(Cli::try_parse_from(["reef", "plan", "docs", "app", "docs", "--clear"]).is_err());
         // a project added takes its repo, and `--project` means nothing there
         let add = Cli::try_parse_from(["reef", "project", "add", "reef", "--repo", "../reef"]);
         assert!(matches!(

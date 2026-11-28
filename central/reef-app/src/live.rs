@@ -70,13 +70,15 @@ impl Drop for Follow {
 #[cfg(not(feature = "web"))]
 type Follow = ();
 
-/// The changes that mean reading a plan again: a put, a page edited, a whole plan written, its
-/// project's remote fetched to a new commit, or a gap
+/// The changes that mean reading a plan again: a put, a page edited, a whole plan written, the
+/// branch it follows or the docs it names changed, its project's remote fetched to a new commit,
+/// or a gap
 const PLAN_KINDS: &[&str] = &[
     "nodes-put",
     "pages-put",
     "plan-written",
     "plan-branched",
+    "plan-docs-named",
     "project-fetched",
     "missed",
 ];

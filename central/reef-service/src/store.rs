@@ -53,6 +53,7 @@ mod activity;
 mod branches;
 mod comment;
 mod decision;
+mod docs;
 mod follow;
 mod history;
 mod loops;
@@ -64,6 +65,7 @@ mod work;
 
 pub use branches::{BranchProposal, BranchSet, KeptBranch, StoredBranch};
 pub use comment::{Followed, Pending};
+pub use docs::{DocsProposal, DocsSet, KeptDocs, StoredDocs};
 pub use history::BadCursor;
 pub use moving::{MoveProposal, MoveSet};
 pub use remotes::{KeptRemote, StoredRemote};
@@ -130,6 +132,9 @@ pub struct Proposal {
     /// The branch the plan follows, read under its write lock, whose docs the check reads, or
     /// `None` for its project's own
     pub branch: Option<String>,
+    /// The docs the plan names, read under the same lock, whose chapters the check reads, or
+    /// `None` for none (C122)
+    pub docs: Option<String>,
 }
 
 /// What came of a put
@@ -463,9 +468,11 @@ impl<B: Backend> Store<B> {
     /// * `project` - The project's name
     #[instrument(name = "Store::plans", skip_all, err(Debug))]
     pub async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanInfo>> {
-        // a project's plans sit in that project's partition, and their branches in another
+        // read the project's plan rows, then the branches and docs its plans name, which sit in
+        // partitions of their own
         let rows = self.backend.plans(project).await?;
         let mut branches = self.plan_branches(project).await?;
+        let mut docs = self.plans_docs(project).await?;
         rows.into_iter()
             .map(|row| {
                 // a row of another project whose key hashed the same is a collision
@@ -481,12 +488,15 @@ impl<B: Backend> Store<B> {
                     .remove(&row.name)
                     .map(|stored| stored.kept)
                     .unwrap_or_default();
+                // take the docs the plan names, if it names any
+                let named = docs.remove(&row.name).and_then(|stored| stored.kept.docs);
                 Ok(PlanInfo {
                     name: PlanName::new(row.project, row.name)?,
                     revision: row.current,
                     registered: None,
                     branch: kept.branch,
                     was: kept.was,
+                    docs: named,
                 })
             })
             .collect()
@@ -929,8 +939,10 @@ impl<B: Backend> Store<B> {
             after: records(plan, nodes.clone())?,
             pages: stood_pages.clone(),
             pages_after: pages.clone(),
-            // the branch it follows, read under the same lock, so it is judged where it lands
+            // read the branch it follows and the docs it names under this same lock, so the check
+            // judges the plan where the write lands
             branch: self.plan_branch(plan).await?,
+            docs: self.plan_docs(plan).await?,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
@@ -1189,8 +1201,10 @@ impl<B: Backend> Store<B> {
             after: records(plan, judged)?,
             pages: pages.into_iter().map(PageWrite::from).collect(),
             pages_after: None,
-            // the branch it follows, read under the same lock, so it is judged where it lands
+            // read the branch it follows and the docs it names under this same lock, so the check
+            // judges the plan where the write lands
             branch: self.plan_branch(plan).await?,
+            docs: self.plan_docs(plan).await?,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {
@@ -1362,8 +1376,10 @@ impl<B: Backend> Store<B> {
             after: nodes,
             pages: before,
             pages_after: Some(after),
-            // the branch it follows, read under the same lock, so it is judged where it lands
+            // read the branch it follows and the docs it names under this same lock, so the check
+            // judges the plan where the write lands
             branch: self.plan_branch(plan).await?,
+            docs: self.plan_docs(plan).await?,
         };
         let problems = check(proposal).await?;
         if !problems.is_empty() {

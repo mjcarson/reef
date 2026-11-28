@@ -23,6 +23,10 @@
 //!   so every read of one moment sees one commit.
 //! - **A page edit is checked as a node write is.** Taking out a page a node links to, or a
 //!   heading a link names, adds a problem, and is refused.
+//! - **A plan's docs are a book** ([`docs`]). A plan names a folder or a summary, read over its
+//!   pages and its repo as chapters, and every check reads it, so a write that takes a chapter
+//!   away is refused and `check` lists one a fetch or the working tree took. A plan that names
+//!   none reads its root node, then its pages ([`Service::read`]).
 //! - **Docs are served as pages.** A payload's links lead under [`paths::docs`], where
 //!   [`Service::doc_page`] renders each doc as the page mdbook would write for it, so the
 //!   viewer's *Read here* cuts a section out of it as out of a book's page.
@@ -61,8 +65,10 @@ use reef_api::{
     check_page_path, paths,
 };
 use reef_model::{
-    Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record, nodes_from_records,
+    Book, Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record,
+    nodes_from_records,
 };
+use reef_render::chapters::{plan_book, read_book};
 use reef_render::docs::page_node_problems;
 use reef_render::{
     Cached, DocSource, Layered, MemSource, ROOT, Renderer, Sections, doc_body, render_page,
@@ -89,6 +95,7 @@ use crate::tree::Docs;
 mod branches;
 mod comments;
 mod decisions;
+mod docs;
 mod history;
 mod loops;
 mod moving;
@@ -666,13 +673,15 @@ impl<B: Backend> Service<B> {
     /// * `plan` - The plan's full name
     #[instrument(name = "Service::check", skip_all, err(Debug))]
     pub async fn check(&self, plan: &PlanName) -> anyhow::Result<Vec<Diagnostic>> {
-        // the plan and its pages as they stand, and the repo under them
+        // read the plan's nodes and pages as they stand now and the repo its docs come from
         let (records, pages, docs) = self.snapshot(plan).await?;
+        // get the folder or summary the plan names so its book is checked too
+        let named = self.store.plan_docs(plan).await?;
         let sections = self.sections.clone();
         // build it off the async threads, since its docs are files or git's objects
         let problems = tokio::task::spawn_blocking(move || {
             let renderer = Renderer::new(Layered::new(&pages, docs.source()?), sections);
-            anyhow::Ok(checked(&renderer, records, &pages).1)
+            anyhow::Ok(checked(&renderer, records, &pages, named.as_deref()).1)
         })
         .await??;
         Ok(problems)
@@ -873,7 +882,9 @@ impl<B: Backend> Service<B> {
         // each plan follows
         let project_read = self.project_named(project).await?;
         let branches = self.store.plan_branches(project).await?;
-        // each plan, its pages as they stand, and where its docs are read
+        // get the folder or summary each of the project's plans names
+        let named = self.store.plans_docs(project).await?;
+        // read each plan's nodes and pages, where its docs are read, and the docs it names
         let mut read = Vec::with_capacity(plans.len());
         for plan in &plans {
             let (records, pages, _) = self.snapshot(plan).await?;
@@ -881,7 +892,11 @@ impl<B: Backend> Service<B> {
                 .get(&plan.plan)
                 .and_then(|stored| stored.kept.branch.as_deref());
             let docs = Docs::of(&project_read, branch)?;
-            read.push((plan.clone(), records, pages, docs));
+            // find the folder or summary this plan names, if it names one
+            let book = named
+                .get(&plan.plan)
+                .and_then(|stored| stored.kept.docs.clone());
+            read.push((plan.clone(), records, pages, docs, book));
         }
         // and the queue's entries of those plans, in its order
         let queue: Vec<NodeName> = self
@@ -898,21 +913,21 @@ impl<B: Backend> Service<B> {
         let next = tokio::task::spawn_blocking(move || {
             // each distinct source opened once, before any plan borrows one
             let mut sources: Vec<(Docs, Cached<_>)> = Vec::new();
-            for (_, _, _, docs) in &read {
+            for (_, _, _, docs, _) in &read {
                 if !sources.iter().any(|(opened, _)| opened == docs) {
                     sources.push((docs.clone(), Cached::new(docs.source()?)));
                 }
             }
             let graphs: Vec<PlanGraph> = read
                 .into_iter()
-                .map(|(name, records, pages, docs)| {
+                .map(|(name, records, pages, docs, book)| {
                     // the source its branch was opened as, which is always there
                     let repo = sources
                         .iter()
                         .find_map(|(opened, repo)| (*opened == docs).then_some(repo))
                         .expect("every plan's source was opened");
                     let renderer = Renderer::new(Layered::new(&pages, repo), sections.clone());
-                    let (graph, problems) = checked(&renderer, records, &pages);
+                    let (graph, problems) = checked(&renderer, records, &pages, book.as_deref());
                     PlanGraph {
                         name,
                         graph,
@@ -996,6 +1011,64 @@ impl<B: Backend> Service<B> {
         Ok(html)
     }
 
+    /// Reads a plan's docs as a book: the folder or summary it names, read over its pages and its
+    /// repo, else its root node, then its pages by path
+    ///
+    /// Each chapter with a doc names the page [`Service::doc_page`] serves it as. The root
+    /// node's chapter names its node, whose body has no page of its own. A book's problems are
+    /// left to `check`, so a chapter a summary lists that isn't there reads as a draft.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    #[instrument(name = "Service::read", skip_all, err(Debug))]
+    pub async fn read(&self, plan: &PlanName) -> anyhow::Result<Book> {
+        // make sure the plan's project is registered
+        self.project_named(&plan.project).await?;
+        // find the plan in its project's listing to learn which docs it names
+        let info = self
+            .store
+            .plans(&plan.project)
+            .await?
+            .into_iter()
+            .find(|info| info.name == *plan)
+            .ok_or_else(|| NotListed(plan.clone()))?;
+        // read the plan's nodes and pages as they stand now and the repo its docs come from
+        let (records, pages, docs) = self.snapshot(plan).await?;
+        // read the book on a blocking thread since its docs may be files on disk or git objects
+        let mut book = tokio::task::spawn_blocking(move || match info.docs {
+            // read the folder or summary the plan names with its pages laid over its repo's files
+            Some(named) => {
+                let source = Layered::new(&pages, docs.source()?);
+                anyhow::Ok(read_book(&source, &named).0)
+            }
+            // otherwise open the book with the plan's root node, then list its pages by path
+            None => {
+                // pick the first node in written order that is in no group as the root
+                let root = records
+                    .iter()
+                    .filter(|record| record.spec.group.is_none())
+                    .min_by(|a, b| (a.order, &a.spec.id).cmp(&(b.order, &b.spec.id)))
+                    .map(|record| {
+                        // title the root by its node's title, falling back to its id
+                        let title = record.spec.title.as_deref().unwrap_or(&record.spec.id);
+                        (record.spec.id.as_str(), title)
+                    });
+                // read the root node's chapter followed by a chapter for each page
+                anyhow::Ok(plan_book(root, &pages))
+            }
+        })
+        .await??;
+        // point each chapter that has a doc at the page that doc is served as
+        let served = paths::docs(plan);
+        book.each_chapter_mut(|chapter| {
+            if let Some(path) = &chapter.path {
+                chapter.page = Some(format!("{served}{}", reef_render::paths::html_of(path)));
+            }
+        });
+        Ok(book)
+    }
+
     /// Reads a plan's records and its pages as they stand at one moment, and where its other
     /// docs are read from
     ///
@@ -1060,24 +1133,31 @@ fn build<S: DocSource>(renderer: &Renderer<S>, records: Vec<Record>) -> (Graph, 
 }
 
 /// Builds a plan as check does, its pages with it: the checked graph, then each node briefed
-/// from its docs, then each link of a page that names a node the plan doesn't have
+/// from its docs, then each link of a page that names a node the plan doesn't have, then the
+/// book of the docs it names
 ///
-/// Returns the graph and its problems, the nodes' first, then the pages'.
+/// Returns the graph and its problems, the nodes' first, then the pages', then the book's.
 ///
 /// # Arguments
 ///
 /// * `renderer` - Reads the docs the nodes link to, the plan's pages over its repo
 /// * `records` - The plan's records, in written order
 /// * `pages` - The plan's pages, whose links to nodes are checked
+/// * `docs` - The folder or summary the plan names, whose chapters must be there, if any
 fn checked<S: DocSource>(
     renderer: &Renderer<S>,
     records: Vec<Record>,
     pages: &MemSource,
+    docs: Option<&str>,
 ) -> (Graph, Vec<Diagnostic>) {
     // the nodes as check builds them
     let (graph, mut problems) = build(renderer, records);
     // and each page's links to nodes, against the nodes built
     problems.extend(page_node_problems(&graph, pages.iter()));
+    // check that every chapter of the book the plan names is there, read over the same docs
+    if let Some(docs) = docs {
+        problems.extend(read_book(renderer.source(), docs).1);
+    }
     (graph, problems)
 }
 
@@ -1097,11 +1177,13 @@ async fn added(
     sections: Sections,
     proposal: Proposal,
 ) -> anyhow::Result<Vec<Diagnostic>> {
+    // unpack the plan before and after the write, its pages, and the docs it names
     let Proposal {
         before,
         after,
         pages,
         pages_after,
+        docs: named,
         ..
     } = proposal;
     // its docs are files or git's objects, so build both sides off the async threads
@@ -1113,8 +1195,8 @@ async fn added(
             None => {
                 let renderer = Renderer::new(Layered::new(&pages, &repo), sections);
                 (
-                    checked(&renderer, before, &pages).1,
-                    checked(&renderer, after, &pages).1,
+                    checked(&renderer, before, &pages, named.as_deref()).1,
+                    checked(&renderer, after, &pages, named.as_deref()).1,
                 )
             }
             // each side over its own pages, the repo read once for both
@@ -1123,8 +1205,8 @@ async fn added(
                 let stood = Renderer::new(Layered::new(&pages, &repo), sections.clone());
                 let left = Renderer::new(Layered::new(&pages_after, &repo), sections);
                 (
-                    checked(&stood, before, &pages).1,
-                    checked(&left, after, &pages_after).1,
+                    checked(&stood, before, &pages, named.as_deref()).1,
+                    checked(&left, after, &pages_after, named.as_deref()).1,
                 )
             }
         };
@@ -1214,7 +1296,13 @@ pub(crate) async fn added_across(
     sections: Sections,
     proposal: BranchProposal,
 ) -> anyhow::Result<Vec<Diagnostic>> {
-    let BranchProposal { records, pages, .. } = proposal;
+    // unpack the plan's nodes, its pages, and the docs it names
+    let BranchProposal {
+        records,
+        pages,
+        docs: named,
+        ..
+    } = proposal;
     // both sides are files or git's objects, so build them off the async threads
     let added = tokio::task::spawn_blocking(move || {
         let pages = page_source(pages);
@@ -1223,13 +1311,13 @@ pub(crate) async fn added_across(
             Ok(source) => {
                 let renderer =
                     Renderer::new(Layered::new(&pages, Cached::new(source)), sections.clone());
-                checked(&renderer, records.clone(), &pages).1
+                checked(&renderer, records.clone(), &pages, named.as_deref()).1
             }
             Err(_) => Vec::new(),
         };
         // and as it would read at the new branch
         let renderer = Renderer::new(Layered::new(&pages, Cached::new(to.source()?)), sections);
-        let after = checked(&renderer, records, &pages).1;
+        let after = checked(&renderer, records, &pages, named.as_deref()).1;
         anyhow::Ok(new_problems(&before, after))
     })
     .await??;

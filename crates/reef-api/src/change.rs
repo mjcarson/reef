@@ -82,6 +82,14 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// The docs a plan names were set, changed or cleared, so its book reads elsewhere (C122)
+    PlanDocsNamed {
+        /// The plan's full name
+        plan: PlanName,
+        /// The folder or summary it names now, or `None` for none
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        docs: Option<String>,
+    },
     /// A batch of puts and removals was written to a plan as one change, every node it didn't
     /// touch at the version it was at
     NodesPut {
@@ -223,6 +231,7 @@ impl Change {
             Change::ProjectFetched { .. } => "project-fetched",
             Change::PlanAdded { .. } => "plan-added",
             Change::PlanBranched { .. } => "plan-branched",
+            Change::PlanDocsNamed { .. } => "plan-docs-named",
             Change::NodesPut { .. } => "nodes-put",
             Change::PagesPut { .. } => "pages-put",
             Change::PlanWritten { .. } => "plan-written",
@@ -247,6 +256,7 @@ impl Change {
             Change::ProjectAdded { project } => Some(project.name.as_str()),
             Change::PlanAdded { plan }
             | Change::PlanBranched { plan, .. }
+            | Change::PlanDocsNamed { plan, .. }
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan.project.as_str()),
@@ -277,6 +287,7 @@ impl Change {
             }
             Change::PlanAdded { plan }
             | Change::PlanBranched { plan, .. }
+            | Change::PlanDocsNamed { plan, .. }
             | Change::NodesPut { plan, .. }
             | Change::PagesPut { plan, .. }
             | Change::PlanWritten { plan, .. } => Some(plan),
@@ -407,6 +418,10 @@ mod tests {
                 plan: plan.clone(),
                 branch: Some("dev".to_string()),
             },
+            Change::PlanDocsNamed {
+                plan: plan.clone(),
+                docs: Some("docs/SUMMARY.md".to_string()),
+            },
             Change::NodesPut {
                 plan: plan.clone(),
                 nodes: Vec::new(),
@@ -529,6 +544,20 @@ mod tests {
             branch: None,
         };
         assert_eq!(branched.plan().map(|plan| plan.plan.as_str()), Some("app"));
+        // build a change that clears the docs a plan of the `reef` project names
+        let named = Change::PlanDocsNamed {
+            plan: PlanName::new("reef", "app").unwrap(),
+            docs: None,
+        };
+        // check it reaches its own project and plan but not another plan
+        assert_eq!(named.project(), Some("reef"));
+        assert_eq!(named.plan().map(|plan| plan.plan.as_str()), Some("app"));
+        assert!(!named.reaches("central"));
+        // check its JSON leaves `docs` out when no docs are named
+        assert_eq!(
+            serde_json::to_value(&named).unwrap(),
+            json!({"kind": "plan-docs-named", "plan": "reef/app"})
+        );
     }
 
     /// A test run on a node is its plan's, and one on no node reaches every plan of its project

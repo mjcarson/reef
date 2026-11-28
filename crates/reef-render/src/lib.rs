@@ -10,9 +10,12 @@
 //!
 //! A book's own files are read by [`book`]: its node files, and the plan they make, checked
 //! and briefed, as mdbook-reef draws it and `reef import` lifts it into a central plan. The
-//! links written in a node are moved with it by [`links`], so they lead where they did.
+//! links written in a node are moved with it by [`links`], so they lead where they did. The docs
+//! a central plan names are read as a book of chapters by [`chapters`], from a folder or a
+//! summary in mdbook's format, over any source that lists its folders.
 
 pub mod book;
+pub mod chapters;
 pub mod docs;
 pub mod extract;
 pub mod links;
@@ -26,5 +29,5 @@ pub use markdown::{
     render_body, render_comment, render_page,
 };
 pub use source::{
-    Cached, DocSource, FsSource, Headings, Layered, MemSource, RepoSource, doc_body, leaves,
+    Cached, DocSource, Entry, FsSource, Headings, Layered, MemSource, RepoSource, doc_body, leaves,
 };

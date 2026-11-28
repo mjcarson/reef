@@ -174,6 +174,69 @@ fn tree_source_refuses_paths_that_leave_and_links_out() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A directory at a commit lists its blobs as files and its trees as folders, each symlink as
+/// what it leads to, and leaves out a link out of the tree, a submodule and a dotfile
+#[test]
+fn tree_source_lists_a_directory_as_a_working_tree_would() -> anyhow::Result<()> {
+    // make a work tree and the path its bare clone will go to
+    let (work, clone) = cloned("lists")?;
+    // write a file, a folder, a dotfile, and a file outside the work tree
+    git::write(&work, "docs/design.md", "# Design\n")?;
+    git::write(&work, "docs/guide/setup.md", "# Setup\n")?;
+    git::write(&work, "docs/.hidden.md", "# Hidden\n")?;
+    git::write(&work, "../outside.md", "# Outside\n")?;
+    // link to the file, to the folder, out of the tree, and to nothing at all
+    let link = |target: &str, path: &str| std::os::unix::fs::symlink(target, work.join(path));
+    link("design.md", "docs/link.md")?;
+    link("guide", "docs/also")?;
+    link("../../outside.md", "docs/out.md")?;
+    link("missing.md", "docs/dangling.md")?;
+    // stage it all, then add a submodule's gitlink at the commit it started from
+    git::run(&work, &["add", "."])?;
+    let start = git::run(&work, &["rev-parse", "HEAD"])?;
+    let gitlink = format!("160000,{start},docs/vendor");
+    git::run(&work, &["update-index", "--add", "--cacheinfo", &gitlink])?;
+    // commit it and open its tree from a bare clone, as a remote project's docs are read
+    git::run(&work, &["commit", "-q", "-m", "a folder"])?;
+    let commit = git::run(&work, &["rev-parse", "HEAD"])?;
+    clone_bare(&work, &clone)?;
+    let tree = TreeSource::open(&clone, &commit)?;
+    // list the folder by name, each as a file or folder
+    let listed: Vec<(String, bool)> = tree
+        .list("docs")
+        .into_iter()
+        .map(|entry| (entry.name, entry.folder))
+        .collect();
+    // expect each link as what it leads to, and no link out, dangling link, dotfile or submodule
+    let want = [
+        ("also", true),
+        ("design.md", false),
+        ("guide", true),
+        ("link.md", false),
+    ];
+    let want: Vec<(String, bool)> = want
+        .into_iter()
+        .map(|(name, folder)| (name.to_string(), folder))
+        .collect();
+    assert_eq!(listed, want);
+    // make sure the root lists its folders too
+    let root: Vec<String> = tree.list("").into_iter().map(|entry| entry.name).collect();
+    assert!(root.contains(&"docs".to_string()), "{root:?}");
+    // make sure a folder reached through a link lists as the folder it leads to
+    assert_eq!(tree.list("docs/also"), tree.list("docs/guide"));
+    // make sure a file, a path that leaves, a missing path and a submodule list nothing
+    for dir in ["docs/design.md", "..", "/etc", "docs/gone", "docs/vendor"] {
+        assert!(tree.list(dir).is_empty(), "{dir}");
+    }
+    // make sure the docs a commit opens as list the folder the same way
+    let docs = Docs::Commit {
+        clone: clone.clone(),
+        commit,
+    };
+    assert_eq!(docs.source()?.list("docs"), tree.list("docs"));
+    Ok(())
+}
+
 /// Several branches fetch into one shallow clone, each over its own ref, so each plan's docs
 /// read at its own branch's tip, and a branch the remote hasn't fails alone
 #[tokio::test]

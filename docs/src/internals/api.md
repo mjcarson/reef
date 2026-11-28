@@ -26,6 +26,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET …/plans/{plan}/payload` | the viewer's `Payload` |
 | `GET …/plans/{plan}/check` | its problems, as check prints them |
 | `GET …/plans/{plan}/docs/{*path}` | a doc as its HTML page (`docs/design.html` for `docs/design.md`), the plan's page or the repo's file, or 404 |
+| `GET …/plans/{plan}/book` | its docs as a `Book`: what it was read from (`folder`, `summary` or `plan`), a summary's title, and its items, each a `chapter` with its title, doc, node, served `page`, mdbook number and own items, a `part` or a `separator`; or 404 if the plan isn't listed |
+| `PUT …/plans/{plan}/book` `PlanDocs` | `DocsNamed`: 200 if it reads those docs now, 422 if they aren't there or would add a problem, or 404 if the plan isn't listed |
 | `GET …/plans/{plan}/pages` | its own pages: a `PageListing` |
 | `POST …/plans/{plan}/pages` `PageEdit` | `PageEdited`: 200, 409 if stale, 422 if it would add a problem |
 | `GET …/plans/{plan}/pages/{*path}` | the `StoredPage`, or 404 |
@@ -88,7 +90,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 - **A whole plan or a page is a big body.** `PUT …/revision` and `POST …/pages` take up to
   48 MiB, past axum's default of 2 MiB, which the example book's pages alone exceed.
 - **The change stream** sends each change as an event named by its kind (`project-added`,
-  `project-fetched`, `plan-added`, `plan-branched`, `nodes-put`, `pages-put`, `plan-written`,
+  `project-fetched`, `plan-added`, `plan-branched`, `plan-docs-named`, `nodes-put`, `pages-put`, `plan-written`,
   `queue-changed`, `work-recorded`, `test-run-changed`), its data the change as JSON. It is live only: a client reads
   what it needs, then follows. One that falls behind by more than 256 changes is sent `missed`,
   with how many, and should read again. `plan` narrows it within a `project`, and a project's

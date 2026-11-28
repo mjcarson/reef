@@ -2231,6 +2231,155 @@ async fn page_commands_edit_by_version() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `reef plan docs` names a folder or a summary that is there, is refused one that isn't, prints
+/// what a plan names and its chapters, and clears them; once named, a page edit that takes a
+/// chapter away is refused, a repo file taken away shows in `reef check`, and `reef plan ls`
+/// shows the docs (C122)
+#[tokio::test]
+async fn plan_docs_names_only_what_is_there() -> anyhow::Result<()> {
+    // start a scratch service and get the repo its project is registered from
+    let cx = Cx::new("plan-docs").await?;
+    let repo = cx.ax.repo.clone();
+    // write a folder of docs to the repo, plus a summary and a chapter to keep as pages
+    write_files(
+        &repo,
+        &[
+            ("docs/README.md", "# The docs\n\nWhat they are for.\n"),
+            ("docs/guide.md", "# Guide\n"),
+            ("docs/book/intro.md", "# Intro\n"),
+            (
+                "scratch/SUMMARY.md",
+                "# Summary\n\n- [Intro](intro.md)\n- [Later](later.md)\n",
+            ),
+            ("scratch/later.md", "# Later\n"),
+        ],
+    )?;
+    // put the summary and its later chapter as pages under the repo's `docs/book` folder
+    for (page, file) in [
+        ("docs/book/SUMMARY.md", "scratch/SUMMARY.md"),
+        ("docs/book/later.md", "scratch/later.md"),
+    ] {
+        cx.reef(&repo, &["page", "put", page, file]).await?;
+    }
+    // print the book of a plan that names no docs yet, which lists only its pages
+    let shown = cx.reef(&repo, &["plan", "docs", "central"]).await?;
+    assert_eq!(
+        shown,
+        "`reef/central` names no docs: its book is its root node, then its pages\n\
+         # Pages\n\
+         Summary (docs/book/SUMMARY.md)\n\
+         Later (docs/book/later.md)\n"
+    );
+    // name a folder that is there as the plan's docs
+    let named = cx
+        .reef(&repo, &["plan", "docs", "central", "docs/"])
+        .await?;
+    assert_eq!(named, "`reef/central` reads its docs from `docs/`\n");
+    // name the same folder written another way, which changes nothing
+    let again = cx
+        .reef(&repo, &["plan", "docs", "central", "./docs"])
+        .await?;
+    assert_eq!(
+        again,
+        "`reef/central` reads its docs from `docs/` already\n"
+    );
+    // print the folder as an outline of its README, its files, then the folder its summary
+    // orders, with the plan's pages laid over the repo's files
+    let shown = cx.reef(&repo, &["plan", "docs", "central"]).await?;
+    assert_eq!(
+        shown,
+        "`reef/central` reads its docs from `docs/`\n\
+         The docs (docs/README.md)\n\
+         Guide (docs/guide.md)\n\
+         book\n  \
+           1. Intro (docs/book/intro.md)\n  \
+           2. Later (docs/book/later.md)\n"
+    );
+    // name a summary that is there in place of the folder
+    let named = cx
+        .reef(&repo, &["plan", "docs", "central", "docs/book/SUMMARY.md"])
+        .await?;
+    assert_eq!(
+        named,
+        "`reef/central` reads its docs from `docs/book/SUMMARY.md`\n"
+    );
+    // make sure `plan ls` shows the summary the plan now names
+    let plans = cx.reef(&repo, &["plan", "ls"]).await?;
+    assert!(plans.contains(", docs `docs/book/SUMMARY.md`"), "{plans}");
+    // try to name docs that aren't there or that leave the repo, each of which is refused
+    for (path, said) in [
+        ("gone/", "the plan's docs: `gone/` isn't there"),
+        (
+            "docs/GONE.md",
+            "the plan's docs: `docs/GONE.md` isn't there",
+        ),
+        ("../docs", "the plan's docs: `../docs` leaves the repo"),
+    ] {
+        // name the bad path and expect the service to refuse it
+        let (_, error) = cx
+            .failing(&repo, &["plan", "docs", "central", path])
+            .await?;
+        // make sure the refusal says the plan kept its docs and lists the problem found
+        assert!(
+            error.starts_with(
+                "`reef/central` names what it did, since those docs would add these problems:"
+            ),
+            "{path}: {error}"
+        );
+        assert!(error.contains(said), "{path}: {error}");
+    }
+    // make sure the plan still names the summary after every refusal
+    let plans = cx.reef(&repo, &["plan", "ls"]).await?;
+    assert!(plans.contains(", docs `docs/book/SUMMARY.md`"), "{plans}");
+    // try to remove a page the summary lists, which is refused as a missing chapter
+    let (_, error) = cx
+        .failing(&repo, &["page", "rm", "docs/book/later.md"])
+        .await?;
+    assert!(
+        error.contains("docs/book/SUMMARY.md: lists `docs/book/later.md`, which isn't there"),
+        "{error}"
+    );
+    // try to remove the summary itself, which is refused since the plan names it
+    let (_, error) = cx
+        .failing(&repo, &["page", "rm", "docs/book/SUMMARY.md"])
+        .await?;
+    assert!(
+        error.contains("the plan's docs: `docs/book/SUMMARY.md` isn't there"),
+        "{error}"
+    );
+    // make sure the plan has no problems while every chapter is there
+    assert_eq!(
+        cx.reef(&repo, &["check"]).await?,
+        "`reef/central` has no problems\n"
+    );
+    // delete a chapter the summary lists from the working tree, which no write can refuse
+    std::fs::remove_file(repo.join("docs/book/intro.md"))?;
+    // make sure `check` now lists the missing chapter as a problem at the summary
+    let (printed, error) = cx.failing(&repo, &["check"]).await?;
+    assert_eq!(
+        printed,
+        "error: docs/book/SUMMARY.md: lists `docs/book/intro.md`, which isn't there\n"
+    );
+    assert_eq!(error, "`reef/central` has 1 problem");
+    // clear the plan's docs so it names none again
+    let cleared = cx
+        .reef(&repo, &["plan", "docs", "central", "--clear"])
+        .await?;
+    assert_eq!(
+        cleared,
+        "`reef/central` names no docs: its book is its root node, then its pages\n"
+    );
+    // make sure `plan ls` no longer shows any docs for the plan
+    let plans = cx.reef(&repo, &["plan", "ls"]).await?;
+    assert!(!plans.contains("docs `"), "{plans}");
+    // remove the page the summary listed, which nothing refuses now that no docs are named
+    let rm = cx
+        .reef(&repo, &["page", "rm", "docs/book/later.md"])
+        .await?;
+    assert_eq!(rm, "removed page `docs/book/later.md`\n");
+    Ok(())
+}
+
 /// A book whose page links into a group's file inline and by reference, at a heading of it, and
 /// into another node's file, and whose node links a heading of the group's file
 const NODE_LINKED_BOOK: [(&str, &str); 4] = [

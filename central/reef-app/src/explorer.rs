@@ -505,6 +505,7 @@ mod tests {
             registered: None,
             branch: None,
             was: Vec::new(),
+            docs: None,
         };
         // a node in progress makes it active
         let working = match active {

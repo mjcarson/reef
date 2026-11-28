@@ -24,6 +24,7 @@
 //! | `GET` | [`CHECK`] |
 //! | `GET` | [`NEXT`] |
 //! | `GET` | [`DOC`] |
+//! | `GET`, `PUT` | [`BOOK`] |
 //! | `GET`, `POST` | [`PAGES`] |
 //! | `GET` | [`PAGE`] |
 //! | `GET ?older=&limit=` | [`PAGE_HISTORY`] |
@@ -139,6 +140,10 @@ pub const NEXT: &str = "/api/v1/projects/{project}/plans/{plan}/next";
 /// `path` is the page mdbook would write for the doc, from the root of the plan's docs:
 /// `docs/design.html` for the repo's `docs/design.md`.
 pub const DOC: &str = "/api/v1/projects/{project}/plans/{plan}/docs/{*path}";
+
+/// A plan's docs as a book, a tree of chapters, read by `GET`; the folder or summary it reads
+/// them from is named, or cleared, by `PUT` (C122)
+pub const BOOK: &str = "/api/v1/projects/{project}/plans/{plan}/book";
 
 /// A plan's own pages: listed by `GET`, edited a page at a time by `POST`
 pub const PAGES: &str = "/api/v1/projects/{project}/plans/{plan}/pages";
@@ -576,6 +581,15 @@ pub fn docs(plan: &PlanName) -> String {
     format!("{}/docs/", self::plan(plan))
 }
 
+/// The path of a plan's docs as a book, where the docs it names are set too
+///
+/// # Arguments
+///
+/// * `plan` - The plan's full name
+pub fn book(plan: &PlanName) -> String {
+    format!("{}/book", self::plan(plan))
+}
+
 /// The path of a plan's own pages
 ///
 /// # Arguments
@@ -944,6 +958,12 @@ mod tests {
         assert_eq!(super::check(&plan), format!("{filled}/check"));
         assert_eq!(super::next(&plan), format!("{filled}/next"));
         assert_eq!(super::pages(&plan), format!("{filled}/pages"));
+        assert_eq!(
+            super::book(&plan),
+            super::BOOK
+                .replace("{project}", "reef")
+                .replace("{plan}", "central")
+        );
         // a project's plans summed up fill in their own, beside its plans
         assert_eq!(
             super::plan_summaries("reef"),

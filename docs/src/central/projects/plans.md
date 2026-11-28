@@ -6,8 +6,12 @@ reef plan new app --branch dev     # one that follows a branch of the repo
 reef plan branch launch release    # follow another branch, unless the plan's links break there
 reef plan branch launch --clear    # follow the project's own branch again
 reef plan branch launch --merged   # follow the branch its branch was merged into
-reef plan ls                       # each plan, the revision it is at, what it follows, who listed it
+reef plan ls                       # each plan, the revision it is at, what it follows, its docs, who listed it
 reef plan ls --long                # and each summed up: its state, nodes done, last update, who works on what
+reef plan docs launch docs/        # read a folder as the plan's docs, unless it isn't there
+reef plan docs launch docs/src/SUMMARY.md   # or a summary in mdbook's format
+reef plan docs launch              # what it reads, and its chapters as an outline
+reef plan docs launch --clear      # name none: its book is its root node, then its pages
 ```
 
 - **A project with one plan needs no `--plan`.** Once it has several, the checkout picks one:
@@ -56,3 +60,31 @@ A project can keep plans for several lines of work at once, such as `main`'s and
 - **A branch is checked before a plan follows it,** as every write is. A branch the repo hasn't
   is refused, a remote project's clone fetches one it lacks, and a change that would break the
   plan's links is refused with the problems it would add, leaving the plan as it was.
+
+## A plan's docs
+
+A plan names the docs that say what it is for, its goals and its requirements, and reads them as
+a book of chapters, which `GET …/plans/{plan}/book` answers and the app draws.
+
+- **A folder or a summary.** A path ending `.md` is a summary in mdbook's format, and any other a
+  folder; a trailing `/` is dropped, and `.` is the root. Either is read where the plan's links
+  are: its pages over its repo's files, at the branch it follows.
+- **A folder is read by name.** Its `README.md` or `index.md` comes first, as its own page, then
+  its other markdown files by name, then its folders by name. Each folder is a section headed by
+  its own page, else titled by its name, and a folder that holds no markdown is left out. Each
+  chapter is titled by its first heading, else its file's name.
+- **A summary orders a folder.** A folder that holds a `SUMMARY.md`, at any depth, is read by it
+  as mdbook reads one: a title, prefix chapters, numbered chapters with nested lists as
+  sub-chapters and `[Draft]()` drafts, `#` part titles, `---` separators and suffix chapters. Its
+  numbered chapters are numbered as mdbook numbers them, running on across parts, and its links
+  lead from its own folder. A summary may be a page, anywhere but the root
+  ([Pages](pages.md)).
+- **A plan that names none** reads its first node in written order that is in no group, then
+  each of its pages by path under *Pages*, as an export's fresh summary lists them.
+- **Checked as links are.** Naming docs that aren't there, or that leave the repo, is refused,
+  and so is a page edit or a branch change that takes away a chapter a summary lists, the
+  summary itself, or a named folder's last doc. Taking a page out of a folder just shrinks the
+  book. A fetch or the working tree can't be refused, so a chapter one took away is a problem
+  `reef check` lists, and the book reads it as a draft.
+- **Kept in the plan's history** under `plan/<plan>`, as a branch change is, and named in `reef
+  plan ls`: ``revision 4, reads its project's working tree, docs `docs/` ``.

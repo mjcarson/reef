@@ -291,6 +291,7 @@ impl<B: Backend> Store<B> {
                 pages: from_pages,
                 pages_after: None,
                 branch: self.plan_branch(from).await?,
+                docs: self.plan_docs(from).await?,
             },
             to: Proposal {
                 before: records(to, there.iter().cloned().map(NodeWrite::from).collect())?,
@@ -298,6 +299,7 @@ impl<B: Backend> Store<B> {
                 pages: to_pages,
                 pages_after: None,
                 branch: self.plan_branch(to).await?,
+                docs: self.plan_docs(to).await?,
             },
         };
         // judged on both, and nothing moved if either gains a problem

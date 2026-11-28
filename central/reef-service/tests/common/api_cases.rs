@@ -15,10 +15,11 @@ use reef_api::{
     StoredNode, StoredPage, Target, Thread, ThreadState, TrailerOutcome, TrailerRead, WorkRecord,
     paths,
 };
-use reef_api::{BranchFetched, Branched, MoveNodes, Moved, PlanBranch};
+use reef_api::{BranchFetched, Branched, DocsNamed, MoveNodes, Moved, PlanBranch, PlanDocs};
 use reef_api::{MarkReview, Review, ReviewState, Reviewed, Writer};
 use reef_model::{
-    Description, Diagnostic, EntryState, Next, NodeSpec, Payload, PlanName, Status, WaitsOn,
+    Book, BookFrom, BookItem, Description, Diagnostic, EntryState, Next, NodeSpec, Payload,
+    PlanName, Status, WaitsOn,
 };
 use reef_service::Backend;
 use reqwest::StatusCode;
@@ -2547,6 +2548,284 @@ pub async fn each_plans_queue_keeps_its_own_history<B: Backend + 'static>(
         (status, error.code),
         (StatusCode::NOT_FOUND, ErrorCode::NotListed)
     );
+    Ok(())
+}
+
+/// Names a plan's docs through the book's route, answering its status and outcome
+///
+/// # Arguments
+///
+/// * `ax` - The served service
+/// * `plan` - The plan's full name
+/// * `docs` - The folder or summary to name, or `None` for none
+async fn name_docs<B: Backend + 'static>(
+    ax: &Ax<B>,
+    plan: &PlanName,
+    docs: Option<&str>,
+) -> anyhow::Result<(StatusCode, DocsNamed)> {
+    // build the request naming these docs, or none
+    let request = PlanDocs {
+        docs: docs.map(str::to_string),
+    };
+    // put it to the plan's book route and return the status and outcome it answers
+    ax.client.put(&paths::book(plan), &request).await
+}
+
+/// Each chapter of a book as `title (path) -> page`, in order, depth first, a part as its title
+///
+/// # Arguments
+///
+/// * `book` - The book
+fn chapters_of(book: &Book) -> Vec<String> {
+    /// Adds each item's line
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - The items
+    /// * `out` - Where each line is added
+    fn walk(items: &[BookItem], out: &mut Vec<String>) {
+        // add a line for each item in the order the book lists them
+        for item in items {
+            match item {
+                BookItem::Chapter(chapter) => {
+                    // add the chapter's title, doc and page, using `-` for any it lacks
+                    out.push(format!(
+                        "{} ({}) -> {}",
+                        chapter.title,
+                        chapter.path.as_deref().unwrap_or("-"),
+                        chapter.page.as_deref().unwrap_or("-")
+                    ));
+                    // then add the chapters nested under it
+                    walk(&chapter.items, out);
+                }
+                // add a part as its title and a separator as a rule
+                BookItem::Part { title } => out.push(format!("# {title}")),
+                BookItem::Separator => out.push("---".to_string()),
+            }
+        }
+    }
+    // walk the book's items from the top and return every line found
+    let mut out = Vec::new();
+    walk(&book.items, &mut out);
+    out
+}
+
+/// The book route answers a plan's docs as its tree of chapters: the repo's files with a page
+/// lying over one and a page of its own beside them, each titled by its heading and with the
+/// page it is served as, which opens as HTML; naming docs that aren't there is refused, and an
+/// unlisted plan has no book (C122)
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn the_book_answers_a_plans_chapters<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // write a folder of docs with a section in it to the repo
+    doc(
+        &ax.repo,
+        "docs/README.md",
+        "# The docs\n\nWhat they are for.\n",
+    )?;
+    doc(&ax.repo, "docs/a.md", "# Repo A\n")?;
+    doc(&ax.repo, "docs/b.md", "# Bee\n")?;
+    doc(&ax.repo, "docs/guide/index.md", "# The guide\n")?;
+    // put one page over a repo file and one beside them
+    let pages = paths::pages(&ax.plan);
+    for (path, text) in [("docs/a.md", "# Page A\n"), ("docs/c.md", "# Sea\n")] {
+        // build the page's put without a version, since it is new
+        let put = PageEdit::Put {
+            page: PageWrite::new(path, text),
+            read: None,
+        };
+        // post it and make sure the page is kept
+        let (status, edited): (_, PageEdited) = ax.client.post(&pages, &put).await?;
+        assert_eq!(status, StatusCode::OK, "{path}: {edited:?}");
+    }
+    // open the plan's change stream before naming its docs so the change is seen
+    let mut events = Events::new(
+        ax.client
+            .open(&format!("{}?project=reef&plan=central", paths::CHANGES))
+            .await?,
+    );
+    // name the folder as the plan's docs
+    let (status, named) = name_docs(&ax, &ax.plan, Some("docs/")).await?;
+    assert_eq!(status, StatusCode::OK, "{named:?}");
+    // make sure it was applied and the answer names the folder without its trailing `/`
+    let DocsNamed::Applied { plan, changed } = named else {
+        anyhow::bail!("naming `docs/`: {named:?}");
+    };
+    assert!(changed);
+    assert_eq!(plan.docs.as_deref(), Some("docs"));
+    // make sure the plan's listing names the folder too
+    let (_, info): (_, PlanInfo) = ax.client.get(&paths::plan(&ax.plan)).await?;
+    assert_eq!(info.docs.as_deref(), Some("docs"));
+    // make sure the change stream tells of the docs named
+    let event = events.next().await?.expect("a change for the docs named");
+    assert_eq!(event.event, "plan-docs-named");
+    let change: Change = serde_json::from_str(&event.data)?;
+    assert_eq!(
+        change,
+        Change::PlanDocsNamed {
+            plan: ax.plan.clone(),
+            docs: Some("docs".to_string()),
+        }
+    );
+    // read the plan's book and make sure it was read from the folder
+    let (status, book): (_, Book) = ax.client.get(&paths::book(&ax.plan)).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        book.from,
+        BookFrom::Folder {
+            path: "docs".to_string()
+        }
+    );
+    // make sure each chapter is titled by its doc's heading, with the page laid over the file
+    let served = paths::docs(&ax.plan);
+    let want: Vec<String> = [
+        ("The docs", "docs/README.md", "docs/index.html"),
+        ("Page A", "docs/a.md", "docs/a.html"),
+        ("Bee", "docs/b.md", "docs/b.html"),
+        ("Sea", "docs/c.md", "docs/c.html"),
+        ("The guide", "docs/guide/index.md", "docs/guide/index.html"),
+    ]
+    .into_iter()
+    .map(|(title, path, page)| format!("{title} ({path}) -> {served}{page}"))
+    .collect();
+    assert_eq!(chapters_of(&book), want);
+    // open each chapter's page and make sure it is served as HTML
+    for chapter in book.chapters() {
+        // get the page this chapter is served as
+        let page = chapter
+            .page
+            .as_deref()
+            .expect("every chapter here has a page");
+        // open it and make sure it is there
+        let response = ax.client.open(page).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{page}");
+        // make sure its HTML holds the chapter's title, so the page's words win over the file's
+        let html = response.text().await?;
+        assert!(html.contains(&chapter.title), "{page}: {html}");
+    }
+    // try to name a folder that isn't there, which is refused
+    let (status, named) = name_docs(&ax, &ax.plan, Some("gone")).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let DocsNamed::Refused(problems) = named else {
+        anyhow::bail!("naming `gone`: {named:?}");
+    };
+    // make sure the refusal lists the missing folder as its only problem
+    let said: Vec<String> = problems.iter().map(ToString::to_string).collect();
+    assert_eq!(said, ["the plan's docs: `gone/` isn't there"]);
+    // make sure the plan still names the folder it named before
+    let (_, info): (_, PlanInfo) = ax.client.get(&paths::plan(&ax.plan)).await?;
+    assert_eq!(info.docs.as_deref(), Some("docs"));
+    // make sure a plan that isn't listed has no book to read
+    let ghost = PlanName::new("reef", "ghost")?;
+    let (status, error): (_, ApiError) = ax.client.get(&paths::book(&ghost)).await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    // make sure it has no docs to name either
+    let (status, error): (_, ApiError) = ax
+        .client
+        .put(&paths::book(&ghost), &PlanDocs { docs: None })
+        .await?;
+    assert_eq!(
+        (status, error.code),
+        (StatusCode::NOT_FOUND, ErrorCode::NotListed)
+    );
+    Ok(())
+}
+
+/// A plan that names no docs answers its root node, its first ungrouped node in written order,
+/// then its pages by path under `Pages`, each with the page it is served as (C122)
+///
+/// # Arguments
+///
+/// * `ax` - The served service and its plan
+pub async fn a_plan_naming_no_docs_answers_its_root_and_pages<B: Backend + 'static>(
+    ax: Ax<B>,
+) -> anyhow::Result<()> {
+    // build a titled group, a member written before it, and ungrouped work written after it
+    let mut group = work("G", &[], 1);
+    group.spec.title = Some("G The plan".to_string());
+    let mut member = work("C1", &[], 0);
+    member.spec.group = Some("G".to_string());
+    let after = work("R", &[], 2);
+    // put all three in one batch and make sure it is kept
+    let puts = Puts::new(
+        [member, group, after]
+            .into_iter()
+            .map(|node| NodePut::new(node, None))
+            .collect(),
+    );
+    let (status, checked): (_, Checked) = ax.client.post(&paths::nodes(&ax.plan), &puts).await?;
+    assert_eq!(status, StatusCode::OK, "{checked:?}");
+    // put two pages, one with no heading to title it
+    let pages = paths::pages(&ax.plan);
+    for (path, text) in [
+        ("plan.md", "Words, no heading.\n"),
+        ("design/app.md", "# The app\n"),
+    ] {
+        // build the page's put without a version, since it is new
+        let put = PageEdit::Put {
+            page: PageWrite::new(path, text),
+            read: None,
+        };
+        // post it and make sure the page is kept
+        let (status, _): (_, PageEdited) = ax.client.post(&pages, &put).await?;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+    // read the book of the plan, which names no docs
+    let (status, book): (_, Book) = ax.client.get(&paths::book(&ax.plan)).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(book.from, BookFrom::Plan);
+    // make sure it lists the root node with no page, then each page by path under `Pages`
+    let served = paths::docs(&ax.plan);
+    assert_eq!(
+        chapters_of(&book),
+        [
+            "G The plan (-) -> -".to_string(),
+            "# Pages".to_string(),
+            format!("The app (design/app.md) -> {served}design/app.html"),
+            format!("plan (plan.md) -> {served}plan.html"),
+        ]
+    );
+    // make sure the first chapter is the group, since it is the first ungrouped node written
+    let BookItem::Chapter(root) = &book.items[0] else {
+        anyhow::bail!("the book opens with {:?}", book.items[0]);
+    };
+    assert_eq!(root.node.as_deref(), Some("G"));
+    // open each chapter that has a page and make sure it is served
+    for page in book
+        .chapters()
+        .iter()
+        .filter_map(|chapter| chapter.page.as_deref())
+    {
+        let response = ax.client.open(page).await?;
+        assert_eq!(response.status(), StatusCode::OK, "{page}");
+    }
+    // name the design folder and make sure the book is now read from it alone
+    let (status, _) = name_docs(&ax, &ax.plan, Some("design")).await?;
+    assert_eq!(status, StatusCode::OK);
+    let (_, named): (_, Book) = ax.client.get(&paths::book(&ax.plan)).await?;
+    assert_eq!(
+        chapters_of(&named),
+        [format!(
+            "The app (design/app.md) -> {served}design/app.html"
+        )]
+    );
+    // clear the plan's docs and make sure the answer says it names none
+    let (status, cleared) = name_docs(&ax, &ax.plan, None).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        matches!(&cleared, DocsNamed::Applied { plan, changed: true } if plan.docs.is_none()),
+        "{cleared:?}"
+    );
+    // make sure the book is the same one it answered before any docs were named
+    let (_, again): (_, Book) = ax.client.get(&paths::book(&ax.plan)).await?;
+    assert_eq!(again, book);
     Ok(())
 }
 

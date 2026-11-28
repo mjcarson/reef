@@ -31,8 +31,10 @@ use reef_api::{
     StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
     WorkRecord, Writer, paths,
 };
-use reef_api::{Build, MoveNodes, Moved, OpenRun, PlanSummary, RunReport, TestRun};
-use reef_model::{Diagnostic, Next, NodeName, PlanName};
+use reef_api::{
+    Build, DocsNamed, MoveNodes, Moved, OpenRun, PlanDocs, PlanSummary, RunReport, TestRun,
+};
+use reef_model::{Book, Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
 use std::path::Path;
 use std::time::Duration;
@@ -420,6 +422,37 @@ impl Client {
         let path = paths::plan_branch(plan);
         let request = self.http.put(self.url(&path)).json(&PlanBranch { branch });
         self.send(request, &path).await
+    }
+
+    /// Names the docs a plan reads as its book, or clears them so its book is its root node,
+    /// then its pages
+    ///
+    /// A service older than plans that name docs has no route for it, and says so.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `docs` - The folder or summary to name, or `None` for none
+    pub async fn set_plan_docs(
+        &self,
+        plan: &PlanName,
+        docs: Option<String>,
+    ) -> anyhow::Result<DocsNamed> {
+        // put the docs to the plan's book route, which a service older than C122 doesn't have
+        let path = paths::book(plan);
+        let request = self.http.put(self.url(&path)).json(&PlanDocs { docs });
+        self.send(request, &path).await
+    }
+
+    /// Reads a plan's docs as a book of chapters, each with the page its doc is served as
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    pub async fn book(&self, plan: &PlanName) -> anyhow::Result<Book> {
+        // get the plan's chapters from its book route
+        let path = paths::book(plan);
+        self.send(self.http.get(self.url(&path)), &path).await
     }
 
     /// Lists a plan's current revision, each node at the version a put of it names

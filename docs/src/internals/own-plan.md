@@ -85,4 +85,5 @@ reef claude install                        # the MCP entry, the hooks and the sk
   read back a plan, a node and a queue entry the one before C87 wrote. Nor did C119's
   `ActivityRow`, which keeps each plan's activity beside its edits: its binary opened the data
   directory a reef-serve from before C50 wrote, added an admin to it, and served its plan's 99
-  nodes back.
+  nodes back. Nor did C122's `PlanDocsRow`, which keeps the docs a plan names beside its
+  `PlanRow`, joined last so no other table's fingerprint moved.

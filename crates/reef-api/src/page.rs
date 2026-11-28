@@ -147,8 +147,9 @@ pub enum PageEdited {
 ///
 /// A page's path is relative and `/`-separated, and names a markdown file a book could hold:
 /// no part of it is empty or starts with a `.`, it holds no `#`, `?`, `\` or control character,
-/// it ends in `.md`, and its file isn't named `SUMMARY.md`. A book's walk keeps every such file,
-/// so a page exported into a book imports back.
+/// it ends in `.md`, and it isn't the root's `SUMMARY.md`, which export writes for a book of its
+/// own. A `SUMMARY.md` under a folder may be a page, as a plan's docs may name it (C122). A
+/// book's walk keeps every such file, so a page exported into a book imports back.
 ///
 /// # Arguments
 ///
@@ -199,7 +200,8 @@ pub fn check_page_path(path: &str) -> Result<(), String> {
             "`{path}` isn't markdown: a page's path ends in `.md`"
         ));
     }
-    if path.rsplit('/').next() == Some("SUMMARY.md") {
+    // refuse only the root's summary, since a nested `SUMMARY.md` may be a page
+    if path == "SUMMARY.md" {
         return Err(format!(
             "`{path}` is a book's summary, which no page can be"
         ));
@@ -216,7 +218,13 @@ mod tests {
     #[test]
     fn page_paths_keep_to_the_rules() {
         // a page at the root or under directories is kept
-        for path in ["plan.md", "design/app.md", "a/b/c-d_e.md", "README.md"] {
+        for path in [
+            "plan.md",
+            "design/app.md",
+            "a/b/c-d_e.md",
+            "README.md",
+            "a/SUMMARY.md",
+        ] {
             assert_eq!(check_page_path(path), Ok(()), "{path}");
         }
         // anything a book would skip, or a link can't name, is refused with why
@@ -263,10 +271,6 @@ mod tests {
             (
                 "SUMMARY.md",
                 "`SUMMARY.md` is a book's summary, which no page can be",
-            ),
-            (
-                "a/SUMMARY.md",
-                "`a/SUMMARY.md` is a book's summary, which no page can be",
             ),
         ];
         for (path, why) in refused {

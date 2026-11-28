@@ -91,6 +91,13 @@ is the twin's oracle.
   `Store::plan_done` reads a window from its end back, a page at a time, stopping at the first
   entry older than its start, and counts only the nodes done now, so one set back isn't counted.
   A node moved in done counts in neither plan, since its going done was its old plan's.
+- **The docs each plan names are a row each** (C122, `PlanDocsRow`), in its project's
+  partition, as its branch is: a plan with no row names none. `Store::set_plan_docs` judges a
+  change under the plan's write lock and writes it `if_absent` or over the version read, keeping
+  an `Edited::DocsNamed` under `plan/<plan>` and no activity entry. Every checked write's
+  `Proposal`, and a branch change's, reads the docs under the same lock, so a write is judged
+  against the book the plan reads as it lands. The table joined the schema last, so no data
+  directory was replaced.
 - **Every loop is a row of one partition** (`Store::edit_loop`), under its pane's key, so a
   pane keeps one loop. Every change reads them all under one lock and writes the one row, a
   start `if_absent` and anything else by version, so two loops taking one node at once are

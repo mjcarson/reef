@@ -252,6 +252,15 @@ pub enum Edited {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<String>,
     },
+    /// The docs the plan names were set, changed or cleared, each side `None` for none (C122)
+    DocsNamed {
+        /// The docs it named
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        /// The docs it names now
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
     /// The node moved from one plan of its project to another, its work and comments with it
     Relisted {
         /// The plan it left
@@ -285,6 +294,8 @@ impl Edited {
     /// assert_eq!(keys.describe(), "edited needs, title");
     /// let branched = Edited::Branched { from: None, to: Some("dev".to_string()) };
     /// assert_eq!(branched.describe(), "follows dev, not its project's branch");
+    /// let named = Edited::DocsNamed { from: None, to: Some("docs/".to_string()) };
+    /// assert_eq!(named.describe(), "reads its docs from `docs/`, not its root node and pages");
     /// ```
     pub fn describe(&self) -> String {
         // a side left unsaid reads as unset
@@ -350,6 +361,18 @@ impl Edited {
                     None => "its project's branch".to_string(),
                 };
                 format!("follows {}, not {}", side(to), side(from))
+            }
+            Edited::DocsNamed { from, to } => {
+                // describe each side as the docs named, or its root node and pages for none
+                let side = |docs: &Option<String>| match docs {
+                    Some(docs) => format!("`{docs}`"),
+                    None => "its root node and pages".to_string(),
+                };
+                // say which docs the plan reads now before the ones it read
+                match to {
+                    Some(_) => format!("reads its docs from {}, not {}", side(to), side(from)),
+                    None => format!("names no docs, not {}", side(from)),
+                }
             }
             Edited::Relisted { from, to } => format!("moved from plan `{from}` to `{to}`"),
             Edited::Other => "an edit this reef can't read".to_string(),

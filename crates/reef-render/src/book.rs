@@ -53,8 +53,9 @@ pub struct BookNode {
 
 /// Every markdown file under `src`, or under each of its `roots`, relative to `src` and sorted
 ///
-/// Dotfiles and mdbook's `SUMMARY.md` are left out. The order they sort in is the order the
-/// plan was written in.
+/// Dotfiles and mdbook's `SUMMARY.md` at the root are left out. A `SUMMARY.md` under a folder is
+/// kept, since a plan's docs may name one as a page (C122). The order they sort in is the order
+/// the plan was written in.
 ///
 /// # Arguments
 ///
@@ -85,11 +86,15 @@ pub fn markdown_files(src: &Path, roots: &[String]) -> Vec<String> {
                 if path.is_dir() {
                     stack.push(path);
                 } else if name.ends_with(".md")
-                    && name != "SUMMARY.md"
                     && let Ok(rel) = path.strip_prefix(src)
                 {
-                    // the summary is mdbook's, and every other markdown file may be a node
-                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                    // write the file's path from the root with `/` between its parts
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    // skip the root's summary since it is mdbook's, but keep every other
+                    // markdown file, a nested summary among them, since any may be a node
+                    if rel != "SUMMARY.md" {
+                        out.push(rel);
+                    }
                 }
             }
         }
@@ -268,7 +273,7 @@ fn line_of_id(yaml: &str, id: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Plan, line_of_id, read_nodes};
+    use super::{Config, Plan, line_of_id, markdown_files, read_nodes};
 
     /// An inline node is placed at the line its `id:` is on, in block or flow style
     #[test]
@@ -311,6 +316,41 @@ mod tests {
         let plan = Plan::load(&dir, &Config::default());
         let member = plan.graph.node(plan.graph.index_of("m").unwrap());
         assert_eq!(member.origin.file(), Some("plan/a.md"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Only the root's summary is mdbook's: one under a folder is a page a plan's docs may name,
+    /// so a book exported with it reads it back
+    #[test]
+    fn a_nested_summary_is_kept() {
+        // start from an empty scratch folder of this process's own
+        let dir = std::env::temp_dir().join(format!("reef-book-summary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        // write a summary at the root, another in a folder, and a chapter beside the second
+        std::fs::write(
+            dir.join("SUMMARY.md"),
+            "# Summary
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("docs/SUMMARY.md"),
+            "# Docs
+
+- [A](a.md)
+",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("docs/a.md"),
+            "# A
+",
+        )
+        .unwrap();
+        // check that the folder's summary is listed beside its chapter and the root's is not
+        assert_eq!(markdown_files(&dir, &[]), ["docs/SUMMARY.md", "docs/a.md"]);
+        // clean up the scratch folder
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

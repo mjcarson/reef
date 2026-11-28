@@ -28,6 +28,8 @@
 //! | `GET …/plans/{plan}/check` | `check` | its problems |
 //! | `GET …/plans/{plan}/next` | `next` | its ready work, its queue's first, and what the rest waits on: [`Next`] |
 //! | `GET …/plans/{plan}/docs/{*path}` | `doc_page` | a doc rendered as its page, or 404 |
+//! | `GET …/plans/{plan}/book` | `book` | its docs as a [`Book`] of chapters, each with its served page, or 404 |
+//! | `PUT …/plans/{plan}/book` | `set_plan_docs` | [`DocsNamed`]: 200, 422 if the docs aren't there or would add a problem, or 404 if the plan isn't listed |
 //! | `GET …/plans/{plan}/pages` | `pages` | its own pages: [`PageListing`] |
 //! | `POST …/plans/{plan}/pages` | `edit_page` | [`PageEdited`]: 200, 409 if stale, 422 if refused |
 //! | `GET …/plans/{plan}/pages/{*path}` | `page` | the [`StoredPage`], or 404 |
@@ -126,10 +128,10 @@ use reef_api::{
     Transcript, User, UserAdded, WRITE_BODY_MAX, WorkRecord, paths,
 };
 use reef_api::{
-    Build, HistoryPage, HistoryQuery, MoveNodes, Moved, OpenRun, PasswordChange, PasswordChanged,
-    PlanSummary, RunReport, TestRun, TokenInfo, UserRemoved,
+    Build, DocsNamed, HistoryPage, HistoryQuery, MoveNodes, Moved, OpenRun, PasswordChange,
+    PasswordChanged, PlanDocs, PlanSummary, RunReport, TestRun, TokenInfo, UserRemoved,
 };
-use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
+use reef_model::{Book, Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::convert::Infallible;
@@ -234,6 +236,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::CHECK, get(check::<S>))
         .route(paths::NEXT, get(next::<S>))
         .route(paths::DOC, get(doc::<S>))
+        .route(paths::BOOK, get(book::<S>).put(set_plan_docs::<S>))
         .route(
             paths::PAGES,
             get(pages::<S>)
@@ -1539,6 +1542,57 @@ async fn doc<S: Serves>(
             format!("no doc of `{plan}` is written to `{}`", segments.path),
         )),
     }
+}
+
+/// Reads a plan's docs as a book: the folder or summary it names, else its root node and its
+/// pages, each chapter with the page its doc is served as
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The plan's project and name
+#[instrument(name = "api::book", skip_all, err(Debug))]
+async fn book<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<PlanSegments>,
+) -> Result<Json<Book>, Failure> {
+    // build the plan's full name from the path's segments
+    let plan = segments.name()?;
+    // read the plan's chapters with its pages laid over its repo's files
+    let book = serves.service().read(&plan).await?;
+    Ok(Json(book))
+}
+
+/// Names the docs a plan reads as its book, or clears them: 200 if it reads them now, 422 if
+/// they aren't there or would add a problem
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `caller` - Who is calling, whom the plan's history names as changing it
+/// * `segments` - The plan's project and name
+/// * `docs` - The folder or summary to name, or none
+#[instrument(name = "api::set_plan_docs", skip_all, err(Debug))]
+async fn set_plan_docs<S: Serves>(
+    State(serves): State<S>,
+    caller: Caller,
+    Segments(segments): Segments<PlanSegments>,
+    Body(docs): Body<PlanDocs>,
+) -> Result<(StatusCode, Json<DocsNamed>), Failure> {
+    // build the plan's full name from the path's segments
+    let plan = segments.name()?;
+    // name the docs as the caller, checked against the old docs under the plan's write lock
+    let asker = caller.asker();
+    let named = serves
+        .service()
+        .set_plan_docs(&plan, docs.docs, &asker)
+        .await?;
+    // answer 422 when the docs were refused so a client can tell without reading the body
+    let status = match named {
+        DocsNamed::Applied { .. } => StatusCode::OK,
+        DocsNamed::Refused(_) => StatusCode::UNPROCESSABLE_ENTITY,
+    };
+    Ok((status, Json(named)))
 }
 
 /// Lists a plan's own pages, by path

@@ -535,18 +535,23 @@ plan names its docs, and reads them as a book beside the graph or in its place
 ### Design choices
 
 - **A plan names its docs:** a folder, or a summary in mdbook's format, named by
-  `reef plan docs <plan> <PATH>` and cleared by `--clear`. Either lies in the layered source, the
-  plan's pages over the repo's files ([Docs in central mode](#docs-in-central-mode)).
+  `reef plan docs <plan> <PATH>` and cleared by `--clear`, through `PUT …/plans/{plan}/book`,
+  and kept in a row of its own. A path ending `.md` is a summary and any other a folder, `.` the
+  root. Either lies in the layered source, the plan's pages over the repo's files
+  ([Docs in central mode](#docs-in-central-mode)). `GET …/book` answers the tree of chapters,
+  each with the page it is served as.
 - **A folder is a book.** Its markdown files and folders make a tree of chapters: a folder's
   `README.md` or `index.md` is its section's own page, then its other files, then its folders,
   each by name. A `SUMMARY.md` in a folder orders it in mdbook's format instead. Each chapter is
   titled by its first heading, else its file's name.
 - **A summary may be a page,** anywhere but the book's root, where export writes its own.
-- **A plan that names none** reads its root node's body, then its pages by path, as export's
-  fresh summary lists them.
+- **A plan that names none** reads its root node's body, its first node in written order that
+  is in no group, then its pages by path, as export's fresh summary lists them.
 - **Checked as links are.** Naming a folder or summary that isn't there is refused, and so is a
-  page edit that takes a chapter away. A fetch can't be refused, so a chapter it took away is a
-  problem `check` lists.
+  page edit or a branch change that takes a chapter away: one a summary lists, the summary
+  itself, or a named folder's last doc. Taking a page out of a folder just shrinks the book. A
+  fetch can't be refused, so a chapter it took away is a problem `check` lists, read as a
+  draft.
 - **mdbook's look, drawn by the app.** A folding chapter bar on the left, the page, and its prev
   and next, with mdbook's content width, headings, tables and code, written in the app's own
   styles rather than an mdbook build in a frame. The service answers a chapter as runs of HTML and
