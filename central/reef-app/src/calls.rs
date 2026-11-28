@@ -14,9 +14,9 @@ use reef_api::{
 use reef_api::{Checked, NodePut, NodeWrite, Puts, lift, puts_for};
 #[cfg(feature = "server")]
 use reef_api::{HistoryQuery, MarkReview, MarkThread, NewReply, NewThread, Writer};
+use reef_model::{Book, ChapterText, Payload, Status};
 #[cfg(feature = "server")]
 use reef_model::{NodeSpec, PlanName};
-use reef_model::{Payload, Status};
 use serde::{Deserialize, Serialize};
 
 use crate::side::timeline::NodeTimeline;
@@ -307,6 +307,76 @@ pub async fn payload(project: String, plan: String) -> Result<Payload, ServerFnE
     let name = plan_name(project, plan)?;
     crate::server::service()
         .payload(&name)
+        .await
+        .map_err(failed)
+}
+
+/// A plan's docs as a book: its chapters in order, each with the page it is served as, or its
+/// root node's chapter then its pages for a plan that names no docs
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+#[get("/app/book?project&plan")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::book", skip_all, err(Debug))
+)]
+pub async fn book(project: String, plan: String) -> Result<Book, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service().read(&name).await.map_err(failed)
+}
+
+/// One of a plan's docs as a chapter of its book: runs of HTML, each fence a view of the plan
+/// between them, or `None` if the plan has no doc at the path
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `path` - The doc's path from the root of the plan's docs
+#[get("/app/chapter?project&plan&path")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::chapter", skip_all, err(Debug))
+)]
+pub async fn chapter(
+    project: String,
+    plan: String,
+    path: String,
+) -> Result<Option<ChapterText>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .chapter(&name, &path)
+        .await
+        .map_err(failed)
+}
+
+/// A node's body as a chapter of its plan's book, as a plan that names no docs opens with its
+/// root node's, or `None` if the plan has no such node
+///
+/// # Arguments
+///
+/// * `project` - The project the plan belongs to
+/// * `plan` - The plan's name within it
+/// * `id` - The node's id
+#[get("/app/node-chapter?project&plan&id")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::node_chapter", skip_all, err(Debug))
+)]
+pub async fn node_chapter(
+    project: String,
+    plan: String,
+    id: String,
+) -> Result<Option<ChapterText>, ServerFnError> {
+    // a name that breaks the naming rule is refused before the store is read
+    let name = plan_name(project, plan)?;
+    crate::server::service()
+        .node_chapter(&name, &id)
         .await
         .map_err(failed)
 }

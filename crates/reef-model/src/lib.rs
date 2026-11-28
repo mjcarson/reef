@@ -16,7 +16,7 @@ pub mod spec;
 pub mod view;
 
 pub use accept::{AccChart, Criterion, Kind, Met, Resolved};
-pub use chapters::{Book, BookFrom, BookItem, Chapter};
+pub use chapters::{Book, BookFrom, BookItem, Chapter, ChapterText, Run};
 pub use graph::{Diagnostic, EdgeKind, Graph, Link, Node, PerfDoc, Unmet};
 pub use name::{NameError, NodeName, PlanName};
 pub use next::{Next, Ready, Waiting, WaitsOn};

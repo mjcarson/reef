@@ -856,3 +856,125 @@ fn comments_are_kept_through_server_functions() -> anyhow::Result<()> {
         anyhow::Ok(())
     })
 }
+
+/// A chapter is answered as runs of HTML and views: its headings under mdbook's ids, its links
+/// under the plan's served docs, and each fence a view between runs, and a plan naming no docs
+/// opens with its root node's body, read the same way
+#[test]
+fn a_chapter_is_answered_as_runs() -> anyhow::Result<()> {
+    use reef_app::calls::{book, chapter, node_chapter};
+    use reef_model::{BookItem, Run};
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // a plan whose docs are a folder of its pages: an intro, and a chapter with a fence
+        let repo = fx.project("chaptered", &["central", "bare"]).await?;
+        let pages = [
+            ("docs/README.md", "# Intro\n\nRead [the rows](rows.md#rows).\n"),
+            (
+                "docs/rows.md",
+                "# Rows\n\n## Rows\n\nSee [A1](node:A1).\n\n```reef\nfocus = \"A1\"\n```\n\n```reef\nbogus = 1\n```\n\nAfter.\n",
+            ),
+        ];
+        for (path, text) in pages {
+            let file = fx.dir.join(path.replace('/', "-"));
+            std::fs::write(&file, text)?;
+            let file = file.to_str().expect("the file is a utf-8 path");
+            fx.reef(&repo, &["page", "put", path, file, "--plan", "central"])
+                .await?;
+        }
+        fx.reef(&repo, &["plan", "docs", "central", "docs"]).await?;
+        let failed = |error: dioxus::prelude::ServerFnError| anyhow::anyhow!("{error}");
+        let project = || "chaptered".to_string();
+        let plan = || "central".to_string();
+        // the book lists both, each with the page it is served as
+        let read = book(project(), plan()).await.map_err(failed)?;
+        let served = "/api/v1/projects/chaptered/plans/central/docs/";
+        let pages: Vec<(Option<&str>, Option<&str>)> = read
+            .chapters()
+            .into_iter()
+            .map(|c| (c.path.as_deref(), c.page.as_deref()))
+            .collect();
+        let intro = format!("{served}docs/index.html");
+        let rows_page = format!("{served}docs/rows.html");
+        assert_eq!(
+            pages,
+            [
+                (Some("docs/README.md"), Some(intro.as_str())),
+                (Some("docs/rows.md"), Some(rows_page.as_str())),
+            ],
+            "{read:?}"
+        );
+        // the chapter is its runs: HTML with mdbook's ids, a view, a fence that can't be read,
+        // then HTML
+        let text = chapter(project(), plan(), "docs/rows.md".into())
+            .await
+            .map_err(failed)?
+            .ok_or_else(|| anyhow::anyhow!("the chapter wasn't answered"))?;
+        assert_eq!(text.title, "Rows");
+        let [
+            Run::Html { html: first },
+            Run::View { spec },
+            Run::Unread { error },
+            Run::Html { html: last },
+        ] = &text.runs[..]
+        else {
+            anyhow::bail!("runs of HTML, a view, an unread fence and HTML: {text:?}");
+        };
+        assert!(first.starts_with("<h1 id=\"rows\">Rows</h1>"), "{first}");
+        assert!(first.contains("<h2 id=\"rows-1\">Rows</h2>"), "{first}");
+        assert!(first.contains(r#"data-goto="A1""#), "{first}");
+        assert_eq!(spec.focus.as_deref(), Some("A1"));
+        assert!(error.contains("bogus"), "{error}");
+        assert_eq!(last, "<p>After.</p>\n");
+        // a link to another chapter leads to the page the book serves it as, at its heading
+        let intro_text = chapter(project(), plan(), "docs/README.md".into())
+            .await
+            .map_err(failed)?
+            .ok_or_else(|| anyhow::anyhow!("the intro wasn't answered"))?;
+        let [Run::Html { html }] = &intro_text.runs[..] else {
+            anyhow::bail!("the intro is one run: {intro_text:?}");
+        };
+        assert!(html.contains(&format!("href=\"{rows_page}#rows\"")), "{html}");
+        // a doc the plan has none of is no chapter
+        assert!(
+            chapter(project(), plan(), "docs/gone.md".into())
+                .await
+                .map_err(failed)?
+                .is_none()
+        );
+        // a plan naming no docs opens with its root node, its body read as runs under its title
+        let node = fx.dir.join("chaptered-bare-a1.md");
+        std::fs::write(
+            &node,
+            "---\n# version: 1\nid: A1\ntitle: \"A1 The first of bare\"\ndescription:\n  why: \"bare has nothing in it.\"\n  what: \"bare has a node.\"\n---\n\nThe plan's root.\n\n```reef\nexpand = \"all\"\n```\n",
+        )?;
+        let node = node.to_str().expect("the file is a utf-8 path");
+        fx.reef(&repo, &["node", "put", node, "--plan", "bare"])
+            .await?;
+        let bare = book(project(), "bare".into()).await.map_err(failed)?;
+        let Some(BookItem::Chapter(root)) = bare.items.first() else {
+            anyhow::bail!("a plan naming no docs opens with its root: {bare:?}");
+        };
+        assert_eq!((root.node.as_deref(), root.page.as_deref()), (Some("A1"), None));
+        let text = node_chapter(project(), "bare".into(), "A1".into())
+            .await
+            .map_err(failed)?
+            .ok_or_else(|| anyhow::anyhow!("the root's chapter wasn't answered"))?;
+        assert_eq!(text.title, "A1 The first of bare");
+        let [Run::Html { html }, Run::View { .. }] = &text.runs[..] else {
+            anyhow::bail!("the root's body is HTML, then its view: {text:?}");
+        };
+        assert!(
+            html.starts_with("<h1 id=\"a1-the-first-of-bare\">A1 The first of bare</h1>"),
+            "{html}"
+        );
+        assert!(html.contains("<p>The plan's root.</p>"), "{html}");
+        assert!(
+            node_chapter(project(), "bare".into(), "Z9".into())
+                .await
+                .map_err(failed)?
+                .is_none()
+        );
+        anyhow::Ok(())
+    })
+}

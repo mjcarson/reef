@@ -5,7 +5,12 @@
 //! its pages and its repo's files. A plan that names none reads its root node, then its pages by
 //! path. Either way the book is a list of [`BookItem`]s: chapters, each of which may hold more,
 //! with part titles and separators between them where a summary writes them.
+//!
+//! The app's docs view reads a chapter as [`ChapterText`]: runs of HTML, with each
+//! ```` ```reef ```` fence a [`Run::View`] between them, so it draws the fence as a live view of
+//! the plan rather than as a page's markup (C123).
 
+use crate::view::ViewSpec;
 use serde::{Deserialize, Serialize};
 
 /// A plan's docs as a book: where they were read from, the title a summary gives them, and
@@ -79,6 +84,59 @@ pub struct Chapter {
     /// The chapters under it
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<BookItem>,
+}
+
+/// One chapter's text as the docs view draws it: its title, then its runs in order
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ChapterText {
+    /// The chapter's title: its doc's first heading, else its path, or its node's title
+    pub title: String,
+    /// Its HTML and its views, in the order the doc writes them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<Run>,
+}
+
+/// One run of a chapter's text: HTML, or a fence's view of the plan between two runs of it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Run {
+    /// HTML, each heading under the id mdbook gives it
+    Html {
+        /// The run's markup
+        html: String,
+    },
+    /// A ```` ```reef ```` fence, drawn as a live view of the plan
+    View {
+        /// What the fence asks to show
+        spec: ViewSpec,
+    },
+    /// A ```` ```reef ```` fence whose view can't be read
+    Unread {
+        /// Why it can't be read
+        error: String,
+    },
+}
+
+impl ChapterText {
+    /// Whether any of the chapter's runs is a view of the plan, which needs the plan's payload
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_model::{ChapterText, Run, ViewSpec};
+    ///
+    /// let html = Run::Html { html: "<p>a</p>".to_string() };
+    /// let text = ChapterText { title: "A".to_string(), runs: vec![html] };
+    /// assert!(!text.has_views());
+    /// let view = Run::View { spec: ViewSpec::default() };
+    /// let text = ChapterText { title: "A".to_string(), runs: vec![view] };
+    /// assert!(text.has_views());
+    /// ```
+    pub fn has_views(&self) -> bool {
+        // a view's run, rather than HTML or a fence that can't be read
+        self.runs.iter().any(|run| matches!(run, Run::View { .. }))
+    }
 }
 
 impl Book {
@@ -171,8 +229,46 @@ fn each_of_mut<F: FnMut(&mut Chapter)>(items: &mut [BookItem], change: &mut F) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Book, BookFrom, BookItem, Chapter};
+    use super::{Book, BookFrom, BookItem, Chapter, ChapterText, Run};
+    use crate::view::ViewSpec;
     use serde_json::json;
+
+    /// A chapter's text is pinned too, since the app reads it from the server
+    #[test]
+    fn a_chapters_runs_are_tagged_by_kind() {
+        // HTML, a view, and a fence that can't be read
+        let text = ChapterText {
+            title: "Rows".to_string(),
+            runs: vec![
+                Run::Html {
+                    html: "<h1 id=\"rows\">Rows</h1>\n".to_string(),
+                },
+                Run::View {
+                    spec: ViewSpec {
+                        focus: Some("M3".to_string()),
+                        ..ViewSpec::default()
+                    },
+                },
+                Run::Unread {
+                    error: "unknown field".to_string(),
+                },
+            ],
+        };
+        let value = serde_json::to_value(&text).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "title": "Rows",
+                "runs": [
+                    {"kind": "html", "html": "<h1 id=\"rows\">Rows</h1>\n"},
+                    {"kind": "view", "spec": {"focus": "M3", "direction": "TB", "expand": []}},
+                    {"kind": "unread", "error": "unknown field"},
+                ],
+            })
+        );
+        // and it reads back as itself
+        assert_eq!(serde_json::from_value::<ChapterText>(value).unwrap(), text);
+    }
 
     /// A book's JSON is pinned, since the app and the CLI read it
     #[test]

@@ -50,6 +50,15 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   group has none, since its status is its members'. **Open** shows the node's panel at any of
   its tabs, and **Copy id** copies its id. Escape, or a click anywhere outside it, closes the
   menu.
+- **A plan's docs**, from **Docs** in its bar, read as a book at
+  `/plans/{project}/{plan}/docs/{path}`: the docs it names with `reef plan docs`, or else its
+  root node then its pages. The chapter bar on the left lists the chapters as mdbook does. A
+  section folds and unfolds with its ❱, and the one holding the open chapter starts unfolded.
+  The chapter shows in mdbook's column, with links to the chapters before and after it. A
+  ```` ```reef ```` fence draws as a live view of the plan, as on the plan's page. A link to
+  another chapter opens it here, at the heading its anchor names, and the browser's back button
+  goes back. A link naming a node opens the plan's page with that node shown. A page edited, or
+  a fetch that moves the plan's branch, shows with no reload. **Graph** goes back to the plan.
 - **The sessions panel**, from the bar, shows each session attached to central reef, live:
   - the headless sessions `reef loop run` started, whose loops it starts, pauses and stops and
     whose questions and plans it answers;

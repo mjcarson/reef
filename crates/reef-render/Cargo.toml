@@ -12,4 +12,6 @@ serde.workspace = true
 # the viewer's payload as the JSON a page carries
 serde_json.workspace = true
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# a ```reef fence's view, read for the app's docs view
+toml = "1"
 

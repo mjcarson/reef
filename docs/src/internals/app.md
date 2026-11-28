@@ -1,7 +1,7 @@
 # The app
 
 `reef-app` is a Dioxus 0.7.10 fullstack app. Its front page explores every project's plans, each
-summed up, and each plan opens at `/plans/{project}/{plan}`, drawn by reef-view linked into the client's
+summed up, and each plan opens at `/plans/{project}/{plan}`, or as its docs under `docs/`, drawn by reef-view linked into the client's
 wasm, with the node the viewer selects in a panel beside it that edits its YAML. A plan's page
 follows the change stream, so each put shows up live. Its server functions sit under `/app/`,
 each a call on the service, and its server mounts `api::router` beside them, so one port serves
@@ -21,6 +21,25 @@ the pages and the JSON API alike.
   resource, which keeps what it showed until its answer lands, where a server future would
   suspend the page again. A session or run that goes silent reads as gone only once its
   project is next read, as the sessions panel's does.
+- **A plan's docs read as a book** (C123, `docs.rs`) at `/plans/{project}/{plan}/docs/{path}`,
+  `#anchor` naming a heading. `calls::book` answers the chapters C122's `Service::read` reads.
+  `calls::chapter` answers one doc as reef-model's `ChapterText`, and `calls::node_chapter`
+  answers the root node's body of a plan that names no docs. Both come from
+  `reef_render::render_runs`: runs of HTML with mdbook's heading ids, where each
+  ```` ```reef ```` fence is a `Run::View` of its `ViewSpec`, or a `Run::Unread` saying why it
+  can't be read. `render_page` is the same runs' HTML in a `<main>`, views left out. The view
+  draws each HTML run as rendered. A chapter with views reads the plan's payload once, and draws
+  each view as a `Canvas` given the fence's spec, inline at its height. `layout = "page"` fills
+  the column, as reef.css fills mdbook's. A view is keyed by its spec, so a chapter read again
+  keeps it as the reader left it. A click on a link whose page a chapter is served as pushes
+  that chapter's route instead of loading the page. A `data-goto` link calls the view's
+  `on_node`, which on this route opens `/plans/{project}/{plan}#{id}`, where the canvas shows
+  that node once it is fitted. Clicks inside a view are the view's own. The book and the chapter
+  are client resources over the plan's change stream (`live::use_changes`), whose kinds include
+  a page put, a branch fetched and the docs named. A chapter newly opened, or a new anchor,
+  scrolls to its heading or its top, and one read again after a change stays where it was. The
+  chapter bar is keyed by the open chapter, so sections folded by hand unfold again for the next
+  one, as mdbook draws each page's bar afresh.
 - **The editor saves as `reef node put` does,** through `reef_api::puts_for`, at the version it
   read: another writer's change since comes back stale with the newer version, and a save that
   would add a problem comes back with check's messages.

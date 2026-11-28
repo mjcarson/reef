@@ -2131,6 +2131,296 @@ def keep_decisions(plan, node, decisions):
         return json.load(answer)
 
 
+# the C123 checks' book: a plan whose docs are a folder of its pages, an intro, a chapter holding
+# a view of the plan and links, and a section with a page of its own and a child, each long
+# enough that a heading's anchor scrolls
+FILLER = "".join(f"Line {n} of the filler, which pushes what follows below the window.\n\n" for n in range(40))
+BOOK_PAGES = {
+    "book/README.md": "# The book\n\nWhere it starts. Read [the views](views.md#a-view).\n",
+    "book/views.md": "# Views\n\nAbove the view.\n\n```reef\nfocus = \"BK\"\nexpand = \"all\"\nheight = \"360px\"\n```\n\n"
+                     + FILLER + "## A view\n\nBelow it, see [BK1](node:BK1) and [the deep part](part/b.md#deep).\n\n" + FILLER,
+    "book/part/README.md": "# Part one\n\nThe section's own page.\n",
+    "book/part/b.md": "# Part one's child\n\n" + FILLER + "## Deep\n\nDeep text.\n\n" + FILLER,
+}
+# whether the C123 checks' plan has been made, by the run's first check that needs it
+BOOK_MADE = []
+BOOK_GROUP = """id: BK
+title: "BK The book's work"
+description:
+  why: "The book's work is not grouped."
+  what: "The book's work is grouped."
+nodes:
+  - id: BK1
+    title: "BK1 The first of the book"
+    description:
+      why: "The book has no first node."
+      what: "The book has a first node."
+  - id: BK2
+    title: "BK2 The second of the book"
+    needs: [BK1]
+    description:
+      why: "The book has no second node."
+      what: "The book has a second node."
+"""
+
+
+def book_plan():
+    """The C123 checks' plan, `book`, made once: its group of two and its docs, a folder of pages."""
+    if BOOK_MADE:
+        return
+    reef("plan", "new", "book")
+    put("book", BOOK_GROUP)
+    for path, text in BOOK_PAGES.items():
+        source = WORK / ("book-" + path.replace("/", "-"))
+        source.write_text(text)
+        reef("page", "put", path, str(source), "--plan", "book")
+    reef("plan", "docs", "book", "book")
+    BOOK_MADE.append("book")
+
+
+def docs_state(page):
+    """What the docs view shows: the open chapter's heading, the bar's marked chapter, every chapter the bar lists, and
+    the previous and next links' titles."""
+    return page.evaluate("""() => {
+        const text = (el) => el ? el.textContent.trim() : null;
+        return {
+            heading: text(document.querySelector('.reef-app-book-main h1')),
+            active: text(document.querySelector('.reef-app-book-bar a.active')),
+            listed: [...document.querySelectorAll('.reef-app-book-bar .reef-app-chapter-line')].map(text),
+            prev: text(document.querySelector('.reef-app-book-prev .reef-app-book-near')),
+            next: text(document.querySelector('.reef-app-book-next .reef-app-book-near')),
+        };
+    }""")
+
+
+def wait_heading(page, heading, timeout=10000):
+    """Waits for the docs view to show a chapter whose first heading is the one given."""
+    try:
+        page.wait_for_function("(h) => document.querySelector('.reef-app-book-main h1')?.textContent.trim() === h",
+                               arg=heading, timeout=timeout)
+    except Exception:
+        pass
+
+
+def heading_top(page, anchor):
+    """How far a heading sits below the top of the docs view's column, in pixels, or None with no such heading."""
+    return page.evaluate("""(id) => {
+        const column = document.querySelector('.reef-app-book-page');
+        const heading = column && column.querySelector(`[id="${id}"]`);
+        return heading ? heading.getBoundingClientRect().top - column.getBoundingClientRect().top : null;
+    }""", anchor)
+
+
+def c123_the_chapter_bar_folds_and_pages_on(page):
+    """C123: the docs view's chapter bar folds its sections and marks the open chapter, and a chapter's previous and
+    next move through the book in order."""
+    book_plan()
+    page.goto(URL + "/plans/check/book/docs")
+    wait_heading(page, "The book")
+    first = docs_state(page)
+    page.screenshot(path=str(SHOTS / "reef-app-docs.png"))
+    page.emulate_media(color_scheme="dark")
+    page.screenshot(path=str(SHOTS / "reef-app-docs-dark.png"))
+    page.emulate_media(color_scheme="light")
+    # the section not holding the open chapter starts folded, and its toggle unfolds and folds it
+    section = page.locator(".reef-app-chapter", has_text="Part one").first
+    child = ".reef-app-book-bar a:has-text(\"Part one's child\")"
+    folded = page.locator(child).count()
+    section.locator(".reef-app-fold").first.click()
+    page.wait_for_timeout(200)
+    unfolded = page.locator(child).count()
+    section.locator(".reef-app-fold").first.click()
+    page.wait_for_timeout(200)
+    refolded = page.locator(child).count()
+    # next walks the book in order, each chapter marked as it opens, and prev walks back
+    walked = [(first["heading"], first["active"])]
+    for _ in range(3):
+        before = docs_state(page)["heading"]
+        page.click(".reef-app-book-next")
+        try:
+            page.wait_for_function("(h) => document.querySelector('.reef-app-book-main h1')?.textContent.trim() !== h",
+                                   arg=before, timeout=10000)
+        except Exception:
+            pass
+        state = docs_state(page)
+        walked.append((state["heading"], state["active"]))
+    last = docs_state(page)
+    page.click(".reef-app-book-prev")
+    wait_heading(page, "Part one")
+    back = docs_state(page)
+    titles = ["The book", "Views", "Part one", "Part one's child"]
+    check("C123 the chapter bar folds a section and marks the open chapter",
+          first["heading"] == "The book" and first["active"] is not None and "The book" in first["active"]
+          and folded == 0 and unfolded == 1 and refolded == 0,
+          {"first": first, "child shown folded, unfolded, folded again": (folded, unfolded, refolded)})
+    check("C123 a chapter's previous and next move through the book in order",
+          [heading for heading, _ in walked] == titles
+          and all(active is not None and heading in active for heading, active in walked)
+          and first["prev"] is None and first["next"] == "Views"
+          and last["next"] is None and last["prev"] == "Part one" and back["heading"] == "Part one"
+          and page.url.endswith("/plans/check/book/docs/book/part/README.md"),
+          {"walked": walked, "last": last, "back": back, "url": page.url})
+
+
+def c123_a_fence_draws_live(page):
+    """C123: a reef fence in a chapter draws as a live view of the plan: its group's boxes, and a node put into the group
+    from the terminal, without a reload."""
+    book_plan()
+    page.goto(URL + "/plans/check/book/docs/book/views.md")
+    wait_heading(page, "Views")
+    fence = ".reef-app-book-main .reef-app-fence .reef.reef-mounted"
+    try:
+        page.wait_for_selector(fence + " .reef-node", timeout=20000)
+    except Exception:
+        pass
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    boxes = lambda: page.evaluate(f"() => [...document.querySelectorAll('{fence} .reef-viewport .reef-node')]"
+                                  ".map(n => n.textContent)")
+    before = boxes()
+    height = page.evaluate(f"() => document.querySelector('{fence}')?.getBoundingClientRect().height ?? null")
+    # a node put into the view's group shows in it
+    put("book", """id: BK3
+title: "BK3 The third of the book"
+group: BK
+description:
+  why: "The book has no third node."
+  what: "The book has a third node."
+""")
+    try:
+        page.wait_for_function(f"() => [...document.querySelectorAll('{fence} .reef-viewport .reef-node')]"
+                               ".some(n => n.textContent.includes('BK3'))", timeout=10000)
+    except Exception:
+        pass
+    after = boxes()
+    kept = page.evaluate("() => window.__kept")
+    page.screenshot(path=str(SHOTS / "reef-app-docs-fence.png"))
+    check("C123 a reef fence in a chapter draws as a live view of the plan",
+          any("BK1" in box for box in before) and any("BK2" in box for box in before)
+          and not any("BK3" in box for box in before) and any("BK3" in box for box in after)
+          and height is not None and abs(height - 360) <= 4 and kept == "same page",
+          {"before": before, "after": after, "height": height, "no reload": kept})
+
+
+def c123_links_stay_in_the_docs(page):
+    """C123: a link to another chapter opens it in the docs view at the heading its anchor names, without a reload, and
+    a node: link opens that node on the plan's page."""
+    book_plan()
+    page.goto(URL + "/plans/check/book/docs")
+    wait_heading(page, "The book")
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    # a chapter's link opens it here, scrolled to the heading
+    page.click(".reef-app-book-main a:has-text('the views')")
+    wait_heading(page, "Views")
+    page.wait_for_timeout(500)
+    views_url = page.url
+    top = heading_top(page, "a-view")
+    kept = page.evaluate("() => window.__kept")
+    # and so does one to a heading of a chapter in a section
+    page.click(".reef-app-book-main a:has-text('the deep part')")
+    wait_heading(page, "Part one's child")
+    page.wait_for_timeout(500)
+    deep_url = page.url
+    deep_top = heading_top(page, "deep")
+    deep_kept = page.evaluate("() => window.__kept")
+    # back in the browser's history, the views chapter shows again
+    page.go_back()
+    wait_heading(page, "Views")
+    back = docs_state(page)["heading"]
+    # a link naming a node opens the plan's page with that node shown
+    page.click(".reef-app-book-main .reef-app-run a[data-goto=BK1]")
+    try:
+        page.wait_for_function("() => document.querySelector('.reef-side h2')?.textContent === 'BK1 The first of the book'",
+                               timeout=20000)
+    except Exception:
+        pass
+    shown = sidebar_title(page)
+    node_url = page.url
+    check("C123 a link to another chapter opens it in the view at its heading",
+          views_url.endswith("/plans/check/book/docs/book/views.md#a-view") and top is not None and -4 <= top < 80
+          and kept == "same page"
+          and deep_url.endswith("/plans/check/book/docs/book/part/b.md#deep") and deep_top is not None
+          and -4 <= deep_top < 80 and deep_kept == "same page" and back == "Views",
+          {"views": (views_url, top, kept), "deep": (deep_url, deep_top, deep_kept), "back": back})
+    check("C123 a node: link in the docs opens that node",
+          shown == "BK1 The first of the book" and node_url.endswith("/plans/check/book#BK1"),
+          {"sidebar": shown, "url": node_url})
+
+
+def c123_a_chapter_has_its_route_and_follows_edits(page):
+    """C123: a chapter opens at its own route, a page edit draws the chapter bar and the open chapter again, and so does
+    a fetch of the plan's branch, each without a reload."""
+    book_plan()
+    page.goto(URL + "/plans/check/book/docs/book/part/b.md")
+    wait_heading(page, "Part one's child")
+    opened = docs_state(page)
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    # the page edited from the terminal, retitled, shows in the bar and the chapter
+    got = reef("page", "get", "book/part/b.md", "--plan", "book")
+    source = WORK / "book-part-b-edited.md"
+    source.write_text(got.replace("# Part one's child", "# Part one's last child").replace("Deep text.", "Deeper text."))
+    reef("page", "put", "book/part/b.md", str(source), "--plan", "book")
+    wait_heading(page, "Part one's last child")
+    try:
+        page.wait_for_function("() => document.querySelector('.reef-app-book-bar a.active')?.textContent"
+                               ".includes(\"Part one's last child\")", timeout=10000)
+    except Exception:
+        pass
+    edited = docs_state(page)
+    text = page.inner_text(".reef-app-book-main")
+    kept = page.evaluate("() => window.__kept")
+    check("C123 a chapter opens at its route, and a page edit draws the bar and the chapter again",
+          opened["heading"] == "Part one's child" and opened["active"] is not None and "Part one's child" in opened["active"]
+          and edited["heading"] == "Part one's last child" and "Part one's last child" in (edited["active"] or "")
+          and "Deeper text." in text and kept == "same page",
+          {"opened": opened, "edited": edited, "no reload": kept})
+    # a remote project whose plan's docs are its repo's folder, fetched to a new commit
+    remote = WORK / "booked"
+    if remote.exists():
+        shutil.rmtree(remote)
+    bare, work = remote / "remote.git", remote / "work"
+    run("git", "init", "-q", "--bare", "-b", "main", bare)
+    run("git", "clone", "-q", bare, work)
+
+    def wgit(*args):
+        """Runs git in the remote's work clone as the check's own author."""
+        return run("git", "-C", work, "-c", "user.name=reef", "-c", "user.email=reef@example.invalid", *args)
+
+    wgit("checkout", "-q", "-b", "main")
+    (work / "docs").mkdir()
+    (work / "docs/README.md").write_text("# Fetched\n\nFetched once.\n")
+    wgit("add", ".")
+    wgit("commit", "-q", "-m", "docs")
+    wgit("push", "-q", "origin", "main")
+    reef("project", "add", "booked", "--url", f"file://{bare}")
+    reef("plan", "new", "p", "--project", "booked")
+    path = WORK / "put-booked-p.yaml"
+    path.write_text(node_yaml("A1", "A1 The first of booked"))
+    reef("node", "put", str(path), "--project", "booked", "--plan", "p")
+    reef("plan", "docs", "p", "docs", "--project", "booked")
+    page.goto(URL + "/plans/booked/p/docs/docs/README.md")
+    try:
+        page.wait_for_function("() => document.querySelector('.reef-app-book-main')?.textContent.includes('Fetched once.')",
+                               timeout=10000)
+    except Exception:
+        pass
+    first = page.inner_text(".reef-app-book-main")
+    page.evaluate("() => { window.__kept = 'same page'; }")
+    (work / "docs/README.md").write_text("# Fetched\n\nFetched twice.\n")
+    wgit("commit", "-q", "-am", "docs again")
+    wgit("push", "-q", "origin", "main")
+    fetched = reef("project", "fetch", "--project", "booked")
+    try:
+        page.wait_for_function("() => document.querySelector('.reef-app-book-main')?.textContent.includes('Fetched twice.')",
+                               timeout=10000)
+    except Exception:
+        pass
+    again = page.inner_text(".reef-app-book-main")
+    kept = page.evaluate("() => window.__kept")
+    check("C123 a fetch of the plan's branch draws the open chapter again",
+          "Fetched once." in first and "Fetched twice." in again and kept == "same page",
+          {"first": first[:80], "again": again[:80], "fetched": fetched, "no reload": kept})
+
+
 def c76_a_nodes_decisions_show_in_its_sidebar(page):
     """C76: a node's Decisions tab shows each question with the choice picked, each plan with its
     verdict and feedback, the last approved one open, and a new decision appears live."""
@@ -3052,6 +3342,10 @@ def main():
                 c84_an_attached_session_streams_its_transcript,
                 c121_the_front_page_sums_up_each_plan,
                 c121_the_front_page_follows_one_stream,
+                c123_the_chapter_bar_folds_and_pages_on,
+                c123_a_fence_draws_live,
+                c123_links_stay_in_the_docs,
+                c123_a_chapter_has_its_route_and_follows_edits,
                 c76_a_nodes_decisions_show_in_its_sidebar,
                 c88_history_pages_back,
                 c90_the_timeline_says_what_happened,

@@ -193,6 +193,18 @@ mod web {
         el.scroll_into_view_with_scroll_into_view_options(&options);
     }
 
+    /// Scrolls whatever holds an element so the element is at its top, as a heading's anchor
+    /// is followed
+    ///
+    /// # Arguments
+    ///
+    /// * `el` - The element
+    pub fn scroll_to_start(el: &El) {
+        let options = web_sys::ScrollIntoViewOptions::new();
+        options.set_block(web_sys::ScrollLogicalPosition::Start);
+        el.scroll_into_view_with_scroll_into_view_options(&options);
+    }
+
     /// Gives an element the keyboard's focus
     ///
     /// # Arguments
@@ -522,6 +534,9 @@ mod server {
 
     /// Nothing scrolls on the server
     pub fn scroll_into_view(_el: &El) {}
+
+    /// Nothing is scrolled on the server
+    pub fn scroll_to_start(_el: &El) {}
 
     /// Nothing has focus on the server
     pub fn focus(_el: &El) {}

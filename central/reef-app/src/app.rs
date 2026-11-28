@@ -1,8 +1,10 @@
-//! The app's pages: the plan explorer, a plan's own page, and the account page
+//! The app's pages: the plan explorer, a plan's own page, its docs as a book, and the account
+//! page
 
 use crate::account::Account;
 use crate::calls::{self, ProjectPlans};
 use crate::canvas::{Canvas, Keyed};
+use crate::docs::DocsPage;
 use crate::explorer::Explorer;
 use crate::live::use_changes;
 use crate::queue::{QueuePanel, use_queue};
@@ -306,6 +308,54 @@ button.reef-app-timeline-open:hover { text-decoration: underline; }
 .reef-app-decision-choices li.picked { color: var(--reef-done); }
 .reef-app-own-answer { margin: 0.15rem 0 0; font-style: italic; }
 .reef-app-ended > .reef-app-runners { margin-top: 0.3rem; opacity: 0.75; }
+.reef-app-pane-link { font-size: 0.9rem; }
+.reef-app-book { flex: 1; min-width: 0; display: flex; --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
+.reef-app-book-bar { flex: none; width: 300px; max-width: 40vw; overflow-y: auto; box-sizing: border-box; padding: 10px 15px; background: var(--panel); border-right: 1px solid var(--line); font-size: 0.875rem; }
+.reef-app-book-title { margin: 0.4em 0 0.6em; font-weight: 700; }
+.reef-app-chapters { list-style: none; margin: 0; padding: 0; line-height: 2.2em; }
+.reef-app-section { padding-left: 20px; line-height: 1.9em; }
+.reef-app-chapter { line-height: 1.5em; margin-top: 0.6em; }
+.reef-app-chapter-line { display: flex; align-items: baseline; gap: 0.3rem; }
+.reef-app-chapter-line > a { flex: 1; min-width: 0; color: var(--fg); text-decoration: none; overflow-wrap: anywhere; }
+.reef-app-chapter-line > a:hover, .reef-app-chapter-line > a.active { color: var(--links); }
+.reef-app-chapter-line > a.active { font-weight: 600; }
+.reef-app-chapter-draft { flex: 1; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+.reef-app-fold { flex: none; font: inherit; color: var(--fg); background: none; border: 0; padding: 0 10px; cursor: pointer; opacity: 0.68; transition: transform 0.3s; }
+.reef-app-fold:hover { opacity: 1; }
+.reef-app-chapter.expanded > .reef-app-chapter-line > .reef-app-fold { transform: rotate(90deg); }
+.reef-app-part { margin: 5px 0; font-weight: 700; }
+.reef-app-spacer { height: 3px; margin: 5px 0; background: var(--line); }
+.reef-app-book-page { flex: 1; min-width: 0; overflow-y: auto; box-sizing: border-box; padding: 0 15px 50px; }
+.reef-app-book-main { max-width: 750px; margin: 0 auto; font-size: 1rem; line-height: 1.45; }
+.reef-app-book-main.fills { max-width: none; height: 100%; display: flex; flex-direction: column; box-sizing: border-box; padding-bottom: 8px; }
+.reef-app-book-page:has(.reef-app-book-main.fills) { padding-bottom: 0; overflow: hidden; }
+.reef-app-run { display: contents; }
+.reef-app-book-main h1, .reef-app-book-main h2, .reef-app-book-main h3, .reef-app-book-main h4 { line-height: 1.25; }
+.reef-app-book-main h2, .reef-app-book-main h3 { margin-block-start: 2.5em; }
+.reef-app-book-main h4, .reef-app-book-main h5 { margin-block-start: 2em; }
+.reef-app-book-main a { text-decoration: none; }
+.reef-app-book-main a:hover { text-decoration: underline; }
+.reef-app-book-main img { max-width: 100%; }
+.reef-app-book-main table { margin: 0 auto; border-collapse: collapse; }
+.reef-app-book-main table td, .reef-app-book-main table th { padding: 3px 20px; border: 1px solid var(--line); }
+.reef-app-book-main table thead { background: var(--panel); }
+.reef-app-book-main table thead th { font-weight: 700; }
+.reef-app-book-main table tbody tr:nth-child(2n) { background: color-mix(in srgb, var(--panel) 55%, var(--bg)); }
+.reef-app-book-main blockquote { margin: 20px 0; padding: 0 20px; background: var(--panel); border-block: 0.1em solid var(--line); }
+.reef-app-book-main :not(pre) > code { padding: 0.1em 0.3em; border-radius: 3px; background: var(--panel); }
+.reef-app-book-main pre { padding: 1rem; overflow-x: auto; border-radius: 4px; background: var(--panel); line-height: 1.4; }
+.reef-app-book-main pre > code { font-size: 0.875em; }
+.reef-app-fence { position: relative; }
+.reef-app-fence.fills { flex: 1 1 auto; min-height: 240px; display: flex; flex-direction: column; }
+.reef-app-fence .reef { font-size: 13px; line-height: normal; }
+.reef-app-fence-unread { margin: 1em 0; }
+.reef-app-book-nav { display: flex; gap: 1rem; margin-block-start: 50px; }
+.reef-app-book-prev, .reef-app-book-next { display: flex; align-items: center; gap: 0.6rem; max-width: 48%; padding: 0.3rem 0.9rem; border-radius: 5px; background: var(--panel); color: var(--fg); }
+.reef-app-book-main a.reef-app-book-prev:hover, .reef-app-book-main a.reef-app-book-next:hover { text-decoration: none; color: var(--links); }
+.reef-app-book-next { margin-left: auto; text-align: right; }
+.reef-app-book-arrow { font-size: 2.2em; line-height: 1; }
+.reef-app-book-near { font-size: 0.9rem; overflow-wrap: anywhere; }
+@media (max-width: 40rem) { .reef-app-book-bar { display: none; } }
 "#;
 
 /// The app's pages, by path
@@ -315,9 +365,13 @@ pub enum Route {
     /// Every project and its plans, each summed up
     #[route("/")]
     Explorer {},
-    /// One plan, full-window
-    #[route("/plans/:project/:plan")]
-    PlanPage { project: String, plan: String },
+    /// One plan, full-window, showing the node its fragment names once the plan is drawn
+    #[route("/plans/:project/:plan#:node")]
+    PlanPage { project: String, plan: String, node: String },
+    /// A plan's docs as a book, open at the chapter its path names, and at the heading its
+    /// fragment names, or at the book's first chapter for no path
+    #[route("/plans/:project/:plan/docs/:..path#:anchor")]
+    DocsPage { project: String, plan: String, path: Vec<String>, anchor: String },
     /// Your password and tokens, and every user to an admin
     #[route("/account")]
     Account {},
@@ -385,6 +439,7 @@ fn PlanSwitch(listing: ProjectPlans, plan: String) -> Element {
             let route = Route::PlanPage {
                 project: info.name.project.clone(),
                 plan: info.name.plan.clone(),
+                node: String::new(),
             };
             let follows = follows(&listing.project, info);
             (
@@ -514,8 +569,13 @@ fn BranchPicker(
 ///
 /// * `project` - The project the plan belongs to
 /// * `plan` - The plan's name within it
+/// * `node` - A node to show once the plan is drawn, as a link from its docs asks, or empty
 #[component]
-pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Element {
+pub fn PlanPage(
+    project: ReadSignal<String>,
+    plan: ReadSignal<String>,
+    node: ReadSignal<String>,
+) -> Element {
     // the plan, read again when the route names another plan, so a plan that isn't there says so
     let info = use_server_future(move || calls::plan_info(project(), plan()))?;
     // the plan's changes, which read its payload again
@@ -537,11 +597,20 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
     // and its runners, which the bar counts and the sessions panel shows
     use_runners(project);
     let (project_now, plan_now) = (project(), plan());
+    // the node a link asked to show, if one did
+    let select = Some(node()).filter(|id| !id.is_empty());
+    let docs = Route::DocsPage {
+        project: project_now.clone(),
+        plan: plan_now.clone(),
+        path: Vec::new(),
+        anchor: String::new(),
+    };
     rsx! {
         div { class: "reef-app-plan",
             header { class: "reef-app-bar",
                 Link { to: Route::Explorer {}, "← Plans" }
                 strong { class: "reef-app-plan-name", "{project}/{plan}" }
+                Link { class: "reef-app-pane-link", to: docs, "Docs" }
                 if let Some(Ok(listing)) = &*siblings.read() {
                     PlanSwitch { listing: listing.clone(), plan: plan_now.clone() }
                     BranchPicker { listing: listing.clone(), plan: plan_now.clone(), siblings }
@@ -563,6 +632,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
                             plan: plan_now.clone(),
                             payload,
                             changes,
+                            select,
                         }
                     }
                 }

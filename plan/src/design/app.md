@@ -558,7 +558,9 @@ plan names its docs, and reads them as a book beside the graph or in its place
   views, mdbook's heading ids kept, so a ```` ```reef ```` fence draws as a live view of the plan.
 - **Links stay inside the docs.** A link to another chapter opens it in the view, a heading's
   anchor scrolls to it, a `node:` link opens that node, and a link outside the book opens its
-  served page. A chapter has a route of its own, `/plans/{project}/{plan}/docs/{path}`.
+  served page. A chapter has a route of its own, `/plans/{project}/{plan}/docs/{path}`, where
+  a `node:` link opens the plan's page with the node shown, `/plans/{project}/{plan}#{id}`
+  ([C123](../milestones/m15.md)).
 - **Either pane shows the docs.** The main area flips between Graph and Docs, and the sidebar
   shows the docs beside a node's tabs, with or without a node selected. Each pane's choice and its
   open chapter are kept per plan.

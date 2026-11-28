@@ -3,6 +3,7 @@
 
 use crate::paths::{self, Target};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag, TagEnd};
+use reef_model::{Run, ViewSpec};
 use std::collections::HashSet;
 
 /// Where links in rendered node bodies start. Each page replaces it with its way back to the
@@ -381,26 +382,89 @@ fn rebase(link_type: LinkType, source: &str, dest: &str) -> CowStr<'static> {
 /// assert!(page.contains("href=\"reef-root:/docs/f.html#x\""));
 /// ```
 pub fn render_page(md: &str, source: &str) -> String {
+    // the page is titled by its first heading, or else by its path
+    let title = page_title(md, source);
+    // the doc's runs of HTML inside a page's `<main>`, as mdbook lays its pages out, a plan drawn
+    // on the doc's page not drawn here
+    let main: String = render_runs(md, source)
+        .into_iter()
+        .filter_map(|run| match run {
+            Run::Html { html } => Some(html),
+            Run::View { .. } | Run::Unread { .. } => None,
+        })
+        .collect();
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n</head>\n<body>\n<main>\n{main}</main>\n</body>\n</html>\n",
+        paths::escape(&title)
+    )
+}
+
+/// The title a doc's page or chapter is given: its first heading, or else its path
+///
+/// # Arguments
+///
+/// * `md` - The doc's markdown, without its frontmatter
+/// * `source` - The doc's path
+pub fn page_title(md: &str, source: &str) -> String {
+    // the first heading's text, as mdbook titles a chapter
+    heading_spans(md).into_iter().next().map_or_else(|| source.to_string(), |h| h.text)
+}
+
+/// Render a doc as the app's docs view draws it: runs of HTML, each heading with the id mdbook
+/// gives it, with each ```` ```reef ```` fence a view of the plan between them
+///
+/// Its links start with [`ROOT`] and a link naming a node opens as one whose `data-goto` the
+/// viewer follows, as on its page. A fence whose view can't be read is a run saying why.
+///
+/// # Arguments
+///
+/// * `md` - The doc's markdown, without its frontmatter
+/// * `source` - The doc's path, which its links are written relative to
+///
+/// # Examples
+///
+/// ```
+/// use reef_model::Run;
+/// use reef_render::render_runs;
+///
+/// let runs = render_runs("# Design\n\n```reef\nfocus = \"M3\"\n```\n\nAfter.\n", "docs/design.md");
+/// assert!(matches!(&runs[0], Run::Html { html } if html.contains("<h1 id=\"design\">")));
+/// assert!(matches!(&runs[1], Run::View { spec } if spec.focus.as_deref() == Some("M3")));
+/// assert!(matches!(&runs[2], Run::Html { html } if html == "<p>After.</p>\n"));
+/// ```
+pub fn render_runs(md: &str, source: &str) -> Vec<Run> {
     // the ids mdbook gives the headings, in the order they come
     let spans = heading_spans(md);
     let mut ids = spans.iter().map(|h| CowStr::from(h.id.clone()));
-    // the page is titled by its first heading, or else by its path
-    let title = spans.first().map_or(source, |h| h.text.as_str());
+    let mut runs = Vec::new();
     let mut events = Vec::new();
-    let mut skip_fence = false;
+    // the fence being read, by its body so far
+    let mut fence: Option<String> = None;
     let mut links = Links::new(source);
     for ev in Parser::new_ext(md, md_options()) {
         let ev = match ev {
-            // a plan drawn on the doc's page isn't drawn here
+            // a plan drawn on the doc ends the run before it, and is read whole
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if is_reef(&info) => {
-                skip_fence = true;
+                html_run(&mut runs, &mut events);
+                fence = Some(String::new());
                 continue;
             }
-            Event::End(TagEnd::CodeBlock) if skip_fence => {
-                skip_fence = false;
+            Event::Text(text) if fence.is_some() => {
+                if let Some(body) = &mut fence {
+                    body.push_str(&text);
+                }
                 continue;
             }
-            _ if skip_fence => continue,
+            // its view is its own run, or why it can't be read
+            Event::End(TagEnd::CodeBlock) if fence.is_some() => {
+                let body = fence.take().unwrap_or_default();
+                runs.push(match toml::from_str::<ViewSpec>(&body) {
+                    Ok(spec) => Run::View { spec },
+                    Err(error) => Run::Unread { error: error.message().to_string() },
+                });
+                continue;
+            }
+            _ if fence.is_some() => continue,
             // each heading gets its id, so a link's anchor finds it
             Event::Start(Tag::Heading { level, classes, attrs, .. }) => Event::Start(Tag::Heading { level, id: ids.next(), classes, attrs }),
             // and each link leads where it did from the doc, or to the box of the node it names
@@ -408,13 +472,25 @@ pub fn render_page(md: &str, source: &str) -> String {
         };
         events.push(ev);
     }
-    // the doc inside a page's `<main>`, as mdbook lays its pages out
-    let mut main = String::new();
-    pulldown_cmark::html::push_html(&mut main, events.into_iter());
-    format!(
-        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n</head>\n<body>\n<main>\n{main}</main>\n</body>\n</html>\n",
-        paths::escape(title)
-    )
+    // the HTML after the last fence
+    html_run(&mut runs, &mut events);
+    runs
+}
+
+/// Ends a run of HTML: the events since the last run, written as HTML, unless there are none
+///
+/// # Arguments
+///
+/// * `runs` - The runs so far
+/// * `events` - The events since the last run, taken
+fn html_run(runs: &mut Vec<Run>, events: &mut Vec<Event<'_>>) {
+    // nothing between two fences, or before the first, is no run
+    if events.is_empty() {
+        return;
+    }
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, events.drain(..));
+    runs.push(Run::Html { html });
 }
 
 /// Whether a fenced code block's info string makes it a ```` ```reef ```` fence
@@ -494,6 +570,33 @@ mod tests {
         assert!(page.contains("href=\"reef-root:/docs/other.html#x\""), "{page}");
         assert!(!page.contains("focus"), "{page}");
         assert!(page.contains("<del>Was.</del>"), "{page}");
+    }
+
+    /// A doc read for the docs view keeps each fence as a view between runs of HTML, its
+    /// headings under mdbook's ids and its links as on its page
+    #[test]
+    fn runs_keep_fences_as_views() {
+        let md = "# A\n\n## Rows\n\nSee [o](other.md#x) and [M6](node:M6).\n\n```reef\nfocus = \"M3\"\nexpand = \"all\"\n```\n\n```reef\nbogus = 1\n```\n\n## Rows\n\nAfter.\n";
+        let runs = render_runs(md, "docs/a.md");
+        let [Run::Html { html: first }, Run::View { spec }, Run::Unread { error }, Run::Html { html: last }] = &runs[..] else {
+            panic!("runs of HTML, a view, a fence that can't be read and HTML: {runs:?}");
+        };
+        // the HTML before the fences has its headings' ids, its links rooted and its node's link
+        assert!(first.starts_with("<h1 id=\"a\">A</h1>"), "{first}");
+        assert!(first.contains("<h2 id=\"rows\">Rows</h2>"), "{first}");
+        assert!(first.contains("href=\"reef-root:/docs/other.html#x\""), "{first}");
+        assert!(first.contains(r#"<a href="javascript:void 0" data-goto="M6">M6</a>"#), "{first}");
+        assert!(!first.contains("focus"), "{first}");
+        // the fence is its view, and one that can't be read says why
+        assert_eq!(spec.focus.as_deref(), Some("M3"));
+        assert_eq!(spec.expand, reef_model::Expand::Keyword("all".to_string()));
+        assert!(error.contains("bogus"), "{error}");
+        // and the HTML after them goes on with the ids mdbook gives a repeated heading
+        assert_eq!(last, "<h2 id=\"rows-1\">Rows</h2>\n<p>After.</p>\n");
+        // a doc with no fence is one run, as its page's `<main>` holds it
+        let plain = render_runs("# A\n\nText.\n", "docs/a.md");
+        assert_eq!(plain, [Run::Html { html: "<h1 id=\"a\">A</h1>\n<p>Text.</p>\n".to_string() }]);
+        assert!(render_page("# A\n\nText.\n", "docs/a.md").contains("<main>\n<h1 id=\"a\">A</h1>\n<p>Text.</p>\n</main>"));
     }
 
     #[test]

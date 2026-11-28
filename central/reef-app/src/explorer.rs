@@ -267,6 +267,7 @@ fn PlanRow(project: Project, summary: PlanSummary, now: ReadSignal<u64>) -> Elem
     let route = Route::PlanPage {
         project: info.name.project.clone(),
         plan: info.name.plan.clone(),
+        node: String::new(),
     };
     let follows = follows(&project, info);
     let listed = info

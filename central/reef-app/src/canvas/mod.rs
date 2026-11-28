@@ -491,7 +491,8 @@ fn whole_plan() -> ViewSpec {
 /// The plan's canvas: its toolbar, diagram, legend and sidebar, and a node's menu
 ///
 /// Keyed by the plan's name, so another plan starts it afresh, while each newer revision of the
-/// same plan is drawn in place.
+/// same plan is drawn in place. It shows the whole plan filling the stage, or what a
+/// ```` ```reef ```` fence asks for, inline in a chapter's text at the fence's height.
 ///
 /// # Arguments
 ///
@@ -499,15 +500,19 @@ fn whole_plan() -> ViewSpec {
 /// * `plan` - The plan's name within it
 /// * `payload` - The plan's payload, as it is read and read again, named for its plan
 /// * `changes` - How many changes to the plan have come, which the editor reads the node again on
+/// * `spec` - What a fence asks the view to show, or `None` for the whole plan filling the stage
+/// * `select` - A node to show once the plan is first drawn, as a link to it asks
 #[component]
 pub fn Canvas(
     project: String,
     plan: String,
     payload: Resource<Result<Keyed, ServerFnError>>,
     changes: ReadSignal<u64>,
+    #[props(default)] spec: Option<ViewSpec>,
+    #[props(default)] select: Option<String>,
 ) -> Element {
     let name = format!("{project}/{plan}");
-    let view = use_view(name.clone());
+    let view = use_view(name.clone(), spec);
     // the plan's comment threads, which the toolbar counts and the sidebar shows
     let (threads_project, threads_plan) = (project.clone(), plan.clone());
     crate::side::threads::use_threads(
@@ -523,6 +528,19 @@ pub fn Canvas(
             view.resized();
         }
     });
+    // and once it is fitted, show the node a link asked for, if the plan has it
+    let mut shown_asked = use_signal(|| false);
+    use_effect(move || {
+        let fitted = *view.fitted.read();
+        let Some(id) = select.as_deref() else { return };
+        if !fitted || *shown_asked.peek() {
+            return;
+        }
+        if view.graph().is_some_and(|g| g.index_of(id).is_some()) {
+            shown_asked.set(true);
+            view.goto(id);
+        }
+    });
     // leaving full screen, or entering it, fits the view once the new size settles
     use_hook(move || {
         Rc::new(dom::on_document("fullscreenchange", move || {
@@ -533,10 +551,19 @@ pub fn Canvas(
             });
         }))
     });
-    // the drawing and the toolbar's state
+    // the drawing and the toolbar's state, a fence's view drawn at its height in the text
     let drawn = view.drawn();
+    let page = view.spec.read().layout == Layout::Page;
+    let height = match page {
+        true => None,
+        false => Some(format!(
+            "height: {}",
+            view.spec.read().height.as_deref().unwrap_or("70vh")
+        )),
+    };
     let classes = format!(
-        "reef reef-page reef-mounted reef-app-graph{}{}",
+        "reef{} reef-mounted reef-app-graph{}{}",
+        if page { " reef-page" } else { "" },
         if view.selected.read().is_some() {
             " reef-has-side"
         } else {
@@ -552,9 +579,21 @@ pub fn Canvas(
     let layout_ms = drawn.as_ref().map(|d| format!("{:.1}", d.ms));
     let draws = drawn.as_ref().map(|d| d.draws.to_string());
     let has_acc = view.graph().is_some_and(|g| g.has_acceptance());
+    // what is said over the view until its plan is drawn: over the stage for the whole plan,
+    // and inside the view for a fence's, which sits in a chapter's text
+    let note = match &*payload.read() {
+        Some(Err(error)) => rsx! {
+            p { class: "reef-app-error reef-app-over", "Reading the plan failed: {error}" }
+        },
+        None => rsx! {
+            p { class: "reef-app-muted reef-app-over", "Loading the plan…" }
+        },
+        Some(Ok(_)) => rsx! {},
+    };
     rsx! {
         div {
             class: "{classes}",
+            style: height,
             tabindex: "0",
             "data-boxes": boxes,
             "data-layout-ms": layout_ms,
@@ -565,15 +604,12 @@ pub fn Canvas(
             Stage { changes, project: project.clone(), plan: plan.clone() }
             ChartTip {}
             NodeMenu { project: project.clone(), plan: plan.clone() }
+            if !page {
+                {note.clone()}
+            }
         }
-        match &*payload.read() {
-            Some(Err(error)) => rsx! {
-                p { class: "reef-app-error reef-app-over", "Reading the plan failed: {error}" }
-            },
-            None => rsx! {
-                p { class: "reef-app-muted reef-app-over", "Loading the plan…" }
-            },
-            Some(Ok(_)) => rsx! {},
+        if page {
+            {note}
         }
     }
 }
@@ -583,11 +619,12 @@ pub fn Canvas(
 /// # Arguments
 ///
 /// * `name` - The plan's name, `project/plan`
-fn use_view(name: String) -> View {
+/// * `spec` - What a fence asks the view to show, or `None` for the whole plan
+fn use_view(name: String, spec: Option<ViewSpec>) -> View {
     // the signals, each starting as a newly mounted view's does
     let name = use_signal(|| name);
     let plan = use_signal(|| None::<Plan>);
-    let spec = use_signal(whole_plan);
+    let spec = use_signal(move || spec.unwrap_or_else(whole_plan));
     let expanded = use_signal(HashSet::<String>::new);
     let mut filter = use_signal(Filter::default);
     let measure = use_signal(|| None::<Rc<Measure>>);

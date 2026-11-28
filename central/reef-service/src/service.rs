@@ -65,13 +65,14 @@ use reef_api::{
     check_page_path, paths,
 };
 use reef_model::{
-    Book, Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record,
-    nodes_from_records,
+    Book, ChapterText, Diagnostic, Graph, Next, NodeName, Payload, PlanGraph, PlanName, Record,
+    Run, nodes_from_records,
 };
 use reef_render::chapters::{plan_book, read_book};
 use reef_render::docs::page_node_problems;
 use reef_render::{
-    Cached, DocSource, Layered, MemSource, ROOT, Renderer, Sections, doc_body, render_page,
+    Cached, DocSource, Layered, MemSource, ROOT, Renderer, Sections, doc_body, page_title,
+    render_page, render_runs,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -983,17 +984,121 @@ impl<B: Backend> Service<B> {
     /// * `page` - The page's path from the root of the plan's docs
     #[instrument(name = "Service::doc_page", skip_all, err(Debug))]
     pub async fn doc_page(&self, plan: &PlanName, page: &str) -> anyhow::Result<Option<String>> {
+        // the plan's pages the page could be written from, over its repo
+        let page = reef_render::paths::join("", page);
+        let (pages, repo) = self
+            .doc_source(plan, reef_render::paths::md_of(&page))
+            .await?;
+        let docs = paths::docs(plan);
+        // read and render it off the async threads, since its doc may be a file or a blob
+        let html = tokio::task::spawn_blocking(move || {
+            let source = Layered::new(pages, repo.source()?);
+            anyhow::Ok(page_of(&source, &page).map(|html| html.replace(ROOT, &docs)))
+        })
+        .await??;
+        Ok(html)
+    }
+
+    /// Reads one of a plan's docs as a chapter of its book, as the app's docs view draws it:
+    /// runs of HTML, with each ```` ```reef ```` fence a view of the plan between them, or `None`
+    /// if the plan has no doc at that path
+    ///
+    /// The doc is read as [`Service::doc_page`] reads it, the plan's page over the repo's file,
+    /// and its runs are what that page's `<main>` holds, each heading under the id mdbook gives
+    /// it and its links leading under [`paths::docs`], with its fences kept as views.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `path` - The doc's path from the root of the plan's docs, such as `design/app.md`
+    #[instrument(name = "Service::chapter", skip_all, err(Debug))]
+    pub async fn chapter(
+        &self,
+        plan: &PlanName,
+        path: &str,
+    ) -> anyhow::Result<Option<ChapterText>> {
+        // the plan's page at the path, over its repo
+        let path = reef_render::paths::join("", path);
+        let (pages, repo) = self.doc_source(plan, vec![path.clone()]).await?;
+        let docs = paths::docs(plan);
+        // read and render it off the async threads, since its doc may be a file or a blob
+        let text = tokio::task::spawn_blocking(move || {
+            let source = Layered::new(pages, repo.source()?);
+            anyhow::Ok(source.read(&path).map(|text| {
+                let body = doc_body(&text);
+                chapter_text(page_title(body, &path), render_runs(body, &path), &docs)
+            }))
+        })
+        .await??;
+        Ok(text)
+    }
+
+    /// Reads a node's body as a chapter of its plan's book, as the root node of a plan that
+    /// names no docs is read, or `None` if the plan has no such node
+    ///
+    /// The chapter is titled by the node, its title heading the body unless the body opens with
+    /// it. A stored node's links are written from the root of its plan's docs.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `id` - The node's id
+    #[instrument(name = "Service::node_chapter", skip_all, err(Debug))]
+    pub async fn node_chapter(
+        &self,
+        plan: &PlanName,
+        id: &str,
+    ) -> anyhow::Result<Option<ChapterText>> {
+        // a plan its project lists, of a project that is registered
+        self.project_named(&plan.project).await?;
+        let plans = self.store.plans(&plan.project).await?;
+        if !plans.iter().any(|info| info.name == *plan) {
+            return Err(NotListed(plan.clone()).into());
+        }
+        // the node as stored, if the plan has it
+        let Some(stored) = self.store.get(plan, id).await? else {
+            return Ok(None);
+        };
+        let title = stored.spec.title.clone().unwrap_or_else(|| id.to_string());
+        let body = stored.body;
+        // its title heads the body, unless the body opens with a heading that says it
+        let opens = reef_render::heading_spans(&body)
+            .first()
+            .is_some_and(|h| h.start == body.len() - body.trim_start().len() && h.text == title);
+        let md = match opens {
+            true => body,
+            false => format!("# {title}\n\n{body}"),
+        };
+        // a stored node's links are written from the root of its plan's docs
+        Ok(Some(chapter_text(
+            title,
+            render_runs(&md, ""),
+            &paths::docs(plan),
+        )))
+    }
+
+    /// The plan's pages at some paths, read alone rather than with the rest, and where its other
+    /// docs are read from, for a plan its project lists
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan's full name
+    /// * `paths` - The paths of the pages to read, those no page can have left to the repo
+    #[instrument(name = "Service::doc_source", skip_all, err(Debug))]
+    async fn doc_source(
+        &self,
+        plan: &PlanName,
+        paths: Vec<String>,
+    ) -> anyhow::Result<(MemSource, Docs)> {
         // the docs of a plan its project lists, read from that project's repo
         let repo = self.docs(plan).await?;
         let plans = self.store.plans(&plan.project).await?;
         if !plans.iter().any(|info| info.name == *plan) {
             return Err(NotListed(plan.clone()).into());
         }
-        let docs = paths::docs(plan);
-        // the plan's pages the page could be written from, read alone rather than with the rest
-        let page = reef_render::paths::join("", page);
+        // each page the plan keeps at one of the paths
         let mut pages = MemSource::new();
-        for md in reef_render::paths::md_of(&page) {
+        for md in paths {
             // a path no page can have, such as one that climbs out, is left to the repo to refuse
             if check_page_path(&md).is_err() {
                 continue;
@@ -1002,13 +1107,7 @@ impl<B: Backend> Service<B> {
                 pages.insert(stored.path, stored.text);
             }
         }
-        // read and render it off the async threads, since its doc may be a file or a blob
-        let html = tokio::task::spawn_blocking(move || {
-            let source = Layered::new(pages, repo.source()?);
-            anyhow::Ok(page_of(&source, &page).map(|html| html.replace(ROOT, &docs)))
-        })
-        .await??;
-        Ok(html)
+        Ok((pages, repo))
     }
 
     /// Reads a plan's docs as a book: the folder or summary it names, read over its pages and its
@@ -1241,6 +1340,27 @@ fn rooted(payload: Payload, docs: &str) -> anyhow::Result<Payload> {
     // the docs' path is percent-encoded, so it needs no escaping in JSON
     let json = serde_json::to_string(&payload)?.replace(ROOT, docs);
     Ok(serde_json::from_str(&json)?)
+}
+
+/// A chapter's text, its HTML's links put under the path its plan's docs are served from
+///
+/// # Arguments
+///
+/// * `title` - The chapter's title
+/// * `runs` - Its runs, their links starting with `ROOT`
+/// * `docs` - The path its plan's docs are served from, ending in `/`
+fn chapter_text(title: String, runs: Vec<Run>, docs: &str) -> ChapterText {
+    // each run of HTML has its links rooted, as a served page's are
+    let runs = runs
+        .into_iter()
+        .map(|run| match run {
+            Run::Html { html } => Run::Html {
+                html: html.replace(ROOT, docs),
+            },
+            run => run,
+        })
+        .collect();
+    ChapterText { title, runs }
 }
 
 /// A doc rendered as the page at a path, its links starting with `ROOT`, or `None` if no doc

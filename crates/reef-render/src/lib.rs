@@ -6,7 +6,8 @@
 //! repo's working tree, which no link may leave, and [`MemSource`] holds docs in memory, as a
 //! server holding a plan's pages does. [`Layered`] reads one source over another, as a plan's
 //! pages over its repo, and [`Cached`] reads each doc of a source once. [`render_page`] renders
-//! a doc as the page mdbook would write for it, for a server with no book to serve.
+//! a doc as the page mdbook would write for it, for a server with no book to serve, and
+//! [`render_runs`] as the app's docs view draws it, its ```` ```reef ```` fences as views.
 //!
 //! A book's own files are read by [`book`]: its node files, and the plan they make, checked
 //! and briefed, as mdbook-reef draws it and `reef import` lifts it into a central plan. The
@@ -25,8 +26,8 @@ pub mod source;
 
 pub use docs::{Renderer, Sections};
 pub use markdown::{
-    HeadingSpan, ROOT, heading_spans, headings_of, inline_html, is_reef, md_options, render,
-    render_body, render_comment, render_page,
+    HeadingSpan, ROOT, heading_spans, headings_of, inline_html, is_reef, md_options, page_title,
+    render, render_body, render_comment, render_page, render_runs,
 };
 pub use source::{
     Cached, DocSource, Entry, FsSource, Headings, Layered, MemSource, RepoSource, doc_body, leaves,
