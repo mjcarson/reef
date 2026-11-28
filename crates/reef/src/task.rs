@@ -20,7 +20,8 @@
 //! - **With the steps that finish it,** for the plan to end with ([`finish_steps`]): its
 //!   criteria, its status, and a commit of everything it changed. Approving a plan may clear the
 //!   context, leaving the plan alone, and a seal takes only what is tracked, so a node a plan
-//!   never says to commit would be sealed without its new files.
+//!   never says to commit would be sealed without its new files. A node with a thread that
+//!   wants an answer gets steps answering it too, as a round's are.
 //! - **The Stop hook ends a node once** ([`ended`]). While the node the loop holds isn't done,
 //!   Claude is waiting on the user, and the hook lets it stop. Once it is done, the hook acts on
 //!   its end once, recorded as [`LoopEdit::Acted`], whatever `stop_hook_active` says: it names
@@ -49,14 +50,16 @@
 //!   threads and how its fix goes into the node's commit: a fixup naming each thread in a
 //!   `Reef-Resolves` trailer, squashed in by `git rebase --autosquash` unless a remote branch
 //!   holds the commit already. It is planned like a node, and its end is acted on like one.
+//! - **A reply before the commit that resolves a thread.** A trailer resolves its thread but
+//!   writes nothing in it, so the steps have Claude reply first in each thread the work answers,
+//!   saying what changed and answering any question it asks. The reply leaves the last word
+//!   Claude's, so it calls for no round, and the trailer resolves it as before.
 //! - **Every node handed out with its open threads,** so a comment left while it is worked on is
 //!   there each time it is handed out again.
 
 use reef_api::loops::{holder, member_of};
 use reef_api::work::on_worktree;
-use reef_api::{
-    EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane, RESOLVES_TRAILER, Revision, Thread,
-};
+use reef_api::{EditLoop, Loop, LoopEdit, LoopEdited, LoopState, Pane, Revision, Thread};
 use reef_model::next::entry_lines;
 use reef_model::{Next, NodeName, PlanName, Status};
 use std::collections::HashMap;
@@ -65,6 +68,7 @@ use std::path::Path;
 
 use crate::cli::{self, Pick, PlanPick};
 use crate::client::Client;
+use crate::comment::{ANSWER_OTHERWISE, CHECK_RESOLVED, REPLY_FIRST, trailer_of};
 use crate::git::Checkout;
 use crate::open::Open;
 use crate::{comment, node, start, work};
@@ -1183,15 +1187,14 @@ impl Round {
     /// * `node` - The round's node
     pub fn steps(&self, node: &NodeName) -> String {
         // the trailer naming every thread that wants an answer
-        let numbers: Vec<String> = self.wanting.iter().map(u32::to_string).collect();
-        let trailer = format!("--trailer '{RESOLVES_TRAILER}: {}'", numbers.join(", "));
+        let trailer = trailer_of(&self.wanting);
+        // the fix, a reply in each thread it answers, then the node done
         let mut steps = format!(
             "How to finish the round:\n\
-             1. Fix what each thread asks. A thread that needs no change is resolved with reef's \
-             resolve tool, saying how it was answered; one you need the user's word on gets a \
-             question with the reply tool, and waits on them. Leave out of the trailer below any \
-             thread you didn't answer with the fix.\n\
-             2. Mark `{}` done, and its criteria, as the reef skill says.\n",
+             1. Fix what each thread asks. {ANSWER_OTHERWISE}\n\
+             2. {REPLY_FIRST} Leave out of the trailer below any thread you didn't answer with \
+             the fix.\n\
+             3. Mark `{}` done, and its criteria, as the reef skill says.\n",
             node.id
         );
         match &self.squash {
@@ -1205,17 +1208,16 @@ impl Round {
                     false => format!("{commit}~1"),
                 };
                 steps.push_str(&format!(
-                    "3. Commit everything the round changed as a fixup of `{}`'s commit {} \
+                    "4. Commit everything the round changed as a fixup of `{}`'s commit {} \
                      (\"{summary}\"), naming the threads it answers:\n\
                      \x20    git commit --fixup={commit} {trailer}\n\
-                     \x20  git's output should show reef's `resolved #N` line for each thread; \
-                     resolve any it doesn't with the resolve tool.\n\
-                     4. Squash it into that commit:\n\
+                     \x20  {CHECK_RESOLVED}\n\
+                     5. Squash it into that commit:\n\
                      \x20    GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash --autostash \
                      --rebase-merges {onto}\n\
                      \x20  If the rebase stops for any reason, `git rebase --abort`, which leaves \
                      the fixup commit for a later squash, and say so.\n\
-                     5. End the turn.\n",
+                     6. End the turn.\n",
                     node.id,
                     short(commit)
                 ));
@@ -1225,22 +1227,19 @@ impl Round {
                 summary,
                 remote,
             } => steps.push_str(&format!(
-                "3. `{}`'s commit {} (\"{summary}\") is on `{remote}` already, so it isn't \
+                "4. `{}`'s commit {} (\"{summary}\") is on `{remote}` already, so it isn't \
                  rewritten: commit everything the round changed as a fixup of it, naming the \
                  threads it answers, and leave it for a later `git rebase --autosquash`:\n\
                  \x20    git commit --fixup={commit} {trailer}\n\
-                 \x20  git's output should show reef's `resolved #N` line for each thread; \
-                 resolve any it doesn't with the resolve tool.\n\
-                 4. End the turn.\n",
+                 \x20  {CHECK_RESOLVED}\n\
+                 5. End the turn.\n",
                 node.id,
                 short(commit)
             )),
             Squash::Unknown(why) => steps.push_str(&format!(
-                "3. {why}, so commit everything the round changed as a commit of its own, naming \
-                 the threads it answers with `{trailer}`. git's output should show reef's \
-                 `resolved #N` line for each thread; resolve any it doesn't with the resolve \
-                 tool.\n\
-                 4. End the turn.\n"
+                "4. {why}, so commit everything the round changed as a commit of its own, naming \
+                 the threads it answers with `{trailer}`. {CHECK_RESOLVED}\n\
+                 5. End the turn.\n"
             )),
         }
         steps
@@ -1835,11 +1834,18 @@ async fn hand_out<W: Write>(
         writeln!(out, "\nIts open comment threads ({}):\n", threads.len())?;
         comment::show_threads(&threads, out)?;
     }
-    // and how it is finished, or a round of them
+    // and how it is finished, its threads that want an answer among it, or a round of them
     writeln!(out)?;
     match round {
         Some(round) => write!(out, "{}", round.steps(node))?,
-        None => write!(out, "{}", finish_steps(node))?,
+        None => {
+            let wanting: Vec<u32> = threads
+                .iter()
+                .filter(|thread| thread.wants_answer())
+                .map(|thread| thread.number)
+                .collect();
+            write!(out, "{}", finish_steps(node, &wanting))?
+        }
     }
     // the queue's entries passed over, each with why
     if !next.skipped.is_empty() {
@@ -1867,32 +1873,71 @@ async fn hand_out<W: Write>(
 /// next_task prints them
 ///
 /// Approving a plan may clear the context, leaving the plan alone, so the plan carries them.
-/// A seal takes only what is tracked, so the commit is among them.
+/// A seal takes only what is tracked, so the commit is among them. A thread left on the node
+/// that wants an answer is answered among them: a reply in each one the work answers, then the
+/// commit's trailer naming it.
 ///
 /// # Arguments
 ///
 /// * `node` - The node handed out
+/// * `wanting` - The numbers of its threads that want an answer
 ///
 /// # Examples
 ///
 /// ```
-/// let steps = reef::task::finish_steps(&"reef/central/C44".parse().unwrap());
+/// let node = "reef/central/C44".parse().unwrap();
+/// let steps = reef::task::finish_steps(&node, &[]);
 /// assert!(steps.starts_with("How to finish it:\n1. Do what the approved plan says"));
 /// assert!(steps.contains("3. Commit everything it changed"));
+/// // a thread that wants an answer gets a reply, then the commit's trailer
+/// let steps = reef::task::finish_steps(&node, &[7]);
+/// assert!(steps.contains("2. Answer its open comment thread #7."));
+/// assert!(steps.contains("4. Commit everything it changed"));
+/// assert!(steps.contains("--trailer 'Reef-Resolves: 7'"));
 /// ```
-pub fn finish_steps(node: &NodeName) -> String {
-    format!(
-        "How to finish it:\n\
-         1. Do what the approved plan says.\n\
-         2. Set each of `{id}`'s acceptance criteria met or unmet with reef's accept tool, naming \
+pub fn finish_steps(node: &NodeName, wanting: &[u32]) -> String {
+    let id = &node.id;
+    // the plan's work, then a reply in each thread it answers
+    let mut steps = vec!["Do what the approved plan says.".to_string()];
+    if !wanting.is_empty() {
+        let named: Vec<String> = wanting.iter().map(|number| format!("#{number}")).collect();
+        let noun = if wanting.len() == 1 {
+            "thread"
+        } else {
+            "threads"
+        };
+        steps.push(format!(
+            "Answer its open comment {noun} {}. {REPLY_FIRST} {ANSWER_OTHERWISE}",
+            named.join(", ")
+        ));
+    }
+    steps.push(format!(
+        "Set each of `{id}`'s acceptance criteria met or unmet with reef's accept tool, naming \
          the test that checks it, and mark `{id}` done with the status tool, as the reef skill \
-         says.\n\
-         3. Commit everything it changed, with whatever the repo's own instructions put in the \
-         same change. A seal takes only what is tracked, so a file left untracked is in none of \
-         `{id}`'s revisions.\n\
-         4. End the turn.\n",
-        id = node.id
-    )
+         says."
+    ));
+    // the commit, naming the threads it answers
+    let naming = match wanting.is_empty() {
+        true => String::new(),
+        false => format!(
+            ", naming the threads it answers with `{}` and leaving out any it doesn't. \
+             {CHECK_RESOLVED}",
+            trailer_of(wanting)
+        ),
+    };
+    steps.push(format!(
+        "Commit everything it changed, with whatever the repo's own instructions put in the same \
+         change{naming}{} A seal takes only what is tracked, so a file left untracked is in none \
+         of `{id}`'s revisions.",
+        if naming.is_empty() { "." } else { "" }
+    ));
+    steps.push("End the turn.".to_string());
+    // numbered from 1
+    let mut text = "How to finish it:\n".to_string();
+    for (index, step) in steps.iter().enumerate() {
+        text.push_str(&format!("{}. {step}\n", index + 1));
+    }
+    text
 }
 
 /// Prints the ready work another loop holds, each with the pane holding it, if there is any
@@ -1930,7 +1975,7 @@ async fn edited(client: &Client, pane: &Pane, edit: LoopEdit) -> anyhow::Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{Choice, Ending, GroupEnd, after, choose, group_end};
+    use super::{Choice, Ending, GroupEnd, Round, Squash, after, choose, finish_steps, group_end};
     use reef_api::{Loop, LoopState, Member, Pane};
     use reef_model::{Next, NodeName, PlanName, Ready, Status};
     use std::collections::HashMap;
@@ -2464,5 +2509,96 @@ mod tests {
             GroupEnd::NotYet
         );
         assert_eq!(judged(&again, "C40", &done), GroupEnd::Done(named("C40")));
+    }
+
+    /// A round's steps have Claude reply in each thread its fix answers before the commit whose
+    /// trailer names it, whichever way the fix goes into the node's commit
+    #[test]
+    fn a_rounds_steps_ask_for_a_reply_before_its_commit() {
+        // a fix squashed in, one left on a remote's commit, and one with no commit found
+        let squashes = [
+            Squash::Into {
+                commit: "a".repeat(40),
+                summary: "Add a".to_string(),
+                root: false,
+            },
+            Squash::Pushed {
+                commit: "b".repeat(40),
+                summary: "Add b".to_string(),
+                remote: "origin/main".to_string(),
+            },
+            Squash::Unknown("reef read no commit of the node's".to_string()),
+        ];
+        for squash in squashes {
+            let round = Round {
+                wanting: vec![3, 5],
+                squash,
+            };
+            let steps = round.steps(&named("C40"));
+            // the reply comes as its own step, before the commit naming both threads
+            let reply = steps
+                .find("2. Before committing, reply in each thread you answer with a change")
+                .unwrap_or_else(|| panic!("no reply step: {steps}"));
+            let commit = steps
+                .find("4. ")
+                .unwrap_or_else(|| panic!("no commit step: {steps}"));
+            assert!(reply < commit, "{steps}");
+            assert!(steps.contains("say what changed and where"), "{steps}");
+            assert!(steps.contains("answer any question it asks"), "{steps}");
+            assert!(
+                steps[commit..].contains("--trailer 'Reef-Resolves: 3, 5'"),
+                "{steps}"
+            );
+            // and git's output is checked for a thread resolved with no reply
+            assert!(
+                steps[commit..].contains("reply in any it says has no reply"),
+                "{steps}"
+            );
+            assert!(steps.contains("3. Mark `C40` done"), "{steps}");
+        }
+    }
+
+    /// A node's steps ask for a reply only while a thread on it wants an answer, and then name
+    /// each such thread in the commit's trailer
+    #[test]
+    fn a_nodes_steps_ask_for_a_reply_only_when_a_thread_wants_one() {
+        // with no thread wanting an answer, the steps say nothing of threads
+        let plain = finish_steps(&named("C40"), &[]);
+        assert_eq!(
+            plain,
+            "How to finish it:\n\
+             1. Do what the approved plan says.\n\
+             2. Set each of `C40`'s acceptance criteria met or unmet with reef's accept tool, \
+             naming the test that checks it, and mark `C40` done with the status tool, as the \
+             reef skill says.\n\
+             3. Commit everything it changed, with whatever the repo's own instructions put in \
+             the same change. A seal takes only what is tracked, so a file left untracked is in \
+             none of `C40`'s revisions.\n\
+             4. End the turn.\n"
+        );
+        assert!(!plain.contains("reply"), "{plain}");
+        // with two, each is answered with a reply first, then named in the commit's trailer
+        let steps = finish_steps(&named("C40"), &[3, 5]);
+        assert!(
+            steps.contains(
+                "2. Answer its open comment threads #3, #5. Before committing, reply in each \
+                 thread you answer with a change"
+            ),
+            "{steps}"
+        );
+        assert!(steps.contains("3. Set each of `C40`'s"), "{steps}");
+        let commit = steps
+            .find("4. Commit everything it changed")
+            .unwrap_or_else(|| panic!("no commit step: {steps}"));
+        assert!(
+            steps[commit..]
+                .contains("naming the threads it answers with `--trailer 'Reef-Resolves: 3, 5'`"),
+            "{steps}"
+        );
+        assert!(
+            steps[commit..].contains("reply in any it says has no reply"),
+            "{steps}"
+        );
+        assert!(steps.ends_with("5. End the turn.\n"), "{steps}");
     }
 }

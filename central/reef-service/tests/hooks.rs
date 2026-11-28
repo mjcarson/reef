@@ -1642,6 +1642,14 @@ async fn a_comment_on_a_done_node_comes_back_as_a_round_squashed_into_its_commit
     let fixup =
         format!("git commit --fixup={first} --trailer 'Reef-Resolves: {on_line}, {general}'");
     assert!(took.contains(&fixup), "{took}");
+    // a reply in each thread the fix answers comes before the fixup that resolves it
+    let reply = took
+        .find("2. Before committing, reply in each thread you answer with a change")
+        .unwrap_or_else(|| panic!("no reply step: {took}"));
+    assert!(
+        took.find(&fixup).is_some_and(|commit| reply < commit),
+        "{took}"
+    );
     assert!(
         took.contains(&format!("--rebase-merges {first}~1")),
         "{took}"
@@ -2081,11 +2089,32 @@ async fn three_queued_nodes_run_end_to_end() -> anyhow::Result<()> {
         "{took}"
     );
     assert!(
-        took.contains(&reef::task::finish_steps(&"cli/docs/C".parse()?)),
+        took.contains(&reef::task::finish_steps(&"cli/docs/C".parse()?, &[])),
         "{took}"
     );
-    // the user comments on C while it is planned; its first pass leaves c.txt untracked
+    // the user comments on C while it is planned, so C handed out again mid-node has Claude
+    // reply in the thread before the commit naming it
     let general = commented(&hx, "C", reef_api::Target::Node, "Give c.txt a second line").await?;
+    let (again, _) = hx.taken_in(&a, pane).await?;
+    assert!(
+        again.starts_with("`cli/docs/C` is still this loop's"),
+        "{again}"
+    );
+    assert!(
+        again.contains(&reef::task::finish_steps(
+            &"cli/docs/C".parse()?,
+            &[general]
+        )),
+        "{again}"
+    );
+    assert!(
+        again.contains(&format!(
+            "2. Answer its open comment thread #{general}. Before committing, reply in each \
+             thread you answer with a change"
+        )),
+        "{again}"
+    );
+    // its first pass leaves c.txt untracked
     std::fs::write(a.join("c.txt"), "c\n")?;
     hx.reef(&a, &["status", "C", "done"]).await?;
     hx.status_used(&a, "C", "done").await?;

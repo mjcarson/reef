@@ -212,14 +212,54 @@ impl Thread {
     /// pending in a review waits on the review.
     pub fn wants_answer(&self) -> bool {
         // open, published, and not left waiting on the user by Claude's own reply
-        self.is_open()
-            && !self.pending
-            && self
-                .comments
-                .iter()
-                .rev()
-                .find(|comment| comment.review.is_none())
-                .is_none_or(|comment| comment.author.by.is_user())
+        self.is_open() && !self.pending && !self.last_word_is_claudes()
+    }
+
+    /// Whether Claude wrote its last published comment, open or resolved
+    ///
+    /// A thread a commit's trailer resolved with this false never had a reply saying what the
+    /// commit changed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{Author, Comment, Target, Thread, ThreadState, Writer};
+    ///
+    /// let said = |number, by| Comment {
+    ///     number,
+    ///     at: u64::from(number),
+    ///     author: Author { by, ..Author::default() },
+    ///     review: None,
+    ///     body: "Is it slower?".to_string(),
+    ///     html: String::new(),
+    /// };
+    /// let thread = Thread {
+    ///     node: "reef/central/C130".parse().unwrap(),
+    ///     number: 1,
+    ///     version: 1,
+    ///     target: Target::Node,
+    ///     followed: Vec::new(),
+    ///     outdated: None,
+    ///     state: ThreadState::Resolved,
+    ///     resolutions: Vec::new(),
+    ///     marks: Vec::new(),
+    ///     pending: false,
+    ///     comments: vec![said(1, Writer::User)],
+    /// };
+    /// assert!(!thread.last_word_is_claudes());
+    /// let replied = Thread {
+    ///     comments: vec![said(1, Writer::User), said(2, Writer::Claude)],
+    ///     ..thread
+    /// };
+    /// assert!(replied.last_word_is_claudes());
+    /// ```
+    pub fn last_word_is_claudes(&self) -> bool {
+        // the last comment not pending in a review, if Claude wrote it
+        self.comments
+            .iter()
+            .rev()
+            .find(|comment| comment.review.is_none())
+            .is_some_and(|comment| comment.author.by == Writer::Claude)
     }
 
     /// Whether it is open and published, as the user counts what still wants an answer
@@ -978,6 +1018,7 @@ mod tests {
             ..thread.clone()
         };
         assert!(asked.is_open() && !asked.wants_answer());
+        assert!(asked.last_word_is_claudes() && !thread.last_word_is_claudes());
         // the user answering wants an answer again
         let answered = Thread {
             comments: vec![
@@ -987,13 +1028,18 @@ mod tests {
             ],
             ..thread.clone()
         };
-        assert!(answered.wants_answer());
-        // and a resolved thread wants none
+        assert!(answered.wants_answer() && !answered.last_word_is_claudes());
+        // and a resolved thread wants none, whoever spoke last
         let resolved = Thread {
             state: ThreadState::Resolved,
             ..thread
         };
-        assert!(!resolved.wants_answer());
+        assert!(!resolved.wants_answer() && !resolved.last_word_is_claudes());
+        let replied = Thread {
+            comments: vec![said(1, Writer::User), said(2, Writer::Claude)],
+            ..resolved
+        };
+        assert!(!replied.wants_answer() && replied.last_word_is_claudes());
         // a reply sent as Claude's says so, and the user's leaves it out
         let reply = NewReply {
             body: "Is two enough?".to_string(),

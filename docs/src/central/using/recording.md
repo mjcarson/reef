@@ -31,6 +31,8 @@
   reef comment resolve 7 --reply "No change needed"
   ```
 
-  A commit with a `Reef-Resolves: 7` trailer resolves thread 7 once it is captured. Each comment
-  is listed with who wrote it, from their login, and "Claude, for" them where Claude wrote it
-  through reef's tools.
+  A commit with a `Reef-Resolves: 7` trailer resolves thread 7 once it is captured. The trailer
+  writes nothing in the thread, so Claude replies in it first, saying what changed and answering
+  any question it asks, and a capture that resolves a thread whose last comment is still yours
+  says it has no reply. Each comment is listed with who wrote it, from their login, and "Claude,
+  for" them where Claude wrote it through reef's tools.

@@ -1311,7 +1311,7 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         } => start::start(&client, cwd, &id, &pick, base.as_deref(), restart, out).await,
         Command::Work { id, pick } => start::work(&client, cwd, id.as_deref(), &pick, out).await,
         Command::Comment(CommentCommand::Ls { node, all, pick }) => {
-            comment::ls(&client, cwd, node.as_deref(), all, &pick, out).await
+            comment::ls(&client, cwd, node.as_deref(), all, false, &pick, out).await
         }
         Command::Comment(CommentCommand::Reply { thread, body, pick }) => {
             comment::reply(&client, cwd, thread, &body, Writer::User, &pick, out).await

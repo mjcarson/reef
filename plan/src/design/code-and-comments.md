@@ -378,6 +378,24 @@ Claude answers the comments on a node's work before the loop moves on ([C43](../
     a commit of its own, for a later `git rebase --autosquash`. Nor is one the base branch holds,
     or one reef can't find, such as a node captured before reef read commits: its fix is a
     commit of its own.
+- **A reply says what each fix changed** ([C130](../milestones/m15.md)). A trailer resolves its thread but
+  writes nothing in it, so before the commit naming a thread, Claude replies in it with reef's
+  reply tool: what changed and where, and the answer to any question it asks. A round's steps say
+  so, and so do a node's while a thread on it wants an answer, since its own commit resolves that
+  thread too.
+  - **The reply calls for no round.** It leaves the last word Claude's, so the thread waits on
+    the user until the trailer resolves it, as before.
+  - **The comments tool says it too.** A thread left while a node is planned reaches Claude
+    through the comments tool as often as through next_task, so the tool ends its listing with
+    the same words: a reply first, then each thread the change answers in the commit's
+    `Reef-Resolves` trailer. Tried live, a session that read one this way before had replied
+    but left the trailer out, so the thread stayed open. `reef comment ls` prints the threads
+    alone.
+  - **A reply skipped is said where Claude looks.** A capture reads back each thread its
+    trailers resolved, and says of one whose last published comment is still the user's that it
+    has no reply, beside its `resolved #N` line in git's output. It is read in the CLI after the
+    capture, so a service that predates it needs no redeploy, and a read that fails only leaves
+    the word out.
 - **A node's own commits are kept with each revision.** A capture keeps the non-merge commits its
   head holds that its start and its base branch don't. Once a rebase has rewritten the start
   itself, as a round's squash does, a head commit that is the same change as one the start held

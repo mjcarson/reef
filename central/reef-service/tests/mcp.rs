@@ -631,6 +631,22 @@ async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()>
         )),
         "{listed}"
     );
+    // and it ends with how to answer them: a reply first, then both in the commit's trailer
+    assert!(
+        listed.contains(&format!(
+            "To answer the threads that want one (#{}, #{}): Before committing, reply in each \
+             thread you answer with a change",
+            numbers[0], numbers[1]
+        )),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!(
+            "`--trailer 'Reef-Resolves: {}, {}'`",
+            numbers[0], numbers[1]
+        )),
+        "{listed}"
+    );
     // a question back leaves the first open, its last word Claude's
     let (replied, failed) = session
         .call("reply", json!({"thread": numbers[0], "body": "Which one?"}))

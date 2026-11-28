@@ -77,6 +77,10 @@ The full key reference is in [reference.md](reference.md). Read it before writin
        steps in the plan: the fix is committed as a `git commit --fixup` of the node's commit,
        its `Reef-Resolves` trailer naming each thread it answers, and squashed in with the
        `git rebase --autosquash` next_task names, unless a remote holds that commit already.
+     - **Reply in each thread the fix answers before the commit that names it,** with
+       `mcp__reef__reply`: what changed and where, and the answer to any question it asks. The
+       trailer resolves the thread but writes nothing in it, and git's output says which thread
+       it resolved with no reply since the user's last comment: reply there then.
      - **Answer a thread that needs no change** with `mcp__reef__resolve`, saying how, or ask
        its writer with `mcp__reef__reply`, which leaves it waiting on them. Both write as
        Claude, so a thread whose last word is yours never calls for another round.
@@ -192,7 +196,10 @@ In the same change that finishes the work:
 - `status` `done` on the node. Never set a status on a group: a group is done when its members
   are, and "ready" is derived from `needs`.
 - A commit that answers a comment thread names it in a `Reef-Resolves: <N>` trailer, which
-  resolves the thread once the commit is captured.
+  resolves the thread once the commit is captured. Reply in the thread first, with
+  `mcp__reef__reply`, saying what changed and where and answering any question it asks, since
+  the trailer writes nothing in it. That goes for a thread left on a node while it is worked as
+  much as for a round's.
 - Each acceptance criterion gets `met` or `unmet` with `accept`, numbered from 1 in the order
   its `acceptance` lists them, and the test that checks it. Leave a performance criterion with
   a `metric` and `at-least`/`at-most` alone: its status is derived from the `after` figure.

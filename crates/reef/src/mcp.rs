@@ -526,11 +526,12 @@ impl Tools {
     #[tool(
         description = "List the open comment threads on a reef node's work, or the plan's: each \
                        thread's number, its node, where it is (a file's line in a revision, or \
-                       the node as a whole) and every comment, with who wrote it.",
+                       the node as a whole) and every comment, with who wrote it, then how to \
+                       answer the ones that want an answer.",
         annotations(read_only_hint = true)
     )]
     async fn comments(&self, Parameters(args): Parameters<CommentsArgs>) -> Result<String, String> {
-        // as `reef comment ls` lists them
+        // as `reef comment ls` lists them, then how to answer them
         let mut out = Vec::new();
         let pick = self.pick_of(args.plan);
         let done = comment::ls(
@@ -538,6 +539,7 @@ impl Tools {
             &self.cwd,
             args.id.as_deref(),
             args.all,
+            true,
             &pick,
             &mut out,
         )
@@ -547,8 +549,10 @@ impl Tools {
 
     /// Replies in a comment thread, as Claude
     #[tool(
-        description = "Reply in a reef comment thread, such as with a question back. The thread \
-                       stays open, waiting on the user's answer rather than on yours."
+        description = "Reply in a reef comment thread: before the commit whose `Reef-Resolves` \
+                       trailer resolves it, to say what changed and answer any question it asks, \
+                       since the trailer writes nothing in it; or with a question back. Either \
+                       way the thread waits on the user's word rather than on yours."
     )]
     async fn reply(&self, Parameters(args): Parameters<ReplyArgs>) -> Result<String, String> {
         // as `reef comment reply` keeps one, written as Claude's

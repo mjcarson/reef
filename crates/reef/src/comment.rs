@@ -8,7 +8,9 @@
 //! ```
 //!
 //! - **Listed whole.** Each thread is listed with where it is, whether it is open, and every
-//!   comment's markdown with who wrote it, which is what Claude needs to answer it.
+//!   comment's markdown with who wrote it, which is what Claude needs to answer it. reef's MCP
+//!   tool ends the listing with how to answer the ones that want an answer: a reply saying what
+//!   changed, then the commit's `Reef-Resolves` trailer, as a node's steps say.
 //! - **Resolved by a change.** A thread is resolved by the revision that answered it, which is
 //!   linked to it, so the user sees which change answered which comment. A commit's
 //!   `Reef-Resolves: <N>` trailer does the same when the commit is captured; `resolve` is for a
@@ -22,7 +24,8 @@
 //!   sent with a resolve goes first.
 
 use reef_api::{
-    Commented, NewReply, ResolveThread, Resolved, Revision, Side, Target, Thread, Writer,
+    Commented, NewReply, RESOLVES_TRAILER, ResolveThread, Resolved, Revision, Side, Target, Thread,
+    Writer,
 };
 use reef_model::{NodeName, PlanName};
 use std::io::Write;
@@ -31,6 +34,71 @@ use std::path::Path;
 use crate::cli::{self, PlanPick};
 use crate::client::Client;
 use crate::git::Checkout;
+
+/// What Claude is told of a thread that needs no change, or the user's word
+pub(crate) const ANSWER_OTHERWISE: &str = "A thread that needs no change is resolved with \
+                                           reef's resolve tool, saying how it was answered; one \
+                                           you need the user's word on gets a question with the \
+                                           reply tool, and waits on them.";
+
+/// What Claude is told of replying in a thread before the commit that resolves it, since its
+/// trailer writes nothing in the thread
+pub(crate) const REPLY_FIRST: &str = "Before committing, reply in each thread you answer with a \
+                                      change, with reef's reply tool: say what changed and \
+                                      where, and answer any question it asks, since the \
+                                      commit's trailer resolves the thread but writes nothing \
+                                      in it.";
+
+/// What Claude is told of git's output once a commit's trailer names threads
+pub(crate) const CHECK_RESOLVED: &str = "git's output should show reef's `resolved #N` line for \
+                                         each thread; resolve any it doesn't with the resolve \
+                                         tool, and reply in any it says has no reply.";
+
+/// The `git commit` flag whose trailer names these threads, as Claude is told it
+///
+/// # Arguments
+///
+/// * `threads` - The threads' numbers
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!(reef::comment::trailer_of(&[3, 5]), "--trailer 'Reef-Resolves: 3, 5'");
+/// ```
+pub fn trailer_of(threads: &[u32]) -> String {
+    // each number, split by commas, as the trailer's reader takes them
+    let numbers: Vec<String> = threads.iter().map(u32::to_string).collect();
+    format!("--trailer '{RESOLVES_TRAILER}: {}'", numbers.join(", "))
+}
+
+/// How Claude answers the threads listed that want an answer, as reef's comments tool says
+/// after listing them, or `None` if none of them does
+///
+/// A thread read mid-node through the tool comes with no node's steps, so the tool says what
+/// they would: a reply, then the commit's trailer.
+///
+/// # Arguments
+///
+/// * `threads` - The threads listed
+pub fn answering(threads: &[Thread]) -> Option<String> {
+    // the threads that want an answer, by number
+    let wanting: Vec<u32> = threads
+        .iter()
+        .filter(|thread| thread.wants_answer())
+        .map(|thread| thread.number)
+        .collect();
+    if wanting.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = wanting.iter().map(|number| format!("#{number}")).collect();
+    Some(format!(
+        "To answer the threads that want one ({}): {REPLY_FIRST} Then name each one the change \
+         answers in the commit's trailer, `{}`, leaving out any it doesn't. {CHECK_RESOLVED} \
+         {ANSWER_OTHERWISE}\n",
+        named.join(", "),
+        trailer_of(&wanting)
+    ))
+}
 
 /// Which node's revision a resolve links to a thread when none is named
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +120,8 @@ pub enum Answering<'a> {
 /// * `cwd` - The working directory, which picks the project and plan when none is named
 /// * `node` - The node whose threads to list, a bare id or a full name, else the plan's
 /// * `all` - Whether to list resolved threads too, rather than only the open ones
+/// * `steps` - Whether to end with how Claude answers the ones that want an answer, as reef's
+///   comments tool does
 /// * `pick` - The project and plan, if they were named
 /// * `out` - Where to print them
 pub async fn ls<W: Write>(
@@ -59,6 +129,7 @@ pub async fn ls<W: Write>(
     cwd: &Path,
     node: Option<&str>,
     all: bool,
+    steps: bool,
     pick: &PlanPick,
     out: &mut W,
 ) -> anyhow::Result<()> {
@@ -89,6 +160,10 @@ pub async fn ls<W: Write>(
     let plural = if count == 1 { "" } else { "s" };
     writeln!(out, "{of} has {count} {kind}{plural}:\n")?;
     show_threads(&threads, out)?;
+    // then, for Claude, how the ones that want an answer are answered
+    if let Some(answering) = steps.then(|| answering(&threads)).flatten() {
+        write!(out, "{answering}")?;
+    }
     Ok(())
 }
 
@@ -357,4 +432,76 @@ async fn latest(client: &Client, node: &NodeName) -> anyhow::Result<Revision> {
              another with `--node`"
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::answering;
+    use reef_api::{Author, Comment, Target, Thread, ThreadState, Writer};
+
+    /// A thread of `reef/central/C130` whose comments are written by these writers in turn
+    ///
+    /// # Arguments
+    ///
+    /// * `number` - The thread's number
+    /// * `state` - Whether it is open or resolved
+    /// * `by` - Who wrote each of its comments, the first first
+    fn thread(number: u32, state: ThreadState, by: &[Writer]) -> Thread {
+        // each comment numbered after the thread's first
+        let comments = by
+            .iter()
+            .zip(number..)
+            .map(|(by, at)| Comment {
+                number: at,
+                at: u64::from(at),
+                author: Author {
+                    by: *by,
+                    ..Author::default()
+                },
+                review: None,
+                body: "Is it slower?".to_string(),
+                html: String::new(),
+            })
+            .collect();
+        Thread {
+            node: "reef/central/C130".parse().unwrap(),
+            number,
+            version: 1,
+            target: Target::Node,
+            followed: Vec::new(),
+            outdated: None,
+            state,
+            resolutions: Vec::new(),
+            marks: Vec::new(),
+            pending: false,
+            comments,
+        }
+    }
+
+    /// The comments tool says how to answer only the threads that want an answer: a reply
+    /// first, then each named in the commit's trailer
+    #[test]
+    fn the_listing_says_how_to_answer_the_threads_that_want_one() {
+        // one the user spoke last in, one Claude answered last, and one resolved
+        let threads = [
+            thread(3, ThreadState::Open, &[Writer::User]),
+            thread(5, ThreadState::Open, &[Writer::User, Writer::Claude]),
+            thread(7, ThreadState::Resolved, &[Writer::User]),
+        ];
+        let said = answering(&threads).expect("#3 wants an answer");
+        assert!(
+            said.starts_with(
+                "To answer the threads that want one (#3): Before committing, reply in each \
+                 thread you answer with a change, with reef's reply tool"
+            ),
+            "{said}"
+        );
+        assert!(
+            said.contains("in the commit's trailer, `--trailer 'Reef-Resolves: 3'`"),
+            "{said}"
+        );
+        assert!(said.contains("resolved with reef's resolve tool"), "{said}");
+        // and nothing while none wants one
+        assert_eq!(answering(&threads[1..]), None);
+    }
 }

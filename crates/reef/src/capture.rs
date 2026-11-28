@@ -27,7 +27,8 @@
 //! - **A capture reads its node's `Reef-Resolves` trailers.** Each commit HEAD reaches past the
 //!   node's start and the base branch is read for them, and each thread one names is sent to be
 //!   resolved, linked to the revision the capture keeps or matches. A value that names no thread
-//!   number is said, and sent nowhere.
+//!   number is said, and sent nowhere. A thread it resolves whose last published comment is
+//!   still the user's is said to have no reply, since the trailer writes nothing in it.
 
 use reef_api::comment::trailer_threads;
 use reef_api::{
@@ -188,12 +189,15 @@ pub async fn capture_record<W: Write>(
             )
         })
         .collect();
+    let captured = client.add_capture(&record.node, &add).await?;
+    // the threads its trailers resolved that have no reply of Claude's since the user's word
+    let unreplied = unreplied(client, &record.node.plan, &captured).await;
     let read = Read {
         plan: &record.node.plan,
         summaries: &summaries,
         unreadable: &taken.unreadable,
+        unreplied: &unreplied,
     };
-    let captured = client.add_capture(&record.node, &add).await?;
     match &captured {
         Captured::Added {
             revision, trailers, ..
@@ -428,6 +432,40 @@ fn resolving(own: &[Walked]) -> (Vec<Resolves>, Unreadable) {
     (resolves, unreadable)
 }
 
+/// The threads a capture's trailers resolved whose last published comment is still the user's,
+/// so no reply of Claude's says what the commit changed
+///
+/// Each one is read back after the capture, from the plan its node is in. One that can't be
+/// read is left out, since the capture it follows was kept already and this only adds a word.
+///
+/// # Arguments
+///
+/// * `client` - The service's client
+/// * `plan` - The plan the threads are in
+/// * `captured` - What came of the capture
+async fn unreplied(client: &Client, plan: &PlanName, captured: &Captured) -> Vec<u32> {
+    // what each thread its trailers named came to
+    let trailers = match captured {
+        Captured::Added { trailers, .. }
+        | Captured::Replaced { trailers, .. }
+        | Captured::Unchanged { trailers, .. } => trailers.as_slice(),
+        Captured::NotStarted { .. } | Captured::Restarted { .. } => &[],
+    };
+    let mut unreplied = Vec::new();
+    for read in trailers {
+        // only a thread this capture resolved, as a thread resolved already was said before
+        if read.outcome != TrailerOutcome::Resolved {
+            continue;
+        }
+        if let Ok(Some(thread)) = client.thread(plan, read.thread).await
+            && !thread.last_word_is_claudes()
+        {
+            unreplied.push(read.thread);
+        }
+    }
+    unreplied
+}
+
 /// What a capture's trailers named, for saying what came of each
 struct Read<'a> {
     /// The plan the threads are in
@@ -436,13 +474,16 @@ struct Read<'a> {
     summaries: &'a HashMap<&'a str, &'a str>,
     /// Each trailer value that names no thread number: its commit and the value
     unreadable: &'a [(String, String)],
+    /// The threads it resolved that have no reply of Claude's since the user's last comment
+    unreplied: &'a [u32],
 }
 
 impl Read<'_> {
     /// Prints what each thread a trailer named came to, and each value that named none
     ///
     /// A trailer whose change resolved its thread already, which is still resolved, says
-    /// nothing, since every capture reads it again.
+    /// nothing, since every capture reads it again. A thread resolved with no reply of Claude's
+    /// since the user's last comment says so, since its trailer wrote nothing in it.
     ///
     /// # Arguments
     ///
@@ -459,6 +500,11 @@ impl Read<'_> {
                 .unwrap_or_default();
             let thread = read.thread;
             match read.outcome {
+                TrailerOutcome::Resolved if self.unreplied.contains(&thread) => writeln!(
+                    out,
+                    "resolved #{thread}, answered by {short} {summary}, with no reply since the \
+                     user's last comment: reply in it, saying what changed"
+                )?,
                 TrailerOutcome::Resolved => {
                     writeln!(out, "resolved #{thread}, answered by {short} {summary}")?
                 }

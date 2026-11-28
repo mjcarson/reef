@@ -3871,7 +3871,8 @@ async fn a_trailer_resolves_its_comment_and_the_link_survives_a_squash() -> anyh
     assert!(out.starts_with("captured `A` as revision 2 in "), "{out}");
     assert!(
         out.contains(&format!(
-            "resolved #1, answered by {} Take the lock\n",
+            "resolved #1, answered by {} Take the lock, with no reply since the user's last \
+             comment: reply in it, saying what changed\n",
             &fix[..12]
         )),
         "{out}"
@@ -3940,6 +3941,66 @@ async fn a_trailer_resolves_its_comment_and_the_link_survives_a_squash() -> anyh
         serde_json::to_string(&before)?
     );
     assert_eq!(after[1].0.revision, 2);
+    Ok(())
+}
+
+/// A capture whose trailer resolves a thread the user spoke last in says it has no reply, and
+/// says nothing more of one Claude replied in first
+#[tokio::test]
+async fn a_trailer_says_when_it_resolves_a_thread_claude_never_replied_to() -> anyhow::Result<()> {
+    let cx = Cx::new("resolve-unreplied").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    git::commit(&repo, "base.txt", "base\n", "base")?;
+    // A worked in a worktree of its own, captured once, then asked two things
+    let a = git::worktree(&repo, &cx.ax.dir.join("cli-a"))?;
+    cx.reef(&a, &["start", "A"]).await?;
+    git::commit(&a, "a.txt", "A's first\n", "A one")?;
+    cx.reef(&a, &["node", "capture"]).await?;
+    let lock = comment_on(&cx, "A", "Take the lock first").await?;
+    let slower = comment_on(&cx, "A", "Is it slower?").await?;
+    // Claude replies in the second, saying what changed, and leaves the first with no reply
+    let mut out = Vec::new();
+    reef::comment::reply(
+        &cx.client()?,
+        &a,
+        slower,
+        "Locked in `a.txt`, and no slower: the lock is taken once.",
+        reef_api::Writer::Claude,
+        &reef::cli::PlanPick::default(),
+        &mut out,
+    )
+    .await?;
+    // one commit names both, and its capture resolves them
+    let fix = commit_with(
+        &a,
+        "a.txt",
+        "A's first, locked\n",
+        &format!("Take the lock\n\nReef-Resolves: {lock}, {slower}"),
+    )?;
+    let out = cx.reef(&a, &["node", "capture"]).await?;
+    let short = &fix[..12];
+    // the first is said to have no reply, and the second is said as any resolved thread is
+    assert!(
+        out.contains(&format!(
+            "resolved #{lock}, answered by {short} Take the lock, with no reply since the user's \
+             last comment: reply in it, saying what changed\n"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "resolved #{slower}, answered by {short} Take the lock\n"
+        )),
+        "{out}"
+    );
+    // both are resolved, and only the second ends on Claude's word
+    let unreplied = thread_of(&cx, lock).await?;
+    let replied = thread_of(&cx, slower).await?;
+    assert!(!unreplied.is_open() && !replied.is_open());
+    assert!(!unreplied.last_word_is_claudes() && replied.last_word_is_claudes());
+    // a capture with nothing new says nothing of either again
+    let again = cx.reef(&a, &["node", "capture"]).await?;
+    assert!(!again.contains("no reply"), "{again}");
     Ok(())
 }
 
