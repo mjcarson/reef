@@ -1,10 +1,10 @@
 //! reef's UI: a Dioxus 0.7 fullstack app on axum
 //!
-//! Its front page picks a project's plan, and each plan opens full-window, beside its project's
-//! queue of work to take first (`queue`). The server answers
-//! the app's server functions, which call `reef-service`, and serves reef's JSON API on the same
-//! port, so the CLI, the MCP server and the app all reach one service. Every caller signs in, so
-//! the bar says whom the server takes the browser for (`sign_in`), and links to
+//! Its front page explores every project's plans, each summed up and kept live (`explorer`), and
+//! each plan opens full-window, beside its queue of work to take first (`queue`). The server
+//! answers the app's server functions, which call `reef-service`, and serves reef's JSON API on
+//! the same port, so the CLI, the MCP server and the app all reach one service. Every caller
+//! signs in, so the bar says whom the server takes the browser for (`sign_in`), and links to
 //! their account page, for their password and tokens, and every user to an admin (`account`).
 //!
 //! dx builds two sides from this crate: the wasm client with `web`, and the server with
@@ -21,6 +21,7 @@ pub mod account;
 pub mod app;
 pub mod calls;
 pub mod canvas;
+pub mod explorer;
 pub mod live;
 pub mod panel;
 pub mod queue;

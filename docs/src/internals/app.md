@@ -1,12 +1,26 @@
 # The app
 
-`reef-app` is a Dioxus 0.7.10 fullstack app. Its front page lists every project with its plans,
-and each plan opens at `/plans/{project}/{plan}`, drawn by reef-view linked into the client's
+`reef-app` is a Dioxus 0.7.10 fullstack app. Its front page explores every project's plans, each
+summed up, and each plan opens at `/plans/{project}/{plan}`, drawn by reef-view linked into the client's
 wasm, with the node the viewer selects in a panel beside it that edits its YAML. A plan's page
 follows the change stream, so each put shows up live. Its server functions sit under `/app/`,
 each a call on the service, and its server mounts `api::router` beside them, so one port serves
 the pages and the JSON API alike.
 
+- **The front page is a plan explorer** (C121, `explorer.rs`). `calls::explorer` reads every
+  project's plans summed up, `Service::plan_summaries` once a project, on the server as the
+  page renders, so it reads right before the script runs; its answer carries the server's clock,
+  which the page's relative times count on from, so the server's render and the browser's
+  agree. The page then follows one change stream that names no project
+  (`live::use_explorer_changes`), since plain HTTP/1.1 opens six connections a host. Each change
+  of a kind a summary shows, a put, a start, a loop, a session or a test run, is counted by the
+  project its JSON names, and reads that project's plans alone again (`calls::plan_summaries`);
+  a project registered, a gap, a reconnect or the stream's first opening, since the server read
+  the page before it, reads every project again. Each answer says when its read began, and a
+  project shows the read that began last, its own or the page's. Each read again is a plain
+  resource, which keeps what it showed until its answer lands, where a server future would
+  suspend the page again. A session or run that goes silent reads as gone only once its
+  project is next read, as the sessions panel's does.
 - **The editor saves as `reef node put` does,** through `reef_api::puts_for`, at the version it
   read: another writer's change since comes back stale with the newer version, and a save that
   would add a problem comes back with check's messages.

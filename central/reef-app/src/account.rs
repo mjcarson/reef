@@ -52,7 +52,7 @@ pub fn Account() -> Element {
         main { class: "reef-app-picker reef-app-account",
             header { class: "reef-app-picker-head",
                 h1 { "Account" }
-                Link { to: Route::Picker {}, "← Plans" }
+                Link { to: Route::Explorer {}, "← Plans" }
                 SignedInAs {}
             }
             match &*account.read() {

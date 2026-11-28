@@ -273,7 +273,7 @@ fn the_json_api_answers_on_the_apps_port() -> anyhow::Result<()> {
     })
 }
 
-/// The picker is rendered on the server with a link to every plan of every project
+/// The front page is rendered on the server with a link to every plan of every project
 #[test]
 fn the_picker_links_every_plan() -> anyhow::Result<()> {
     let fx = fx();
@@ -288,6 +288,95 @@ fn the_picker_links_every_plan() -> anyhow::Result<()> {
             let href = format!("href=\"/plans/picker/{plan}\"");
             assert!(body.contains(&href), "no {href} in {body}");
         }
+        anyhow::Ok(())
+    })
+}
+
+/// The markup after a marker, up to the next of another, or to its end
+///
+/// # Arguments
+///
+/// * `body` - The page's markup
+/// * `from` - Where the part starts, which must be there
+/// * `to` - What ends it, if it comes
+fn part<'a>(body: &'a str, from: &str, to: &str) -> &'a str {
+    // after the marker, up to whatever comes next of the other
+    let start = body
+        .find(from)
+        .unwrap_or_else(|| panic!("no {from} in {body}"));
+    let rest = &body[start + from.len()..];
+    match rest.find(to) {
+        Some(end) => &rest[..end],
+        None => rest,
+    }
+}
+
+/// Markup without its comments, such as the markers Dioxus leaves around text for hydration
+///
+/// # Arguments
+///
+/// * `markup` - The markup
+fn unmarked(markup: &str) -> String {
+    // everything outside a comment, in order
+    let mut kept = String::with_capacity(markup.len());
+    let mut rest = markup;
+    while let Some(start) = rest.find("<!--") {
+        kept.push_str(&rest[..start]);
+        // an unclosed comment runs to the end
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    kept.push_str(rest);
+    kept
+}
+
+/// The front page is rendered on the server with each plan summed up, so it reads right before
+/// the page's script runs: its project's counts, the active plan first though the other was
+/// written since, who started its node, what went done today, who listed each, and its last
+/// update relative, the exact time on hover
+#[test]
+fn the_front_page_sums_up_each_plan_on_the_server() -> anyhow::Result<()> {
+    let fx = fx();
+    fx.runtime.block_on(async {
+        // two plans, one with its node started, then the other's node done
+        let repo = fx.project("explorer", &["busy", "quiet"]).await?;
+        fx.reef(&repo, &["start", "A1", "--plan", "busy"]).await?;
+        fx.reef(&repo, &["status", "A1", "done", "--plan", "quiet"])
+            .await?;
+        // the front page, as the server renders it, without the markers hydration reads
+        let (status, body) = fx.get("/").await?;
+        assert_eq!(status, 200, "{body}");
+        let body = unmarked(&body);
+        // the project's card counts its plans and the active one
+        let card = part(&body, "data-project=\"explorer\"", "data-project=\"");
+        assert!(card.contains("2 plans · 1 active"), "{card}");
+        // the active plan comes first, though the other was written since
+        let busy = card
+            .find("class=\"reef-app-plan-row active\" data-plan=\"explorer/busy\"")
+            .expect("busy is listed active");
+        let quiet = card
+            .find("class=\"reef-app-plan-row\" data-plan=\"explorer/quiet\"")
+            .expect("quiet is listed idle");
+        assert!(busy < quiet, "busy isn't first in {card}");
+        // the active plan names its node in progress and who started it, with no session on it
+        let row = part(card, "data-plan=\"explorer/busy\"", "data-plan=\"");
+        assert!(row.contains("s-no-sessions"), "{row}");
+        assert!(row.contains("<code>A1</code> tester"), "{row}");
+        assert!(row.contains("0 of 1 done"), "{row}");
+        // the other counts its node done today, and says who listed it and wrote it last, just
+        // now, with the exact time on hover
+        let row = part(card, "data-plan=\"explorer/quiet\"", "data-plan=\"");
+        assert!(row.contains("1 of 1 done"), "{row}");
+        assert!(row.contains("1 done in the last 24 hours"), "{row}");
+        assert!(row.contains("title=\"A1\""), "{row}");
+        assert!(row.contains("listed by tester"), "{row}");
+        let updated = part(row, "class=\"reef-app-updated\" title=\"", "</span>");
+        assert!(
+            updated.contains(" UTC\"") && updated.contains("updated just now by tester"),
+            "{updated}"
+        );
         anyhow::Ok(())
     })
 }

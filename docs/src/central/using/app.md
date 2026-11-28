@@ -2,8 +2,21 @@
 
 Open the server's root in a browser and sign in. The sign-in lasts 30 days on that browser.
 
-- **The front page** lists every project and its plans, each with the branch it follows and the
-  commit last fetched of it, or "working tree" for a local project's plan that follows none.
+- **The front page** lists every project, who registered it, how many plans it has and how many
+  are active, then its plans: the active ones first, then the rest by their last update. A plan is
+  active while a node of it is in progress, a session on it is live, or a test run on it builds
+  or runs. Each plan shows:
+  - the branch it follows and the commit last fetched of it, or "working tree" for a local
+    project's plan that follows none, and who listed it;
+  - its state of work: *testing* while a test run builds or runs, else *sessions* while a session
+    is live, else *no sessions*;
+  - how many of its nodes are done, how many went done in the last 24 hours (hover for which),
+    and when it was last updated and by whom;
+  - who is working on what: each node in progress with who started it, each live session with
+    whose it is and its loop's node, and each test run with who started it and how it stands.
+
+  It changes as the work does, with no reload, over one change stream for the whole page. Times
+  are relative; hover over one for the exact time.
 - **A plan's page** draws the plan, and follows changes live. Its bar lists the project's plans,
   each with its branch, to move between them, and picks the branch the plan follows from the
   repo's branches: a pick is checked as `reef plan branch` is, and one that would break a link
@@ -48,4 +61,3 @@ Open the server's root in a browser and sign in. The sign-in lasts 30 days on th
   where that was someone else. [With Claude Code](claude-code.md) says how to attach each.
 - **Your name in the bar** opens your account: your password and your tokens, and, for an
   admin, every user, who added each, and the log of acts on users.
-- **The projects' page** says who registered each project; a plan's link, who listed it.

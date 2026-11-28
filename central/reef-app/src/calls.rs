@@ -6,9 +6,9 @@
 use dioxus::prelude::*;
 use reef_api::{
     Branched, Commented, Decision, FileDiff, HISTORY_MAX, HistoryPage, Loop, Marked, Me,
-    PasswordChange, PasswordChanged, PlanInfo, Project, QueueEdit, QueueListing, Queued, Review,
-    ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, SignedOut, Target, Thread,
-    ThreadState, TokenInfo, Transcript, User, UserRemoved,
+    PasswordChange, PasswordChanged, PlanInfo, PlanSummary, Project, QueueEdit, QueueListing,
+    Queued, Review, ReviewState, Reviewed, Revision, Session, SessionAct, SessionActed, SignedOut,
+    Target, Thread, ThreadState, TokenInfo, Transcript, User, UserRemoved,
 };
 #[cfg(feature = "server")]
 use reef_api::{Checked, NodePut, NodeWrite, Puts, lift, puts_for};
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::side::timeline::NodeTimeline;
 
-/// A project and its plans, as the picker lists them
+/// A project and its plans, as the plan page's switcher lists them
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectPlans {
     /// The project: its name and repo
@@ -179,22 +179,90 @@ pub fn signed_out(error: &ServerFnError) -> bool {
     matches!(error, ServerFnError::ServerError { code: 401, .. })
 }
 
-/// Every registered project, by name, with its plans, each saying who registered or listed it
-#[get("/app/projects")]
+/// A project and each of its plans summed up, as the front page's explorer shows them
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSummaries {
+    /// The project: its name, its repo, and who registered it
+    pub project: Project,
+    /// Each of its plans summed up, in its listing's order
+    pub plans: Vec<PlanSummary>,
+}
+
+/// Every project with its plans summed up, and the server's clock as it read them
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Explored {
+    /// Every registered project, by name, each with its plans summed up
+    pub projects: Vec<ProjectSummaries>,
+    /// When the server began reading them, in milliseconds since the epoch, which the page's
+    /// relative times count from, so the server's render and the browser's agree, and which
+    /// tells this read from a newer one
+    pub now: u64,
+}
+
+/// One project's plans summed up, read again, and when the server began reading them
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Summed {
+    /// Each of its plans summed up, in its listing's order
+    pub plans: Vec<PlanSummary>,
+    /// When the server began reading them, in milliseconds since the epoch, which tells this
+    /// read from the page's own
+    pub at: u64,
+}
+
+/// Every registered project, by name, with each of its plans summed up: who listed it, what it
+/// follows, its nodes, its last update, who works on what, and its state of work
+#[get("/app/explorer")]
 #[cfg_attr(
     feature = "server",
-    tracing::instrument(name = "calls::projects", skip_all, err(Debug))
+    tracing::instrument(name = "calls::explorer", skip_all, err(Debug))
 )]
-pub async fn projects() -> Result<Vec<ProjectPlans>, ServerFnError> {
-    // each project, then the plans it lists
+pub async fn explorer() -> Result<Explored, ServerFnError> {
+    // the clock as the read begins, so a change before it is in what is read
+    let now = now_ms();
+    // each project, then its plans summed up in one read of its work
     let service = crate::server::service();
     let projects = service.projects().await.map_err(failed)?;
-    let mut listed = Vec::with_capacity(projects.len());
+    let mut explored = Vec::with_capacity(projects.len());
     for project in projects {
-        let plans = service.plan_listing(&project.name).await.map_err(failed)?;
-        listed.push(ProjectPlans { project, plans });
+        let plans = service
+            .plan_summaries(&project.name)
+            .await
+            .map_err(failed)?;
+        explored.push(ProjectSummaries { project, plans });
     }
-    Ok(listed)
+    Ok(Explored {
+        projects: explored,
+        now,
+    })
+}
+
+/// One project's plans summed up, which the front page reads again after a change to it, with
+/// when the read began
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+#[get("/app/plan-summaries?project")]
+#[cfg_attr(
+    feature = "server",
+    tracing::instrument(name = "calls::plan_summaries", skip_all, err(Debug))
+)]
+pub async fn plan_summaries(project: String) -> Result<Summed, ServerFnError> {
+    // the clock as the read begins, then its plans, refused for a project that isn't registered
+    let at = now_ms();
+    let plans = crate::server::service()
+        .plan_summaries(&project)
+        .await
+        .map_err(failed)?;
+    Ok(Summed { plans, at })
+}
+
+/// The server's clock, in milliseconds since the epoch
+#[cfg(feature = "server")]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64)
 }
 
 /// One plan's name and the revision its readers load

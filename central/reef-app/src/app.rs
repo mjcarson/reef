@@ -1,8 +1,9 @@
-//! The app's pages: the picker, a plan's own page, and the account page
+//! The app's pages: the plan explorer, a plan's own page, and the account page
 
 use crate::account::Account;
 use crate::calls::{self, ProjectPlans};
 use crate::canvas::{Canvas, Keyed};
+use crate::explorer::Explorer;
 use crate::live::use_changes;
 use crate::queue::{QueuePanel, use_queue};
 use crate::session::{SessionPanel, SessionsButton, use_runners};
@@ -44,8 +45,21 @@ code { font-size: 0.92em; }
 .reef-app-project { border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1.1rem; background: var(--panel); }
 .reef-app-project h2 { margin: 0; font-size: 1.15rem; }
 .reef-app-repo { margin: 0.2rem 0 0.6rem; color: var(--muted); font-family: monospace; font-size: 0.85rem; overflow-wrap: anywhere; }
-.reef-app-plans { margin: 0; padding-left: 1.2rem; }
-.reef-app-plans li { margin: 0.2rem 0; }
+.reef-app-project-head { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: baseline; }
+.reef-app-plan-count { color: var(--muted); font-size: 0.85rem; }
+.reef-app-plans { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.4rem; }
+.reef-app-plan-row { display: grid; gap: 0.15rem; padding: 0.4rem 0.6rem; border: 1px solid var(--line); border-left: 3px solid var(--line); border-radius: 6px; background: var(--bg); }
+.reef-app-plan-row.active { border-left-color: var(--reef-progress); }
+.reef-app-plan-head { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
+.reef-app-plan-head .reef-app-branch { margin-left: 0; }
+.reef-app-plan-state { font-size: 0.72rem; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 0.3rem; }
+.reef-app-plan-state.s-testing { color: var(--reef-progress); border-color: var(--reef-progress); }
+.reef-app-plan-state.s-sessions { color: var(--links); border-color: var(--links); }
+.reef-app-listed { margin-left: auto; font-size: 0.8rem; color: var(--muted); }
+.reef-app-plan-facts, .reef-app-plan-work { display: flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; align-items: baseline; font-size: 0.8rem; color: var(--muted); }
+.reef-app-plan-work { color: var(--fg); }
+.reef-app-done-today.some { color: var(--reef-done); }
+.reef-app-work-kind { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .reef-app-branch { margin-left: 0.5rem; color: var(--muted); font-family: monospace; font-size: 0.8rem; }
 .reef-app-plan-switch { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: baseline; }
 .reef-app-plan-tab { font-size: 0.85rem; padding: 0.1rem 0.5rem; border: 1px solid var(--line); border-radius: 999px; text-decoration: none; color: var(--fg); background: var(--panel); }
@@ -227,7 +241,7 @@ button.reef-app-timeline-open:hover { text-decoration: underline; }
 .reef-app-menu-chips .reef-button:disabled { cursor: default; }
 .reef-app-menu-chips + .reef-app-menu-items { border-top: 1px solid var(--line); }
 .reef-app-menu-problem { margin: 4px 10px; font-size: 0.8rem; overflow-wrap: anywhere; }
-.reef-app-sessions, .reef-app-sessions-toggle, .reef-app-user, .reef-app-account { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
+.reef-app-sessions, .reef-app-sessions-toggle, .reef-app-user, .reef-app-account, .reef-app-picker { --reef-done: #2e7d32; --reef-progress: #e0a100; --reef-blocked: #d32f2f; --reef-ready: var(--links); --reef-border: color-mix(in srgb, var(--fg) 40%, var(--bg)); }
 .reef-app-sessions-toggle { margin-left: auto; }
 .reef-app-waiting { margin-left: 0.35rem; font-size: 0.75rem; color: var(--links); }
 .reef-app-sessions-toggle.some .reef-app-waiting { font-weight: 600; }
@@ -298,9 +312,9 @@ button.reef-app-timeline-open:hover { text-decoration: underline; }
 #[derive(Debug, Clone, PartialEq, Routable)]
 #[rustfmt::skip]
 pub enum Route {
-    /// Every project and its plans
+    /// Every project and its plans, each summed up
     #[route("/")]
-    Picker {},
+    Explorer {},
     /// One plan, full-window
     #[route("/plans/:project/:plan")]
     PlanPage { project: String, plan: String },
@@ -330,122 +344,14 @@ fn Head() -> Element {
     }
 }
 
-/// The front page: every project, each with its plans to open
-#[component]
-pub fn Picker() -> Element {
-    // every project and its plans, read on the server as the page renders
-    let projects = use_server_future(calls::projects)?;
-    rsx! {
-        main { class: "reef-app-picker",
-            header { class: "reef-app-picker-head",
-                h1 { "reef" }
-                SignedInAs {}
-            }
-            match &*projects.read() {
-                Some(Ok(listed)) if listed.is_empty() => rsx! {
-                    p { class: "reef-app-muted",
-                        "No projects yet. Register one with "
-                        code { "reef project add <name>" }
-                        " from its repo, or "
-                        code { "reef project add <name> --url <git url>" }
-                        " for one the service clones."
-                    }
-                },
-                Some(Ok(listed)) => rsx! {
-                    ul { class: "reef-app-projects",
-                        for listing in listed.iter().cloned() {
-                            ProjectEntry { key: "{listing.project.name}", listing }
-                        }
-                    }
-                },
-                Some(Err(error)) => rsx! {
-                    p { CallFailed { error: error.clone(), doing: "Reading the projects" } }
-                },
-                None => rsx! {
-                    p { class: "reef-app-muted", "Loading…" }
-                },
-            }
-        }
-    }
-}
-
-/// One project in the picker: its name, its repo, who registered it, and a link to each of its
-/// plans, titled with who listed it
-///
-/// # Arguments
-///
-/// * `listing` - The project and its plans
-#[component]
-fn ProjectEntry(listing: ProjectPlans) -> Element {
-    // the repo to show: a remote's URL, branch and commit, else its path, and each plan's route
-    let repo = match &listing.project.remote {
-        Some(remote) => format!("{} · {} @ {}", remote.url, remote.branch, remote.short()),
-        None => listing.project.repo.display().to_string(),
-    };
-    // who registered it, if anyone known did
-    let registered = listing
-        .project
-        .registered
-        .as_ref()
-        .and_then(|registered| registered.author.describe());
-    let plans: Vec<(String, Route, String, String)> = listing
-        .plans
-        .iter()
-        .map(|info| {
-            let route = Route::PlanPage {
-                project: info.name.project.clone(),
-                plan: info.name.plan.clone(),
-            };
-            // who listed it, as the link's title
-            let listed = info
-                .registered
-                .as_ref()
-                .and_then(|registered| registered.author.describe())
-                .map(|who| format!("Listed by {who}"))
-                .unwrap_or_default();
-            // and what it follows, beside it
-            let follows = follows(&listing.project, info);
-            (info.name.plan.clone(), route, listed, follows)
-        })
-        .collect();
-    rsx! {
-        li { class: "reef-app-project",
-            h2 { "{listing.project.name}" }
-            p { class: "reef-app-repo", "{repo}" }
-            if let Some(who) = registered {
-                p { class: "reef-app-muted reef-app-registered",
-                    "Registered by "
-                    span { class: "reef-app-author", "{who}" }
-                }
-            }
-            if plans.is_empty() {
-                p { class: "reef-app-muted",
-                    "No plans yet. Make one with "
-                    code { "reef plan new <name>" }
-                    "."
-                }
-            } else {
-                ul { class: "reef-app-plans",
-                    for (name, route, listed, follows) in plans {
-                        li { key: "{name}", title: "{listed}",
-                            Link { to: route, "{name}" }
-                            span { class: "reef-app-branch", "{follows}" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// What a plan follows, as the picker and the switcher show it: its branch and the commit last
-/// fetched of it, or its project's working tree
+/// What a plan follows, as the front page and the switcher show it: its branch and the commit
+/// last fetched of it, or its project's working tree
 ///
 /// # Arguments
 ///
 /// * `project` - The plan's project
 /// * `info` - The plan
-fn follows(project: &Project, info: &PlanInfo) -> String {
+pub(crate) fn follows(project: &Project, info: &PlanInfo) -> String {
     let branch = info.branch.as_deref();
     match (&project.remote, branch) {
         // a remote project's branch, where it was last fetched
@@ -634,7 +540,7 @@ pub fn PlanPage(project: ReadSignal<String>, plan: ReadSignal<String>) -> Elemen
     rsx! {
         div { class: "reef-app-plan",
             header { class: "reef-app-bar",
-                Link { to: Route::Picker {}, "← Plans" }
+                Link { to: Route::Explorer {}, "← Plans" }
                 strong { class: "reef-app-plan-name", "{project}/{plan}" }
                 if let Some(Ok(listing)) = &*siblings.read() {
                     PlanSwitch { listing: listing.clone(), plan: plan_now.clone() }

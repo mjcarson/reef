@@ -32,7 +32,7 @@ reef-draw = { workspace = true }
 # the layout's direction and paths, which the canvas's arrows are drawn along
 reef-layout = { workspace = true }
 web-sys = { version = "0.3", features = [
-  "Clipboard", "Document", "DomRect", "DomTokenList", "Element", "EventSource", "EventTarget", "HtmlElement",
+  "Clipboard", "Document", "DomRect", "DomTokenList", "Element", "EventSource", "EventTarget", "HtmlElement", "MessageEvent",
   "Navigator", "NodeList", "Performance", "PointerEvent", "ScrollIntoViewOptions", "ScrollLogicalPosition", "Storage",
   "WheelEvent", "Window", "console",
 ], optional = true }

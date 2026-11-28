@@ -514,8 +514,16 @@ at a glance ([C119](../milestones/m15.md), [C120](../milestones/m15.md), [C121](
 - **One summary a plan, from one route.** The page reads each project's plans summed up in one
   call, rather than a read per node, work record or session.
 - **One change stream for the page,** not one a project, since plain HTTP/1.1 opens six
-  connections a host.
-- **Times are relative, exact on hover.**
+  connections a host. Each change is counted by the project its JSON names, and reads only that
+  project's plans again; a project registered, a gap, a reconnect or the stream's first opening
+  reads every project again, the last since the server read the page before the stream opened.
+  A session's every report is a change, so reading every project on each would read all of them
+  as often as the busiest one reports.
+- **Rendered on the server with every summary,** so the page reads right before its script
+  runs. A read again keeps what the page showed until its answer lands, rather than suspending
+  the page.
+- **Times are relative, exact on hover.** They count on from the server's clock as it read the
+  page, so the server's render and the browser's agree, and tick every 30 seconds.
 
 ## A plan's docs
 

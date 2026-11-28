@@ -45,6 +45,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 
 # reef's checkout, the app's crate, and where dx put the server it built
@@ -1970,6 +1971,157 @@ def c84_an_attached_session_streams_its_transcript(page):
         reef("loop", "stop", "--pane", pane)
 
 
+def explorer_rows(page, project):
+    """The front page's plans of a project, in the order it lists them: each one's plan, state of work, whether it is
+    active, branch, who listed it, its facts, and who works on what."""
+    return page.eval_on_selector_all(
+        f".reef-app-project[data-project='{project}'] .reef-app-plan-row",
+        """rows => rows.map(r => {
+            const text = sel => r.querySelector(sel)?.textContent ?? null;
+            const all = sel => [...r.querySelectorAll(sel)].map(e => e.textContent);
+            return {plan: r.dataset.plan, state: r.dataset.state, active: r.classList.contains('active'),
+                    said: text('.reef-app-plan-state'), branch: text('.reef-app-branch'), listed: text('.reef-app-listed'),
+                    done: text('.reef-app-plan-done'), today: text('.reef-app-done-today'),
+                    today_ids: r.querySelector('.reef-app-done-today')?.title ?? null,
+                    updated: text('.reef-app-updated'), exact: r.querySelector('.reef-app-updated')?.title ?? null,
+                    workers: all('.reef-app-worker'), sessions: all('.reef-app-live-session'),
+                    runs: all('.reef-app-live-run')};
+        })""")
+
+
+def explorer_row(page, plan):
+    """The front page's row for one of the check project's plans, or None if it lists none."""
+    return next((row for row in explorer_rows(page, "check") if row["plan"] == f"check/{plan}"), None)
+
+
+def shows(page, selector, text):
+    """Waits until an element the selector finds says exactly the text, returning whether one did within 10 s."""
+    try:
+        page.wait_for_function(
+            "([sel, text]) => [...document.querySelectorAll(sel)].some(e => e.textContent === text)",
+            arg=[selector, text], timeout=10000)
+        return True
+    except PlaywrightTimeout:
+        return False
+
+
+def quietly(*steps):
+    """Runs each cleanup step, going on past one that fails, as one undoing a step that never ran does."""
+    for step in steps:
+        try:
+            step()
+        except Exception as error:  # noqa: BLE001 - a cleanup's failure is only reported
+            print(f"cleanup: {error}")
+
+
+def c121_the_front_page_sums_up_each_plan(page):
+    """C121: the front page counts each project's plans and its active ones, lists the active first and the rest by their
+    last update, and shows each plan's branch, who listed it, its state of work, its nodes done and those done in the last
+    24 hours, its last update and who works on what, as the summary route answers them."""
+    # a plan of two nodes, with nothing going on in it
+    reef("plan", "new", "explore")
+    put("explore", node_yaml("E1", "E1 The first to explore"))
+    put("explore", node_yaml("E2", "E2 The second to explore"))
+    page.goto(URL + "/")
+    page.wait_for_selector(".reef-app-plan-row[data-plan='check/explore']")
+    head = page.inner_text(".reef-app-project[data-project='check'] .reef-app-plan-count")
+    rows = explorer_rows(page, "check")
+    explore = explorer_row(page, "explore")
+    page.screenshot(path=str(SHOTS / "reef-app-explorer.png"), full_page=True)
+    # the summary route's answer, ordered as the page says it orders: active first, then the newest update, then by name
+    status, summaries = api("GET", "/api/v1/projects/check/plan-summaries")
+    active = [summary for summary in summaries if summary["active"]]
+    expected = sorted(summaries, key=lambda summary: (
+        not summary["active"], -summary["updated"]["at"] if "updated" in summary else float("inf"),
+        summary["plan"]["name"]))
+    order = [row["plan"] for row in rows]
+    states = {row["plan"]: (row["state"], row["active"]) for row in rows}
+    check("C121 each project counts its plans and its active ones, the active listed first",
+          status == 200 and head == f"{len(summaries)} plans · {len(active)} active" and len(active) > 0
+          and order == [summary["plan"]["name"] for summary in expected]
+          and all(states[summary["plan"]["name"]] == (summary["state"], summary["active"]) for summary in summaries),
+          {"head": head, "order": order, "expected": [summary["plan"]["name"] for summary in expected]})
+    check("C121 each plan shows its branch, who listed it, its state, its nodes done today and its last update",
+          explore is not None and explore["branch"] == "working tree" and explore["listed"] == "listed by check"
+          and explore["state"] == "no-sessions" and explore["said"] == "no sessions" and not explore["active"]
+          and explore["done"] == "0 of 2 done" and explore["today"] == "0 done in the last 24 hours"
+          and explore["updated"] == "updated just now by check" and (explore["exact"] or "").endswith(" UTC")
+          and explore["workers"] == explore["sessions"] == explore["runs"] == [],
+          explore)
+
+
+def c121_the_front_page_follows_one_stream(page):
+    """C121: a node starting and going done, a session attaching and a test run starting each change the front page
+    without a reload, over one change stream that names no project."""
+    # a tab of its own, counting the change streams it opens
+    context = signed(page.context.browser.new_context(ignore_https_errors=True))
+    tab = context.new_page()
+    streams, reads = [], []
+    tab.on("request", lambda request: "/api/v1/changes" in request.url and streams.append(request.url))
+    tab.on("response", lambda answer: "/app/plan-summaries" in answer.url and reads.append(answer.status))
+    row = ".reef-app-plan-row[data-plan='check/explore']"
+    head = ".reef-app-project[data-project='check'] .reef-app-plan-count"
+    pane, session, run_id = "claude:4343", "c121-check", "c121-run"
+    seen, waits = {}, {}
+    try:
+        tab.goto(URL + "/")
+        tab.wait_for_selector(row)
+        tab.evaluate("() => { window.__kept = 'same page'; }")
+        seen["head before"] = tab.inner_text(head)
+        # E1 started: the plan turns active, among the active ones, naming E1 and who started it
+        reef("start", "E1", "--plan", "explore")
+        waits["started"] = shows(tab, f"{row} .reef-app-worker", "E1 check")
+        seen["head after"] = tab.inner_text(head)
+        rows = explorer_rows(tab, "check")
+        place = [r["plan"] for r in rows].index("check/explore")
+        seen["among the active"] = all(r["active"] for r in rows[:place + 1])
+        seen["started"] = explorer_row(tab, "explore")
+        # E1 done: it counts one done in the last 24 hours, naming it on hover
+        reef("status", "E1", "done", "--plan", "explore")
+        waits["done"] = shows(tab, f"{row} .reef-app-done-today", "1 done in the last 24 hours")
+        seen["done"] = explorer_row(tab, "explore")
+        # a terminal's loop holding E2, and its session attached: sessions, naming whose and on what
+        reef("loop", "start", "--pane", pane, "--plan", "explore", "--no-open")
+        reef("loop", "take", "--pane", pane)
+        attach = {"id": session, "pane": {"kind": "claude", "pid": 4343}, "project": "check", "plan": "explore",
+                  "host": "check-host", "cwd": str(WORK / "repo"), "state": "working", "claude": "s1"}
+        attached, _ = api("POST", "/api/v1/sessions", attach)
+        waits["sessions"] = shows(tab, f"{row} .reef-app-live-session", "check on E2")
+        seen["sessions"] = explorer_row(tab, "explore")
+        # a test run on E2, building: testing
+        opened = {"id": run_id, "project": "check", "plan": "explore", "node": "E2", "host": "check-host",
+                  "cwd": str(WORK / "repo"), "command": ["cargo", "test"], "state": "building"}
+        ran, _ = api("POST", "/api/v1/test-runs", opened)
+        waits["testing"] = shows(tab, f"{row} .reef-app-live-run", "check on E2, building")
+        seen["testing"] = explorer_row(tab, "explore")
+        tab.screenshot(path=str(SHOTS / "reef-app-explorer-live.png"), full_page=True)
+        seen["kept"] = tab.evaluate("() => window.__kept")
+        seen["streams"] = list(streams)
+        seen["waits"] = waits
+        seen["summary reads"] = list(reads)
+        started, done, live, testing = seen["started"], seen["done"], seen["sessions"], seen["testing"]
+        before = int(seen["head before"].split(" · ")[1].split()[0])
+        after = int(seen["head after"].split(" · ")[1].split()[0])
+        check("C121 a node done, a session attached and a run started change the page live, over one stream",
+              started["active"] and "E1 check" in started["workers"] and after == before + 1
+              and seen["among the active"]
+              and done["today"] == "1 done in the last 24 hours" and done["today_ids"] == "E1"
+              and done["done"] == "1 of 2 done"
+              and attached == 200 and live["state"] == "sessions" and live["said"] == "sessions"
+              and live["sessions"] == ["check on E2"] and "E2 check" in live["workers"]
+              and ran in (200, 201) and testing["state"] == "testing" and testing["said"] == "testing"
+              and testing["runs"] == ["check on E2, building"]
+              and seen["kept"] == "same page" and len(streams) == 1 and "project=" not in streams[0]
+              and all(waits.values()),
+              seen)
+    finally:
+        # the run passed, the session detached and the loop stopped, so nothing stays live, each step that ran
+        quietly(lambda: api("POST", f"/api/v1/test-runs/{run_id}", {"elapsed_ms": 1000, "state": "passed"}),
+                lambda: api("DELETE", f"/api/v1/sessions/{session}"),
+                lambda: reef("loop", "stop", "--pane", pane),
+                context.close)
+
+
 def keep_decisions(plan, node, decisions):
     """Keeps a node's decisions through the JSON API, as reef's hooks do."""
     body = json.dumps({"decisions": decisions}).encode()
@@ -2829,7 +2981,7 @@ def c89_every_act_names_its_author(browser):
         page.goto(ACTS_URL + "/")
         page.wait_for_selector(".reef-app-project", timeout=20000)
         registered = page.inner_text(".reef-app-project .reef-app-registered")
-        listed = page.get_attribute(".reef-app-project .reef-app-plans li", "title")
+        listed = page.inner_text(".reef-app-project .reef-app-listed")
         # the plan's sessions panel says who started bob's loop
         page.goto(ACTS_URL + "/plans/acts/central")
         wait_drawn(page)
@@ -2841,7 +2993,7 @@ def c89_every_act_names_its_author(browser):
         check("C89 the account page shows the admin log and who added each user, and a loop who started it",
               added_by == [["ada", "—"], ["bob", "ada"]]
               and log == [["ada", "added bob"], [None, "added ada, an admin"]]
-              and registered == "Registered by ada" and listed == "Listed by ada"
+              and registered == "Registered by ada" and listed == "listed by ada"
               and started == "Loop started by bob",
               {"added by": added_by, "log": log, "registered": registered, "listed": listed,
                "started": started})
@@ -2898,6 +3050,8 @@ def main():
                 c46_a_question_is_answered_in_the_app,
                 c47_a_rejected_plan_comes_back_revised,
                 c84_an_attached_session_streams_its_transcript,
+                c121_the_front_page_sums_up_each_plan,
+                c121_the_front_page_follows_one_stream,
                 c76_a_nodes_decisions_show_in_its_sidebar,
                 c88_history_pages_back,
                 c90_the_timeline_says_what_happened,

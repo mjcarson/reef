@@ -12,8 +12,12 @@
 //!
 //! A project's runners, their sessions and loops, follow its stream on a counter of their own,
 //! so a transcript is read again as each entry comes, without reading the queue or the plan.
+//!
+//! The front page follows one stream for every project, and counts each change by the project
+//! its data names, so a change reads only its own project's plans again ([`ExplorerChanges`]).
 
 use dioxus::prelude::*;
+use std::collections::HashMap;
 
 /// The plan's change stream, followed in the client
 #[cfg(feature = "web")]
@@ -107,6 +111,9 @@ struct Counter {
     /// Whether a bump forgets the doc sections read first, since the plan's pages may have
     /// changed under them
     docs: bool,
+    /// Whether the stream's first opening bumps it too, for a count whose first read came before
+    /// the stream was followed, as a server's render does, so no change between them is lost
+    opened: bool,
 }
 
 /// The changes that mean reading a plan's queue again: an edit of it, or any change to the plan
@@ -123,6 +130,137 @@ const QUEUE_KINDS: &[&str] = &[
 /// The changes that mean reading a project's runners again: a session's report or an act on it,
 /// a loop changed, or a gap
 const SESSION_KINDS: &[&str] = &["session-changed", "loop-changed", "missed"];
+
+/// The changes that mean reading every project again: one registered, or a gap, which may have
+/// dropped any project's changes
+const EXPLORER_KINDS: &[&str] = &["project-added", "missed"];
+
+/// The changes that mean reading one project's plans summed up again: a plan listed or moved, a
+/// fetch, a node or page written, a start, or a loop, session or test run that changed
+const SUMMARY_KINDS: &[&str] = &[
+    "plan-added",
+    "plan-branched",
+    "project-fetched",
+    "nodes-put",
+    "pages-put",
+    "plan-written",
+    "work-recorded",
+    "loop-changed",
+    "session-changed",
+    "test-run-changed",
+];
+
+/// The changes the front page follows on its one stream: those that mean reading every project
+/// again, and those that mean reading one project's plans again, by project
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExplorerChanges {
+    /// How many changes meant reading every project again: one registered, a gap, the stream's
+    /// first opening, since the server read the page before it, and each reconnect
+    pub all: ReadSignal<u64>,
+    /// How many changes each project has had, by its name
+    projects: ReadSignal<HashMap<String, u64>>,
+}
+
+impl ExplorerChanges {
+    /// How many changes mean reading one project's plans again, its own alone, since a change
+    /// that reaches every project reads every one again at once
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub fn of(&self, project: &str) -> u64 {
+        // its own changes, by its name
+        self.projects.read().get(project).copied().unwrap_or(0)
+    }
+}
+
+/// Counts the changes every project and each one has had since the front page opened, on one
+/// change stream that names no project, since plain HTTP/1.1 opens six connections a host
+///
+/// A resource that reads [`ExplorerChanges::of`] reads that project's plans again after each of
+/// its changes, without reading any other project's.
+pub fn use_explorer_changes() -> ExplorerChanges {
+    // how many changes have come to every project and to each, and the stream they come on
+    let all = use_signal(|| 0u64);
+    let projects = use_signal(HashMap::new);
+    let mut stream = use_signal(|| None::<Follow>);
+    // follow every project, once
+    use_effect(move || {
+        let url = reef_api::paths::changes(None, None);
+        let counters = [Counter {
+            kinds: EXPLORER_KINDS,
+            count: all,
+            docs: false,
+            opened: true,
+        }];
+        let mut followed = follow(&url, &counters);
+        // and count each project's own changes by the project each names
+        by_project(followed.as_mut(), SUMMARY_KINDS, projects, all);
+        stream.set(followed);
+    });
+    ExplorerChanges {
+        all: all.into(),
+        projects: projects.into(),
+    }
+}
+
+/// Listens on a stream for changes of some kinds, bumping the count of the project each names,
+/// or every project's for a change whose data says none
+///
+/// # Arguments
+///
+/// * `follow` - The stream, if it opened
+/// * `kinds` - The kinds of change to count by project
+/// * `projects` - Each project's count, by its name
+/// * `all` - Every project's count
+#[cfg(feature = "web")]
+fn by_project(
+    follow: Option<&mut Follow>,
+    kinds: &'static [&'static str],
+    projects: Signal<HashMap<String, u64>>,
+    all: Signal<u64>,
+) {
+    // nothing to listen on if the stream didn't open
+    let Some(follow) = follow else {
+        return;
+    };
+    for kind in kinds {
+        let (mut projects, mut all) = (projects, all);
+        follow.listen(kind, move |event| match changed_project(&event) {
+            // the project the change names reads its plans again
+            Some(project) => *projects.write().entry(project).or_default() += 1,
+            // and a change that can't be read reaches every project
+            None => *all.write() += 1,
+        });
+    }
+}
+
+/// Nothing is followed on the server, where effects never run
+#[cfg(not(feature = "web"))]
+fn by_project(
+    _follow: Option<&mut Follow>,
+    _kinds: &'static [&'static str],
+    _projects: Signal<HashMap<String, u64>>,
+    _all: Signal<u64>,
+) {
+}
+
+/// The project a change event names, from its data, the change as JSON
+///
+/// # Arguments
+///
+/// * `event` - The stream's event
+#[cfg(feature = "web")]
+fn changed_project(event: &web_sys::Event) -> Option<String> {
+    use wasm_bindgen::JsCast;
+    // a server-sent event's data is its change, as JSON
+    let data = event
+        .dyn_ref::<web_sys::MessageEvent>()?
+        .data()
+        .as_string()?;
+    let change: reef_api::Change = serde_json::from_str(&data).ok()?;
+    change.project().map(str::to_string)
+}
 
 /// Counts the changes to a project's runners and loops announced since the page opened, following
 /// its stream again when the route names another project
@@ -143,6 +281,7 @@ pub fn use_session_changes(project: ReadSignal<String>) -> ReadSignal<u64> {
             kinds: SESSION_KINDS,
             count,
             docs: false,
+            opened: false,
         }];
         stream.set(follow(&url, &counters));
     });
@@ -174,11 +313,13 @@ pub fn use_changes(project: ReadSignal<String>, plan: ReadSignal<String>) -> Rea
                 kinds: PLAN_KINDS,
                 count,
                 docs: true,
+                opened: false,
             },
             Counter {
                 kinds: WORK_KINDS,
                 count: work,
                 docs: false,
+                opened: false,
             },
         ];
         stream.set(follow(&url, &counters));
@@ -220,6 +361,7 @@ pub fn use_queue_changes(project: ReadSignal<String>, plan: ReadSignal<String>) 
             kinds: QUEUE_KINDS,
             count,
             docs: true,
+            opened: false,
         }];
         stream.set(follow(&url, &counters));
     });
@@ -277,10 +419,16 @@ fn follow(url: &str, counters: &[Counter]) -> Option<Follow> {
         }
     });
     let reconnected: Vec<Counter> = counters.to_vec();
+    let first = Rc::new(Cell::new(true));
     follow.listen("open", move |_| {
-        if dropped.replace(false) {
+        // a reconnect bumps every counter, and the first opening those read before it
+        let opening = first.replace(false);
+        let dropped = dropped.replace(false);
+        if dropped {
             crate::canvas::dom::forget_docs();
-            for counter in &reconnected {
+        }
+        for counter in &reconnected {
+            if dropped || (opening && counter.opened) {
                 let mut count = counter.count;
                 *count.write() += 1;
             }
