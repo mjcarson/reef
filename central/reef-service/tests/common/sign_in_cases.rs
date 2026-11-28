@@ -231,6 +231,7 @@ pub async fn unauthenticated_reads_are_refused_and_pages_ask_for_sign_in<B: Back
     let reads = [
         paths::PROJECTS.to_string(),
         paths::plans(&plan.project),
+        paths::plan_summaries(&plan.project),
         paths::plan(&plan),
         paths::nodes(&plan),
         paths::node(&plan, "C1"),

@@ -5,7 +5,7 @@
 //! reef [--conf PATH] project ls
 //! reef [--conf PATH] project show [--project NAME]
 //! reef [--conf PATH] plan new <NAME> [--project NAME]
-//! reef [--conf PATH] plan ls [--project NAME]
+//! reef [--conf PATH] plan ls [--long] [--project NAME]
 //! reef [--conf PATH] node put [FILE] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node get <ID> [--md] [--project NAME] [--plan NAME]
 //! reef [--conf PATH] node rm <ID>... [--project NAME] [--plan NAME]
@@ -94,8 +94,8 @@
 use clap::{Args, Parser, Subcommand};
 use reef_api::work::on_worktree;
 use reef_api::{
-    AddedProject, Attach, BranchFetched, Branched, Fetched, Pane, PlanInfo, Project, SessionState,
-    WorkRecord, Writer,
+    AddedProject, Attach, BranchFetched, Branched, Fetched, Pane, PlanInfo, PlanSummary, Project,
+    SessionState, WorkRecord, Writer,
 };
 use reef_model::{Met, PlanName, Status};
 use std::ffi::OsString;
@@ -612,6 +612,10 @@ pub enum PlanCommand {
     },
     /// List the project's plans, the revision each is at and the branch each follows
     Ls {
+        /// Sum each plan up too: its state of work, its nodes done, its last update and who
+        /// works on what
+        #[arg(long)]
+        long: bool,
         /// The project whose plans to list, if not the working directory's
         #[command(flatten)]
         pick: Pick,
@@ -1210,7 +1214,9 @@ pub async fn run<W: Write>(cli: Cli, cwd: &Path, out: &mut W) -> anyhow::Result<
         Command::Plan(PlanCommand::New { name, branch, pick }) => {
             plan_new(&client, cwd, &name, branch, &pick, out).await
         }
-        Command::Plan(PlanCommand::Ls { pick }) => plan_ls(&client, cwd, &pick, out).await,
+        Command::Plan(PlanCommand::Ls { long, pick }) => {
+            plan_ls(&client, cwd, &pick, long, out).await
+        }
         Command::Plan(PlanCommand::Branch {
             name,
             branch,
@@ -2211,41 +2217,139 @@ fn follows(project: &Project, branch: Option<&str>) -> String {
     }
 }
 
-/// Lists the picked project's plans and the revision each is at
+/// Lists the picked project's plans and the revision each is at, each summed up beneath it if
+/// asked
 ///
 /// # Arguments
 ///
 /// * `client` - The service's client
 /// * `cwd` - The working directory
 /// * `pick` - The project named, if one was
+/// * `long` - Whether to sum each plan up too
 /// * `out` - Where to print them
 async fn plan_ls<W: Write>(
     client: &Client,
     cwd: &Path,
     pick: &Pick,
+    long: bool,
     out: &mut W,
 ) -> anyhow::Result<()> {
-    // every plan of the project, by name, its revision and who listed it beside it
+    // every plan of the project, summed up if asked, which says its listing too
     let project = picked(client, cwd, pick).await?;
-    let plans = client.plans(&project.name).await?;
-    let rows = plans.iter().map(|info| {
-        // its revision, what it follows, and who listed it
-        let mut line = format!(
-            "revision {}, {}",
-            info.revision,
-            follows(&project, info.branch.as_deref())
-        );
-        if let Some(listed) = info
-            .registered
-            .as_ref()
-            .and_then(|registered| history::by_whom("listed", &registered.author))
-        {
-            line.push_str(", ");
-            line.push_str(&listed);
+    let plans: Vec<(PlanInfo, Vec<String>)> = match long {
+        true => client
+            .plan_summaries(&project.name)
+            .await?
+            .into_iter()
+            .map(|summary| {
+                let lines = summed_up(&summary);
+                (summary.plan, lines)
+            })
+            .collect(),
+        false => client
+            .plans(&project.name)
+            .await?
+            .into_iter()
+            .map(|info| (info, Vec::new()))
+            .collect(),
+    };
+    // each by name, its listing beside it, and its summary's lines beneath that
+    let mut rows = Vec::new();
+    for (info, lines) in plans {
+        rows.push((info.name.to_string(), listed(&project, &info)));
+        rows.extend(lines.into_iter().map(|line| (String::new(), line)));
+    }
+    columns(out, rows.into_iter())
+}
+
+/// A plan's listing as a line: its revision, what it follows, and who listed it
+///
+/// # Arguments
+///
+/// * `project` - The plan's project
+/// * `info` - The plan as its listing names it
+fn listed(project: &Project, info: &PlanInfo) -> String {
+    // its revision and what it follows
+    let mut line = format!(
+        "revision {}, {}",
+        info.revision,
+        follows(project, info.branch.as_deref())
+    );
+    // and who listed it, if that is known
+    if let Some(listed) = info
+        .registered
+        .as_ref()
+        .and_then(|registered| history::by_whom("listed", &registered.author))
+    {
+        line.push_str(", ");
+        line.push_str(&listed);
+    }
+    line
+}
+
+/// A plan summed up as lines: whether it is active, its state of work, its nodes done, its last
+/// update, then each node in progress, live session and live run on it
+///
+/// # Arguments
+///
+/// * `summary` - The plan summed up
+fn summed_up(summary: &PlanSummary) -> Vec<String> {
+    // whether work goes on, its state, and how far it has got
+    let mut first = format!(
+        "{}, {}, {} of {} nodes done, {} in the last 24 hours",
+        if summary.active { "active" } else { "idle" },
+        summary.state.describe(),
+        summary.nodes.done,
+        summary.nodes.total(),
+        summary.done_today.len(),
+    );
+    // when it was last written, and by whom if that is known
+    match &summary.updated {
+        Some(updated) => {
+            first.push_str(&format!(", updated {}", start::when(updated.at)));
+            if let Some(who) = updated.author.describe() {
+                first.push_str(&format!(" by {who}"));
+            }
         }
-        (info.name.to_string(), line)
-    });
-    columns(out, rows)
+        None => first.push_str(", no update kept"),
+    }
+    let mut lines = vec![first];
+    // each node in progress, and who started it
+    for working in &summary.in_progress {
+        let mut line = format!("{} in progress", working.node);
+        if let Some(started) = history::by_whom("started", &working.started_by) {
+            line.push_str(", ");
+            line.push_str(&started);
+        }
+        lines.push(line);
+    }
+    // each live session, its loop's node, where it stands, and who attached it
+    for session in &summary.sessions {
+        let mut line = format!("session {}", session.id);
+        if let Some(node) = &session.node {
+            line.push_str(&format!(" on {node}"));
+        }
+        line.push_str(&format!(", {}", session.state.describe()));
+        if let Some(attached) = history::by_whom("attached", &session.attached_by) {
+            line.push_str(", ");
+            line.push_str(&attached);
+        }
+        lines.push(line);
+    }
+    // each live run, its node, where it stands, and who started it
+    for run in &summary.runs {
+        let mut line = format!("run {}", run.id);
+        if let Some(node) = &run.node {
+            line.push_str(&format!(" on {node}"));
+        }
+        line.push_str(&format!(", {}", run.state.describe()));
+        if let Some(started) = history::by_whom("started", &run.started_by) {
+            line.push_str(", ");
+            line.push_str(&started);
+        }
+        lines.push(line);
+    }
+    lines
 }
 
 /// What `reef loop run` does: typed in a Claude Code session, it attaches that session and starts
@@ -2751,10 +2855,13 @@ mod tests {
     use super::{
         ClaudeCommand, Cli, Command, CommentCommand, Here, HookCommand, LoopCommand, NodeCommand,
         PageCommand, PlanCommand, ProjectCommand, QueueCommand, UserCommand, branch_plan, columns,
-        named_plan, pick_merged, unpicked,
+        listed, named_plan, pick_merged, summed_up, unpicked,
     };
     use clap::{CommandFactory, Parser};
-    use reef_api::{PlanInfo, Project, Remote};
+    use reef_api::{
+        Author, LiveRun, LiveSession, NodeCounts, PlanInfo, PlanSummary, Project, Registered,
+        Remote, RunState, SessionState, Updated, Working,
+    };
     use reef_model::PlanName;
     use reef_model::{Met, Status};
     use std::path::{Path, PathBuf};
@@ -3609,5 +3716,111 @@ mod tests {
         let mut out = Vec::new();
         columns(&mut out, std::iter::empty()).unwrap();
         assert!(out.is_empty());
+    }
+
+    /// `reef plan ls --long` sums each plan up beneath its listing: whether it is active, its
+    /// state of work, its nodes done, those done in the last 24 hours, its last update, and who
+    /// works on what
+    #[test]
+    fn plan_ls_long_sums_up_each_plan() {
+        // `--long` is taken
+        let cli = Cli::try_parse_from(["reef", "plan", "ls", "--long"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Plan(PlanCommand::Ls { long: true, .. })
+        ));
+        // a plan ada listed, a node bob started, a session ada attached and a run of bob's
+        let named = |user: &str| Author {
+            user: Some(user.to_string()),
+            since: Some(1),
+            ..Author::default()
+        };
+        let project = Project {
+            name: "reef".to_string(),
+            repo: "/src/reef".into(),
+            remote: None,
+            registered: None,
+        };
+        let plan = PlanInfo {
+            registered: Some(Registered {
+                at: 1,
+                author: named("ada"),
+            }),
+            ..info("reef", "central", None)
+        };
+        let busy = PlanSummary::new(
+            plan.clone(),
+            None,
+            NodeCounts {
+                todo: 3,
+                in_progress: 2,
+                done: 7,
+                blocked: 0,
+            },
+            Some(Updated {
+                at: 1_795_000_000_123,
+                author: named("bob"),
+            }),
+            vec!["C1".to_string(), "C4".to_string()],
+            vec![
+                Working {
+                    node: "C2".to_string(),
+                    started_by: named("bob"),
+                    started_at: Some(5),
+                },
+                Working {
+                    node: "C3".to_string(),
+                    started_by: Author::default(),
+                    started_at: None,
+                },
+            ],
+            vec![LiveSession {
+                id: "k3x9".to_string(),
+                attached_by: named("ada"),
+                node: Some("C2".to_string()),
+                state: SessionState::Waiting,
+            }],
+            vec![LiveRun {
+                id: "r-1".to_string(),
+                node: Some("C2".to_string()),
+                state: RunState::Running,
+                started_by: named("bob"),
+            }],
+        );
+        // its listing first, then the summary's lines beneath it
+        assert_eq!(
+            listed(&project, &busy.plan),
+            "revision 1, reads its project's working tree, listed by ada"
+        );
+        assert_eq!(
+            summed_up(&busy),
+            vec![
+                "active, testing, 7 of 12 nodes done, 2 in the last 24 hours, updated \
+                 2026-11-18 11:06:40 +0000 by bob"
+                    .to_string(),
+                "C2 in progress, started by bob".to_string(),
+                "C3 in progress".to_string(),
+                "session k3x9 on C2, waiting for a reply, attached by ada".to_string(),
+                "run r-1 on C2, running, started by bob".to_string(),
+            ]
+        );
+        // a quiet plan reads idle, with no sessions, and one with no update kept says so
+        let quiet = PlanSummary::new(
+            plan,
+            None,
+            NodeCounts::default(),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            summed_up(&quiet),
+            vec![
+                "idle, no sessions, 0 of 0 nodes done, 0 in the last 24 hours, no update kept"
+                    .to_string()
+            ]
+        );
     }
 }

@@ -74,6 +74,9 @@ suite!(
     a_subtree_moves_whole_and_groups_with_their_members,
     test_run_routes_answer_with_their_status,
     test_runs_are_told_on_the_change_stream,
+    plan_summaries_count_nodes_and_name_their_activity,
+    a_plans_state_is_testing_sessions_or_no_sessions,
+    a_plan_is_active_while_work_goes_on,
 );
 
 /// A config listening on this host's loopback port alone, over HTTPS, with reef's own

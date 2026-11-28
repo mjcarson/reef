@@ -31,7 +31,7 @@ use reef_api::{
     StoredPage, Thread, TokenInfo, Transcript, User, UserAdded, UserRemoved, WRITER_HEADER,
     WorkRecord, Writer, paths,
 };
-use reef_api::{Build, MoveNodes, Moved, OpenRun, RunReport, TestRun};
+use reef_api::{Build, MoveNodes, Moved, OpenRun, PlanSummary, RunReport, TestRun};
 use reef_model::{Diagnostic, Next, NodeName, PlanName};
 use serde::de::DeserializeOwned;
 use std::path::Path;
@@ -362,6 +362,17 @@ impl Client {
     /// * `project` - The project's name
     pub async fn plans(&self, project: &str) -> anyhow::Result<Vec<PlanInfo>> {
         let path = paths::plans(project);
+        self.send(self.http.get(self.url(&path)), &path).await
+    }
+
+    /// Lists each of a project's plans summed up: its state of work, last update, nodes done in
+    /// the last 24 hours and who works on what
+    ///
+    /// # Arguments
+    ///
+    /// * `project` - The project's name
+    pub async fn plan_summaries(&self, project: &str) -> anyhow::Result<Vec<PlanSummary>> {
+        let path = paths::plan_summaries(project);
         self.send(self.http.get(self.url(&path)), &path).await
     }
 

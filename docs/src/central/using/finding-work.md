@@ -8,6 +8,7 @@ remotes fetch from, so any clone works, whatever its path or scheme:
 ```sh
 reef project show                  # shop  git@github.com:acme/shop.git (`main` at 6376987)
 reef plan ls
+reef plan ls --long                # which plans have work going on, who is on what, and done today
 ```
 
 Anywhere else, name it with `--project shop`. Where a project has several plans, the checkout

@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::session::SessionState;
+use crate::test_run::RunState;
 use crate::user::Author;
 
 /// When a project or a plan was registered, and by whom, as its history keeps it
@@ -183,6 +185,215 @@ pub struct PlanInfo {
     /// The branches it followed before, the latest last
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub was: Vec<String>,
+}
+
+/// One of a project's plans summed up, as the plan explorer shows it (C120)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanSummary {
+    /// The plan as its listing names it, with who listed it
+    pub plan: PlanInfo,
+    /// The commit its docs are read at: its remote branch where it was last fetched, or `None`
+    /// for a local project's, or a branch not fetched yet
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Its nodes by status, its groups left out
+    #[serde(default)]
+    pub nodes: NodeCounts,
+    /// When it was last written and by whom, or `None` if neither a write nor its listing is kept
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<Updated>,
+    /// The ids of its nodes done now that went done in the last 24 hours, in the plan's order
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_today: Vec<String>,
+    /// Each of its nodes in progress, and who started its work
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_progress: Vec<Working>,
+    /// Each live session on it
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<LiveSession>,
+    /// Each of its test runs building or running
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<LiveRun>,
+    /// Its state of work: testing, else sessions, else none
+    pub state: PlanState,
+    /// Whether work goes on in it now: a node in progress, a live session or a run
+    pub active: bool,
+}
+
+impl PlanSummary {
+    /// Sums up a plan, its state and whether it is active told from its work
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan as its listing names it
+    /// * `commit` - The commit its docs are read at, if it is fetched
+    /// * `nodes` - Its nodes by status
+    /// * `updated` - When it was last written and by whom
+    /// * `done_today` - Its nodes done now that went done in the last 24 hours
+    /// * `in_progress` - Its nodes in progress, and who started each
+    /// * `sessions` - Its live sessions
+    /// * `runs` - Its test runs building or running
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::{NodeCounts, PlanInfo, PlanState, PlanSummary};
+    /// use reef_model::PlanName;
+    ///
+    /// let plan = PlanInfo {
+    ///     name: PlanName::new("reef", "central").unwrap(),
+    ///     revision: 1,
+    ///     registered: None,
+    ///     branch: None,
+    ///     was: Vec::new(),
+    /// };
+    /// let quiet = PlanSummary::new(plan, None, NodeCounts::default(), None, vec![], vec![], vec![], vec![]);
+    /// assert_eq!(quiet.state, PlanState::NoSessions);
+    /// assert!(!quiet.active);
+    /// ```
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        plan: PlanInfo,
+        commit: Option<String>,
+        nodes: NodeCounts,
+        updated: Option<Updated>,
+        done_today: Vec<String>,
+        in_progress: Vec<Working>,
+        sessions: Vec<LiveSession>,
+        runs: Vec<LiveRun>,
+    ) -> Self {
+        // testing wins over sessions, and either, or a node in progress, is work going on
+        let state = PlanState::of(!runs.is_empty(), !sessions.is_empty());
+        let active = !in_progress.is_empty() || !sessions.is_empty() || !runs.is_empty();
+        PlanSummary {
+            plan,
+            commit,
+            nodes,
+            updated,
+            done_today,
+            in_progress,
+            sessions,
+            runs,
+            state,
+            active,
+        }
+    }
+}
+
+/// How many of a plan's nodes stand at each status, its groups left out, since a group's status
+/// is what its members add up to
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCounts {
+    /// Not started
+    #[serde(default)]
+    pub todo: usize,
+    /// Being worked on
+    #[serde(default)]
+    pub in_progress: usize,
+    /// Finished
+    #[serde(default)]
+    pub done: usize,
+    /// Stuck
+    #[serde(default)]
+    pub blocked: usize,
+}
+
+impl NodeCounts {
+    /// How many nodes it counts
+    pub fn total(&self) -> usize {
+        self.todo + self.in_progress + self.done + self.blocked
+    }
+}
+
+/// A node in progress, and who started its work
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Working {
+    /// The node's id
+    pub node: String,
+    /// Who started its work record, unknown for a node set in progress with none started
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub started_by: Author,
+    /// When its work record started, in milliseconds since the epoch, if it has one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+}
+
+/// A live session on a plan: who attached it and its loop's node
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSession {
+    /// The session's id
+    pub id: String,
+    /// Who attached it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub attached_by: Author,
+    /// The node its loop holds, if it holds one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Where it stands
+    pub state: SessionState,
+}
+
+/// A test run on a plan, building or running
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveRun {
+    /// The run's id
+    pub id: String,
+    /// The node its checkout is on, if one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Where it stands
+    pub state: RunState,
+    /// Who started it
+    #[serde(default, skip_serializing_if = "Author::is_unknown")]
+    pub started_by: Author,
+}
+
+/// A plan's state of work, one of three
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlanState {
+    /// A test run on it builds or runs
+    Testing,
+    /// A session on it is live, and no run is
+    Sessions,
+    /// Neither
+    NoSessions,
+}
+
+impl PlanState {
+    /// The state a plan reads: testing while a run builds or runs, else sessions while one is
+    /// live, else none
+    ///
+    /// # Arguments
+    ///
+    /// * `testing` - Whether a run on it builds or runs
+    /// * `sessions` - Whether a session on it is live
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use reef_api::PlanState;
+    ///
+    /// assert_eq!(PlanState::of(true, true), PlanState::Testing);
+    /// assert_eq!(PlanState::of(false, true), PlanState::Sessions);
+    /// assert_eq!(PlanState::of(false, false), PlanState::NoSessions);
+    /// ```
+    pub fn of(testing: bool, sessions: bool) -> PlanState {
+        match (testing, sessions) {
+            (true, _) => PlanState::Testing,
+            (false, true) => PlanState::Sessions,
+            (false, false) => PlanState::NoSessions,
+        }
+    }
+
+    /// The state as a person reads it
+    pub fn describe(self) -> &'static str {
+        match self {
+            PlanState::Testing => "testing",
+            PlanState::Sessions => "sessions",
+            PlanState::NoSessions => "no sessions",
+        }
+    }
 }
 
 /// A request to register a project, for a repo on the service's host or by its git URL
@@ -374,9 +585,13 @@ pub struct AddedPlan {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddedProject, BranchFetched, Branched, Fetched, NewProject, PlanBranch, PlanInfo, Project,
-        Remote, Tip,
+        AddedProject, BranchFetched, Branched, Fetched, LiveRun, LiveSession, NewProject,
+        NodeCounts, PlanBranch, PlanInfo, PlanState, PlanSummary, Project, Remote, Tip, Updated,
+        Working,
     };
+    use crate::session::SessionState;
+    use crate::test_run::RunState;
+    use crate::user::Author;
     use reef_model::PlanName;
     use serde_json::json;
 
@@ -565,5 +780,120 @@ mod tests {
             serde_json::to_value(Fetched::Local).unwrap(),
             json!("local")
         );
+    }
+
+    /// A plan's summary is pinned, its state and whether it is active told from its work
+    #[test]
+    fn a_plan_summary_tells_its_state_from_its_work() {
+        // a plan and who wrote it
+        let plan = PlanInfo {
+            registered: None,
+            name: PlanName::new("reef", "central").unwrap(),
+            revision: 3,
+            branch: None,
+            was: Vec::new(),
+        };
+        let ada = Author {
+            user: Some("ada".to_string()),
+            since: Some(1),
+            ..Author::default()
+        };
+        let counts = NodeCounts {
+            todo: 2,
+            in_progress: 1,
+            done: 4,
+            blocked: 0,
+        };
+        // with only a node in progress it is active, with no sessions
+        let working = vec![Working {
+            node: "C2".to_string(),
+            started_by: ada.clone(),
+            started_at: Some(5),
+        }];
+        let updated = Some(Updated {
+            at: 9,
+            author: ada.clone(),
+        });
+        let quiet = PlanSummary::new(
+            plan.clone(),
+            None,
+            counts,
+            updated.clone(),
+            vec!["C1".to_string()],
+            working.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!((quiet.state, quiet.active), (PlanState::NoSessions, true));
+        assert_eq!(quiet.nodes.total(), 7);
+        assert_eq!(
+            serde_json::to_value(&quiet).unwrap(),
+            json!({
+                "plan": {"name": "reef/central", "revision": 3},
+                "nodes": {"todo": 2, "in_progress": 1, "done": 4, "blocked": 0},
+                "updated": {"at": 9, "author": {"user": "ada", "since": 1}},
+                "done_today": ["C1"],
+                "in_progress": [{"node": "C2", "started_by": {"user": "ada", "since": 1}, "started_at": 5}],
+                "state": "no-sessions",
+                "active": true,
+            })
+        );
+        // a live session makes it sessions, and a run beside it testing
+        let session = LiveSession {
+            id: "s1".to_string(),
+            attached_by: ada.clone(),
+            node: Some("C2".to_string()),
+            state: SessionState::Working,
+        };
+        let run = LiveRun {
+            id: "r1".to_string(),
+            node: None,
+            state: RunState::Running,
+            started_by: ada,
+        };
+        let sessions = PlanSummary::new(
+            plan.clone(),
+            None,
+            counts,
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![session.clone()],
+            Vec::new(),
+        );
+        assert_eq!(
+            (sessions.state, sessions.active),
+            (PlanState::Sessions, true)
+        );
+        let testing = PlanSummary::new(
+            plan.clone(),
+            Some("a".repeat(40)),
+            counts,
+            None,
+            Vec::new(),
+            Vec::new(),
+            vec![session],
+            vec![run],
+        );
+        assert_eq!((testing.state, testing.active), (PlanState::Testing, true));
+        // and it reads back as itself
+        let value = serde_json::to_value(&testing).unwrap();
+        assert_eq!(value["state"], json!("testing"));
+        assert_eq!(
+            serde_json::from_value::<PlanSummary>(value).unwrap(),
+            testing
+        );
+        // with none of those it is idle
+        let idle = PlanSummary::new(
+            plan,
+            None,
+            NodeCounts::default(),
+            updated,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!((idle.state, idle.active), (PlanState::NoSessions, false));
     }
 }

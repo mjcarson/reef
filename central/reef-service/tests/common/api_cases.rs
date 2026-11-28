@@ -30,6 +30,9 @@ use super::{doc, git};
 // the test runs' cases, run by the same suite, which the other suites sharing `common` don't use
 #[allow(unused_imports)]
 pub use super::test_run_cases::*;
+// the plan summaries' cases, run by the same suite, which the other suites don't use either
+#[allow(unused_imports)]
+pub use super::summary_cases::*;
 
 /// A piece of work that says why it is needed and what it does, needing what it names
 ///

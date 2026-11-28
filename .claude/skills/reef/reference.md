@@ -155,6 +155,7 @@ on), else `--plan`.
 ```sh
 reef project show                    # the project the working directory belongs to
 reef plan ls                         # its plans, each at its revision, and the branch each follows
+reef plan ls --long                  # each summed up too: active or idle, done today, who works on what
 reef plan branch central --merged    # move a plan to the branch its branch was merged into
 reef next                            # ready work, the queue's first, then what the rest waits on
 reef next --all                      # the same across every plan, whichever the checkout picks

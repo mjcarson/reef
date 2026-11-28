@@ -94,6 +94,7 @@ mod loops;
 mod moving;
 mod remotes;
 mod sessions;
+mod summary;
 mod test_runs;
 mod throttle;
 mod users;

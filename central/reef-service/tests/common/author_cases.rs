@@ -83,7 +83,7 @@ async fn put(
 /// * `ax` - The served service
 /// * `admin` - The admin who adds them
 /// * `name` - Their name
-async fn added<B: Backend + 'static>(
+pub async fn added<B: Backend + 'static>(
     ax: &Ax<B>,
     admin: &User,
     name: &str,

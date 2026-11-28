@@ -14,6 +14,7 @@ that `Service::shared` opens. Every route is one service call, and every body an
 | `GET /api/v1/projects/{project}/branches` | the branches its repo has: a remote's as `git ls-remote --heads` lists them now, a local repo's as it keeps them |
 | `GET /api/v1/projects/{project}/plans` | every `PlanInfo`, each with its `registered`, as a project |
 | `POST /api/v1/projects/{project}/plans` `NewPlan` | `AddedPlan`: 201, or 200 if it was listed |
+| `GET /api/v1/projects/{project}/plan-summaries` | every `PlanSummary`, in its listing's order: the plan's `PlanInfo`, the commit its docs are read at, its nodes by status with its groups left out, its last update, its nodes done in the last 24 hours, each node in progress with who started its work, its live sessions and runs, its state (`testing`, `sessions` or `no-sessions`) and whether it is `active` |
 | `GET …/plans/{plan}` | its `PlanInfo`, naming the revision readers load and the branch it follows |
 | `PUT …/plans/{plan}/branch` `PlanBranch` | `Branched`: 200 if it follows the branch now, or 422 if the repo has no such branch or the plan's links would break there |
 | `GET …/plans/{plan}/nodes` | its `Listing` |

@@ -11,6 +11,7 @@
 //! | `GET ?dir=&remote=` | [`FIND_PROJECT`] |
 //! | `POST` | [`PROJECT_FETCH`] |
 //! | `GET`, `POST` | [`PLANS`] |
+//! | `GET` | [`PLAN_SUMMARIES`] |
 //! | `GET`, `POST` | [`QUEUE`] |
 //! | `GET ?older=&limit=` | [`QUEUE_HISTORY`] |
 //! | `GET` | [`PROJECT_NEXT`] |
@@ -78,6 +79,11 @@ pub const BRANCHES: &str = "/api/v1/projects/{project}/branches";
 
 /// A project's plans: listed by `GET`, added to by `POST`
 pub const PLANS: &str = "/api/v1/projects/{project}/plans";
+
+/// Each of a project's plans summed up, as the plan explorer shows them, listed by `GET`
+///
+/// It is not under [`PLANS`], where a plan named `summary` would lose its own route.
+pub const PLAN_SUMMARIES: &str = "/api/v1/projects/{project}/plan-summaries";
 
 /// A project's queue: listed by `GET`, edited an entry at a time by `POST`
 pub const QUEUE: &str = "/api/v1/projects/{project}/queue";
@@ -377,6 +383,15 @@ pub fn fetch(project: &str) -> String {
 /// * `project` - The project's name
 pub fn plans(project: &str) -> String {
     format!("{PROJECTS}/{}/plans", encode(project))
+}
+
+/// The path of a project's plans summed up
+///
+/// # Arguments
+///
+/// * `project` - The project's name
+pub fn plan_summaries(project: &str) -> String {
+    format!("{PROJECTS}/{}/plan-summaries", encode(project))
 }
 
 /// The path of the branches a project's repo has
@@ -929,6 +944,11 @@ mod tests {
         assert_eq!(super::check(&plan), format!("{filled}/check"));
         assert_eq!(super::next(&plan), format!("{filled}/next"));
         assert_eq!(super::pages(&plan), format!("{filled}/pages"));
+        // a project's plans summed up fill in their own, beside its plans
+        assert_eq!(
+            super::plan_summaries("reef"),
+            super::PLAN_SUMMARIES.replace("{project}", "reef")
+        );
         // a page's path fills in the page's template, its slashes kept
         let page = super::PAGE
             .replace("{project}", "reef")

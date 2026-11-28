@@ -13,6 +13,7 @@
 //! | `POST …/projects/{project}/fetch` | `fetch` | [`Fetched`]: 200, 422 if it is a local project, or 502 if its remote can't be fetched |
 //! | `GET …/projects/{project}/plans` | `plans` | every [`PlanInfo`] |
 //! | `POST …/projects/{project}/plans` | `add_plan` | [`AddedPlan`]: 201, or 200 if listed |
+//! | `GET …/projects/{project}/plan-summaries` | `plan_summaries` | every [`PlanSummary`], in its listing's order |
 //! | `GET …/projects/{project}/queue` | `queue` | its [`QueueListing`] |
 //! | `POST …/projects/{project}/queue` | `edit_queue` | [`Queued`]: 200, 409 if not queued, 422 if not in its plan |
 //! | `GET …/projects/{project}/queue/history?older=&limit=` | `queue_history` | a page of its queue's edits, newest first: a [`HistoryPage`] |
@@ -126,7 +127,7 @@ use reef_api::{
 };
 use reef_api::{
     Build, HistoryPage, HistoryQuery, MoveNodes, Moved, OpenRun, PasswordChange, PasswordChanged,
-    RunReport, TestRun, TokenInfo, UserRemoved,
+    PlanSummary, RunReport, TestRun, TokenInfo, UserRemoved,
 };
 use reef_model::{Diagnostic, NameError, Next, NodeName, Payload, PlanName};
 use serde::Deserialize;
@@ -212,6 +213,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
         .route(paths::FIND_PROJECT, get(find_project::<S>))
         .route(paths::PROJECT_FETCH, axum::routing::post(fetch::<S>))
         .route(paths::PLANS, get(plans::<S>).post(add_plan::<S>))
+        .route(paths::PLAN_SUMMARIES, get(plan_summaries::<S>))
         .route(paths::QUEUE, get(queue::<S>).post(edit_queue::<S>))
         .route(paths::QUEUE_HISTORY, get(queue_history::<S>))
         .route(paths::PROJECT_NEXT, get(project_next::<S>))
@@ -1144,6 +1146,22 @@ async fn plans<S: Serves>(
     // every plan the project lists, with who listed it, refused if it isn't registered
     let plans = serves.service().plan_listing(&segments.project).await?;
     Ok(Json(plans))
+}
+
+/// Lists each of a project's plans summed up, as the plan explorer shows them
+///
+/// # Arguments
+///
+/// * `serves` - The service
+/// * `segments` - The project's name
+#[instrument(name = "api::plan_summaries", skip_all, err(Debug))]
+async fn plan_summaries<S: Serves>(
+    State(serves): State<S>,
+    Segments(segments): Segments<ProjectSegments>,
+) -> Result<Json<Vec<PlanSummary>>, Failure> {
+    // every plan the project lists, summed up, refused if it isn't registered
+    let summaries = serves.service().plan_summaries(&segments.project).await?;
+    Ok(Json(summaries))
 }
 
 /// Lists a project's queue: each entry with its rank, and whether next takes it

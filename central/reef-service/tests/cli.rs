@@ -837,6 +837,20 @@ async fn project_add_and_plan_new_show_in_plan_ls() -> anyhow::Result<()> {
     let plans = cx.reef(&repo, &["plan", "ls"]).await?;
     assert_eq!(names(&plans), ["cli/docs"]);
     assert!(plans.contains("revision "), "{plans}");
+    // `--long` sums it up beneath: idle, holding nothing, its listing its last update
+    let long = cx.reef(&repo, &["plan", "ls", "--long"]).await?;
+    let lines: Vec<&str> = long.lines().collect();
+    let [listed, summed] = lines[..] else {
+        anyhow::bail!("`plan ls --long` printed {long:?}");
+    };
+    assert!(listed.starts_with("cli/docs  revision "), "{long}");
+    let summed = summed.trim_start();
+    assert!(
+        summed
+            .starts_with("idle, no sessions, 0 of 0 nodes done, 0 in the last 24 hours, updated "),
+        "{long}"
+    );
+    assert!(summed.ends_with(" by tester"), "{long}");
     // and `project ls` lists it beside the project the fixture registered, by name
     let projects = cx.reef(&repo, &["project", "ls"]).await?;
     assert_eq!(names(&projects), ["cli", "reef"]);

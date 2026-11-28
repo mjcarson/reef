@@ -7,6 +7,7 @@ reef plan branch launch release    # follow another branch, unless the plan's li
 reef plan branch launch --clear    # follow the project's own branch again
 reef plan branch launch --merged   # follow the branch its branch was merged into
 reef plan ls                       # each plan, the revision it is at, what it follows, who listed it
+reef plan ls --long                # and each summed up: its state, nodes done, last update, who works on what
 ```
 
 - **A project with one plan needs no `--plan`.** Once it has several, the checkout picks one:
@@ -21,6 +22,14 @@ reef plan ls                       # each plan, the revision it is at, what it f
 - **Each plan has a queue of its own,** which its `next` follows first. An entry is placed among
   its plan's entries alone, and each plan's queue keeps its own history beside the project's.
 - **A plan's name** keeps to the same rule as a project's and a user's.
+- **`--long` sums each plan up** beneath its listing, as the app's front page does. A plan is
+  *active* while a node of it is in progress, a session on it is live or a test run on it builds
+  or runs, else *idle*. Its state is *testing* while a run builds or runs, else *sessions* while a
+  session is live, else *no sessions*. It counts its nodes done, groups left out, and those that
+  went done in the last 24 hours and are done still, and names its last update and who made it.
+  Then each node in progress names who started its work, and each live session and run its node
+  and who attached or started it. A session or run that names no plan is its project's only
+  plan's, or no plan's in a project of several.
 
 ## A plan follows a branch
 
