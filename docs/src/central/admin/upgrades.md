@@ -18,6 +18,12 @@ sudo rm -rf /opt/reef/app && sudo cp -r central/target/dx/reef-app/release/web /
 sudo systemctl start reef
 ```
 
+- **Every caller signs in from this release on.** A server whose config sets
+  `[auth] required = false` refuses to start, naming the key: take it out before the restart.
+  `reefadm upgrade` does it for you. A server with no user answers nobody until its first admin
+  is added from its host ([The first admin](../deploy/first-admin.md)), as `reefadm upgrade`
+  does. Then each user runs `reef login` once, since their CLI, MCP server, hooks and runners
+  send that login's token. What was written before keeps no author: nothing is backdated.
 - **Users' `reef` follows by itself.** The server hands its users the `reef` its release holds,
   and every answer names that build, so a stamped `reef` replaces itself with the new one the
   next time it calls ([Keeping reef up to date](../using/updates.md)). A `reef` built with

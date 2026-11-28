@@ -151,16 +151,18 @@ impl Session {
     }
 }
 
-/// The CLI's client of a served twin, as the MCP server holds one
+/// The CLI's client of a served twin, as the MCP server holds one, signed in with the login the
+/// case's credentials file keeps, which a twin with no user yet holds none of
 ///
 /// # Arguments
 ///
 /// * `ax` - The served service
 fn client_of(ax: &Ax<MemoryBackend>) -> anyhow::Result<reef::Client> {
-    // a config naming the twin's port and where reef's own CA is kept, and nothing else
+    // a config naming the twin's port and where reef's own CA is kept, and the case's login
     let mut conf = Conf::default();
     conf.api.address = ax.address;
     conf.api.certs = Some(ax.certs.clone());
+    conf.credentials = Some(ax.credentials.clone());
     reef::Client::new(&conf)
 }
 
@@ -482,7 +484,25 @@ async fn next_task_skips_a_waiting_queued_node_and_says_why() -> anyhow::Result<
     // and starts it here, in progress
     assert!(took.contains("started `C` in "), "{took}");
     assert!(took.contains("`C` is in-progress, at version 2"), "{took}");
-    assert!(client.work_of(&plan.node("C")?).await?.is_some());
+    // its start, and its status set, are Claude's for the user signed in, as the put was
+    let started = client
+        .work_of(&plan.node("C")?)
+        .await?
+        .expect("C's start is recorded");
+    assert_eq!(
+        started.started_by.describe().as_deref(),
+        Some("Claude, for tester")
+    );
+    let history = client.node_history(&plan.node("C")?, None).await?;
+    assert!(!history.edits.is_empty());
+    for logged in &history.edits {
+        assert_eq!(
+            logged.author.describe().as_deref(),
+            Some("Claude, for tester"),
+            "v{:?}",
+            logged.version
+        );
+    }
     // a second call before it is done hands out C again, starting nothing
     let (again, failed) = first.call("next_task", json!({})).await?;
     assert!(!failed, "{again}");
@@ -605,7 +625,7 @@ async fn comment_tools_list_threads_and_answer_as_claude() -> anyhow::Result<()>
     );
     assert!(
         listed.contains(&format!(
-            "#{} on `reef/central/C1`, the node as a whole: open\n    #{} by the user:\n        \
+            "#{} on `reef/central/C1`, the node as a whole: open\n    #{} by tester:\n        \
              Why one?",
             numbers[0], numbers[0]
         )),

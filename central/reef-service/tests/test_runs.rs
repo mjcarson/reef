@@ -19,7 +19,7 @@ use reef_service::MemoryBackend;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::http::Ax;
+use common::http::{Ax, TESTER};
 
 /// How long a case waits to read a run held mid-way before it gives up
 const HELD_WAIT: Duration = Duration::from_secs(120);
@@ -255,7 +255,8 @@ fn totals(run: &TestRun) -> Vec<(String, u64, bool)> {
 }
 
 /// A run's total is known before its first test runs, through a pty, and the run names the node
-/// the checkout is on; its doc tests are guessed, from the command's last run once there is one
+/// the checkout is on and the user who started it; its doc tests are guessed, from the command's
+/// last run once there is one
 #[tokio::test]
 async fn a_runs_total_is_known_before_its_first_test() -> anyhow::Result<()> {
     let tx = Tx::new("total").await?;
@@ -283,6 +284,7 @@ async fn a_runs_total_is_known_before_its_first_test() -> anyhow::Result<()> {
     assert_eq!(held.node.as_deref(), Some("T1"));
     assert_eq!(held.plan.as_deref(), Some(tx.ax.plan.plan.as_str()));
     assert_eq!(held.command[..2], ["cargo", "test"]);
+    assert_eq!(held.started_by.describe().as_deref(), Some(TESTER));
     // it passed, the doc tests saying how many they were, and the pty's colours showing
     let done = tx.runs().await?.remove(0);
     assert_eq!(done.state, RunState::Passed);

@@ -42,8 +42,8 @@
 //!   each failure, in memory, for the app to draw beside the node its checkout is on.
 //! - **A terminal loop is kept by its pane** ([`loops`]): the project it feeds, the node it
 //!   holds, which no other loop may take, and whether it is paused.
-//! - **Users sign in for tokens** ([`users`]), when reef's config requires it: the first user is
-//!   added from the service's own host, and the rest by an admin. Users change their passwords,
+//! - **Users sign in for tokens** ([`users`]), every caller but those signing in: the first user
+//!   is added from the service's own host, and the rest by an admin. Users change their passwords,
 //!   list and revoke their tokens, and an admin removes users; repeated failed sign-ins are
 //!   slowed ([`throttle`]).
 //! - **A project registers by its git URL too** ([`remotes`]): the service clones one branch of
@@ -125,8 +125,6 @@ pub struct Service<B = ShoalBackend> {
     sessions: sessions::Sessions,
     /// The test runs clients report, kept in memory
     test_runs: test_runs::TestRuns,
-    /// Whether every caller must sign in
-    requires_sign_in: bool,
     /// The tokens looked up lately, trusted for a minute
     tokens: users::Tokens,
     /// The sign-ins that failed lately, which slow the next for the same name or address
@@ -159,7 +157,7 @@ impl Service<ShoalBackend> {
     /// * `conf` - reef's config
     #[instrument(name = "Service::open", skip_all, err(Debug))]
     pub async fn open(conf: &Conf) -> anyhow::Result<Service> {
-        // reach shoal however the config says to, asking callers to sign in if it says to
+        // reach shoal however the config says to
         let store = Store::open(conf).await?;
         // clone remote projects where it says, unless it names nowhere and no home has a default
         let clones = match conf.clones_dir() {
@@ -168,7 +166,6 @@ impl Service<ShoalBackend> {
             Err(error) => return Err(error),
         };
         Ok(Service::new(store)
-            .requiring_sign_in(conf.auth.required)
             .serving_client(Served::find(conf).await)
             .cloning_into(clones)
             .cloning_from(conf.remotes.hosts.clone())
@@ -228,8 +225,7 @@ fn served_line(build: &reef_api::Build) -> String {
 }
 
 impl<B: Backend> Service<B> {
-    /// A service over a store, taking a node's brief form from the default doc sections, asking
-    /// no caller to sign in
+    /// A service over a store, taking a node's brief form from the default doc sections
     ///
     /// # Arguments
     ///
@@ -243,7 +239,6 @@ impl<B: Backend> Service<B> {
             changes: Mutex::new(Some(changes)),
             sessions: sessions::Sessions::default(),
             test_runs: test_runs::TestRuns::default(),
-            requires_sign_in: false,
             tokens: users::Tokens::default(),
             throttle: throttle::Throttle::default(),
             revocations: tokio::sync::watch::Sender::new(0),
@@ -342,7 +337,7 @@ impl<B: Backend> Service<B> {
 
     /// Registers a project for a repo, refusing a name or a repo another project has
     ///
-    /// With sign-in required, only an admin registers a directory on the service's host.
+    /// Only an admin registers a directory on the service's host.
     ///
     /// # Arguments
     ///
@@ -356,7 +351,7 @@ impl<B: Backend> Service<B> {
         repo: &Path,
         asker: Asker<'_>,
     ) -> anyhow::Result<AddedProject> {
-        // a directory on this host is an admin's to name, once callers sign in
+        // a directory on this host is an admin's to name
         self.judge_on_host(asker, "register a project by a directory on its host")
             .await?;
         // register it, naming who did, and tell the change stream if it was
@@ -1271,8 +1266,9 @@ fn new_problems(before: &[Diagnostic], after: Vec<Diagnostic>) -> Vec<Diagnostic
 #[cfg(test)]
 mod tests {
     use super::{Asker, Service, new_problems};
+    use crate::backend::Backend;
     use crate::store::{Checked, NodePut, NodeWrite};
-    use reef_api::{Change, PutNode};
+    use reef_api::{Change, NewUser, PutNode, User, UserAdded};
     use reef_model::{Description, Diagnostic, NodeSpec, PlanName};
     use std::path::Path;
     use tokio::sync::broadcast::error::TryRecvError;
@@ -1314,17 +1310,42 @@ mod tests {
         }
     }
 
+    /// Adds a service's first user, an admin, as its own host may
+    ///
+    /// Only an admin registers a project by a directory on the service's host.
+    ///
+    /// # Arguments
+    ///
+    /// * `service` - The service to add them to
+    async fn admin<B: Backend>(service: &Service<B>) -> anyhow::Result<User> {
+        // the first user, asked for from the service's own host
+        let new = NewUser {
+            name: "ada".to_string(),
+            password: "correct horse battery".to_string(),
+            admin: true,
+        };
+        let local = Asker {
+            local: true,
+            ..Asker::default()
+        };
+        match service.add_user(new, local).await? {
+            UserAdded::Added(user) => Ok(user),
+            UserAdded::NameTaken => anyhow::bail!("the first user's name was taken"),
+        }
+    }
+
     /// A put that breaks the plan is refused with the message check gives the plan it would make
     #[tokio::test]
     async fn breaking_put_is_refused_with_checks_message() -> anyhow::Result<()> {
         // a plan of a project for the repo this crate is in
         let service = Service::memory();
+        let admin = admin(&service).await?;
+        let asker = Asker {
+            user: Some(&admin),
+            ..Asker::default()
+        };
         service
-            .add_project(
-                "reef",
-                Path::new(env!("CARGO_MANIFEST_DIR")),
-                Asker::default(),
-            )
+            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")), asker)
             .await?;
         let plan = PlanName::new("reef", "central")?;
         service.add_plan(&plan, &reef_api::NOBODY).await?;
@@ -1350,12 +1371,13 @@ mod tests {
         // a plan of a project for the repo this crate is in, followed from before it is listed
         let service = Service::memory();
         let mut changes = service.changes();
+        let admin = admin(&service).await?;
+        let asker = Asker {
+            user: Some(&admin),
+            ..Asker::default()
+        };
         service
-            .add_project(
-                "reef",
-                Path::new(env!("CARGO_MANIFEST_DIR")),
-                Asker::default(),
-            )
+            .add_project("reef", Path::new(env!("CARGO_MANIFEST_DIR")), asker)
             .await?;
         let plan = PlanName::new("reef", "central")?;
         service.add_plan(&plan, &reef_api::NOBODY).await?;

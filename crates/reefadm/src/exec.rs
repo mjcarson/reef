@@ -303,7 +303,8 @@ impl File {
     }
 }
 
-/// A request for the server's `GET /api/v1/me`
+/// A request for one of the server's routes that answer a caller who hasn't signed in:
+/// `GET /api/v1/me`, or `GET /api/v1/users`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
     /// The route's whole URL
@@ -376,6 +377,14 @@ pub trait Runner {
     ///
     /// * `ask` - Where to ask, and what to trust
     fn me(&mut self, ask: &Ask) -> Result<Me>;
+
+    /// Asks the server whether it has a user yet, which `GET /api/v1/users` tells a caller who
+    /// hasn't signed in: an empty list while it has none, and a refusal once it has one
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - Where to ask, and what to trust
+    fn has_users(&mut self, ask: &Ask) -> Result<bool>;
 
     /// Makes sure root's steps can run without asking again for a while
     fn elevate(&mut self) -> Result<()>;
@@ -581,6 +590,29 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
         .with_context(|| format!("setting {}'s mode", path.display()))
 }
 
+/// A client for one of the server's open routes, with short timeouts, trusting reef's CA if
+/// the ask names it
+///
+/// # Arguments
+///
+/// * `ask` - Where to ask, and what to trust
+fn asking(ask: &Ask) -> Result<reqwest::blocking::Client> {
+    // short timeouts, since the port takes connections before the store is up
+    let mut builder = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(4));
+    if let Some(ca) = &ask.ca {
+        builder = builder
+            .add_root_certificate(reqwest::Certificate::from_pem(ca).context("reading reef's CA")?);
+    }
+    if let Some((name, address)) = &ask.resolve {
+        builder = builder.resolve(name, *address);
+    }
+    builder
+        .build()
+        .context("building the health check's client")
+}
+
 impl Runner for Real {
     /// Runs a probe, capturing its output
     ///
@@ -696,21 +728,7 @@ impl Runner for Real {
     ///
     /// * `ask` - Where to ask, and what to trust
     fn me(&mut self, ask: &Ask) -> Result<Me> {
-        // short timeouts, since the port takes connections before the store is up
-        let mut builder = reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(4));
-        if let Some(ca) = &ask.ca {
-            builder = builder.add_root_certificate(
-                reqwest::Certificate::from_pem(ca).context("reading reef's CA")?,
-            );
-        }
-        if let Some((name, address)) = &ask.resolve {
-            builder = builder.resolve(name, *address);
-        }
-        let client = builder
-            .build()
-            .context("building the health check's client")?;
+        let client = asking(ask)?;
         // the route answers without signing in
         let me = client
             .get(&ask.url)
@@ -720,6 +738,34 @@ impl Runner for Real {
             .json::<Me>()
             .with_context(|| format!("reading {}'s answer", ask.url))?;
         Ok(me)
+    }
+
+    /// Asks the server whether it has a user yet, once, with short timeouts
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - Where to ask, and what to trust
+    fn has_users(&mut self, ask: &Ask) -> Result<bool> {
+        let client = asking(ask)?;
+        // the route answers a caller who hasn't signed in while there are no users
+        let response = client
+            .get(&ask.url)
+            .send()
+            .with_context(|| format!("asking {}", ask.url))?;
+        match response.status() {
+            // the users, which a server with none lists to anyone
+            reqwest::StatusCode::OK => {
+                let users = response
+                    .json::<Vec<serde_json::Value>>()
+                    .with_context(|| format!("reading {}'s answer", ask.url))?;
+                Ok(!users.is_empty())
+            }
+            // once it has one, only an admin may list them
+            reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Ok(true),
+            // a reef from before users has none
+            reqwest::StatusCode::NOT_FOUND => Ok(false),
+            status => bail!("{} answered {status}", ask.url),
+        }
     }
 
     /// Asks for sudo's password now, so root's steps that follow don't stop to ask
@@ -884,6 +930,15 @@ impl<R: Runner> Runner for Dry<R> {
         })
     }
 
+    /// Asks for real, since asking changes nothing
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - Where to ask
+    fn has_users(&mut self, ask: &Ask) -> Result<bool> {
+        self.inner.has_users(ask)
+    }
+
     /// Nothing runs as root, so nothing needs sudo
     fn elevate(&mut self) -> Result<()> {
         Ok(())
@@ -952,15 +1007,18 @@ pub struct Script {
     pub attempts: Vec<(String, Output)>,
     /// What the server answers each `me`, in turn, else a server asking callers to sign in
     pub mes: VecDeque<std::result::Result<Me, String>>,
+    /// Whether the server has a user, or why it couldn't be asked, every time; else it has one
+    pub users: Option<std::result::Result<bool, String>>,
     /// The answer to every question
     pub yes: bool,
     /// The password every prompt gets
     pub secret: String,
-    /// Every change, in order: `run: …`, `write: …`, `me: …`
+    /// Every change, in order: `run: …`, `write: …`, `me: …`, and each password asked for,
+    /// `password: …`
     pub log: Vec<String>,
     /// Every file written, whole
     pub files: Vec<File>,
-    /// Every probe, as shown
+    /// Every probe, as shown, and each ask for the server's users, `users: …`
     pub probed: Vec<String>,
     /// Everything said
     pub said: Vec<String>,
@@ -988,11 +1046,11 @@ impl Script {
         self.answer(shown, Output::printed(stdout))
     }
 
-    /// The changes run or written, without the server's answers
+    /// The changes run or written, without the server's answers or the passwords asked for
     pub fn steps(&self) -> Vec<&str> {
         self.log
             .iter()
-            .filter(|line| !line.starts_with("me: "))
+            .filter(|line| !line.starts_with("me: ") && !line.starts_with("password: "))
             .map(String::as_str)
             .collect()
     }
@@ -1087,6 +1145,20 @@ impl Runner for Script {
         }
     }
 
+    /// Answers as the script says, else as a server that has a user
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - Where it asks
+    fn has_users(&mut self, ask: &Ask) -> Result<bool> {
+        self.probed.push(format!("users: {}", ask.url));
+        match &self.users {
+            Some(Ok(has)) => Ok(*has),
+            Some(Err(error)) => bail!("asking {}: {error}", ask.url),
+            None => Ok(true),
+        }
+    }
+
     /// Needs nothing
     fn elevate(&mut self) -> Result<()> {
         Ok(())
@@ -1102,13 +1174,18 @@ impl Runner for Script {
         Ok(self.yes)
     }
 
-    /// Answers with the script's password
+    /// Answers with the script's password, noting that it was asked for and how
     ///
     /// # Arguments
     ///
     /// * `prompt` - What was asked
     /// * `file` - The file it would be read from
-    fn password(&mut self, _prompt: &str, _file: Option<&Path>) -> Result<String> {
+    fn password(&mut self, prompt: &str, file: Option<&Path>) -> Result<String> {
+        let from = match file {
+            Some(file) => format!("from {}", file.display()),
+            None => prompt.to_string(),
+        };
+        self.log.push(format!("password: {from}"));
         Ok(self.secret.clone())
     }
 

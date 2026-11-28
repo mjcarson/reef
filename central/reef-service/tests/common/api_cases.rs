@@ -23,7 +23,7 @@ use reef_model::{
 use reef_service::Backend;
 use reqwest::StatusCode;
 
-use super::http::{Ax, Events};
+use super::http::{Ax, Events, TESTER};
 use super::work_cases::{added_file, start_in};
 use super::{doc, git};
 
@@ -80,7 +80,8 @@ pub async fn client_puts_a_node_and_lists_plans<B: Backend + 'static>(
     let new = NewProject::dir("api", repo.clone());
     let (status, added): (_, AddedProject) = ax.client.post(paths::PROJECTS, &new).await?;
     assert_eq!(status, StatusCode::CREATED);
-    // its registration names nobody, since no token was sent, and its listing says the same
+    // its registration names the case's own user, whose token was sent, and its listing says
+    // the same
     let AddedProject::Added(project) = added else {
         panic!("a project for a fresh repo was refused: {added:?}");
     };
@@ -88,7 +89,7 @@ pub async fn client_puts_a_node_and_lists_plans<B: Backend + 'static>(
         .registered
         .clone()
         .expect("its registration is kept");
-    assert!(registered.author.is_unknown());
+    assert_eq!(registered.author.describe().as_deref(), Some(TESTER));
     assert_eq!(
         project,
         Project {

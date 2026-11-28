@@ -2,7 +2,7 @@
 //!
 //! The sign-in page itself is reef-service's, plain HTML with no script, so a browser that isn't
 //! signed in never loads the app. Once it is, the bar says whom the server takes it for, linking
-//! to their account page, and offers to sign out, when the server asks callers to sign in at all. A browser whose sign-in lapses,
+//! to their account page, and offers to sign out. A browser whose sign-in lapses,
 //! its token revoked or expired, finds the change stream refused and its calls answered 401, and
 //! is offered the sign-in page again, which brings it back where it was.
 
@@ -30,7 +30,7 @@ pub fn sign_in_href(route: &Route) -> String {
 
 /// Whom the server takes this browser for, a sign-out beside it, or a way back to signing in
 ///
-/// It shows nothing when the server asks no caller to sign in.
+/// It shows nothing until the server says who it takes the browser for.
 #[component]
 pub fn SignedInAs() -> Element {
     // read as the page renders, so the bar says it from the first paint
@@ -39,10 +39,9 @@ pub fn SignedInAs() -> Element {
     let lost = SIGN_IN_LOST();
     let me: Option<Me> = me.read().as_ref().and_then(|me| me.as_ref().ok().cloned());
     match me {
-        // signed in, and asked to be
+        // signed in, as every caller is asked to be
         Some(Me {
-            user: Some(user),
-            required: true,
+            user: Some(user), ..
         }) => rsx! {
             span { class: "reef-app-user",
                 if lost {
@@ -62,16 +61,13 @@ pub fn SignedInAs() -> Element {
             }
         },
         // asked to sign in, and not
-        Some(Me {
-            user: None,
-            required: true,
-        }) => rsx! {
+        Some(Me { user: None, .. }) => rsx! {
             span { class: "reef-app-user",
                 a { href: sign_in_href(&route), "Sign in" }
             }
         },
-        // nobody need sign in, or it can't be told
-        _ => rsx! {},
+        // it can't be told yet
+        None => rsx! {},
     }
 }
 

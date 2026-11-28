@@ -1,7 +1,8 @@
 # reef's own plan
 
 reef's own plan lives in a reef-serve that runs as a systemd user unit, its data in the default
-`~/.local/share/reef/shoal`, with no config file. `plan/` is the plan's export, which git keeps:
+`~/.local/share/reef/shoal`, with no config file. Every caller signs in, on loopback too, so its
+first user is you, added once from this host. `plan/` is the plan's export, which git keeps:
 it is the copy a fresh data directory is imported from, and the book `mdbook-reef` still builds.
 This page is reef's own setup. A server for a team, or one for yourself, is set up as
 [Deploying](../central/deploy/index.md) says.
@@ -34,6 +35,8 @@ buffers, so a session whose `ulimit -l` is lower needs `LimitMEMLOCK=` in the un
 ```sh
 systemctl --user daemon-reload && systemctl --user enable --now reef
 journalctl --user -u reef                  # what it said starting, where its CA is, and any warning
+reef user add "$USER"                      # its first user, an admin, once
+reef login --user "$USER"                  # a token the CLI, the MCP server and the hooks send
 reef project add reef                      # from the repo's root, once
 reef import plan --plan central            # the plan, from its book
 reef claude install                        # the MCP entry, the hooks and the skill, for the loop

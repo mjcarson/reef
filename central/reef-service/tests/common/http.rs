@@ -4,14 +4,17 @@
 //! Each case's server runs on a port of its own, chosen by the OS, over the same store a service
 //! case would get: the `reef` project registered for a fresh git repo, and `reef/central` listed.
 //! It speaks HTTPS, serving reef's own certificate, made in the case's own directory so no case
-//! touches the user's, and its client trusts reef's own CA alone. A case that serves other hosts
+//! touches the user's, and its client trusts reef's own CA alone. Every server asks its callers
+//! to sign in, so a case's server has a user of its own, [`TESTER`], an admin whose token the
+//! client sends and whose login the case's credentials file keeps for the CLI, unless the case
+//! is about a server with no user yet. A case that serves other hosts
 //! too gets a second port, on every interface, with a certificate minted for it, and a client
 //! that trusts that.
 
-use reef_api::{ApiError, Build};
+use reef_api::{ApiError, Build, NewUser, TokenKind, User, UserAdded};
 use reef_model::PlanName;
 use reef_service::api::{Listeners, Local};
-use reef_service::{Backend, Conf, Served, Service, TlsSettings, api};
+use reef_service::{Asker, Backend, Conf, Served, Service, TlsSettings, api};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -24,10 +27,24 @@ use tokio::task::JoinHandle;
 
 use super::Fx;
 use super::faulty::Faulty;
+use super::sign_in_cases::PASSWORD;
 use super::tls::{Minted, minted};
 
 /// How long a case waits for any one answer or event
 pub const WAIT: Duration = Duration::from_secs(10);
+
+/// The name of the user a case's server has of its own, the first and an admin
+pub const TESTER: &str = "tester";
+
+/// Who a served fixture's client signs in as
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signing {
+    /// The fixture's own user, [`TESTER`], an admin, whose token the client and the case's
+    /// credentials file hold
+    Tester,
+    /// Nobody: the server has no user yet, and the client sends no token
+    Nobody,
+}
 
 /// A client of the JSON API, speaking only `reef-api`'s types
 #[derive(Clone)]
@@ -93,6 +110,14 @@ impl Client {
     pub fn signed(&self, token: &str) -> Client {
         Client {
             token: Some(token.to_string()),
+            ..self.clone()
+        }
+    }
+
+    /// The same client, sending no token, as a caller who hasn't signed in
+    pub fn unsigned(&self) -> Client {
+        Client {
+            token: None,
             ..self.clone()
         }
     }
@@ -210,9 +235,9 @@ impl Client {
         path: &str,
         text: &str,
     ) -> anyhow::Result<(StatusCode, ApiError)> {
+        // sent with this client's token, as every request is
         let request = self
-            .http
-            .post(format!("{}{path}", self.base))
+            .request(Method::POST, path)
             .header("content-type", "application/json")
             .body(text.to_string());
         let response = tokio::time::timeout(WAIT, request.send()).await??;
@@ -261,6 +286,12 @@ pub struct Ax<B: Backend + 'static> {
     pub repo: PathBuf,
     /// A directory of the case's own, under cargo's target dir, which holds the repo
     pub dir: PathBuf,
+    /// The user the client signs in as, [`TESTER`], unless the server has no user yet
+    pub user: Option<User>,
+    /// The credentials file holding that user's login for the CLI, keyed by the server's root:
+    /// `home/reef/credentials.toml` under the case's directory, which no login holds until one
+    /// is made if the server has no user yet
+    pub credentials: PathBuf,
     /// The server's task, stopped when the fixture is dropped
     server: JoinHandle<anyhow::Result<()>>,
 }
@@ -285,80 +316,93 @@ impl<B: Backend + 'static> Drop for Ax<B> {
 }
 
 impl<B: Backend + 'static> Fx<B> {
-    /// Serves this fixture's store on a loopback port of its own, and makes a client of it
+    /// Serves this fixture's store on a loopback port of its own, and makes a client of it,
+    /// signed in as the case's own user, [`TESTER`]
     pub async fn api(self) -> anyhow::Result<Ax<B>> {
-        self.api_with(false).await
+        let conf = self.loopback()?;
+        self.api_on(conf, Signing::Tester, None, None).await
     }
 
-    /// Serves this fixture's store asking every caller to sign in, and makes a client of it,
-    /// which has signed nobody in
+    /// Serves this fixture's store with no user yet, and makes a client of it, which has signed
+    /// nobody in
     pub async fn api_signing_in(self) -> anyhow::Result<Ax<B>> {
-        self.api_with(true).await
+        let conf = self.loopback()?;
+        self.api_on(conf, Signing::Nobody, None, None).await
     }
 
-    /// Serves this fixture's store handing its users a client, asking every caller to sign in or
-    /// not, and makes a client of it
+    /// Serves this fixture's store handing its users a client, and makes a client of it, signed
+    /// in as the case's own user, [`TESTER`]
     ///
     /// # Arguments
     ///
-    /// * `required` - Whether every caller must sign in
     /// * `client` - The `reef` it hands its users
-    pub async fn api_serving(self, required: bool, client: Served) -> anyhow::Result<Ax<B>> {
-        self.api_on(required, None, Some(client)).await
+    pub async fn api_serving(self, client: Served) -> anyhow::Result<Ax<B>> {
+        let conf = self.loopback()?;
+        self.api_on(conf, Signing::Tester, None, Some(client)).await
     }
 
-    /// Serves this fixture's store asking every caller to sign in, on a loopback port and for
-    /// other hosts on every interface, with a certificate minted for this host there
+    /// Serves this fixture's store as a config file says, handing its users a client, with no
+    /// user yet, and makes a client of it, which has signed nobody in
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The config file, whose `[api]` must name a loopback address and the case's
+    ///   own `certs`
+    /// * `client` - The `reef` it hands its users
+    pub async fn api_reading(self, conf: &Path, client: Served) -> anyhow::Result<Ax<B>> {
+        // read as a server reads its config as it starts
+        let conf = Conf::load(Some(conf))?;
+        self.api_on(conf, Signing::Nobody, None, Some(client)).await
+    }
+
+    /// Serves this fixture's store with no user yet, on a loopback port and for other hosts on
+    /// every interface, with a certificate minted for this host there
     pub async fn api_over_tls(self) -> anyhow::Result<Ax<B>> {
         // a certificate minted for this host, which the other hosts' listener names
         let minted = minted(&self.dir.join("tls"))?;
-        let tls = TlsSettings {
+        let mut conf = self.loopback()?;
+        conf.api.tls = Some(TlsSettings {
             address: "0.0.0.0:0".parse()?,
             cert: Some(minted.cert.clone()),
             key: Some(minted.key.clone()),
-        };
-        self.api_on(true, Some((tls, minted)), None).await
+        });
+        self.api_on(conf, Signing::Nobody, Some(minted), None).await
     }
 
-    /// Serves this fixture's store on a loopback port of its own, asking callers to sign in or
-    /// not, and makes a client of it
+    /// The config a case's server reads: any free port on localhost, reef's own certificate in
+    /// the case's own directory
+    fn loopback(&self) -> anyhow::Result<Conf> {
+        let mut conf = Conf::default();
+        conf.api.address = "127.0.0.1:0".parse()?;
+        conf.api.certs = Some(self.dir.join("certs"));
+        Ok(conf)
+    }
+
+    /// Serves this fixture's store over HTTPS as a config says, with reef's own certificate made
+    /// in the case's directory, and for other hosts too if it names a listener for them
     ///
     /// # Arguments
     ///
-    /// * `required` - Whether every caller must sign in
-    async fn api_with(self, required: bool) -> anyhow::Result<Ax<B>> {
-        self.api_on(required, None, None).await
-    }
-
-    /// Serves this fixture's store over HTTPS on a loopback port of its own, with reef's own
-    /// certificate made in the case's directory, and for other hosts too if a listener is given
-    ///
-    /// # Arguments
-    ///
-    /// * `required` - Whether every caller must sign in
-    /// * `wide` - Other hosts' listener, and the certificate minted for it, if the case has one
+    /// * `conf` - The config the server reads
+    /// * `signing` - Whom the client signs in as
+    /// * `minted` - The certificate minted for other hosts' listener, if the config names one
     /// * `client` - The `reef` it hands its users, if it hands them one
     async fn api_on(
         self,
-        required: bool,
-        wide: Option<(TlsSettings, Minted)>,
+        conf: Conf,
+        signing: Signing,
+        minted: Option<Minted>,
         client: Option<Served>,
     ) -> anyhow::Result<Ax<B>> {
         // the service, shared by the server and the case, handing its users the client given
         let sx = self.serve();
-        let mut service = sx.service.requiring_sign_in(required);
+        let mut service = sx.service;
         if let Some(client) = client {
             service = service.serving_client(Ok(client));
         }
         let service = Arc::new(service);
-        // any free port on localhost, reef's own certificate in the case's own directory
-        let certs = sx.dir.join("certs");
-        let mut conf = Conf::default();
-        conf.api.address = "127.0.0.1:0".parse()?;
-        conf.api.certs = Some(certs.clone());
-        conf.auth.required = required;
-        let minted = wide.as_ref().map(|(_, minted)| minted.clone());
-        conf.api.tls = wide.map(|(tls, _)| tls);
+        // where reef's own certificate is made, as the config names it
+        let certs = conf.certs_dir()?;
         let listeners = Listeners::bind(&conf).await?;
         let address = match &listeners.local {
             Local::Tls(local) => axum::serve::Listener::local_addr(local)?,
@@ -390,8 +434,18 @@ impl<B: Backend + 'static> Fx<B> {
             service.clone(),
             std::future::pending(),
         ));
+        // the client, and the case's own user signed in unless the server is to have none
+        let client = Client::trusting(format!("https://{address}"), &ca)?;
+        let credentials = sx.dir.join("home/reef/credentials.toml");
+        let (client, user) = match signing {
+            Signing::Tester => {
+                let (user, token) = tester(&service, &credentials, &client.base).await?;
+                (client.signed(&token), Some(user))
+            }
+            Signing::Nobody => (client, None),
+        };
         Ok(Ax {
-            client: Client::trusting(format!("https://{address}"), &ca)?,
+            client,
             address,
             certs,
             ca,
@@ -400,9 +454,51 @@ impl<B: Backend + 'static> Fx<B> {
             plan: sx.plan,
             repo: sx.repo,
             dir: sx.dir,
+            user,
+            credentials,
             server,
         })
     }
+}
+
+/// Adds a case's own user, [`TESTER`], as the service's first, an admin from its own host, signs
+/// them in, and keeps their login for the CLI
+///
+/// # Arguments
+///
+/// * `service` - The served service
+/// * `credentials` - The credentials file the case's CLI is named
+/// * `base` - The server's root, which the CLI keys the login by
+async fn tester<B: Backend + 'static>(
+    service: &Service<Faulty<B>>,
+    credentials: &Path,
+    base: &str,
+) -> anyhow::Result<(User, String)> {
+    // the first user, from the service's own host
+    let new = NewUser {
+        name: TESTER.to_string(),
+        password: PASSWORD.to_string(),
+        admin: true,
+    };
+    let local = Asker {
+        local: true,
+        ..Asker::default()
+    };
+    let UserAdded::Added(user) = service.add_user(new, local).await? else {
+        anyhow::bail!("`{TESTER}` was taken in a fresh service");
+    };
+    // a token for them, as `reef login` gets one
+    let issued = service
+        .sign_in(TESTER, PASSWORD, TokenKind::Cli, "the case", None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("`{TESTER}` didn't sign in"))?;
+    // kept where the case's CLI reads it, for the root it calls
+    let login = reef::credentials::Login {
+        user: TESTER.to_string(),
+        token: issued.token.clone(),
+    };
+    reef::credentials::keep(credentials, base, login)?;
+    Ok((user, issued.token))
 }
 
 /// The build a fake client says it is: stamped with a commit and its time, for this host's

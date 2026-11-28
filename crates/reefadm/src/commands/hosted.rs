@@ -8,7 +8,8 @@
 //!    machine's share: the toolchains, the disk and the schema checks are this machine's.
 //! 3. **The release staged here** and shipped there as one tar ([`ship::ship`]).
 //! 4. **The install there**, by reefadm's copy with `--shipped`, over `ssh -t`, so sudo's prompts
-//!    and reef's are on this terminal. Its command line is built here, so the flags that name
+//!    and reef's are on this terminal. A server there with no user yet gets its first admin, whose
+//!    password is asked here before the build and sent there. Its command line is built here, so the flags that name
 //!    this machine's things, its checkouts, its repo and its ref, never reach it.
 //! 5. **The shipped release and the password removed** there, however it ended.
 //!
@@ -18,6 +19,7 @@
 use super::{adopt, deploy, upgrade};
 use crate::cli::{DeployArgs, UpgradeArgs};
 use crate::exec::quote;
+use crate::first_admin::{self, Admin, Told};
 use crate::layout::{Kind, Layout, Mode};
 use crate::remote::{self, There};
 use crate::ship::{self, Facts, SHIPPED};
@@ -53,19 +55,8 @@ pub fn deploy(cx: &mut Cx, host: &str, args: &DeployArgs, compiled: &[&str]) -> 
     deploy::stop_for(cx, &facts.problems)?;
     // the first admin, by the name the host's admin has unless told another, asked for now so
     // the build runs unattended
-    let first = match (mode, args.no_admin) {
-        (Mode::System, false) => {
-            let Some(name) = args.first_admin.clone().or_else(|| facts.user.clone()) else {
-                bail!(
-                    "{host} didn't say who its admin is: name the first admin with --first-admin"
-                );
-            };
-            let prompt = format!("{name}'s password, as reef's first admin on {host}");
-            let password = cx.runner.password(&prompt, args.password_file.as_deref())?;
-            Some((name, password))
-        }
-        _ => None,
-    };
+    let told = Told::from(args);
+    let first = admin_there(cx, host, &told, None, facts.user.clone())?;
     // the build here, for the host's CPU
     let layout = Layout::new(mode, &cx.env)?;
     let src = args.src.clone().unwrap_or_else(|| layout.src.clone());
@@ -102,13 +93,53 @@ pub fn deploy(cx: &mut Cx, host: &str, args: &DeployArgs, compiled: &[&str]) -> 
     if args.api_only {
         line.push("--api-only".to_string());
     }
-    match (&first, mode) {
-        (Some((name, _)), _) => line.extend(["--first-admin".to_string(), name.clone()]),
-        (None, Mode::System) => line.push("--no-admin".to_string()),
-        (None, Mode::User) => {}
-    }
-    let password = first.map(|(_, password)| password);
+    line.extend(admin_flags(&told, first.as_ref()));
+    let password = first.map(|admin| admin.password);
     install(cx, &there, &out, line, password.as_deref())
+}
+
+/// The first admin to add on a host's server, by the name its admin has unless told another,
+/// their password asked for now so the build runs unattended, or none: `--no-admin`, or a server
+/// that has a user already
+///
+/// # Arguments
+///
+/// * `cx` - The runner
+/// * `host` - The host, as ssh reaches it
+/// * `told` - What the command was told of the first admin
+/// * `users` - Whether the server there has a user, if it said
+/// * `admin` - The admin there, as the host's reefadm said
+fn admin_there(
+    cx: &mut Cx,
+    host: &str,
+    told: &Told,
+    users: Option<bool>,
+    admin: Option<String>,
+) -> Result<Option<Admin>> {
+    // none asked for, or none needed
+    if told.none || users == Some(true) {
+        return Ok(None);
+    }
+    let Some(name) = told.name.map(String::from).or(admin) else {
+        bail!("{host} didn't say who its admin is: name the first admin with --first-admin");
+    };
+    let prompt = format!("{name}'s password, as reef's first admin on {host}");
+    let password = first_admin::password(cx.runner, &prompt, told.password_file)?;
+    Ok(Some(Admin { name, password }))
+}
+
+/// The flags that tell reefadm's copy there of the first admin: whom to add, or to add none
+///
+/// # Arguments
+///
+/// * `told` - What the command was told of the first admin
+/// * `admin` - The first admin to add, whose password is sent beside the flags
+fn admin_flags(told: &Told, admin: Option<&Admin>) -> Vec<String> {
+    match (admin, told.none) {
+        (Some(admin), _) => vec!["--first-admin".to_string(), admin.name.clone()],
+        (None, true) => vec!["--no-admin".to_string()],
+        (None, false) => Vec::new(),
+    }
 }
 
 /// Takes over reef installed by hand on another host, built here for its CPU
@@ -137,6 +168,9 @@ fn adopt(cx: &mut Cx, host: &str, args: &DeployArgs, compiled: &[&str]) -> Resul
     let Some(kind) = facts.kind else {
         bail!("{host} didn't say which server its install runs");
     };
+    // the first admin, if the install has no user, asked for now so the build runs unattended
+    let told = Told::from(args);
+    let first = admin_there(cx, host, &told, facts.users, facts.user.clone())?;
     // the build here, checked against the schema the install wrote its data with
     let layout = Layout::new(mode, &cx.env)?;
     let src = args.src.clone().unwrap_or_else(|| layout.src.clone());
@@ -182,10 +216,12 @@ fn adopt(cx: &mut Cx, host: &str, args: &DeployArgs, compiled: &[&str]) -> Resul
         schema.as_ref(),
     );
     let out = ship::stage_out(cx, &built, &record, Some(&adopted))?;
-    // taken over there by reefadm's copy
+    // taken over there by reefadm's copy, its first admin added there if it had no user
     let mut line = vec!["deploy".to_string(), "--adopt".to_string()];
     line.extend(adopting(args));
-    install(cx, &there, &out, line, None)
+    line.extend(admin_flags(&told, first.as_ref()));
+    let password = first.map(|admin| admin.password);
+    install(cx, &there, &out, line, password.as_deref())
 }
 
 /// Upgrades the reef reefadm deployed on another host, built here for its CPU
@@ -235,14 +271,25 @@ pub fn upgrade(cx: &mut Cx, host: &str, args: &UpgradeArgs, compiled: &[&str]) -
         args.target_cpu.as_deref(),
     )?;
     let running = &state.release;
+    let told = Told::from(args);
     if upgrade::same(&reef, &manifest, &class, running) && !args.rebuild {
         cx.runner.say(&format!(
             "reef on {host} is at {} already, as release {}: nothing to upgrade",
             ship::short(&reef),
             running.name
         ));
+        // a server there with no user still is told how to get one
+        if facts.users == Some(false) && !told.none {
+            cx.runner.say(&format!(
+                "reef on {host} has no user yet: `reefadm --host {host} upgrade --rebuild` adds \
+                 its first admin, or `reef user add NAME` there"
+            ));
+        }
         return Ok(());
     }
+    // the first admin, if the server there has no user, asked for now so the build runs
+    // unattended
+    let first = admin_there(cx, host, &told, facts.users, facts.user.clone())?;
     // the schema, before the build and after it, against the tables the running release wrote
     let pin = src.join("reef/central/reef-service/src/schema.rs");
     match crate::exec::read(cx.runner, &pin, crate::exec::As::Me)? {
@@ -282,7 +329,9 @@ pub fn upgrade(cx: &mut Cx, host: &str, args: &UpgradeArgs, compiled: &[&str]) -
             line.push(flag.to_string());
         }
     }
-    install(cx, &there, &out, line, None)?;
+    line.extend(admin_flags(&told, first.as_ref()));
+    let password = first.map(|admin| admin.password);
+    install(cx, &there, &out, line, password.as_deref())?;
     upgrade::after(cx, &src, running, &record.release)
 }
 

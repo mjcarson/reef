@@ -293,7 +293,8 @@ fn a_host_other_than_ubuntu_2604_is_told_so() {
     assert_eq!(told(None), None);
 }
 
-/// A user unit deploys with no sudo, no account and no config, on loopback alone
+/// A user unit deploys with no sudo, no account and no config, on loopback alone, its first
+/// admin the user, added and signed in by the release's CLI with no config to name
 #[test]
 fn a_user_unit_deploys_without_root() {
     let mut script = fresh();
@@ -327,17 +328,119 @@ fn a_user_unit_deploys_without_root() {
     assert!(steps.contains(
         &"run: ln -sfn /home/ada/.local/share/reef/current/bin/reef /home/ada/.cargo/bin/reef"
     ));
-    // asked on loopback alone, and no admin added
+    // asked on loopback alone, its password before the build, and the user added as its first
+    // admin and signed in, by the release's CLI with no config to name
     let asked: Vec<_> = script
         .log
         .iter()
         .filter(|line| line.starts_with("me: "))
         .collect();
     assert_eq!(asked, ["me: https://127.0.0.1:12180/api/v1/me"]);
-    assert!(!steps.iter().any(|step| step.contains("user add")));
+    let password = script
+        .log
+        .iter()
+        .position(|line| line.starts_with("password: "))
+        .expect("the first admin's password was asked");
+    let fetched = script
+        .log
+        .iter()
+        .position(|line| line.contains("git"))
+        .expect("reef was fetched");
+    assert!(password < fetched, "{:#?}", script.log);
+    let cli = "run: /home/ada/.local/share/reef/current/bin/reef";
+    let admin: Vec<&str> = steps
+        .iter()
+        .copied()
+        .filter(|step| step.starts_with(cli))
+        .collect();
+    assert_eq!(admin.len(), 2, "{steps:#?}");
+    for (step, command) in admin.iter().zip(["user add ada", "login --user ada"]) {
+        let (before, after) = step.split_once(" --password-file ").unwrap();
+        assert_eq!(before, format!("{cli} {command}"));
+        assert!(after.ends_with("/password"), "{step}");
+    }
     assert_eq!(
         steps.last(),
         Some(&"write: write /home/ada/.local/share/reef/reefadm.toml (644)")
+    );
+    let state = &script.files.last().unwrap().text;
+    assert!(state.contains("first_admin = \"ada\""), "{state}");
+}
+
+/// A user unit over a config of the user's own that turns sign-in off has the key taken out
+/// before it starts, the file kept beside it, its comments kept, and its first admin added with
+/// the config named
+#[test]
+fn a_user_unit_over_a_config_turning_sign_in_off() {
+    let mut script = fresh();
+    let config = "/home/ada/.config/reef/config.toml";
+    script.prints(
+        format!("cat {config}"),
+        "# mine\n[auth]\n# off for now\nrequired = false\n",
+    );
+    script.prints(format!("test -e {config}"), "");
+    run(&mut script, &["deploy", "--user", "--api-only"]).unwrap();
+    let steps = script.steps();
+    // kept beside it, then written without the key, before the unit starts
+    let kept = steps
+        .iter()
+        .position(|step| {
+            *step
+                == format!("run: cp -a {config} /home/ada/.config/reef/config.toml.before-sign-in")
+        })
+        .unwrap_or_else(|| panic!("the config wasn't kept: {steps:#?}"));
+    let written = steps
+        .iter()
+        .position(|step| *step == format!("write: write {config} (644)"))
+        .unwrap_or_else(|| panic!("the config wasn't written: {steps:#?}"));
+    let started = steps
+        .iter()
+        .position(|step| *step == "run: systemctl --user enable --now reef.service")
+        .unwrap();
+    assert!(kept < written && written < started, "{steps:#?}");
+    let text = &script
+        .files
+        .iter()
+        .find(|file| file.path.display().to_string() == config)
+        .unwrap()
+        .text;
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("required")),
+        "{text}"
+    );
+    assert!(
+        text.starts_with("# mine\n[auth]\n# off for now\n"),
+        "{text}"
+    );
+    // and its first admin added by the CLI reading it
+    let added =
+        format!("run: /home/ada/.local/share/reef/current/bin/reef --conf {config} user add ada");
+    assert!(
+        steps.iter().any(|step| step.starts_with(&added)),
+        "{steps:#?}"
+    );
+}
+
+/// A user unit told to add no admin adds none, and asks no password
+#[test]
+fn a_user_unit_with_no_admin_adds_none() {
+    let mut script = fresh();
+    run(
+        &mut script,
+        &["deploy", "--user", "--api-only", "--no-admin"],
+    )
+    .unwrap();
+    assert!(
+        !script.log.iter().any(|line| line.starts_with("password: ")),
+        "{:#?}",
+        script.log
+    );
+    assert!(
+        !script.steps().iter().any(|step| step.contains("user add")),
+        "{:#?}",
+        script.steps()
     );
 }
 

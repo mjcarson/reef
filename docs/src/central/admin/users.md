@@ -24,8 +24,6 @@ reef user log                      # who added or removed each user, set a passw
   password, revoking a token, and a recovery on the server, which names nobody. `reef user log`
   prints it, newest first, 200 at a time (`--older`, `--all`), and the account page shows its
   newest 200. Signing in and out isn't logged.
-- **Users can be added before sign-in is required,** so they are ready when `[auth] required`
-  is turned on.
 
 ## Tokens
 

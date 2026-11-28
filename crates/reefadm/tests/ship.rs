@@ -42,6 +42,8 @@ fn facts() -> Facts {
             .map(String::from)
             .into(),
         kind: Some(Kind::App),
+        // a server there with users, so no first admin is asked for unless a case says
+        users: Some(true),
         ..Facts::default()
     }
 }
@@ -218,6 +220,66 @@ fn a_dry_run_builds_and_ships_nothing() {
             .probed
             .iter()
             .any(|probe| probe.contains("deploy --facts"))
+    );
+}
+
+/// An upgrade there of a server with no user asks its first admin's password here before the
+/// build, by the name the host's admin has, sends it there, and has the install add them
+#[test]
+fn a_host_with_no_user_gets_its_first_admin() {
+    // the release there, at this build's commits, for another class, and no user yet
+    let mut running = old(PROJECT_ROW);
+    running.reef = "992226c4a1b2c3d4e5f60718293a4b5c6d7e8f90".into();
+    running.build = Some("-C target-cpu=x86-64-v2".into());
+    let mut said = facts();
+    said.users = Some(false);
+    said.state = Some(State {
+        mode: Mode::System,
+        kind: Kind::App,
+        repo: "https://github.com/mjcarson/reef.git".into(),
+        reference: "CentralizedPlanner".into(),
+        release: running,
+        previous: None,
+        first_admin: None,
+        src: None,
+    });
+    let mut script = hosts("upgrade --facts", &said);
+    there(&mut script, &["--host", "europa", "upgrade"]).unwrap();
+    // the password asked before anything is built
+    let asked = script
+        .log
+        .iter()
+        .position(|line| line.starts_with("password: "))
+        .expect("the first admin's password was asked");
+    let built = script
+        .log
+        .iter()
+        .position(|line| line.contains("cargo +"))
+        .expect("the release was built");
+    assert!(asked < built, "{:#?}", script.log);
+    // sent there where only the admin reads it, and named to the install as ops's
+    let steps = script.steps();
+    let sent = steps
+        .iter()
+        .position(|step| step.contains("cat > /home/ops/.cache/reefadm/password-"))
+        .unwrap_or_else(|| panic!("the password wasn't sent: {steps:#?}"));
+    let installed = steps
+        .iter()
+        .position(|step| step.starts_with("run: ssh europa"))
+        .unwrap();
+    assert!(sent < installed, "{steps:#?}");
+    let (before, after) = steps[installed].split_once(" --password-file ").unwrap();
+    assert_eq!(
+        before,
+        format!(
+            "run: ssh europa -- '{} --yes upgrade --first-admin ops --shipped {}",
+            copy(),
+            shipped()
+        )
+    );
+    assert!(
+        after.starts_with("/home/ops/.cache/reefadm/password-"),
+        "{after}"
     );
 }
 

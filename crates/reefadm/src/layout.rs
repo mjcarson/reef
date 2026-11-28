@@ -29,9 +29,9 @@ pub const UNIT: &str = "reef.service";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// A team server: a system unit under the `reef` account, with sign-in and a TLS port
+    /// A team server: a system unit under the `reef` account, with a TLS port
     System,
-    /// One person's server: a user unit on loopback, with no sign-in
+    /// One person's server: a user unit on loopback, its first admin that person
     User,
 }
 

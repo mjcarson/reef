@@ -14,8 +14,8 @@ reef project ls                    # shop  git@github.com:acme/shop.git (`main` 
 reef project show                  # from a checkout: the project it belongs to
 ```
 
-- **Any signed-in user can register a remote project.** With sign-in required, only an admin
-  can register a remote that is a path on the server's host, `file://` or bare.
+- **Any signed-in user can register a remote project.** Only an admin can register a remote
+  that is a path on the server's host, `file://` or bare.
 - **`[remotes] hosts`, if the config sets it,** lists the only hosts a remote may be cloned
   from.
 - **A URL can't carry a user or a password,** nor be relative, nor use any transport but file,
@@ -49,6 +49,6 @@ reef project add shop --repo /srv/git/shop    # or a directory named
 
 The service reads its docs from that working tree as it stands, so nothing needs pushing. A plan
 that follows another branch reads a worktree with that branch checked out, or else the branch's
-last commit. With
-sign-in required, only an admin may do this. A checkout on another host can't find a project
+last commit. Only
+an admin may do this. A checkout on another host can't find a project
 registered this way, since that project has no URL to match.

@@ -153,6 +153,21 @@ pub fn asks(served: &Served, hostname: &str, pem: Option<Vec<u8>>) -> Vec<Ask> {
     asks
 }
 
+/// Where a server is asked whether it has a user yet: its loopback port, as this host's CLI
+/// reaches it, trusting reef's CA
+///
+/// # Arguments
+///
+/// * `served` - reef's config
+/// * `pem` - reef's CA, as PEM, if it could be read
+pub fn users_ask(served: &Served, pem: Option<Vec<u8>>) -> Ask {
+    Ask {
+        url: format!("https://{}/api/v1/users", served.loopback()),
+        ca: pem,
+        resolve: None,
+    }
+}
+
 /// reef's CA as this host's CLI trusts it: a team server's readable copy, else the one in the
 /// certificates' directory, if it can be read
 ///

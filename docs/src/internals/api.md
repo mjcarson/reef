@@ -97,8 +97,8 @@ that `Service::shared` opens. Every route is one service call, and every body an
   plans, and reaches every plan.
 - **One layer signs callers in.** `api::serve` wraps the router in `auth::guard`, as reef-app
   wraps its whole router. It reads a token from `Authorization: Bearer`, else the `reef_sign_in`
-  cookie, and hands each route its `Caller`. With `[auth] required` off, the default, it lets
-  everything through. On, everything but signing in and the app's static files needs a user: a
+  cookie, and hands each route its `Caller`. Everything but signing in, saying who is calling,
+  the users' routes, the client's and the app's static files needs a user, on loopback too: a
   page a browser opens is sent to `/sign-in?next=…`, and anything else is answered 401 with
   `WWW-Authenticate: Bearer`. A change stream opened with a token ends once the token signs
   nobody in: revoked, expired, or its user removed or given a new password by an admin.

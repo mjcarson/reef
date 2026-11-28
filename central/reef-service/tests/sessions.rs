@@ -18,6 +18,7 @@ use reef_api::{
     Answer, EntryKind, LoopEdited, Prompt, PromptKind, Session, SessionAct, SessionActed,
     SessionState, Transcript,
 };
+use reef_model::PlanName;
 use reef_service::MemoryBackend;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
@@ -25,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::git;
-use common::http::Ax;
+use common::http::{Ax, TESTER};
 
 /// The variable naming what the stub plays: `permission`, `question` or `plan`
 const STUB_PLAY: &str = "REEF_STUB_PLAY";
@@ -374,10 +375,16 @@ impl Sx {
     ///
     /// # Arguments
     ///
-    /// * `args` - The command line after `reef --conf <config>`
+    /// * `args` - The command line after `reef --conf <config> --credentials <file>`
     async fn cli(&self, args: &[&str]) -> anyhow::Result<String> {
+        // the case's config, and its user's login
         let conf = self.conf.to_str().expect("the config is a utf-8 path");
-        let line = ["reef", "--conf", conf]
+        let credentials = self
+            .ax
+            .credentials
+            .to_str()
+            .expect("the credentials are a utf-8 path");
+        let line = ["reef", "--conf", conf, "--credentials", credentials]
             .into_iter()
             .chain(args.iter().copied());
         let cli = reef::Cli::from_args(line)?;
@@ -396,16 +403,19 @@ impl Sx {
     ) {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let (conf, repo, claude) = (self.conf.clone(), self.repo.clone(), self.claude.clone());
+        let credentials = self.ax.credentials.clone();
+        let client = self.client();
         let task = tokio::spawn(async move {
-            // as `reef loop run --claude <script>` runs it, with the case's config
-            let client = reef::Client::new(&reef::Conf::load(Some(&conf))?)?;
+            // as `reef loop run --claude <script>` runs it, with the case's config and its user's
+            // login, which it hands each session
+            let client = client?;
             let runs = reef::run::Runs {
                 claude: Some(claude.display().to_string()),
                 start: false,
                 mode: None,
                 args: Vec::new(),
                 conf: Some(conf),
-                credentials: None,
+                credentials: Some(credentials),
             };
             let pick = reef::cli::PlanPick::default();
             let mut out = Vec::new();
@@ -520,7 +530,8 @@ fn texts(transcript: &Transcript) -> Vec<String> {
 
 /// A loop started from the app runs a fresh session a node, its transcript and prompts relayed:
 /// each answer reaches the session, a done node moves on, a pause stops after the node, a stop
-/// ends the session, and the runner lets go once stopped
+/// ends the session, and the runner lets go once stopped; the session, and every write it makes,
+/// names the user the runner's login signs in
 #[tokio::test(flavor = "multi_thread")]
 async fn a_loop_started_from_the_app_runs_a_session_a_node() -> anyhow::Result<()> {
     let sx = Sx::new("runs", &["A", "B"], "permission").await?;
@@ -532,6 +543,7 @@ async fn a_loop_started_from_the_app_runs_a_session_a_node() -> anyhow::Result<(
         })
         .await?;
     assert!(session.pane.runs(), "{:?}", session.pane);
+    assert_eq!(session.attached_by.describe().as_deref(), Some(TESTER));
     let started = sx.act(&session, SessionAct::Start).await?;
     assert!(
         matches!(&started, SessionActed::Looped { edited, .. } if matches!(**edited, LoopEdited::Started { .. })),
@@ -555,6 +567,16 @@ async fn a_loop_started_from_the_app_runs_a_session_a_node() -> anyhow::Result<(
         .prompt_when("B's prompt", |prompt| prompt.id == "perm-B")
         .await?;
     assert!(sx.done("A").await?);
+    // the session took A, started it and set it done, each as the runner's user
+    let node = PlanName::new("runs", "docs")?.node("A")?;
+    let client = sx.client()?;
+    let record = client.work_of(&node).await?.expect("A was started");
+    assert_eq!(record.started_by.user.as_deref(), Some(TESTER));
+    let history = client.node_history(&node, None).await?;
+    assert!(history.edits.len() > 1, "{:?}", history.edits);
+    for logged in &history.edits {
+        assert_eq!(logged.author.user.as_deref(), Some(TESTER), "{logged:?}");
+    }
     let transcript = sx.transcript().await?;
     let said = texts(&transcript);
     assert!(
@@ -639,7 +661,7 @@ async fn a_runners_loop_is_one_node_wide() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unknown_session_is_told_so() -> anyhow::Result<()> {
     let sx = Sx::new("unknown", &["A"], "permission").await?;
-    let client = reef::Client::new(&reef::Conf::load(Some(&sx.conf))?)?;
+    let client = sx.client()?;
     // a report or an ask for orders comes back as none, so the runner attaches again
     let report = reef_api::Report {
         entries: Vec::new(),
@@ -908,9 +930,12 @@ fn append(path: &Path, text: &str) -> anyhow::Result<()> {
 }
 
 impl Sx {
-    /// A client of the case's served twin, as the CLI makes one from its config
+    /// A client of the case's served twin, as the CLI makes one from its config, signed in as
+    /// the case's own user
     fn client(&self) -> anyhow::Result<reef::Client> {
-        reef::Client::new(&reef::Conf::load(Some(&self.conf))?)
+        let mut conf = reef::Conf::load(Some(&self.conf))?;
+        conf.credentials = Some(self.ax.credentials.clone());
+        reef::Client::new(&conf)
     }
 
     /// Attaches a terminal's session as `! reef loop run` does, its follower's start recorded
@@ -948,10 +973,10 @@ impl Sx {
         tokio::task::JoinHandle<anyhow::Result<reef::follow::Ended>>,
     ) {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let conf = self.conf.clone();
+        let client = self.client();
         let task = tokio::spawn(async move {
-            // as `reef hook follow` runs it, with the case's config
-            let client = reef::Client::new(&reef::Conf::load(Some(&conf))?)?;
+            // as `reef hook follow` runs it, with the case's config and its user's login
+            let client = client?;
             let mut out = Vec::new();
             let stop = async {
                 let _ = stopped.await;

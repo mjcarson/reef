@@ -9,8 +9,8 @@
 //! back reef's own certificate, listens over HTTPS on `api.address`, which must be a loopback
 //! address, and on `api.tls.address` if `[api.tls]` names one, then opens the service: shoal in
 //! this process with `embedded`, or the external node `shoal.address` names. It says where
-//! reef's own CA is, to trust, and with `[auth] required` that callers must sign in, and while
-//! reef has no user, how to add the first. It listens before shoal starts, so a port that is
+//! reef's own CA is, to trust, that callers must sign in, and while reef has no user, how to add
+//! the first. It listens before shoal starts, so a port that is
 //! taken, an address that isn't local, or a certificate that can't be read stops it before a
 //! pool locks the data directory. On SIGINT or SIGTERM it ends the change stream, waits for the requests
 //! still open, and closes the service, stopping an in-process pool cleanly.
@@ -157,10 +157,8 @@ async fn run(conf: Option<PathBuf>) -> anyhow::Result<()> {
     if let Some(note) = listeners.trust_note() {
         eprintln!("reef-serve: {note}");
     }
-    // that callers must sign in, if they must, and how to add the first user
-    if let Some(note) = service.sign_in_note().await? {
-        eprintln!("reef-serve: {note}");
-    }
+    // that callers must sign in, and how to add the first user
+    eprintln!("reef-serve: {}", service.sign_in_note().await?);
     // the `reef` it hands its users, or why it hands them none
     eprintln!("reef-serve: {}", service.client_note());
     // serve until told to stop, then wait for the requests still open, fetching every remote

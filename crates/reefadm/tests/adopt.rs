@@ -174,6 +174,98 @@ fn adopt_keeps_the_config_and_data_and_swaps_in_reefadms_unit() {
     assert!(!said.contains("reef project add"), "{said}");
 }
 
+/// An install with no user yet has its first admin's password asked before the build, and the
+/// admin added and signed in once it is up and reefadm's record is written
+#[test]
+fn an_install_with_no_user_gets_its_first_admin() {
+    let mut script = hand_made();
+    script.users = Some(Ok(false));
+    run(&mut script, &["deploy", "--adopt"]).unwrap();
+    // the password asked before anything is built
+    let asked = script
+        .log
+        .iter()
+        .position(|line| line.starts_with("password: "))
+        .expect("the first admin's password was asked");
+    let built = script
+        .log
+        .iter()
+        .position(|line| line.contains("cargo +"))
+        .expect("the release was built");
+    assert!(asked < built, "{:#?}", script.log);
+    // added and signed in after the record, by the release's CLI reading the config
+    let steps = script.steps();
+    let record = steps
+        .iter()
+        .position(|step| *step == "write: sudo write /etc/reef/reefadm.toml (644)")
+        .unwrap();
+    let cli = "run: /opt/reef/current/bin/reef --conf /etc/reef/config.toml";
+    for (step, command) in steps[record + 1..]
+        .iter()
+        .zip(["user add ada", "login --user ada"])
+    {
+        let (before, after) = step.split_once(" --password-file ").unwrap();
+        assert_eq!(before, format!("{cli} {command}"), "{steps:#?}");
+        assert!(after.ends_with("/password"), "{step}");
+    }
+    // and the record names them
+    let state = &script
+        .files
+        .iter()
+        .find(|file| file.path.as_path() == std::path::Path::new("/etc/reef/reefadm.toml"))
+        .unwrap()
+        .text;
+    let state: State = toml::from_str(state).unwrap();
+    assert_eq!(state.first_admin.as_deref(), Some("ada"));
+}
+
+/// A config made by hand that turns sign-in off is written where reefadm reads it without the
+/// key, the one there kept beside it, since the new release refuses to start on it
+#[test]
+fn a_config_turning_sign_in_off_is_written_without_it() {
+    let mut script = hand_made();
+    let off = CONFIG.replace("required = true", "required = false");
+    script.prints("sudo cat /etc/reef/config.toml", off);
+    script.prints("sudo test -e /etc/reef/config.toml", "");
+    run(&mut script, &["deploy", "--adopt"]).unwrap();
+    let steps = script.steps();
+    let at = |step: &str| {
+        steps
+            .iter()
+            .position(|taken| *taken == step)
+            .unwrap_or_else(|| panic!("{step} isn't among {steps:#?}"))
+    };
+    // kept, then written, before reefadm's unit starts
+    let kept = at("run: sudo cp -a /etc/reef/config.toml /etc/reef/config.toml.before-reefadm");
+    let written = at("write: sudo write /etc/reef/config.toml (644)");
+    let started = at("run: sudo systemctl enable --now reef.service");
+    assert!(kept < written && written < started, "{steps:#?}");
+    // the key gone, saying why, and every other key as it was
+    let text = &script
+        .files
+        .iter()
+        .find(|file| file.path.as_path() == std::path::Path::new("/etc/reef/config.toml"))
+        .unwrap()
+        .text;
+    assert!(
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("required")),
+        "{text}"
+    );
+    assert!(
+        text.contains("taking out `[auth] required = false`"),
+        "{text}"
+    );
+    let served = Served::read(text, std::path::Path::new("c.toml")).unwrap();
+    assert_eq!(served.auth.required, None);
+    assert_eq!(served.tls_port(), Some(12443));
+    assert_eq!(
+        served.clones(&layout()),
+        std::path::Path::new("/var/lib/reef/clones")
+    );
+}
+
 /// A unit made by hand with settings of its own, as europa's keeps reef off a benchmark's cores
 const EUROPA: &str = "# reef's central planner: reef-app, run as the `reef` account.\n#\n\
                       # NOT a shoal benchmark or lab node: never wipe /var/lib/reef.\n[Unit]\n\

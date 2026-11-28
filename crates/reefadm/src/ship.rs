@@ -61,6 +61,10 @@ pub struct Facts {
     /// The tables an install made by hand wrote its data with, as its own reef-serve says them
     #[serde(default)]
     pub tables: BTreeMap<String, String>,
+    /// Whether the server there has a user yet, if it runs and could be asked, so the builder
+    /// asks the first admin's password before the build
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub users: Option<bool>,
 }
 
 impl Facts {

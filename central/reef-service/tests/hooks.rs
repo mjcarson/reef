@@ -20,7 +20,7 @@ use reef_service::MemoryBackend;
 use std::path::{Path, PathBuf};
 
 use common::git;
-use common::http::Ax;
+use common::http::{Ax, TESTER};
 
 #[path = "../../../crates/reef/tests/support/oracle.rs"]
 mod oracle;
@@ -145,10 +145,12 @@ impl Hx {
             ("post-commit", "hook post-commit"),
             ("post-rewrite", "hook post-rewrite $1"),
         ] {
+            // the case's config and its user's login, which no token of the developer's beats
             let script = format!(
-                "#!/bin/sh\nREEF_CONFIG='{}' {SHIM_LOG}='{}' {SHIM_ARGS}=\"{args}\" exec '{}' \
-                 reef_shim --exact --nocapture --quiet\n",
+                "#!/bin/sh\nunset REEF_TOKEN\nREEF_CONFIG='{}' REEF_CREDENTIALS='{}' {SHIM_LOG}='{}' \
+                 {SHIM_ARGS}=\"{args}\" exec '{}' reef_shim --exact --nocapture --quiet\n",
                 self.conf.display(),
+                self.ax.credentials.display(),
                 self.log.display(),
                 exe.display()
             );
@@ -164,11 +166,16 @@ impl Hx {
     /// # Arguments
     ///
     /// * `cwd` - The working directory to run it from
-    /// * `args` - The command line after `reef --conf <config>`
+    /// * `args` - The command line after `reef --conf <config> --credentials <file>`
     async fn reef(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-        // the command line as typed, with the case's config named
+        // the command line as typed, with the case's config and its user's login named
         let conf = self.conf.to_str().expect("the config is a utf-8 path");
-        let line = ["reef", "--conf", conf]
+        let credentials = self
+            .ax
+            .credentials
+            .to_str()
+            .expect("the credentials are a utf-8 path");
+        let line = ["reef", "--conf", conf, "--credentials", credentials]
             .into_iter()
             .chain(args.iter().copied());
         let cli = reef::Cli::from_args(line)?;
@@ -177,9 +184,10 @@ impl Hx {
         Ok(String::from_utf8(out)?)
     }
 
-    /// A client of the case's service, as the CLI makes one
+    /// A client of the case's service, as the CLI makes one, signed in as the case's own user
     fn client(&self) -> anyhow::Result<reef::Client> {
-        let conf = reef::Conf::load(Some(&self.conf))?;
+        let mut conf = reef::Conf::load(Some(&self.conf))?;
+        conf.credentials = Some(self.ax.credentials.clone());
         reef::Client::new(&conf)
     }
 
@@ -626,7 +634,8 @@ async fn committed(dir: &Path, path: &str, text: &str, message: &str) -> anyhow:
 
 /// A node Claude marks done has a captured revision before the next node starts: each commit
 /// keeps its draft current, the mark drafts what is uncommitted, Stop seals it once and only
-/// once it is done, and the next node starts after it
+/// once it is done, and the next node starts after it; git's hook captures each commit as the
+/// user its login signs in, and the seal keeps them
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_node_marked_done_is_captured_before_the_next_starts() -> anyhow::Result<()> {
     let hx = Hx::new("done", &["A", "B"]).await?;
@@ -645,6 +654,8 @@ async fn a_node_marked_done_is_captured_before_the_next_starts() -> anyhow::Resu
         panic!("A's commit kept {} revisions", changes.len());
     };
     assert_eq!((r1.revision, r1.draft), (1, true));
+    // git's hook, a process of its own, sent it as the user its login signs in
+    assert_eq!(r1.author.describe().as_deref(), Some(TESTER));
     let (_, said) = hx.logged()?.pop().expect("A's commit ran post-commit");
     assert!(
         said.starts_with("reef: drafted `A` as revision 1, 1 file +1 -0\n"),
@@ -678,6 +689,7 @@ async fn a_node_marked_done_is_captured_before_the_next_starts() -> anyhow::Resu
         panic!("A's seal left {} revisions", sealed.len());
     };
     assert!(!revision.draft);
+    assert_eq!(revision.author.describe().as_deref(), Some(TESTER));
     assert_eq!(
         revision.shas.head,
         hooked(&a, &["rev-parse", "HEAD"]).await?
@@ -1833,7 +1845,7 @@ async fn a_thread_claude_answered_last_waits_on_the_user() -> anyhow::Result<()>
         "{listed}"
     );
     assert!(
-        listed.contains("    #2 by Claude:\n        Which one?"),
+        listed.contains("    #2 by Claude, for tester:\n        Which one?"),
         "{listed}"
     );
     // the user's answer brings A back before B

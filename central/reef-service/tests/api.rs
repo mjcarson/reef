@@ -140,22 +140,18 @@ async fn server_binds_to_localhost_only() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Other hosts' listener needs sign-in off loopback, serves the certificate it names or reef's
-/// own, the loopback port still takes loopback alone beside it, and a certificate or key that
-/// can't be read is named with its key
+/// Other hosts' listener serves the certificate it names or reef's own, on loopback too, the
+/// loopback port still takes loopback alone beside it, and a certificate or key that can't be
+/// read is named with its key
 #[tokio::test]
-async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()> {
+async fn tls_serves_the_certificate_it_names_or_its_own() -> anyhow::Result<()> {
     // a certificate, and another's key, in a directory of the case's own
     let dir = fresh_dir("api-tls")?;
     let minted = common::tls::minted(&dir.join("ours"))?;
     let other = common::tls::minted(&dir.join("other"))?;
-    // a config serving other hosts at an address, beside loopback, signing in or not
-    let conf = |address: &str,
-                cert: Option<&std::path::Path>,
-                key: Option<&std::path::Path>,
-                required: bool| {
+    // a config serving other hosts at an address, beside loopback
+    let conf = |address: &str, cert: Option<&std::path::Path>, key: Option<&std::path::Path>| {
         let mut conf = loopback(&dir, "127.0.0.1:0").unwrap();
-        conf.auth.required = required;
         conf.api.tls = Some(TlsSettings {
             address: address.parse().unwrap(),
             cert: cert.map(std::path::Path::to_path_buf),
@@ -163,17 +159,9 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
         });
         conf
     };
-    let ours = |required| conf("0.0.0.0:0", Some(&minted.cert), Some(&minted.key), required);
-    // with sign-in off, other hosts would reach a service that answers anyone
-    let refused = Listeners::bind(&ours(false))
-        .await
-        .err()
-        .expect("other hosts were served with sign-in off")
-        .to_string();
-    assert!(refused.contains("`auth.required`"), "{refused}");
-    assert!(refused.contains("`api.tls`"), "{refused}");
-    // but a second port on loopback reaches this host alone, so it needs none
-    let local = conf("127.0.0.1:0", None, None, false);
+    let ours = || conf("0.0.0.0:0", Some(&minted.cert), Some(&minted.key));
+    // a second port on loopback, serving reef's own
+    let local = conf("127.0.0.1:0", None, None);
     assert!(Listeners::bind(&local).await?.tls.is_some());
     // a chain that isn't there, holds no certificate, or isn't its key's, names the files
     let missing = dir.join("missing.pem");
@@ -186,7 +174,7 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
         (&minted.cert, &garbage, "garbage.pem"),
         (&minted.cert, &other.key, "serving the certificate"),
     ] {
-        let refused = Listeners::bind(&conf("0.0.0.0:0", Some(cert), Some(key), true))
+        let refused = Listeners::bind(&conf("0.0.0.0:0", Some(cert), Some(key)))
             .await
             .err()
             .expect(says)
@@ -195,7 +183,7 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
         assert!(refused.contains("`api.tls.cert`"), "{says}: {refused}");
     }
     // a certificate named without its key is refused, naming both keys
-    let refused = Listeners::bind(&conf("0.0.0.0:0", Some(&minted.cert), None, true))
+    let refused = Listeners::bind(&conf("0.0.0.0:0", Some(&minted.cert), None))
         .await
         .err()
         .expect("a certificate with no key")
@@ -203,7 +191,7 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
     assert!(refused.contains("together"), "{refused}");
     assert!(refused.contains("`api.tls.key`"), "{refused}");
     // the loopback port beside it still takes loopback alone
-    let mut wide = ours(true);
+    let mut wide = ours();
     wide.api.address = "0.0.0.0:0".parse()?;
     let refused = Listeners::bind(&wide)
         .await
@@ -214,7 +202,7 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
         "{refused}"
     );
     // a certificate its key signs serves on every interface, beside loopback, both over HTTPS
-    let listeners = Listeners::bind(&ours(true)).await?;
+    let listeners = Listeners::bind(&ours()).await?;
     let tls = listeners.tls.as_ref().expect("TLS was named");
     assert!(
         axum::serve::Listener::local_addr(tls)?
@@ -226,10 +214,44 @@ async fn tls_needs_sign_in_and_a_certificate_it_can_read() -> anyhow::Result<()>
     assert!(roots[1].starts_with("https://0.0.0.0:"), "{roots:?}");
     // and with none named, other hosts are served reef's own
     assert!(
-        Listeners::bind(&conf("0.0.0.0:0", None, None, true))
+        Listeners::bind(&conf("0.0.0.0:0", None, None))
             .await?
             .tls
             .is_some()
     );
+    Ok(())
+}
+
+/// A config that turns sign-in off is refused as reef-serve starts, naming the key and its file,
+/// before anything listens or opens shoal, while one that says it is required reads as before
+#[test]
+fn a_config_turning_sign_in_off_is_refused_at_start() -> anyhow::Result<()> {
+    // a config of the case's own, saying sign-in is off
+    let dir = fresh_dir("api-sign-in-off")?;
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join("reef.toml");
+    let text = format!(
+        "[api]\naddress = \"127.0.0.1:0\"\ncerts = \"{}\"\n\n[auth]\nrequired = false\n",
+        dir.join("certs").display()
+    );
+    std::fs::write(&file, text)?;
+    // reef-serve refuses to start on it, saying which key in which file to take out
+    let started = std::process::Command::new(env!("CARGO_BIN_EXE_reef-serve"))
+        .arg("--conf")
+        .arg(&file)
+        .env_remove(reef_service::conf::CONFIG_VAR)
+        .output()?;
+    let said = String::from_utf8_lossy(&started.stderr);
+    assert!(!started.status.success(), "it started: {said}");
+    assert!(
+        said.contains(&format!("`auth.required` in {}", file.display())),
+        "{said}"
+    );
+    assert!(said.contains("reef user add"), "{said}");
+    // nothing was listened on or opened: no certificate was made
+    assert!(!dir.join("certs").exists(), "it made a certificate");
+    // and one saying sign-in is required is read, changing nothing
+    std::fs::write(&file, "[auth]\nrequired = true\n")?;
+    assert_eq!(Conf::load(Some(&file))?.auth.required, Some(true));
     Ok(())
 }

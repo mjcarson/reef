@@ -1,8 +1,8 @@
 //! reefadm: central reef deployed, upgraded and run from one command
 //!
 //! ```sh
-//! reefadm deploy                    # a team server on this host: a system unit, sign-in, a TLS port
-//! reefadm deploy --user             # one person's server: a user unit on loopback
+//! reefadm deploy                    # a team server on this host: a system unit, a TLS port, you its admin
+//! reefadm deploy --user             # one person's server: a user unit on loopback, you its admin
 //! reefadm --dry-run deploy          # every step it would take, taking none
 //! reefadm upgrade                   # to the ref's newest commit, put back if it doesn't come up
 //! reefadm uninstall                 # what deploy put here, keeping the data unless --purge
@@ -30,6 +30,7 @@ pub mod commands;
 pub mod compile;
 pub mod cpu;
 pub mod exec;
+pub mod first_admin;
 pub mod health;
 pub mod layout;
 pub mod release;

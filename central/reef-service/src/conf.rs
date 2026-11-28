@@ -32,16 +32,11 @@
 //! ca = "/home/me/.config/reef/ca.pem"
 //!
 //! [api.tls]
-//! # where the JSON API listens for other hosts too, over HTTPS; off loopback, it needs
-//! # `[auth] required`
+//! # where the JSON API listens for other hosts too, over HTTPS
 //! address = "0.0.0.0:12443"
 //! # the certificate chain and its private key, as PEM, else reef's own
 //! cert = "/etc/reef/fullchain.pem"
 //! key = "/etc/reef/privkey.pem"
-//!
-//! [auth]
-//! # whether every caller must sign in; off, reef answers anyone who reaches its port
-//! required = true
 //!
 //! [remotes]
 //! # where the clones of projects registered by their git URLs are kept, absolute
@@ -74,7 +69,7 @@ pub struct Conf {
     pub shoal: ShoalSettings,
     /// Where the JSON API is served
     pub api: ApiSettings,
-    /// Whether callers sign in
+    /// The sign-in key reef reads only to refuse it turned off
     pub auth: AuthSettings,
     /// Where projects registered by their git URLs are cloned, and how often they are fetched
     pub remotes: RemoteSettings,
@@ -151,16 +146,16 @@ pub struct TlsSettings {
     pub key: Option<PathBuf>,
 }
 
-/// Whether callers sign in
+/// The sign-in key a config from before every central reef asked its callers to sign in may hold
 ///
-/// Off, which is the default, reef answers anyone who reaches its port, as a single user's
-/// server on localhost does. On, every route but the ones that sign a user in asks who is
-/// calling.
+/// Every caller signs in, on loopback too, and nothing turns that off. So `required = true`
+/// is read and changes nothing, and `required = false` is refused as the config is loaded,
+/// rather than leaving a server its admin believes open asking for a sign-in.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AuthSettings {
-    /// Whether every caller must sign in
-    pub required: bool,
+    /// Whether every caller must sign in, which `false` can no longer turn off
+    pub required: Option<bool>,
 }
 
 /// Where projects registered by their git URLs are cloned, and how often they are fetched
@@ -243,9 +238,27 @@ impl Conf {
         let mut conf: Conf = toml::from_str(&text)
             .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))?;
         conf.source = Some(path);
+        // a config turning sign-in off is refused before anything is served
+        conf.refuse_sign_in_off()?;
         // an interval that can't be read is said now, rather than once the service is up
         conf.fetch_every()?;
         Ok(conf)
+    }
+
+    /// Refuses a config that turns sign-in off, naming the key to take out
+    ///
+    /// Every central reef asks its callers to sign in, so `[auth] required = false` can't be
+    /// honoured, and a server that started anyway would refuse callers its admin meant to let in.
+    fn refuse_sign_in_off(&self) -> anyhow::Result<()> {
+        // only a false one is refused: true, or the key left out, is how reef runs anyway
+        if self.auth.required == Some(false) {
+            anyhow::bail!(
+                "{} is false, but every central reef asks its callers to sign in: take the key \
+                 out, and add the first user with `reef user add NAME` from this host",
+                self.key("auth.required")
+            );
+        }
+        Ok(())
     }
 
     /// Where reef's config is read from when nothing names it
@@ -408,16 +421,34 @@ mod tests {
         assert!(parsed.is_err(), "a negative core was read");
     }
 
-    /// Sign-in is off unless the config says it is required, and a misspelt key is refused
+    /// Sign-in can't be turned off: true is read and changes nothing, and false is refused
     #[test]
-    fn auth_is_off_unless_required() {
-        // nothing said is off
+    fn sign_in_cant_be_turned_off() {
+        // nothing said is how reef runs
         let conf: Conf = toml::from_str("").expect("an empty config parses");
-        assert!(!conf.auth.required);
-        // and said, on
+        assert_eq!(conf.auth.required, None);
+        conf.refuse_sign_in_off().expect("no key is refused");
+        // true is read, and passes
         let conf: Conf = toml::from_str("[auth]\nrequired = true\n").expect("it parses");
-        assert!(conf.auth.required);
-        // a key the service doesn't know would leave sign-in off unnoticed, so it is refused
+        assert_eq!(conf.auth.required, Some(true));
+        conf.refuse_sign_in_off().expect("true is refused");
+        // false is refused as the file is loaded, naming the key and the file
+        let dir = std::env::temp_dir().join(format!("reef-conf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "[auth]\nrequired = false\n").expect("the config is written");
+        let refused = Conf::load(Some(&file)).expect_err("false was read");
+        let said = refused.to_string();
+        assert!(
+            said.contains(&format!("`auth.required` in {}", file.display())),
+            "the refusal names no key: {said}"
+        );
+        assert!(
+            said.contains("reef user add"),
+            "the refusal says no way on: {said}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        // a key the service doesn't know is still refused
         let parsed = toml::from_str::<Conf>("[auth]\nrequried = true\n");
         assert!(parsed.is_err(), "a misspelt key was read");
     }

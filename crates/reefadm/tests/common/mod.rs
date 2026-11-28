@@ -54,7 +54,7 @@ pub fn git(dir: &str) -> String {
 pub fn fresh() -> Script {
     let mut script = Script {
         yes: true,
-        secret: "hunter2".into(),
+        secret: "correct horse battery".into(),
         ..Script::default()
     };
     // systemd, the disk and the host's name

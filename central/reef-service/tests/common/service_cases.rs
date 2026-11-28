@@ -15,7 +15,7 @@ use reef_service::{
 };
 use std::time::Duration;
 
-use super::{DESIGN, Sx, doc, git, group, member, work};
+use super::{DESIGN, Sx, an_admin, doc, git, group, member, work};
 
 /// A problem at a node's name, as check gives a stored node's
 ///
@@ -1393,13 +1393,17 @@ pub async fn the_first_user_needs_this_host<B: Backend>(sx: Sx<B>) -> anyhow::Re
 pub async fn remotes_are_fetched_on_their_interval<B: Backend>(sx: Sx<B>) -> anyhow::Result<()> {
     // a service that fetches every remote project often
     let service = sx.service.fetching_every(Some(Duration::from_millis(100)));
+    // its admin, as only an admin registers a path on its host
+    let admin = an_admin(&service).await?;
+    let asker = Asker {
+        user: Some(&admin),
+        ..Asker::default()
+    };
     // and a remote project of a published repo, with a plan
     let before = "# Design\n\nThe old words.\n";
     let (bare, checkout) = git::published(&sx.dir.join("up"), &[("docs/design.md", before)])?;
     let url = format!("file://{}", bare.display());
-    let added = service
-        .add_remote_project("up", &url, None, Asker::default())
-        .await?;
+    let added = service.add_remote_project("up", &url, None, asker).await?;
     assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
     let plan = PlanName::new("up", "main")?;
     assert!(service.add_plan(&plan, &reef_api::NOBODY).await?);
@@ -1461,12 +1465,15 @@ pub async fn remotes_come_from_the_hosts_listed<B: Backend>(sx: Sx<B>) -> anyhow
         assert!(bad.0.contains("`remotes.hosts`"), "{url}: {bad}");
         assert!(bad.0.contains("git.example"), "{url}: {bad}");
     }
-    // a path on this host names no host, so the list leaves it be
+    // a path on this host names no host, so the list leaves it be, for its admin to register
+    let admin = an_admin(&service).await?;
+    let asker = Asker {
+        user: Some(&admin),
+        ..Asker::default()
+    };
     let (bare, _) = git::published(&sx.dir.join("up"), &[("README.md", "# Up\n")])?;
     let url = format!("file://{}", bare.display());
-    let added = service
-        .add_remote_project("up", &url, None, Asker::default())
-        .await?;
+    let added = service.add_remote_project("up", &url, None, asker).await?;
     assert!(matches!(added, AddedProject::Added(_)), "{added:?}");
     Ok(())
 }

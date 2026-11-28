@@ -270,42 +270,6 @@ pub async fn every_write_names_the_tokens_user<B: Backend + 'static>(
     Ok(())
 }
 
-/// With sign-in off, a write sent with a token still names its user, and one sent with none
-/// names nobody
-///
-/// # Arguments
-///
-/// * `fx` - The store and its plan
-pub async fn writes_with_sign_in_off_name_a_token_or_nobody<B: Backend + 'static>(
-    fx: Fx<B>,
-) -> anyhow::Result<()> {
-    // ada added from this host and signed in, though nobody need sign in
-    let ax = fx.api().await?;
-    first_admin(&ax, "ada").await?;
-    let ada = signed_in(&ax, "ada").await?;
-    let plan = ax.plan.clone();
-    let node = plan.node("C1")?;
-    // ada puts C1, and a client with no token sets it done
-    put(&ada, &plan, work("C1", None), None).await?;
-    put(&ax.client, &plan, work("C1", Some(Status::Done)), Some(1)).await?;
-    let (_, HistoryPage { edits: history, .. }) =
-        ax.client.get(&paths::node_history(&node)).await?;
-    assert_eq!(authors(&history), vec![None, Some("ada".to_string())]);
-    assert!(history[0].author.is_unknown());
-    // and Claude with no token is Claude for nobody known
-    put(
-        &ax.client.as_claude(),
-        &plan,
-        work("C1", Some(Status::Todo)),
-        Some(2),
-    )
-    .await?;
-    let (_, HistoryPage { edits: history, .. }) =
-        ax.client.get(&paths::node_history(&node)).await?;
-    assert_eq!(history[0].author.describe().as_deref(), Some("Claude"));
-    Ok(())
-}
-
 /// A thread's mark, a resolve by hand, a review started and submitted, a start, a capture and its
 /// revision, and a trailer's resolve each name who made them
 ///

@@ -81,10 +81,8 @@ pub async fn serve() -> anyhow::Result<()> {
     if let Some(note) = listeners.trust_note() {
         eprintln!("reef-app: {note}");
     }
-    // that callers must sign in, if they must, and how to add the first user
-    if let Some(note) = service.sign_in_note().await? {
-        eprintln!("reef-app: {note}");
-    }
+    // that callers must sign in, and how to add the first user
+    eprintln!("reef-app: {}", service.sign_in_note().await?);
     // the `reef` it hands its users, or why it hands them none
     eprintln!("reef-app: {}", service.client_note());
     // once told to stop, end the change stream, so its followers' requests finish

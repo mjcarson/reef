@@ -28,7 +28,7 @@
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
-use reef_api::{lift, paths};
+use reef_api::{NewUser, TokenKind, UserAdded, lift, paths};
 use reef_model::spec::parse_node_file;
 use reef_model::{Graph, Payload, PlanName, nodes_from_records};
 use reef_render::paths::{Target, resolve};
@@ -124,11 +124,15 @@ async fn bench<B: Backend + 'static>(
     book: &Book<'_>,
     rounds: usize,
 ) -> anyhow::Result<()> {
+    // every caller signs in, so the bench is the service's first user, an admin from its host
+    let (admin, token) = signed_in(&service).await?;
+    let asker = Asker {
+        user: Some(&admin),
+        ..Asker::default()
+    };
     // the plan with its docs in the repo, written unchecked
     let plan = PlanName::new("example", "book")?;
-    service
-        .add_project("example", book.docs, Asker::default())
-        .await?;
+    service.add_project("example", book.docs, asker).await?;
     service.add_plan(&plan, &reef_api::NOBODY).await?;
     service
         .store()
@@ -136,9 +140,7 @@ async fn bench<B: Backend + 'static>(
         .await?;
     // and the same plan in a project whose repo is empty, its docs as its own pages
     let paged = PlanName::new("paged", "book")?;
-    service
-        .add_project("paged", book.empty, Asker::default())
-        .await?;
+    service.add_project("paged", book.empty, asker).await?;
     service.add_plan(&paged, &reef_api::NOBODY).await?;
     let write = PlanWrite {
         nodes: book.nodes.to_vec(),
@@ -168,7 +170,7 @@ async fn bench<B: Backend + 'static>(
         &service,
         &plan,
         &repo,
-        address,
+        (address, &token),
         rounds,
         false,
     )
@@ -178,7 +180,7 @@ async fn bench<B: Backend + 'static>(
         &service,
         &paged,
         &in_pages,
-        address,
+        (address, &token),
         rounds,
         true,
     )
@@ -192,6 +194,36 @@ async fn bench<B: Backend + 'static>(
     Ok(())
 }
 
+/// Adds the service's first user, an admin, from its own host, and signs them in
+///
+/// # Arguments
+///
+/// * `service` - The service to add them to
+async fn signed_in<B: Backend + 'static>(
+    service: &Service<B>,
+) -> anyhow::Result<(reef_api::User, String)> {
+    // the first user, asked for from the service's own host
+    let password = "the bench's own password";
+    let new = NewUser {
+        name: "bench".to_string(),
+        password: password.to_string(),
+        admin: true,
+    };
+    let local = Asker {
+        local: true,
+        ..Asker::default()
+    };
+    let UserAdded::Added(user) = service.add_user(new, local).await? else {
+        anyhow::bail!("the bench's user was there already");
+    };
+    // and a token for its requests over HTTP
+    let issued = service
+        .sign_in(&user.name, password, TokenKind::Cli, "the bench", None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("the bench's user didn't sign in"))?;
+    Ok((user, issued.token))
+}
+
 /// Times one plan's build, payload and writes, and prints the figures
 ///
 /// # Arguments
@@ -200,7 +232,7 @@ async fn bench<B: Backend + 'static>(
 /// * `service` - The service the plan is in
 /// * `plan` - The plan
 /// * `source` - Where its docs are read from, for timing `prepare` alone
-/// * `address` - Where the service is served
+/// * `served` - Where the service is served, and the token its first user signs in with
 /// * `rounds` - How many timed rounds each figure takes
 /// * `paged` - Whether the plan's docs are its own pages, so a page edit is timed too
 async fn time_plan<B: Backend + 'static, S: DocSource>(
@@ -208,10 +240,11 @@ async fn time_plan<B: Backend + 'static, S: DocSource>(
     service: &Service<B>,
     plan: &PlanName,
     source: &S,
-    address: std::net::SocketAddr,
+    served: (std::net::SocketAddr, &str),
     rounds: usize,
     paged: bool,
 ) -> anyhow::Result<()> {
+    let (address, token) = served;
     let problems = service.check(plan).await?;
     // the docs' part of a build alone: a fresh renderer checking links and briefing nodes
     let records = service.list(plan).await?.records(plan)?;
@@ -247,6 +280,7 @@ async fn time_plan<B: Backend + 'static, S: DocSource>(
         let start = Instant::now();
         let body = client
             .get(&url)
+            .bearer_auth(token)
             .send()
             .await?
             .error_for_status()?

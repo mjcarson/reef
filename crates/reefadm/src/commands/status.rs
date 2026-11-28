@@ -86,6 +86,7 @@ pub fn status(cx: &mut Cx, args: &StatusArgs) -> Result<()> {
                 ask.url.trim_end_matches("/api/v1/me"),
                 match me.required {
                     true => "callers sign in",
+                    // only a reef from before every central reef asked its callers says this
                     false => "no sign-in",
                 }
             )),

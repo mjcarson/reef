@@ -33,8 +33,8 @@ pub struct Served {
     /// `[api]`: where the service listens and keeps its certificates
     #[serde(default)]
     pub api: ApiKeys,
-    /// `[auth]`: whether callers sign in
-    #[serde(default)]
+    /// `[auth]`: a sign-in key an older config may hold, which reefadm never writes
+    #[serde(default, skip_serializing_if = "AuthKeys::is_unset")]
     pub auth: AuthKeys,
     /// `[remotes]`: where remote projects are cloned
     #[serde(default)]
@@ -91,12 +91,22 @@ pub struct TlsKeys {
     pub key: Option<PathBuf>,
 }
 
-/// `[auth]`'s keys
+/// `[auth]`'s one key, from before every central reef asked its callers to sign in
+///
+/// The service reads `required = true` and changes nothing, and refuses to start on
+/// `required = false`, which reefadm takes out of a config it finds ([`without_sign_in_off`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthKeys {
-    /// Whether every caller signs in
+    /// Whether every caller signs in, which no config can turn off any more
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required: Option<bool>,
+}
+
+impl AuthKeys {
+    /// Whether the config says nothing of sign-in, so `[auth]` needn't be written
+    pub fn is_unset(&self) -> bool {
+        self.required.is_none()
+    }
 }
 
 /// `[remotes]`'s keys
@@ -169,9 +179,7 @@ impl Served {
                     key,
                 }),
             },
-            auth: AuthKeys {
-                required: Some(true),
-            },
+            auth: AuthKeys::default(),
             remotes: RemoteKeys {
                 clones: Some(layout.clones()),
                 fetch_every: Some("5m".to_string()),
@@ -296,6 +304,89 @@ pub struct Explicit {
     pub cert: bool,
 }
 
+/// A config's text with a key under a table taken out, every other line kept as it was
+///
+/// The key's line becomes a comment saying why, at its indent, so the file's comments and the
+/// order of its keys stay as the admin wrote them. Only a line `key = …` directly under
+/// `[table]` is taken: an inline table or a dotted key elsewhere is left for the caller to find.
+///
+/// # Arguments
+///
+/// * `text` - The config's text
+/// * `table` - The table's name, such as `auth`
+/// * `key` - The key's name, such as `required`
+/// * `note` - What the comment left in its place says
+///
+/// # Examples
+///
+/// ```
+/// use reefadm::served::without_key;
+///
+/// let text = "[auth]\n# turned off by hand\nrequired = false\n\n[api]\nrequired = 1\n";
+/// let out = without_key(text, "auth", "required", "taken out");
+/// assert_eq!(out, "[auth]\n# turned off by hand\n# taken out\n\n[api]\nrequired = 1\n");
+/// ```
+pub fn without_key(text: &str, table: &str, key: &str, note: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    // the table each line falls under, from the last header seen
+    let mut current = String::new();
+    for line in text.split_inclusive('\n') {
+        // the line's TOML, before any comment
+        let bare = line.split('#').next().unwrap_or_default().trim();
+        if let Some(header) = bare
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            // a header starts a table; an array of tables is never the plain one asked for
+            current = header.trim().to_string();
+        } else if current == table
+            && bare
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim() == key)
+        {
+            // the key's line, a comment in its place at its indent
+            let indent = &line[..line.len() - line.trim_start().len()];
+            let end = if line.ends_with('\n') { "\n" } else { "" };
+            out.push_str(&format!("{indent}# {note}{end}"));
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// A config's text with `[auth] required = false` taken out, or `None` if it doesn't say that
+///
+/// Every central reef asks its callers to sign in, and the service refuses to start on a config
+/// that says otherwise, so reefadm takes the key out of one it keeps, leaving the rest as it was.
+///
+/// # Arguments
+///
+/// * `text` - The config's text
+/// * `path` - Where it was read from, for the error
+pub fn without_sign_in_off(text: &str, path: &std::path::Path) -> Result<Option<String>> {
+    // only a config turning sign-in off is changed
+    if Served::read(text, path)?.auth.required != Some(false) {
+        return Ok(None);
+    }
+    // the key's line made a comment saying why
+    let out = without_key(
+        text,
+        "auth",
+        "required",
+        "reefadm took out `required = false`: every central reef asks its callers to sign in",
+    );
+    // a key written some other way, such as an inline table, is the admin's to take out
+    if Served::read(&out, path)?.auth.required == Some(false) {
+        anyhow::bail!(
+            "{} turns sign-in off in a way reefadm can't take out: delete `[auth] required` \
+             there, then run reefadm again",
+            path.display()
+        );
+    }
+    Ok(Some(out))
+}
+
 /// The port at the end of an address, such as `12180` from `127.0.0.1:12180` or `[::1]:12180`
 ///
 /// # Arguments
@@ -317,7 +408,7 @@ pub fn port_of(address: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Explicit, Served, TeamFlags};
+    use super::{Explicit, Served, TeamFlags, without_sign_in_off};
     use crate::Env;
     use crate::layout::{Layout, Mode};
     use std::collections::BTreeSet;
@@ -388,7 +479,8 @@ mod tests {
         assert!(missing.is_empty(), "missing {missing:?} from:\n{text}");
         // and the values that make it a team server
         let served = Served::read(&text, Path::new("config.toml")).unwrap();
-        assert_eq!(served.auth.required, Some(true));
+        assert_eq!(served.auth.required, None);
+        assert!(!text.contains("[auth]"), "{text}");
         assert_eq!(served.tls_port(), Some(12443));
         assert_eq!(served.loopback(), "127.0.0.1:12180");
         assert_eq!(served.data(&team()), Path::new("/var/lib/reef/shoal"));
@@ -397,6 +489,41 @@ mod tests {
             Some(Path::new("/etc/reef/reef-ca.pem"))
         );
         assert!(text.starts_with("# Written by `reefadm deploy`"));
+    }
+
+    /// A config turning sign-in off has the key taken out, its comments and other tables kept,
+    /// while one leaving it on or unsaid is left alone, and one written inline is refused
+    #[test]
+    fn sign_in_off_is_taken_out_of_a_config() {
+        let path = Path::new("/etc/reef/config.toml");
+        // the key's line becomes a comment, and nothing else moves
+        let text = "# reef on europa\n[api]\naddress = \"127.0.0.1:12180\"\n\n[auth]\n# off for now\n\
+                    required = false   # we'll see\n\n[remotes]\nfetch_every = \"5m\"\n";
+        let out = without_sign_in_off(text, path)
+            .unwrap()
+            .expect("it is taken out");
+        assert_eq!(
+            out,
+            "# reef on europa\n[api]\naddress = \"127.0.0.1:12180\"\n\n[auth]\n# off for now\n\
+             # reefadm took out `required = false`: every central reef asks its callers to sign \
+             in\n\n[remotes]\nfetch_every = \"5m\"\n"
+        );
+        let served = Served::read(&out, path).unwrap();
+        assert_eq!(served.auth.required, None);
+        assert_eq!(served.loopback(), "127.0.0.1:12180");
+        // a config leaving it on, or saying nothing, is left as it is
+        for kept in [
+            "[auth]\nrequired = true\n",
+            "[api]\naddress = \"127.0.0.1:1\"\n",
+            "",
+        ] {
+            assert_eq!(without_sign_in_off(kept, path).unwrap(), None, "{kept}");
+        }
+        // and one written inline is the admin's to take out, named
+        let inline = "auth = { required = false }\n";
+        let refused = without_sign_in_off(inline, path).unwrap_err().to_string();
+        assert!(refused.contains("/etc/reef/config.toml"), "{refused}");
+        assert!(refused.contains("delete `[auth] required`"), "{refused}");
     }
 
     /// A config written by hand reads leniently, its paths falling back to the defaults

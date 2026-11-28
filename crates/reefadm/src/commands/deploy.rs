@@ -9,10 +9,12 @@
 //! 5. **shoal and glommio,** at the revs reef pins, beside it.
 //! 6. **The build,** then a release made of it, made current.
 //! 7. **For a team server,** the `reef` account, its directories and the config, which a later
-//!    deploy keeps as it is.
+//!    deploy keeps as it is, but for an older config's `[auth] required = false`, which it
+//!    takes out, since every central reef asks its callers to sign in.
 //! 8. **The unit,** written if it changed, then enabled and started, or restarted.
 //! 9. **Health:** reef's CA copied out, and both ports asked until they answer.
-//! 10. **The first admin,** added and signed in from this host.
+//! 10. **The first admin,** added and signed in from this host, on a team server and a user's
+//!     alike.
 //! 11. **The firewall,** opened for the TLS port if ufw or firewalld is on, after asking.
 //! 12. **reefadm's record** of what it deployed, written last, so a deploy that stopped
 //!     partway is run again rather than upgraded.
@@ -20,6 +22,7 @@
 use crate::cli::DeployArgs;
 use crate::compile::Built;
 use crate::exec::{ACCOUNT, As, Cmd, File, Runner};
+use crate::first_admin::{self, Admin, LocalCli, Told};
 use crate::layout::{Kind, Layout, Mode};
 use crate::release::Record;
 use crate::secret::Secret;
@@ -85,7 +88,7 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     stop_for(cx, &problems)?;
     let hostname = super::hostname(cx.runner)?;
     // the first admin's password now, so the build runs unattended
-    let admin = first_admin(cx, args, mode)?;
+    let admin = wanted_admin(cx, args)?;
     // the release: shipped here built, or built here for this machine's CPU
     let (mut record, built) = match &args.shipped {
         Some(dir) => ship::shipped(cx.runner, dir, kind)?,
@@ -108,14 +111,16 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
         Mode::System => team(cx, &layout, args, kept, &hostname)?,
         Mode::User => user_config(cx, &layout, args, kept)?,
     };
+    // a config kept from before that turns sign-in off, which the release refuses to start on
+    super::sign_in_on(cx.runner, &layout)?;
     check_shards(cx.runner, &layout, &served)?;
     // the unit, then the server answering on both ports
     let low = super::low_port(&served);
     start(cx, &layout, &systemd, kind, low)?;
     health::wait(cx.runner, &layout, &served, &hostname)?;
     // the first admin, signed in from here
-    if let Some((name, password)) = &admin {
-        add_admin(cx, &layout, name, password)?;
+    if let Some(admin) = &admin {
+        add_admin(cx, &layout, admin)?;
     }
     if let (Mode::System, Some(port)) = (mode, served.tls_port()) {
         firewall(cx, port)?;
@@ -128,7 +133,7 @@ pub fn deploy(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
         reference: record.reference,
         release: record.release,
         previous: None,
-        first_admin: admin.map(|(name, _)| name),
+        first_admin: admin.map(|admin| admin.name),
         src: args.src.clone(),
     };
     state.write(cx.runner, &layout)?;
@@ -387,24 +392,16 @@ fn free_gib(runner: &mut dyn Runner, dir: &Path) -> Result<Option<u64>> {
         .map(|kib| kib / (1024 * 1024)))
 }
 
-/// The first admin's name and password, for a team server that adds one
+/// The first admin's name and password, which every deployment adds unless told not to
 ///
 /// # Arguments
 ///
 /// * `cx` - The runner and the environment
 /// * `args` - What deploy was told
-/// * `mode` - Which kind of deployment
-fn first_admin(cx: &mut Cx, args: &DeployArgs, mode: Mode) -> Result<Option<(String, String)>> {
-    if mode == Mode::User || args.no_admin {
-        return Ok(None);
-    }
-    // the admin running it, unless told another
-    let Some(name) = args.first_admin.clone().or_else(|| cx.user()) else {
-        bail!("reefadm can't tell who you are: name the first admin with --first-admin");
-    };
-    let prompt = format!("{name}'s password, as reef's first admin");
-    let password = cx.runner.password(&prompt, args.password_file.as_deref())?;
-    Ok(Some((name, password)))
+fn wanted_admin(cx: &mut Cx, args: &DeployArgs) -> Result<Option<Admin>> {
+    // the admin running it, unless told another; a fresh host has no user to ask about
+    let fallback = cx.user();
+    first_admin::wanted(cx, &Told::from(args), None, fallback)
 }
 
 /// A team server's account, directories and config, returning the config it runs with
@@ -640,18 +637,13 @@ pub(super) fn start(
 /// # Arguments
 ///
 /// * `cx` - The runner and the environment
-/// * `layout` - The team server's paths
-/// * `name` - Their name
-/// * `password` - Their password
-fn add_admin(cx: &mut Cx, layout: &Layout, name: &str, password: &str) -> Result<()> {
-    // the release's CLI, reading the team server's config, which names reef's CA copy
-    let reef = layout.current.join("bin/reef");
-    let cli = |args: &[&str]| {
-        Cmd::new(reef.display().to_string())
-            .arg("--conf")
-            .arg(&layout.config)
-            .args(args)
-    };
+/// * `layout` - The deployment's paths
+/// * `admin` - Their name and password
+fn add_admin(cx: &mut Cx, layout: &Layout, admin: &Admin) -> Result<()> {
+    let (name, password) = (admin.name.as_str(), admin.password.as_str());
+    // the release's CLI, reading the deployment's config if it has one, which names reef's CA
+    let reef = LocalCli::of(cx.runner, layout)?;
+    let cli = |args: &[&str]| reef.cmd(args);
     // signed in already, from a deploy before this one
     let whoami = cx.runner.probe(&cli(&["whoami"]))?;
     if whoami.ok() && whoami.stdout.starts_with(&format!("`{name}`")) {

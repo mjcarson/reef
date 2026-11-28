@@ -168,6 +168,7 @@ pub async fn whoami<W: Write>(client: &Client, out: &mut W) -> anyhow::Result<()
             "nobody: {} asks every caller to sign in, so run `reef login`",
             client.base()
         )?,
+        // only a server from before every central reef asked its callers to sign in says this
         (None, false) => writeln!(out, "nobody: {} asks no caller to sign in", client.base())?,
     }
     Ok(())

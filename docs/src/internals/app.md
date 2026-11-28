@@ -81,6 +81,7 @@ env -u RUSTFLAGS dx serve @server --platform server --features embedded     # de
 env -u RUSTFLAGS dx build @server --platform server --features embedded     # build
 env -u RUSTFLAGS dx build --release @server --platform server --features embedded   # timed
 REEF_CONFIG=reef.toml ../target/dx/reef-app/debug/web/server                 # serve the build
+reef --conf reef.toml user add "$USER" && reef --conf reef.toml login --user "$USER"   # once, its first user
 cargo +nightly test -p reef-app --features embedded                          # the suite
 python check.py                                                              # the browser checks
 python check.py --release --only=c33,c35                                     # the diff's timing
@@ -90,4 +91,6 @@ python check.py --release --only=c33,c35                                     # t
 `check.py` drives the built server in headless Chromium with Playwright: it starts the server
 itself, on a config and data directory of its own under `target/tmp`, reef's own certificate
 made under it too, takes that certificate unchecked in every browser context, and stops its
-process group at the end.
+process group at the end. Every server asks its callers to sign in, so the server `dx serve` or
+a build starts answers nobody until its first user is added from this host and signed in; the
+tests and `check.py` each add a user of their own.

@@ -10,9 +10,8 @@
 //!   HTTP once, with a redirect to https at the host, port and path it asked for
 //!   ([`redirect_answer`]), so `http://` typed in a browser, or through a tunnel, lands on the
 //!   same port over TLS.
-//! - **Sign-in off loopback.** Other hosts reaching a service that answers anyone would let
-//!   anyone on the network write, so [`bind`] refuses `[api.tls]` on an address that isn't a
-//!   loopback one unless `[auth] required` is set.
+//! - **Signed in, wherever it listens.** Every caller signs in, so other hosts reaching
+//!   `[api.tls]` on any address are asked who they are as this host's callers are.
 //! - **Read once, as the server starts.** The chain and its key are PEM files read by [`bind`],
 //!   so a renewed certificate is served from the next restart.
 //! - **Handshakes run beside each other.** [`TlsListener`] hands axum a connection once its
@@ -330,9 +329,7 @@ pub async fn bind_local(conf: &Conf, own: &Own) -> anyhow::Result<TlsListener> {
 /// Listens for other hosts where `[api.tls]` says, if it says anywhere, serving the certificate
 /// it names, else reef's own
 ///
-/// Refuses an address that isn't a loopback one with sign-in off, since other hosts would reach
-/// a service that answers anyone, and names the key behind a certificate or key that can't be
-/// read.
+/// Names the key behind a certificate or key that can't be read.
 ///
 /// # Arguments
 ///
@@ -344,13 +341,6 @@ pub async fn bind(conf: &Conf, own: &Own) -> anyhow::Result<Option<TlsListener>>
     let Some(tls) = &conf.api.tls else {
         return Ok(None);
     };
-    // other hosts reach it only if every caller signs in
-    anyhow::ensure!(
-        tls.address.ip().is_loopback() || conf.auth.required,
-        "{} serves reef to other hosts, so every caller must sign in: set {} to true",
-        conf.key("api.tls"),
-        conf.key("auth.required")
-    );
     // the certificate and its key named, both or neither, read before anything listens
     let config = match (&tls.cert, &tls.key) {
         (Some(cert), Some(key)) => server_config(cert, key).map_err(|error| {

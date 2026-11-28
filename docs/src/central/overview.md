@@ -43,10 +43,10 @@ internals, its JSON API and its store are in [Internals](../internals/central.md
 ## Two ways to run it
 
 - **One person on one machine:** reef-serve as a systemd user unit on loopback, over HTTPS with
-  a certificate of its own, with no config and no sign-in. This is how reef's own plan runs. See
-  [One person on localhost](deploy/localhost.md).
+  a certificate of its own, with no config, its one user that person. This is how reef's own plan
+  runs. See [One person on localhost](deploy/localhost.md).
 - **A team server:** reef-app as a system service under an account of its own, serving other
-  hosts too, with sign-in required and projects registered by their git URLs. [Deploying](deploy/index.md)
+  hosts too, with projects registered by their git URLs. [Deploying](deploy/index.md)
   walks through it.
 
 ## Where things are

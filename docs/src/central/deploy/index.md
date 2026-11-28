@@ -5,7 +5,7 @@
 hand, and say what each part is.
 
 This chapter sets up a team server: reef-app as a system service under an account of its own,
-serving other hosts over HTTPS, with sign-in required. Running it for one person on one machine is
+serving other hosts over HTTPS. Every central reef asks its callers to sign in, on loopback too. Running it for one person on one machine is
 much shorter; see [One person on localhost](localhost.md).
 
 The examples use `reef.example.com`, port `12443` for other hosts, the account `reef`, its config in

@@ -12,16 +12,21 @@
 //! 5. **The install kept:** stopped and backed up, its unit kept beside reefadm's as
 //!    `reef.service.before-reefadm`, its commands and app copied to `releases/adopted`, and its
 //!    config kept as it is. A config reefadm wouldn't read the same is written where reefadm
-//!    reads it, naming each path it left to reef's defaults, the one there kept beside it.
+//!    reads it, naming each path it left to reef's defaults, the one there kept beside it, and
+//!    so is one turning sign-in off, `[auth] required = false` taken out, since every central
+//!    reef asks its callers to sign in.
 //! 6. **reefadm's unit** on the new release, started, and both ports asked. If it doesn't come
 //!    up, the install goes back as it was, its data restored from the backup, and started again
 //!    if it was running.
 //! 7. **reefadm's record,** the install made by hand kept as the release before.
+//! 8. **The first admin,** if the install had no user, its password asked before the build,
+//!    added and signed in from this host.
 
 use super::deploy;
 use crate::cli::DeployArgs;
 use crate::compile::Built;
 use crate::exec::{self, ACCOUNT, As, Ask, Cmd, File, Runner};
+use crate::first_admin::{self, Told};
 use crate::layout::{Kind, Layout, Mode, UNIT};
 use crate::release::{self, COMMANDS, Record};
 use crate::schema::{Schema, Verdict};
@@ -86,13 +91,16 @@ pub struct Found {
 
 impl Found {
     /// Whether reefadm writes a config of its own, since it wouldn't read the install's the same:
-    /// one elsewhere, or one leaving a path to a default reefadm's unit moves
+    /// one elsewhere, one leaving a path to a default reefadm's unit moves, or one turning
+    /// sign-in off, which the new release refuses to start on
     ///
     /// # Arguments
     ///
     /// * `layout` - The deployment's paths
     pub fn rewrites(&self, layout: &Layout) -> bool {
-        !self.named.is_empty() || (self.text.is_some() && self.config != layout.config)
+        !self.named.is_empty()
+            || (self.text.is_some() && self.config != layout.config)
+            || self.served.auth.required == Some(false)
     }
 
     /// The config reefadm writes where it reads it, if the install's isn't read the same there
@@ -105,8 +113,14 @@ impl Found {
         if !self.rewrites(layout) {
             return Ok(None);
         }
-        // its text as it is, comments and all, each path added as a line of its table
+        // its text as it is, comments and all, sign-in off taken out, and each path added as a
+        // line of its table
         let mut text = self.text.clone().unwrap_or_default();
+        let sign_in_off = crate::served::without_sign_in_off(&text, &self.config)?;
+        let took_out = sign_in_off.is_some();
+        if let Some(on) = sign_in_off {
+            text = on;
+        }
         for named in &self.named {
             let value = toml::Value::String(named.path.display().to_string());
             text = with_key(&text, named.table, &format!("{} = {value}", named.key));
@@ -128,9 +142,15 @@ impl Found {
                 names.join(", ")
             ),
         };
+        let taking = match took_out {
+            true => ",\n# taking out `[auth] required = false`, since every central reef asks its \
+                     callers to sign in"
+                .to_string(),
+            false => String::new(),
+        };
         let written = format!(
-            "# Written by `reefadm deploy --adopt` {from}{naming}.\n# reefadm keeps it as it is \
-             from here on: edit it as you like, then restart reef.\n\n{text}"
+            "# Written by `reefadm deploy --adopt` {from}{naming}{taking}.\n# reefadm keeps it as \
+             it is from here on: edit it as you like, then restart reef.\n\n{text}"
         );
         // a table spelt so that a line can't be added to it, such as an inline one, is the
         // admin's to name
@@ -251,6 +271,14 @@ pub fn adopt(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
     let problems = preflight(cx.runner, &layout, &found, &src, building)?;
     deploy::stop_for(cx, &problems)?;
     let hostname = super::hostname(cx.runner)?;
+    // the first admin's password now, if the install has no user, so the build runs unattended;
+    // one stopped can't be asked, so its password is asked for anyway, and asked of it once up
+    let told = Told::from(args);
+    let has = match (told.none, found.active) {
+        (false, true) => first_admin::users(cx.runner, &layout, &found.served),
+        _ => None,
+    };
+    let admin = first_admin::wanted(cx, &told, has, cx.user())?;
     // the release, and the install made by hand as a release of its own
     let (mut record, built, adopted) = match &args.shipped {
         Some(dir) => {
@@ -324,10 +352,21 @@ pub fn adopt(cx: &mut Cx, args: &DeployArgs) -> Result<()> {
         reference: record.reference,
         release: record.release,
         previous: Some(adopted),
-        first_admin: None,
+        first_admin: admin.as_ref().map(|admin| admin.name.clone()),
         src: args.src.clone(),
     };
     state.write(cx.runner, &layout)?;
+    // the first admin, once the record names the release up, so a failure leaves upgrade to add
+    // them, since adopt won't run again over its own record
+    if let Some(admin) = &admin {
+        first_admin::add(cx, &layout, &served, admin).with_context(|| {
+            format!(
+                "reef is adopted and up on release {name}, but its first admin wasn't added: \
+                 `reefadm upgrade` adds them, or `reef user add {}` from this host",
+                admin.name
+            )
+        })?;
+    }
     deploy::summary(cx, &layout, &served, &hostname, &name, false);
     notes(cx, &layout, &found, plain, saved.as_deref());
     Ok(())
@@ -461,6 +500,11 @@ fn facts(
         Ok(found) => {
             facts.kind = Some(found.kind);
             facts.problems = preflight(cx.runner, layout, &found, src, false)?;
+            // whether the install has a user yet, if it runs, for the builder to ask a first
+            // admin's password
+            if found.active {
+                facts.users = first_admin::users(cx.runner, layout, &found.served);
+            }
             // the schema as the old reef-serve says it, unless the admin named the commit
             if args.from_rev.is_none()
                 && let Some(schema) = own_word(cx.runner, layout, &found)?

@@ -44,7 +44,6 @@ macro_rules! suite {
 suite!(
     a_comment_shows_its_author,
     every_write_names_the_tokens_user,
-    writes_with_sign_in_off_name_a_token_or_nobody,
     marks_starts_and_captures_name_their_authors,
     registrations_name_their_authors,
     loop_acts_name_their_authors,

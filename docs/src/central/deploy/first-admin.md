@@ -1,8 +1,10 @@
 # The first admin
 
-`reefadm deploy` adds the first admin and signs them in, unless it is given `--no-admin`
-([With reefadm](reefadm.md)). By hand, add the first admin right away. Until a user exists, anyone with a shell on the server can add
-the first one, who is an admin.
+Every central reef asks its callers to sign in, on loopback too, so a server with no user
+answers nobody but the routes that sign one in. `reefadm deploy`, and `reefadm upgrade` or
+`deploy --adopt` of a server with no user, add the first admin and sign them in, unless given
+`--no-admin` ([With reefadm](reefadm.md)). By hand, add the first admin right away. Until a user
+exists, anyone with a shell on the server can add the first one, who is an admin.
 
 On the server, as yourself:
 

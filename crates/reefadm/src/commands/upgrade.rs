@@ -8,23 +8,31 @@
 //!    `central/reef-service/src/schema.rs` against the tables the running release recorded. A
 //!    table added reads back; a table changed or gone can't, since shoal can't migrate a table,
 //!    so it is refused unless `--fresh` starts a new data directory, the old one moved aside.
-//! 3. **The toolchains, the siblings and the build,** as deploy does, then the new release
+//! 3. **The first admin's password,** if the running server has no user yet, asked before the
+//!    build so it runs unattended.
+//! 4. **The toolchains, the siblings and the build,** as deploy does, then the new release
 //!    staged, the built `reef-serve` saying its schema again.
 //!
 //! The second half, `upgrade --finish <release>`, runs in the reefadm the new release holds, so
 //! its unit and its steps are the new code's:
-//! 4. **Stop, back up, swap `current`,** rewrite the unit if its text changed, start, and wait
-//!    for both ports. If it doesn't come up, the old release goes back, with the backup restored
-//!    over whatever the new one wrote, and the upgrade fails saying why.
-//! 5. **The record,** the old release kept as the one before, then every other release pruned.
+//! 5. **Stop, back up, swap `current`,** take an older config's `[auth] required = false` out,
+//!    rewrite the unit if its text changed, start, and wait for both ports. If it doesn't come
+//!    up, the old release goes back, with the backup restored over whatever the new one wrote,
+//!    and the upgrade fails saying why.
+//! 6. **The record,** the old release kept as the one before, then every other release pruned.
+//! 7. **The first admin,** added and signed in from this host if the server has no user yet,
+//!    since every central reef asks its callers to sign in. The same commits as the running
+//!    release do this alone, so an upgrade run again adds one an earlier one couldn't.
 
 use crate::cli::UpgradeArgs;
 use crate::compile::Built;
 use crate::cpu::{self, Class};
 use crate::exec::{self, As, Cmd, Runner};
+use crate::first_admin::{self, Admin, Told};
 use crate::layout::Layout;
 use crate::release::{self, Record};
 use crate::schema::{Schema, Verdict};
+use crate::secret::Secret;
 use crate::served::Served;
 use crate::ship::{self, Facts};
 use crate::sources::{self, Manifest};
@@ -50,10 +58,16 @@ pub fn upgrade(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
         return facts(cx, args);
     }
     let (layout, state) = super::deployed(cx, args.user)?;
-    // a release built elsewhere for this host's CPU, shipped here
+    let told = Told::from(args);
+    // a release built elsewhere for this host's CPU, shipped here, with the first admin's
+    // password sent beside it if the builder found the server had no user
     if let Some(dir) = &args.shipped {
         let (record, built) = ship::shipped(cx.runner, dir, state.kind)?;
-        return hand_over(cx, args, &layout, &built, &record);
+        let admin = match told.password_file {
+            Some(_) => first_admin::wanted(cx, &told, None, cx.user())?,
+            None => None,
+        };
+        return hand_over(cx, args, &layout, &built, &record, admin.as_ref());
     }
     // the checkouts deploy used, unless told others
     let src = args
@@ -80,14 +94,24 @@ pub fn upgrade(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
         args.target_cpu.as_deref(),
     )?;
     let running = &state.release;
+    let served = super::kept_config(cx.runner, &layout)?.unwrap_or_default();
     if same(&reef, &manifest, &class, running) && !args.rebuild {
         cx.runner.say(&format!(
             "reef is at {} already, as release {}: nothing to upgrade",
             short(&reef),
             running.name
         ));
-        return Ok(());
+        // but a first admin an upgrade before couldn't add, if the server has no user still
+        return first_admin::ensure(cx, &layout, &served, &told);
     }
+    // the first admin's password now, if the server has no user, so the build runs unattended
+    let admin = match told.none {
+        true => None,
+        false => {
+            let has = first_admin::users(cx.runner, &layout, &served);
+            first_admin::wanted(cx, &told, has, cx.user())?
+        }
+    };
     // the new commit's schema, before a build is spent on one that can't read the data
     let pin = src.join("reef/central/reef-service/src/schema.rs");
     match exec::read(cx.runner, &pin, As::Me)? {
@@ -111,7 +135,7 @@ pub fn upgrade(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
         &class,
         schema.as_ref(),
     );
-    hand_over(cx, args, &layout, &built, &record)?;
+    hand_over(cx, args, &layout, &built, &record, admin.as_ref())?;
     after(cx, &src, running, &record.release)
 }
 
@@ -140,9 +164,12 @@ pub(crate) fn same(reef: &str, manifest: &Manifest, class: &Class, running: &Rel
 fn facts(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
     let mut facts = Facts::here(cx)?;
     match super::deployed(cx, args.user) {
-        Ok((_, state)) => {
+        Ok((layout, state)) => {
             facts.kind = Some(state.kind);
             facts.state = Some(state);
+            // whether the server has a user yet, for the builder to ask a first admin's password
+            let served = super::kept_config(cx.runner, &layout)?.unwrap_or_default();
+            facts.users = first_admin::users(cx.runner, &layout, &served);
         }
         Err(error) => facts.problems.push(format!("{error:#}")),
     }
@@ -158,23 +185,36 @@ fn facts(cx: &mut Cx, args: &UpgradeArgs) -> Result<()> {
 /// * `layout` - The deployment's paths
 /// * `built` - The release's files
 /// * `record` - What it was built from
+/// * `admin` - The first admin to add once it is up, if the server has no user
 fn hand_over(
     cx: &mut Cx,
     args: &UpgradeArgs,
     layout: &Layout,
     built: &Built,
     record: &Record,
+    admin: Option<&Admin>,
 ) -> Result<()> {
     if layout.mode == crate::layout::Mode::System {
         cx.runner.elevate()?;
     }
     let name = record.release.name.clone();
     let dir = release::stage(cx.runner, layout, built, record)?;
+    // the first admin's password, handed over as a file only the admin can read, which is
+    // removed once the new release's reefadm is done with it
+    let secret = match admin {
+        Some(admin) => Some(Secret::write(&cx.env, &admin.password, cx.runner.dry())?),
+        None => None,
+    };
+    let mut told = args.clone();
+    if let (Some(admin), Some(secret)) = (admin, &secret) {
+        told.first_admin = Some(admin.name.clone());
+        told.password_file = Some(secret.path().to_path_buf());
+    }
     // the new release's reefadm finishes it, so its unit and its steps are the ones taken; a
     // dry run shows them as this one would take them
     match cx.runner.dry() {
-        true => finish(cx, args, &name),
-        false => cx.runner.run(&finish_command(&dir, args, &name, cx.yes)),
+        true => finish(cx, &told, &name),
+        false => cx.runner.run(&finish_command(&dir, &told, &name, cx.yes)),
     }
 }
 
@@ -280,11 +320,22 @@ fn finish_command(dir: &Path, args: &UpgradeArgs, name: &str, yes: bool) -> Cmd 
         (args.user, "--user"),
         (args.no_backup, "--no-backup"),
         (args.fresh, "--fresh"),
+        (args.no_admin, "--no-admin"),
         (yes, "--yes"),
     ];
-    Cmd::new(dir.join("bin/reefadm").display().to_string())
+    let cmd = Cmd::new(dir.join("bin/reefadm").display().to_string())
         .args(["upgrade", "--finish", name])
-        .args(flags.iter().filter(|(on, _)| *on).map(|(_, flag)| *flag))
+        .args(flags.iter().filter(|(on, _)| *on).map(|(_, flag)| *flag));
+    // the first admin to add, and their password's file, only for a server with no user, so
+    // a release's reefadm from before them still finishes an upgrade of one that has users
+    let cmd = match &args.first_admin {
+        Some(admin) => cmd.args(["--first-admin", admin]),
+        None => cmd,
+    };
+    match &args.password_file {
+        Some(file) => cmd.arg("--password-file").arg(file),
+        None => cmd,
+    }
 }
 
 /// Makes a staged release the one in use, putting the old one back if it doesn't come up
@@ -331,6 +382,8 @@ fn finish(cx: &mut Cx, args: &UpgradeArgs, name: &str) -> Result<()> {
     if args.fresh {
         fresh(cx.runner, &layout, &served, &old.name)?;
     }
+    // a config turning sign-in off, which the new release refuses to start on
+    super::sign_in_on(cx.runner, &layout)?;
     // the new release, its unit, and its start
     release::activate(cx.runner, &layout, &layout.releases.join(name))?;
     super::write_unit(
@@ -381,7 +434,13 @@ fn finish(cx: &mut Cx, args: &UpgradeArgs, name: &str) -> Result<()> {
         "reef is up on release {name}, upgraded from {}",
         old.name
     ));
-    Ok(())
+    // the first admin, if the server has no user yet, once the record names the release up
+    first_admin::ensure(cx, &layout, &served, &Told::from(args)).with_context(|| {
+        format!(
+            "reef is up on release {name}, but its first admin wasn't added: `reefadm upgrade` \
+             again adds them, or `reef user add NAME` from this host"
+        )
+    })
 }
 
 /// Moves the data and the clones aside, and makes them again empty, for a schema that can't

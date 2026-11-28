@@ -71,13 +71,8 @@ pub fn Account() -> Element {
                             AdminLog { log: account.log.clone() }
                         }
                     },
-                    None if account.me.required => rsx! {
-                        p { class: "reef-app-muted", "Sign in to see your account." }
-                    },
                     None => rsx! {
-                        p { class: "reef-app-muted",
-                            "reef asks nobody to sign in, so there is no account to manage here."
-                        }
+                        p { class: "reef-app-muted", "Sign in to see your account." }
                     },
                 },
                 Some(Err(error)) => rsx! {

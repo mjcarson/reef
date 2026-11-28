@@ -57,7 +57,7 @@ anyhow = { workspace = true }
 name = "app"
 required-features = ["embedded"]
 
-# The suite's server asks every caller to sign in, so it runs in a process of its own.
+# The suite's server has a first user of its own, ada, so it runs in a process of its own.
 [[test]]
 name = "sign_in"
 required-features = ["embedded"]

@@ -41,7 +41,7 @@ pub async fn me() -> Result<Me, ServerFnError> {
     let caller = caller();
     Ok(Me {
         user: caller.user,
-        required: crate::server::service().sign_in_required(),
+        required: true,
     })
 }
 
@@ -80,7 +80,7 @@ pub async fn account() -> Result<Account, ServerFnError> {
     let service = crate::server::service();
     let me = Me {
         user: caller.user.clone(),
-        required: service.sign_in_required(),
+        required: true,
     };
     // nobody signed in has no tokens to show
     let Some(user) = &caller.user else {

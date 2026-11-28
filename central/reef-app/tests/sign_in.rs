@@ -3,7 +3,7 @@
 //! browser signs in on is the service's
 //!
 //! The service is the process's own, so this suite runs in a binary of its own, apart from
-//! `app.rs`, whose server asks nobody to sign in.
+//! `app.rs`, whose server's first user is the suite's own, signed in for every case.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
@@ -139,11 +139,10 @@ fn one_layer_guards_the_app_and_the_api() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        // the service over a pool of its own, asking every caller to sign in
+        // the service over a pool of its own, which asks every caller to sign in
         let mut conf = Conf::default();
         conf.shoal.data = Some(dir.join("shoal"));
         conf.shoal.cores = 1;
-        conf.auth.required = true;
         let service = Service::shared(&conf).await?;
         // its first user, from this host
         let new = NewUser {

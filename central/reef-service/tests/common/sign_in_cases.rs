@@ -1,7 +1,7 @@
 //! The sign-in suite's cases, each generic over the backend so it runs against shoal and the twin
 //!
-//! Each case serves its fixture's service on a loopback port of its own, asking every caller to
-//! sign in unless the case is about sign-in off, and calls it as the CLI and a browser do: with a
+//! Each case serves its fixture's service on a loopback port of its own, which asks every caller
+//! to sign in, as every central reef does, and calls it as the CLI and a browser do: with a
 //! token as `Authorization: Bearer`, with the sign-in cookie, or with nothing.
 
 use reef_api::user::SIGN_IN_COOKIE;
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use super::Fx;
 use super::git;
-use super::http::{Ax, Client, fake_client, stamped};
+use super::http::{Ax, Client, TESTER, fake_client, stamped};
 use reef_api::{NodePut, NodeWrite, Puts};
 
 /// The password every case's users sign in with
@@ -366,11 +366,11 @@ pub async fn the_first_user_is_an_admin_and_admins_add_the_rest<B: Backend + 'st
         (status, error.code),
         (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
     );
-    let short = NewUser {
-        password: "short".to_string(),
+    let empty = NewUser {
+        password: String::new(),
         ..new_user("dan", false)
     };
-    let (status, error): (_, ApiError) = ada_client.post(paths::USERS, &short).await?;
+    let (status, error): (_, ApiError) = ada_client.post(paths::USERS, &empty).await?;
     assert_eq!(
         (status, error.code),
         (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
@@ -543,57 +543,78 @@ pub async fn the_browser_signs_in_with_a_cookie<B: Backend + 'static>(
     Ok(())
 }
 
-/// With sign-in off, every route answers as before: anyone reads and writes, a bogus token is
-/// ignored, and only adding users asks who is calling
+/// A server whose config names no `[auth]`, as a config written for C128 or later does, asks
+/// every caller to sign in, on loopback too: an anonymous read and put are refused, naming
+/// `reef login`, while signing in, saying who is calling, the users' routes and the client's
+/// still answer
 ///
 /// # Arguments
 ///
-/// * `fx` - The fixture, served asking no caller to sign in
-pub async fn sign_in_off_changes_nothing<B: Backend + 'static>(fx: Fx<B>) -> anyhow::Result<()> {
-    let ax = fx.api().await?;
+/// * `fx` - The fixture, served as a config file with no `[auth]` says, with no user yet
+pub async fn a_server_whose_config_names_no_auth_signs_every_caller_in<B: Backend + 'static>(
+    fx: Fx<B>,
+) -> anyhow::Result<()> {
+    // a config naming the loopback port and the case's own certificates, and nothing of sign-in
+    let file = fx.dir.join("reef.toml");
+    let text = format!(
+        "[api]\naddress = \"127.0.0.1:0\"\ncerts = \"{}\"\n",
+        fx.dir.join("certs").display()
+    );
+    std::fs::write(&file, text)?;
+    let served = served_client(&fx).await?;
+    let ax = fx.api_reading(&file, served.clone()).await?;
+    assert!(ax.address.ip().is_loopback(), "{}", ax.address);
     let plan = ax.plan.clone();
-    // anyone reads and writes, as before users
-    let (status, _): (_, Vec<Project>) = ax.client.get(paths::PROJECTS).await?;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _): (_, Checked) = ax.client.post(&paths::nodes(&plan), &work("C1")).await?;
-    assert_eq!(status, StatusCode::OK);
-    let response = ax.client.open(&paths::changes(None, None)).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    drop(response);
-    // a token nobody was issued changes nothing
-    let bogus = ax.client.signed(&format!("reef_{}", "0".repeat(64)));
-    let (status, _): (_, Checked) = bogus.post(&paths::nodes(&plan), &work("C2")).await?;
-    assert_eq!(status, StatusCode::OK);
-    // no page sends a browser to sign in
+    // an anonymous read and put on loopback are refused, saying to run `reef login`
+    let anonymous = [
+        ax.client.request(Method::GET, paths::PROJECTS),
+        ax.client
+            .request(Method::POST, &paths::nodes(&plan))
+            .json(&work("C1")),
+    ];
+    for request in anonymous {
+        let response = ax.client.raw(request).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let error: ApiError = response.json().await?;
+        assert_eq!(error.code, ErrorCode::Unauthorized);
+        assert!(error.message.contains("reef login"), "{}", error.message);
+    }
+    // the sign-in page answers a browser
     let request = ax
         .client
-        .request(Method::GET, "/")
+        .request(Method::GET, paths::SIGN_IN)
         .header(ACCEPT, "text/html");
-    let response = ax.client.raw(request).await?;
-    assert_ne!(response.status(), StatusCode::SEE_OTHER);
-    // and the service says nobody need sign in
-    let (_, me): (_, Me) = ax.client.get(paths::ME).await?;
+    assert_eq!(ax.client.raw(request).await?.status(), StatusCode::OK);
+    // and the service says it takes the caller for nobody, and asks every caller to sign in
+    let (status, me): (_, Me) = ax.client.get(paths::ME).await?;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
         me,
         Me {
             user: None,
-            required: false
+            required: true
         }
     );
-    // users can be made ready before sign-in is turned on: the first from this host, then by it
+    // the users' routes say there are none, and add the first from this host
+    let (status, users): (_, Vec<User>) = ax.client.get(paths::USERS).await?;
+    assert_eq!((status, users.len()), (StatusCode::OK, 0));
     let (status, _): (_, UserAdded) = ax
         .client
         .post(paths::USERS, &new_user("ada", false))
         .await?;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, error): (_, ApiError) = ax
+    // a token for them, and with it the read goes on
+    let ada = signed_in(&ax, "ada").await?;
+    let (status, _): (_, Vec<Project>) = ada.get(paths::PROJECTS).await?;
+    assert_eq!(status, StatusCode::OK);
+    // and both client routes answer a caller with no token
+    let (status, build): (_, Build) = ax.client.get(paths::CLIENT).await?;
+    assert_eq!((status, build), (StatusCode::OK, served.build.clone()));
+    let response = ax
         .client
-        .post(paths::USERS, &new_user("eve", false))
+        .raw(ax.client.request(Method::GET, paths::CLIENT_BINARY))
         .await?;
-    assert_eq!(
-        (status, error.code),
-        (StatusCode::UNAUTHORIZED, ErrorCode::Unauthorized)
-    );
+    assert_eq!(response.status(), StatusCode::OK);
     Ok(())
 }
 
@@ -695,19 +716,6 @@ pub async fn cross_origin_writes_are_refused<B: Backend + 'static>(
     first_admin(&ax, "ada").await?;
     let ada = signed_in(&ax, "ada").await?;
     refuses_cross_origin(&ax, &ada).await
-}
-
-/// With sign-in off, every write route still refuses a request from a page of another origin,
-/// which any page a browser opens could send to localhost
-///
-/// # Arguments
-///
-/// * `fx` - The fixture, served asking nobody to sign in
-pub async fn cross_origin_writes_are_refused_with_sign_in_off<B: Backend + 'static>(
-    fx: Fx<B>,
-) -> anyhow::Result<()> {
-    let ax = fx.api().await?;
-    refuses_cross_origin(&ax, &ax.client).await
 }
 
 /// Signing in over TLS sets a Secure cookie, and clears it Secure too, while over plain loopback
@@ -928,14 +936,14 @@ pub async fn plain_http_is_redirected_to_https<B: Backend + 'static>(
     Ok(())
 }
 
-/// With no certificate configured and sign-in off, as one person's server on localhost runs,
-/// the loopback port serves HTTPS over HTTP/2 with reef's own certificate, and the CLI on the
-/// host calls it trusting reef's own CA with no `ca` named
+/// With no certificate configured, as one person's server on localhost runs, the loopback port
+/// serves HTTPS over HTTP/2 with reef's own certificate, and the CLI on the host calls it
+/// trusting reef's own CA with no `ca` named
 ///
 /// # Arguments
 ///
-/// * `fx` - The fixture, served asking nobody to sign in
-pub async fn this_hosts_port_serves_the_cli_over_https_with_sign_in_off<B: Backend + 'static>(
+/// * `fx` - The fixture, served with the case's own user signed in
+pub async fn this_hosts_port_serves_the_cli_over_https<B: Backend + 'static>(
     fx: Fx<B>,
 ) -> anyhow::Result<()> {
     let ax = fx.api().await?;
@@ -951,10 +959,13 @@ pub async fn this_hosts_port_serves_the_cli_over_https_with_sign_in_off<B: Backe
     // the CLI on the host, its config naming the address and where reef keeps its CA alone
     let conf = ax.dir.join("cli.toml");
     std::fs::write(&conf, ax.cli_config())?;
-    let cli = reef::Client::new(&reef::Conf::load(Some(&conf))?)?;
+    let mut signed = reef::Conf::load(Some(&conf))?;
+    signed.credentials = Some(ax.credentials.clone());
+    let cli = reef::Client::new(&signed)?;
     assert_eq!(cli.base(), format!("https://{}", ax.address));
     let me = cli.me().await?;
-    assert!(!me.required, "{me:?}");
+    assert!(me.required, "{me:?}");
+    assert_eq!(me.user.map(|user| user.name).as_deref(), Some(TESTER));
     // and with no CA to trust, it says what to trust rather than that nothing is running
     let mut bare = reef::Conf::load(Some(&conf))?;
     bare.api.certs = Some(ax.dir.join("no-certs-here"));
@@ -1299,8 +1310,8 @@ pub async fn passwords_are_changed_by_their_user_or_set_by_an_admin<B: Backend +
         (status, error.code),
         (StatusCode::FORBIDDEN, ErrorCode::Forbidden)
     );
-    let short = change(Some(PASSWORD), "short");
-    let (status, _): (_, ApiError) = bob.put(&paths::user_password("bob"), &short).await?;
+    let empty = change(Some(PASSWORD), "");
+    let (status, _): (_, ApiError) = bob.put(&paths::user_password("bob"), &empty).await?;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     // with it, the new one signs him in, the old one doesn't, and his token still does
     let (status, changed): (_, PasswordChanged) = bob
@@ -1662,9 +1673,9 @@ pub async fn the_host_recovers_a_lost_admin<B: Backend + 'static>(fx: Fx<B>) -> 
     // a password the service can't keep is refused, and changes nothing
     let refused = ax
         .service
-        .recover_admin("ada", "short".to_string())
+        .recover_admin("ada", String::new())
         .await
-        .expect_err("kept a short password");
+        .expect_err("kept an empty password");
     assert!(
         refused.downcast_ref::<Unkeepable>().is_some(),
         "{refused:#}"
@@ -1690,12 +1701,12 @@ async fn served_client<B: Backend>(fx: &Fx<B>) -> anyhow::Result<Served> {
 ///
 /// # Arguments
 ///
-/// * `fx` - The fixture, served asking no caller to sign in
+/// * `fx` - The fixture, served with the case's own user signed in
 pub async fn the_served_client_is_its_build_its_bytes_and_a_header<B: Backend + 'static>(
     fx: Fx<B>,
 ) -> anyhow::Result<()> {
     let served = served_client(&fx).await?;
-    let ax = fx.api_serving(false, served.clone()).await?;
+    let ax = fx.api_serving(served.clone()).await?;
     let named = "dc5e68cd25c95db18f885357f505e97af24175f9 1795800000";
     // its build, as the client said it, named in the answer's header too
     let response = ax
@@ -1753,36 +1764,38 @@ pub async fn the_served_client_is_its_build_its_bytes_and_a_header<B: Backend + 
 ///
 /// # Arguments
 ///
-/// * `fx` - The fixture, served asking every caller to sign in
+/// * `fx` - The fixture, served with the case's own user, whom the case's calls don't sign in
 pub async fn the_client_routes_answer_without_a_token<B: Backend + 'static>(
     fx: Fx<B>,
 ) -> anyhow::Result<()> {
     let served = served_client(&fx).await?;
-    let ax = fx.api_serving(true, served.clone()).await?;
+    let ax = fx.api_serving(served.clone()).await?;
+    // a caller who hasn't signed in
+    let anyone = ax.client.unsigned();
     // no token sent, and both answer
-    let (status, build): (_, Build) = ax.client.get(paths::CLIENT).await?;
+    let (status, build): (_, Build) = anyone.get(paths::CLIENT).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(build, served.build);
     let response = ax
         .client
-        .raw(ax.client.request(Method::GET, paths::CLIENT_BINARY))
+        .raw(anyone.request(Method::GET, paths::CLIENT_BINARY))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.bytes().await?.len() as u64, served.size);
     // a HEAD of either too, as a download's first look
     let response = ax
         .client
-        .raw(ax.client.request(Method::HEAD, paths::CLIENT_BINARY))
+        .raw(anyone.request(Method::HEAD, paths::CLIENT_BINARY))
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     // but only those: the plan still asks who is calling
-    let (status, error): (_, ApiError) = ax.client.get(paths::PROJECTS).await?;
+    let (status, error): (_, ApiError) = anyone.get(paths::PROJECTS).await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(error.code, ErrorCode::Unauthorized);
     // and a write to either is no read
     let response = ax
         .client
-        .raw(ax.client.request(Method::POST, paths::CLIENT_BINARY))
+        .raw(anyone.request(Method::POST, paths::CLIENT_BINARY))
         .await?;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     Ok(())
@@ -1792,7 +1805,7 @@ pub async fn the_client_routes_answer_without_a_token<B: Backend + 'static>(
 ///
 /// # Arguments
 ///
-/// * `fx` - The fixture, served asking no caller to sign in
+/// * `fx` - The fixture, served with the case's own user signed in
 pub async fn with_no_client_the_route_says_not_found<B: Backend + 'static>(
     fx: Fx<B>,
 ) -> anyhow::Result<()> {

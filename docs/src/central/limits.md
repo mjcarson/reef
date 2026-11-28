@@ -2,8 +2,9 @@
 
 What central reef can't do yet, and the plan's node for each where there is one.
 
-- **A write sent with no token names nobody.** With sign-in off, anything on the host can write
-  without saying who it is.
+- **What was written before sign-in was required names nobody.** Every caller signs in now, so
+  every edit, start, capture, comment, session and test run names its user, but nothing written
+  before that is backdated.
 - **An author is shown by name.** A name reused after its user was removed reads as the same
   user, though the history keeps when each was added.
 - **A fetch names nobody.** A remote project's fetch, by hand or on its interval, says when, not
@@ -20,7 +21,8 @@ What central reef can't do yet, and the plan's node for each where there is one.
   for each line of work instead.
 - **No reverse proxy.** reef reads no forwarded headers
   ([What not to do](deploy/dont.md)).
-- **The loopback port trusts its host.** With sign-in off, anything on the host reaches it. A
+- **The loopback port trusts its host for the first user.** Every caller signs in, on loopback
+  too, but while reef has no user, anything on the host can add the first, who is an admin. A
   web page that DNS rebinding points at 127.0.0.1 is only redirected to `https://` at its own
   name, which reef's certificate doesn't cover (C80).
 - **Docs in LFS or submodules.** A doc kept in LFS reads as its pointer, and a submodule's

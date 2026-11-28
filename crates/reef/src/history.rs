@@ -3,8 +3,8 @@
 //!
 //! Each line is one write: the version it left its node or page at, when it was made, who made
 //! it, and what it changed, such as `v5  2026-11-26 05:47:07 +0000  Claude, for ada: status
-//! in-progress → done`. A write sent with no token names nobody, so its line leaves who out, and
-//! a whole plan's write says so.
+//! in-progress → done`. A write made before its server asked every caller to sign in names
+//! nobody, so its line leaves who out, and a whole plan's write says so.
 //!
 //! A history is read a page of 200 entries at a time. A page with older entries kept ends by
 //! naming the cursor onto them, which `--older` hands back; `--all` reads every page.

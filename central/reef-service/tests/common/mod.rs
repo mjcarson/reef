@@ -204,6 +204,29 @@ impl<B: Backend> Fx<B> {
     }
 }
 
+/// Adds a service's first user, an admin, from its own host, as only an admin registers what is
+/// on the service's host
+///
+/// # Arguments
+///
+/// * `service` - The service to add them to
+pub async fn an_admin<B: Backend>(service: &Service<B>) -> anyhow::Result<reef_api::User> {
+    // the first user, asked for from the service's own host
+    let new = reef_api::NewUser {
+        name: "ada".to_string(),
+        password: "correct horse battery".to_string(),
+        admin: true,
+    };
+    let local = reef_service::Asker {
+        local: true,
+        ..Default::default()
+    };
+    match service.add_user(new, local).await? {
+        reef_api::UserAdded::Added(user) => Ok(user),
+        reef_api::UserAdded::NameTaken => anyhow::bail!("`ada` was taken in a fresh service"),
+    }
+}
+
 impl<B: Reopen> Fx<B> {
     /// Reopens the store over the rows it left, as a restarted process would
     pub async fn reopen(self) -> anyhow::Result<Fx<B>> {

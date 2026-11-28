@@ -70,18 +70,22 @@ no model.
 `reefadm deploy` sets up what the rest of this chapter describes. The pages after this one
 are the same steps done by hand.
 
-- **reef-app as the system unit `reef`**, under the account `reef`, with sign-in required.
-  `--api-only` runs reef-serve instead.
+- **reef-app as the system unit `reef`**, under the account `reef`. `--api-only` runs
+  reef-serve instead.
 - **HTTPS for other hosts on `--port`**, 12443 by default, using reef's own certificate. That
   certificate covers each `--name` (repeat the flag for more names, which default to the host's
   own). To serve a certificate of your own instead, give `--cert` and `--key`.
 - **`/etc/reef/config.toml`**, written from the flags, including `--cores` and `--memory`. A
-  later deploy keeps the file as it is, and refuses a flag that disagrees with it.
+  later deploy keeps the file as it is, and refuses a flag that disagrees with it. The one
+  exception is an older config's `[auth] required = false`, which the server refuses to start
+  on. reefadm takes that key out and keeps the file as it was as `config.toml.before-sign-in`.
 - **The CA copied out** to `/etc/reef/reef-ca.pem`, for this host's CLI and for you to hand
   to users.
-- **The first admin**, `--first-admin` (default: you), added and signed in from this host.
-  `--password-file` reads the password from a file rather than asking twice. `--no-admin`
-  leaves the first user to [The first admin](first-admin.md).
+- **The first admin**, `--first-admin` (default: you), added and signed in from this host. Every
+  central reef asks its callers to sign in, so until then the server answers nobody.
+  `--password-file` reads the password from a file rather than asking twice, and the password is
+  asked before the build, so the build runs unattended. `--no-admin` leaves the first user to [The
+  first admin](first-admin.md).
 - **The firewall**: if ufw or firewalld is on, reefadm asks to open the port.
 
 It ends by saying where reef is and what to hand users:
@@ -96,9 +100,11 @@ reef is up at https://reef.example.com:12443 for other hosts, and https://127.0.
 ## One person on localhost
 
 `reefadm deploy --user` sets up [One person on localhost](localhost.md): a user unit on
-`https://127.0.0.1:12180`, with no config file, no sign-in and no sudo. It turns lingering on,
-so reef keeps running after you log out. `--cores` and `--memory` write a config to
-`~/.config/reef/config.toml`, and nothing else does.
+`https://127.0.0.1:12180`, with no config file and no sudo. It turns lingering on, so reef keeps
+running after you log out. `--cores` and `--memory` write a config to
+`~/.config/reef/config.toml`, and nothing else does. You are its first admin, added and signed in
+as on a team server, since every caller signs in, on loopback too. `--first-admin`,
+`--password-file` and `--no-admin` work as they do there.
 
 ## From another machine
 
@@ -162,7 +168,8 @@ reefadm deploy --user --adopt                 # your own user unit, as localhost
   or one that left a path such as `[shoal] data` to reef's default, is written to
   `/etc/reef/config.toml` naming that path, since reefadm's unit sets no `XDG_*` variables. Only
   the lines naming those paths are added: its other keys and its comments stay as they were.
-  The one that was there is kept as `config.toml.before-reefadm`.
+  The one that was there is kept as `config.toml.before-reefadm`. So is one that turns sign-in
+  off: it is written with `[auth] required = false` taken out, since the new release refuses it.
 - **The unit's own settings are kept in a drop-in.** Anything the unit made by hand sets that
   reefadm's unit doesn't, such as `CPUAffinity=`, `AllowedCPUs=` or `MemoryMax=`, goes into
   `reef.service.d/adopted.conf`, with the comments above each, and still applies. reefadm never
@@ -170,6 +177,9 @@ reefadm deploy --user --adopt                 # your own user unit, as localhost
   reefadm's own.
 - **If the new release doesn't come up,** it puts the install back as it was: its unit, with the
   drop-in gone, its commands, its config, and its data from the backup. It starts it again if it was running.
+- **An install with no user gets its first admin,** as a deploy does. The password is asked
+  before the build, and the admin is added and signed in once reefadm's record is written. If
+  that fails, `reefadm upgrade` adds them.
 - **A server that served plain HTTP,** as reef did before it served HTTPS, now serves HTTPS.
   adopt says so. Each client's `url` needs `https://`, and a client on another host needs reef's CA
   as `ca` ([Certificates](certificates.md)).
@@ -191,14 +201,21 @@ It runs in two halves:
    release's, there's nothing to do unless `--rebuild` is given. Before building, it compares the new commit's schema with
    the tables the running release recorded. A table added is fine. A table changed or dropped is
    refused, naming it, since shoal can't migrate a table ([When the store's schema
-   changes](../admin/schema-changes.md)). Then it builds and stages the new release.
+   changes](../admin/schema-changes.md)). If the server has no user yet, it asks for the first
+   admin's password, by `--first-admin` (default: you), unless `--no-admin` is given. Then it
+   builds and stages the new release.
 2. **The new release's reefadm swaps it in.** Its own unit and steps are the ones used. It stops
-   reef, writes a backup to `/var/backups/reef` (skip it with `--no-backup`), makes the new
-   release current, rewrites the unit if its text changed, starts it and waits for both ports to
-   answer. If the new release doesn't come up, it puts the old release back, restores the backup
-   over whatever the new one wrote, keeping that aside as `*.failed-<time>`, and fails saying why.
+   reef, writes a backup to `/var/backups/reef` (skip it with `--no-backup`), takes an older
+   config's `[auth] required = false` out (keeping the file as `config.toml.before-sign-in`),
+   makes the new release current, rewrites the unit if its text changed, starts it and waits for
+   both ports to answer. If the new release doesn't come up, it puts the old release back,
+   restores the backup over whatever the new one wrote, keeping that aside as
+   `*.failed-<time>`, and fails saying why. Once the record names the new release, a server with
+   no user gets its first admin, added and signed in from the host.
 
-Each release keeps the one before it, so the next upgrade can go back to it. Older releases
+An upgrade at the running release's commits builds nothing, but still adds the first admin to a
+server with no user. So running it again adds an admin that an earlier upgrade couldn't. Each
+release keeps the one before it, so the next upgrade can go back to it. Older releases
 are removed, but never one a running process still uses. When it's done, upgrade each user's
 `reef` too. When reef's skill changed between the two commits, upgrade says so: run `reef claude
 install` again in each repo.

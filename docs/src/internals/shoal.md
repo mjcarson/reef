@@ -16,13 +16,10 @@ address = "127.0.0.1:12180"   # where the JSON API listens over HTTPS, and `reef
 certs = "/home/me/.local/share/reef/certs"   # reef's own CA and certificate; default $XDG_DATA_HOME/reef/certs
 names = ["reef.example"]      # more names reef's own certificate covers
 
-[api.tls]                     # other hosts, beside it; off loopback, needs `[auth] required`
+[api.tls]                     # other hosts, beside it
 address = "0.0.0.0:12443"     # any address
 cert = "/etc/reef/fullchain.pem"   # the certificate chain, as PEM, the server's own first; else reef's own
 key = "/etc/reef/privkey.pem"      # its private key, as PEM
-
-[auth]
-required = true               # every caller signs in; default false, which answers anyone
 
 [remotes]
 clones = "/home/me/.local/share/reef/clones"   # remote projects' clones; default $XDG_DATA_HOME/reef/clones

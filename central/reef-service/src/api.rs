@@ -86,10 +86,10 @@
 //!   of 2 MiB.
 //! - **The change stream is server-sent events,** one a change, its event named by its kind and
 //!   its data the change as JSON. It is live only, and narrowed by `project` and `plan`.
-//! - **Signed in when reef asks it.** [`serve`] wraps the router in [`auth::guard`](crate::auth::guard),
-//!   which hands each route its [`Caller`] and, with sign-in required, answers 401 to a caller
-//!   whose token signs nobody in. A 401 says `WWW-Authenticate: Bearer`, and a 429
-//!   `Retry-After`. With sign-in required, a change stream ends once its token signs nobody in.
+//! - **Every caller signs in.** [`serve`] wraps the router in [`auth::guard`](crate::auth::guard),
+//!   which hands each route its [`Caller`] and answers 401 to a caller whose token signs nobody
+//!   in, on loopback too. A 401 says `WWW-Authenticate: Bearer`, and a 429 `Retry-After`. A
+//!   change stream ends once its token signs nobody in.
 //! - **HTTPS on localhost, and beside it for other hosts.** [`Listeners::bind`] makes or reads
 //!   back reef's own certificate ([`certs`](crate::certs)) and listens over HTTPS on a loopback
 //!   address alone, which this host's CLI, hooks and first admin call. Other hosts reach the API
@@ -308,7 +308,7 @@ pub fn router<S: Serves>(serves: S) -> Router {
             axum::routing::delete(revoke_current::<S>),
         )
         .route(paths::TOKEN, axum::routing::delete(revoke_token::<S>))
-        .route(paths::ME, get(me::<S>))
+        .route(paths::ME, get(me))
         .route(paths::USERS, get(users::<S>).post(add_user::<S>))
         .route(paths::USER_HISTORY, get(user_history::<S>))
         .route(paths::USER, axum::routing::delete(remove_user::<S>))
@@ -1022,8 +1022,8 @@ async fn projects<S: Serves>(State(serves): State<S>) -> Result<Json<Vec<Project
 }
 
 /// Registers a project for a repo on this host or by its git remote: 201 if it was, 409 if its
-/// name or repo is taken, and 403 if, with sign-in required, a caller who isn't an admin names
-/// a directory or a path on this host
+/// name or repo is taken, and 403 if a caller who isn't an admin names a directory or a path on
+/// this host
 ///
 /// # Arguments
 ///
@@ -2483,8 +2483,8 @@ async fn changes<S: Serves>(
         // only the changes it asked for, each an event named by its kind
         query.follows(&change).then(|| Ok(event(&change)))
     });
-    // with sign-in required, it ends once the token it was opened with signs nobody in
-    let token = caller.token.filter(|_| serves.service().sign_in_required());
+    // it ends once the token it was opened with signs nobody in
+    let token = caller.token;
     let ended = async move {
         match token {
             Some(token) => serves.service().signed_out(token).await,
@@ -2632,18 +2632,17 @@ fn no_client() -> Failure {
     )
 }
 
-/// Says who the service takes the caller for, and whether it asks callers to sign in
+/// Says who the service takes the caller for, and that it asks every caller to sign in
 ///
 /// # Arguments
 ///
-/// * `serves` - The service
 /// * `caller` - Who is calling
 #[instrument(name = "api::me", skip_all, err(Debug))]
-async fn me<S: Serves>(State(serves): State<S>, caller: Caller) -> Result<Json<Me>, Failure> {
-    // the user the caller's token signs in, as the guard found
+async fn me(caller: Caller) -> Result<Json<Me>, Failure> {
+    // the user the caller's token signs in, as the guard found, on a server that always asks
     Ok(Json(Me {
         user: caller.user,
-        required: serves.service().sign_in_required(),
+        required: true,
     }))
 }
 

@@ -160,7 +160,7 @@ versions, validation, atomic writes and derived state would each be written seve
   stream, and one that falls behind is told how many changes it missed.
 - **Each new kind of data adds three things:** an operation on the service, a JSON route and a
   server function. This holds for the queue, work records, comments and the loop's state.
-- **Signed in when reef's config asks, plain HTTP on localhost, and TLS beside it.** One layer
+- **Every caller signed in, plain HTTP on localhost, and TLS beside it.** One layer
   signs callers in for both front doors ([Users and sign-in](#users-and-sign-in)), and refuses
   writes from other origins. The loopback port serves plain HTTP to this host, and other hosts
   are served over TLS on a listener beside it ([Served beyond localhost](#served-beyond-localhost)).
@@ -174,17 +174,19 @@ localhost ([C51](../milestones/m10.md)) both build on it.
 
 ### Design choices
 
-- **Off unless reef's config asks for it.** `[auth] required = true` turns sign-in on. Off, the
-  default, every caller is answered as before, so a single user's server on localhost, reef's own
-  among them, runs with no login at all.
+- **Always on, loopback too** ([C128](../milestones/m15.md)). Every caller signs in, and nothing in reef's
+  config turns it off: `[auth] required = false` is refused as the config is loaded, naming the
+  key, and `true` is read and changes nothing. Until C128 sign-in was off unless the config asked
+  for it, so a single user's server, reef's own among them, ran with no login, and every write
+  there named nobody.
 - **One layer for both front doors.** `auth::guard` in reef-service wraps the JSON API in
   reef-serve, and reef-app's whole router: its pages, its server functions, the JSON API it
   mounts and Dioxus's static files. It finds who is calling, from `Authorization: Bearer` or the
   sign-in cookie, and hands every route a `Caller`, which the app's server functions read through
   Dioxus's request context.
-- **Everything is guarded but signing in.** With sign-in on, a caller who isn't signed in reaches
-  only the sign-in page and its form, the token route, `/api/v1/me`, the users' routes, which
-  judge their callers themselves, and the app's stylesheet and static files. A page a browser
+- **Everything is guarded but signing in.** A caller who isn't signed in reaches only the sign-in
+  page and its form, the token route, `/api/v1/me`, the users' routes, which judge their callers
+  themselves, the client's routes ([C117](../overview.md)), and the app's stylesheet and static files. A page a browser
   opens is sent to `/sign-in?next=…`. The app's server functions, the JSON API, a fetched doc
   and the change stream are answered 401, with `WWW-Authenticate: Bearer`.
 - **Users in shoal, passwords as argon2id hashes.** A user is a row under their name, and a token
@@ -204,9 +206,12 @@ localhost ([C51](../milestones/m10.md)) both build on it.
   HttpOnly, SameSite=Strict cookie for 30 days, `Secure` when it is set over TLS, and goes on
   only to a path of this origin.
 - **The first user comes from the service's own host,** over loopback, and is an admin. After
-  that only an admin
-  adds or lists users. This holds whether sign-in is on or off, so users can be added before it
-  is turned on, and nobody can plant an admin while it is off.
+  that only an admin adds or lists users. `reefadm deploy`, a team server's and a user's alike,
+  and `reefadm upgrade` or `deploy --adopt` of a server with no user, add the first admin and sign
+  them in from the host, its password asked before the build, and take an older config's
+  `required = false` out.
+- **Nothing is backdated.** What was written before C128 keeps no author, and the tests and
+  `check.py` each sign in as a user of their own.
 - **A wrong name and a wrong password are told alike.** A name no user has is checked against a
   hash made for the purpose, so it takes as long, and both get the same words.
 - **Tokens looked up are trusted for a minute,** in the service's memory, so a request costs no
@@ -246,8 +251,8 @@ reached it could also have it read or clone what was on its host ([C51](../miles
   adds a second listener on any address that speaks TLS with the PEM chain and key it names,
   through rustls over ring. reef's own unit, and every test that binds loopback, run as before.
 - **TLS only with sign-in required.** Other hosts reaching a service that answers anyone would
-  let anyone on the network write, so `tls::bind` refuses `[api.tls]` unless `[auth] required`
-  is set.
+  let anyone on the network write, so `tls::bind` refused `[api.tls]` unless `[auth] required`
+  was set. Since [C128](../milestones/m15.md) every caller signs in, so the check is gone.
 - **One router on both listeners, each request knowing its peer.** `api::serve_router` serves
   it on both, under one stop, for reef-serve and reef-app alike. Every request carries a `Peer`:
   the address it came from, so the first user is still added from a loopback peer alone, and
@@ -266,8 +271,7 @@ reached it could also have it read or clone what was on its host ([C51](../miles
   `address`, and `[api] ca` a PEM root its certificate is trusted by beside the system's. A
   login is kept by the root, one spelling of it. The service accepts both keys and leaves them
   be, so one file serves both.
-- **What is on the service's host is an admin's.** With sign-in required, registering a project
-  by a directory, or by a remote that names a path on the host, `file://` or bare, takes an
+- **What is on the service's host is an admin's.** Registering a project by a directory, or by a remote that names a path on the host, `file://` or bare, takes an
   admin, judged before the path is looked at. `[remotes] hosts`, if set, names the only hosts a
   remote may be cloned from, for every caller, so nobody points the service's git at its
   internal network.
@@ -375,8 +379,8 @@ With several users, edits, comments and work records said nothing of whose they 
 
 - **The author comes from the token, never the body.** The guard's `Caller` names the user its
   token or cookie signs in, and `Caller::author` hands that to every write the JSON API and the
-  app's server functions make. With sign-in off, a token sent still names its user, and a write
-  with none names nobody.
+  app's server functions make. Since [C128](../milestones/m15.md) every caller signs in, so every write names
+  its user; one written before keeps none.
 - **Claude says so, for its user.** Claude writes with the user's own token, so reef's MCP
   server sends `reef-writer: claude` on every request, and its writes read "Claude, for ada". The
   header can only add that to the token's user, never name another. Hooks and the terminal's own

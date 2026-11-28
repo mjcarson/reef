@@ -54,8 +54,9 @@ pub enum Command {
     /// Deploy central reef on this host, from nothing to a server that answers
     ///
     /// A team server by default: reef-app as the system unit `reef`, under an account of its own,
-    /// sign-in required, HTTPS for other hosts on --port, and its first admin added and signed
-    /// in. `--user` deploys one person's user unit on loopback instead, as reef's own plan runs.
+    /// HTTPS for other hosts on --port, and its first admin added and signed in. `--user`
+    /// deploys one person's user unit on loopback instead, as reef's own plan runs, its first
+    /// admin added and signed in too, since every central reef asks its callers to sign in.
     /// It fetches and builds reef here, which takes a while the first time, and asks before
     /// installing packages or rustup.
     Deploy(DeployArgs),
@@ -172,6 +173,15 @@ pub struct UpgradeArgs {
     /// Start on a fresh data directory, the old one moved aside, for a schema that can't read it
     #[arg(long)]
     pub fresh: bool,
+    /// The first admin's name, added if the server has no user yet [default: you]
+    #[arg(long, value_name = "NAME")]
+    pub first_admin: Option<String>,
+    /// Add no first admin to a server with no user, leaving it to `reef user add` from this host
+    #[arg(long, conflicts_with_all = ["first_admin", "password_file"])]
+    pub no_admin: bool,
+    /// Read the first admin's password from a file, rather than asking twice
+    #[arg(long, value_name = "PATH")]
+    pub password_file: Option<PathBuf>,
     /// Finish an upgrade to a staged release, as the new release's reefadm
     #[arg(long, hide = true, value_name = "RELEASE")]
     pub finish: Option<String>,
@@ -202,8 +212,8 @@ pub struct UninstallArgs {
 /// What `reefadm deploy` is told
 #[derive(Debug, Clone, Args)]
 pub struct DeployArgs {
-    /// One person's server: a user unit on loopback, with no sign-in
-    #[arg(long, conflicts_with_all = ["names", "port", "cert", "key", "first_admin", "no_admin", "password_file"])]
+    /// One person's server: a user unit on loopback, its first admin the user
+    #[arg(long, conflicts_with_all = ["names", "port", "cert", "key"])]
     pub user: bool,
     /// Serve the JSON API alone, with reef-serve, for teams that use only the CLI and Claude Code
     #[arg(long)]
@@ -227,7 +237,7 @@ pub struct DeployArgs {
     /// Each shard's memory budget, such as 256MiB [default: 256MiB]
     #[arg(long, value_name = "SIZE")]
     pub memory: Option<String>,
-    /// The first admin's name [default: you]
+    /// The first admin's name, added if the server has no user yet [default: you]
     #[arg(long, value_name = "NAME")]
     pub first_admin: Option<String>,
     /// Add no first admin, leaving it to `reef user add` from this host
@@ -251,8 +261,8 @@ pub struct DeployArgs {
     /// Take over reef installed here by hand, keeping its config and data, and backing it up first
     ///
     /// The unit, the server it runs and its config are read from the install itself, so none of
-    /// a fresh deploy's flags for them apply.
-    #[arg(long, conflicts_with_all = ["api_only", "names", "port", "cert", "key", "cores", "memory", "first_admin", "no_admin", "password_file"])]
+    /// a fresh deploy's flags for them apply. An install with no user yet gets its first admin.
+    #[arg(long, conflicts_with_all = ["api_only", "names", "port", "cert", "key", "cores", "memory"])]
     pub adopt: bool,
     /// The reef commit the install made by hand was built from, whose schema its data was
     /// written with, so adopt can tell whether the new release reads it
@@ -274,7 +284,8 @@ pub struct DeployArgs {
 mod tests {
     use super::{Cli, Command};
 
-    /// deploy's flags read as given, and a user unit takes none of a team server's
+    /// deploy's and upgrade's flags read as given, a user unit takes none of a team server's own
+    /// but its first admin, and an install taken over takes only its first admin
     #[test]
     fn deploys_flags_read_as_given() {
         let cli = Cli::from_args([
@@ -299,23 +310,27 @@ mod tests {
         assert_eq!(args.names, ["reef.example.com", "10.0.0.5"]);
         assert_eq!(args.port, Some(443));
         assert_eq!(args.reference, "CentralizedPlanner");
-        // a user unit has no TLS port, no first admin and no certificate of its own
-        for flag in [
-            &["--port", "443"][..],
-            &["--first-admin", "ada"],
-            &["--name", "x"],
-        ] {
+        // a user unit has no TLS port and no certificate of its own, but a first admin
+        for flag in [&["--port", "443"][..], &["--name", "x"]] {
             let mut line = vec!["reefadm", "deploy", "--user"];
             line.extend(flag);
             assert!(Cli::from_args(line).is_err(), "{flag:?}");
         }
+        let line = ["reefadm", "deploy", "--user", "--first-admin", "ada"];
+        let Command::Deploy(args) = Cli::from_args(line).unwrap().command else {
+            panic!("deploy reads as deploy");
+        };
+        assert_eq!(args.first_admin.as_deref(), Some("ada"));
         // a certificate needs its key, and no admin takes no admin's name
         assert!(Cli::from_args(["reefadm", "deploy", "--cert", "c.pem"]).is_err());
         assert!(
             Cli::from_args(["reefadm", "deploy", "--no-admin", "--first-admin", "ada"]).is_err()
         );
-        // an install taken over keeps its own config, so none of a fresh one's flags apply
+        // an install taken over keeps its own config, so none of a fresh one's flags apply, but
+        // a first admin does
         assert!(Cli::from_args(["reefadm", "deploy", "--adopt", "--port", "443"]).is_err());
+        let line = ["reefadm", "deploy", "--adopt", "--first-admin", "ada"];
+        assert!(Cli::from_args(line).is_ok());
         assert!(Cli::from_args(["reefadm", "deploy", "--from-rev", "abc"]).is_err());
         assert!(
             Cli::from_args([
@@ -327,6 +342,22 @@ mod tests {
                 "abc"
             ])
             .is_ok()
+        );
+        // upgrade takes a first admin for a server with no user, or none
+        let line = [
+            "reefadm",
+            "upgrade",
+            "--first-admin",
+            "ada",
+            "--password-file",
+            "pw",
+        ];
+        let Command::Upgrade(args) = Cli::from_args(line).unwrap().command else {
+            panic!("upgrade reads as upgrade");
+        };
+        assert_eq!(args.first_admin.as_deref(), Some("ada"));
+        assert!(
+            Cli::from_args(["reefadm", "upgrade", "--no-admin", "--first-admin", "ada"]).is_err()
         );
     }
 }

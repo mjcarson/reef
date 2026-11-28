@@ -5,7 +5,7 @@
 //! its server functions and the JSON API it mounts, so one layer decides for both front doors.
 //!
 //! - **Where a write comes from comes first.** A write a browser sends from a page of another
-//!   origin is refused 403, with sign-in on or off ([`origin::judge`](crate::origin::judge)), so
+//!   origin is refused 403, whoever signed it in ([`origin::judge`](crate::origin::judge)), so
 //!   a page on another port of this host, or another site, can't write through a visitor.
 //! - **Then who is calling.** The layer reads a token from `Authorization: Bearer`, else from
 //!   the sign-in cookie, asks the service whose it is, and hands every route a [`Caller`]: the
@@ -15,9 +15,9 @@
 //!   Claude if the request's `reef-writer` header says it writes as Claude, as reef's MCP server
 //!   does. The header only ever adds "Claude, for" to the token's user, so no request names
 //!   another.
-//! - **Off unless reef's config requires it.** With sign-in off every request goes through, as it
-//!   did before users, and only adding or listing users asks who is calling.
-//! - **On, everything but signing in is guarded** ([`judge`]): the JSON API's reads and writes,
+//! - **Always on, loopback too.** Nothing in reef's config turns it off, so every write names
+//!   the user who made it.
+//! - **Everything but signing in is guarded** ([`judge`]): the JSON API's reads and writes,
 //!   the change stream, docs, the app's pages and server functions. A page a browser opens is
 //!   sent to the sign-in page, and anything else is answered 401.
 //! - **The sign-in page is plain HTML the service serves,** so reef-serve has one too, and it
@@ -177,24 +177,17 @@ pub enum Verdict {
     SignIn,
 }
 
-/// Judges a request by whether sign-in is required, whom its token names, and where it goes
+/// Judges a request by whom its token names, and where it goes
 ///
 /// # Arguments
 ///
-/// * `required` - Whether every caller must sign in
 /// * `named` - Whom the request's token names
 /// * `method` - The request's method
 /// * `path` - The request's path
 /// * `wants_html` - Whether it asks for a page, as a browser opening one does
-pub fn judge(
-    required: bool,
-    named: Named,
-    method: &Method,
-    path: &str,
-    wants_html: bool,
-) -> Verdict {
-    // sign-in off, or a user signed in, or a route that signs one in, goes on
-    if !required || named == Named::User || is_open(method, path) {
+pub fn judge(named: Named, method: &Method, path: &str, wants_html: bool) -> Verdict {
+    // a user signed in, or a route that signs one in, goes on
+    if named == Named::User || is_open(method, path) {
         return Verdict::Pass;
     }
     // a page a browser opens sends it to sign in; the app's calls and every other are refused
@@ -206,7 +199,7 @@ pub fn judge(
     }
 }
 
-/// Whether a route answers anyone while sign-in is required: the routes that sign a user in or
+/// Whether a route answers a caller who isn't signed in: the routes that sign a user in or
 /// out, the one that says who is calling, the users' routes, which judge their callers
 /// themselves, the `reef` the service hands its users, which a new machine fetches before it can
 /// sign in, and the app's static files
@@ -456,7 +449,6 @@ async fn check<S: Serves>(State(serves): State<S>, mut request: Request, next: N
     let from_cookie = presented.as_ref().is_some_and(|(_, cookie)| *cookie);
     // judged by where it goes and what it asks for
     let verdict = judge(
-        service.sign_in_required(),
         named,
         request.method(),
         request.uri().path(),
@@ -792,27 +784,18 @@ mod tests {
         assert_eq!(safe_next(Some("/sign-in?next=/x")), "/");
     }
 
-    /// The guard judges by sign-in, the token, the path and whether a page is wanted
+    /// The guard judges by the token, the path and whether a page is wanted
     #[test]
     fn the_guard_judges_by_path_and_accept() {
         let get = Method::GET;
         let post = Method::POST;
-        // off, everything goes on, whatever the token
+        // a user goes anywhere
         assert_eq!(
-            judge(false, Named::Nobody, &post, "/api/v1/projects", false),
+            judge(Named::User, &post, "/api/v1/projects", false),
             Verdict::Pass
         );
-        assert_eq!(judge(false, Named::Unknown, &get, "/", true), Verdict::Pass);
-        // on, a user goes anywhere
-        assert_eq!(
-            judge(true, Named::User, &post, "/api/v1/projects", false),
-            Verdict::Pass
-        );
-        assert_eq!(
-            judge(true, Named::User, &post, "/app/save", false),
-            Verdict::Pass
-        );
-        // and anyone reaches the routes that sign in, and the static files
+        assert_eq!(judge(Named::User, &post, "/app/save", false), Verdict::Pass);
+        // and anyone reaches the routes that sign in, the client, and the static files
         for (method, path) in [
             (&get, "/sign-in"),
             (&post, "/sign-in"),
@@ -821,34 +804,35 @@ mod tests {
             (&get, "/api/v1/me"),
             (&get, "/api/v1/users"),
             (&post, "/api/v1/users"),
+            (&get, "/api/v1/client"),
+            (&get, "/api/v1/client/reef"),
             (&get, "/reef.css"),
             (&get, "/assets/app-1a2b.wasm"),
             (&get, "/wasm/reef-app.js"),
         ] {
             assert_eq!(
-                judge(true, Named::Nobody, method, path, false),
+                judge(Named::Nobody, method, path, false),
                 Verdict::Pass,
                 "{path}"
             );
         }
         // but not by another method
         assert_eq!(
-            judge(true, Named::Nobody, &Method::DELETE, "/api/v1/users", false),
+            judge(Named::Nobody, &Method::DELETE, "/api/v1/users", false),
             Verdict::Refuse
         );
         assert_eq!(
-            judge(true, Named::Nobody, &post, "/reef.css", false),
+            judge(Named::Nobody, &post, "/reef.css", false),
             Verdict::Refuse
         );
         // a browser opening a page is sent to sign in, from a page or a doc
-        assert_eq!(judge(true, Named::Nobody, &get, "/", true), Verdict::SignIn);
+        assert_eq!(judge(Named::Nobody, &get, "/", true), Verdict::SignIn);
         assert_eq!(
-            judge(true, Named::Unknown, &get, "/plans/a/b", true),
+            judge(Named::Unknown, &get, "/plans/a/b", true),
             Verdict::SignIn
         );
         assert_eq!(
             judge(
-                true,
                 Named::Nobody,
                 &get,
                 "/api/v1/projects/a/plans/b/docs/x.html",
@@ -858,28 +842,24 @@ mod tests {
         );
         // the app's calls, the JSON API, the stream and every write are refused
         assert_eq!(
-            judge(true, Named::Nobody, &get, "/app/projects", true),
+            judge(Named::Nobody, &get, "/app/projects", true),
             Verdict::Refuse
         );
         assert_eq!(
-            judge(true, Named::Nobody, &post, "/app/save", false),
+            judge(Named::Nobody, &post, "/app/save", false),
             Verdict::Refuse
         );
         assert_eq!(
-            judge(true, Named::Nobody, &get, "/api/v1/projects", false),
+            judge(Named::Nobody, &get, "/api/v1/projects", false),
             Verdict::Refuse
         );
         assert_eq!(
-            judge(true, Named::Nobody, &get, "/api/v1/changes", false),
+            judge(Named::Nobody, &get, "/api/v1/changes", false),
             Verdict::Refuse
         );
-        assert_eq!(
-            judge(true, Named::Unknown, &post, "/", true),
-            Verdict::Refuse
-        );
+        assert_eq!(judge(Named::Unknown, &post, "/", true), Verdict::Refuse);
         assert_eq!(
             judge(
-                true,
                 Named::Nobody,
                 &Method::DELETE,
                 "/api/v1/tokens/current",

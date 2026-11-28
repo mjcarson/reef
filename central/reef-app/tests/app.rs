@@ -2,12 +2,14 @@
 //! one port, with plans put through the CLI as a user would
 //!
 //! One server serves every case, since the service is the process's own. Each case works in a
-//! project of its own.
+//! project of its own. Every caller signs in, so the server has a user of its own, an admin,
+//! whose token the suite's requests send and whose login the CLI's credentials file keeps.
 
 // a handler's future over shoal's client nests past the compiler's default depth
 #![recursion_limit = "256"]
 
-use reef_service::{Conf, Service};
+use reef_api::{NewUser, TokenKind, UserAdded};
+use reef_service::{Asker, Conf, Service};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,9 +26,19 @@ struct Fx {
     dir: PathBuf,
     /// A config naming the app's address, for the CLI
     conf: PathBuf,
+    /// The credentials file holding the suite's user's login, for the CLI
+    credentials: PathBuf,
+    /// The token the suite's user signs in with, which its own requests send
+    token: String,
     /// A plain HTTP client
     http: reqwest::Client,
 }
+
+/// The name of the user the suite's server has of its own
+const TESTER: &str = "tester";
+
+/// The password the suite's user signs in with
+const PASSWORD: &str = "correct horse battery";
 
 /// The server, started the first time a case asks
 fn fx() -> &'static Fx {
@@ -55,28 +67,39 @@ impl Fx {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        // the service over a pool of its own, and the app's router on any free local port
-        let address = runtime.block_on(async {
+        // the service over a pool of its own, its first user signed in, and the app's router on
+        // any free local port
+        let (address, token) = runtime.block_on(async {
             let mut conf = Conf::default();
             conf.shoal.data = Some(dir.join("shoal"));
             conf.shoal.cores = 1;
             let service = Service::shared(&conf).await?;
+            let token = tester(service).await?;
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let address = listener.local_addr()?;
             let router = reef_app::server::router(service);
             tokio::spawn(async move { axum::serve(listener, router).await });
-            anyhow::Ok(address)
+            anyhow::Ok((address, token))
         })?;
         // the CLI finds the app where the config says the JSON API is, served plain here, as
         // only a proxy on this host is, since the suite is of the app and not its listeners
         let conf = dir.join("reef.toml");
         std::fs::write(&conf, format!("[api]\nurl = \"http://{address}\"\n"))?;
+        // and the suite's user's login, kept for that root
+        let credentials = dir.join("credentials.toml");
+        let login = reef::credentials::Login {
+            user: TESTER.to_string(),
+            token: token.clone(),
+        };
+        reef::credentials::keep(&credentials, &format!("http://{address}"), login)?;
         let http = reqwest::Client::builder().no_proxy().build()?;
         Ok(Fx {
             runtime,
             address,
             dir,
             conf,
+            credentials,
+            token,
             http,
         })
     }
@@ -86,11 +109,15 @@ impl Fx {
     /// # Arguments
     ///
     /// * `cwd` - The working directory to run it from
-    /// * `args` - The command line after `reef --conf <config>`
+    /// * `args` - The command line after `reef --conf <config> --credentials <file>`
     async fn reef(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-        // the command line as typed, with the app's config named
+        // the command line as typed, with the app's config and the suite's user's login named
         let conf = self.conf.to_str().expect("the config is a utf-8 path");
-        let line = ["reef", "--conf", conf]
+        let credentials = self
+            .credentials
+            .to_str()
+            .expect("the credentials are a utf-8 path");
+        let line = ["reef", "--conf", conf, "--credentials", credentials]
             .into_iter()
             .chain(args.iter().copied());
         let cli = reef::Cli::from_args(line)?;
@@ -136,14 +163,44 @@ impl Fx {
     ///
     /// * `path` - The path, with its query
     async fn get(&self, path: &str) -> anyhow::Result<(u16, String)> {
+        // as the suite's user, as every caller signs in
         let response = self
             .http
             .get(format!("http://{}{path}", self.address))
+            .bearer_auth(&self.token)
             .send()
             .await?;
         let status = response.status().as_u16();
         Ok((status, response.text().await?))
     }
+}
+
+/// Adds the suite's user as the service's first, an admin from its own host, and signs them in,
+/// returning their token
+///
+/// # Arguments
+///
+/// * `service` - The service the app serves
+async fn tester(service: &Service) -> anyhow::Result<String> {
+    // the first user, from the service's own host
+    let new = NewUser {
+        name: TESTER.to_string(),
+        password: PASSWORD.to_string(),
+        admin: true,
+    };
+    let local = Asker {
+        local: true,
+        ..Asker::default()
+    };
+    let UserAdded::Added(_) = service.add_user(new, local).await? else {
+        anyhow::bail!("`{TESTER}` was taken in a fresh service");
+    };
+    // and a token for the suite's requests and the CLI
+    let issued = service
+        .sign_in(TESTER, PASSWORD, TokenKind::Cli, "the suite", None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("`{TESTER}` didn't sign in"))?;
+    Ok(issued.token)
 }
 
 /// Makes a fresh git repo with one commit

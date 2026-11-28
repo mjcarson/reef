@@ -56,6 +56,52 @@ pub(crate) fn kept_config(runner: &mut dyn Runner, layout: &Layout) -> Result<Op
     }
 }
 
+/// What a config reefadm took `[auth] required = false` out of is kept as, beside it
+pub(crate) const SIGN_IN_OFF_KEPT: &str = "config.toml.before-sign-in";
+
+/// Takes `[auth] required = false` out of the config a deployment has, keeping the file as it
+/// was beside it, since the service refuses to start on it; returns whether it did
+///
+/// A roll back needs nothing put back: a release from before every central reef asked its
+/// callers to sign in reads the key left out as sign-in off, as it read `false`.
+///
+/// # Arguments
+///
+/// * `runner` - The runner
+/// * `layout` - The deployment's paths
+pub(crate) fn sign_in_on(runner: &mut dyn Runner, layout: &Layout) -> Result<bool> {
+    // a deployment with no config of its own, or one that leaves sign-in on, is left alone
+    let Some(text) = exec::read(runner, &layout.config, As::Me)? else {
+        return Ok(false);
+    };
+    let Some(text) = crate::served::without_sign_in_off(&text, &layout.config)? else {
+        return Ok(false);
+    };
+    // the file as it was, kept beside it, then the key's line made a comment
+    let kept = layout.config.with_file_name(SIGN_IN_OFF_KEPT);
+    runner.run(
+        &Cmd::new("cp")
+            .arg("-a")
+            .arg(&layout.config)
+            .arg(&kept)
+            .by(layout.owner()),
+    )?;
+    runner.write(&File {
+        path: layout.config.clone(),
+        text,
+        mode: 0o644,
+        runs_as: layout.owner(),
+        owner: None,
+    })?;
+    runner.say(&format!(
+        "took `[auth] required = false` out of {}, since every central reef asks its callers to \
+         sign in; it was kept as {}",
+        layout.config.display(),
+        kept.display()
+    ));
+    Ok(true)
+}
+
 /// This host's name: its fully qualified one, else its own
 ///
 /// # Arguments

@@ -19,9 +19,6 @@ address = "0.0.0.0:12443"           # other hosts, over HTTPS
 cert = "/etc/reef/fullchain.pem"    # the chain, as PEM, the server's own certificate first
 key = "/etc/reef/privkey.pem"       # its private key, as PEM; leave both out for reef's own
 
-[auth]
-required = true                     # every caller signs in; off loopback, TLS won't start without it
-
 [remotes]
 clones = "/var/lib/reef/clones"     # absolute; never move it once projects are registered
 fetch_every = "5m"                  # how often every remote project is fetched; "0s" never
@@ -29,6 +26,10 @@ hosts = ["github.com"]              # the only hosts a remote may be cloned from
 ```
 
 - **A misspelt key stops the server,** naming it, rather than being ignored.
+- **Every caller signs in, on loopback too.** Nothing in the config turns it off. An older
+  config's `[auth] required = false` stops the server, naming the key, and `reefadm upgrade`,
+  or `deploy --adopt`, takes it out ([Upgrades](../admin/upgrades.md)).
+  `required = true` is read and changes nothing.
 - **The server checks the config before shoal starts.** It refuses a memory budget of 0, a
   relative or tmpfs data path, and a certificate or key it can't read, and says what to change.
 - **Every port speaks HTTPS.** A plain-HTTP request is answered with a redirect to `https://` at

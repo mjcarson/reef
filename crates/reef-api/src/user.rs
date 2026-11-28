@@ -1,7 +1,8 @@
 //! Users, the tokens they sign in with, and the requests that add them
 //!
-//! Sign-in is off unless reef's config turns it on. With it on, every route but the ones that
-//! sign a user in asks who is calling: the CLI, the MCP server and the hooks send a token they
+//! Every caller signs in, on loopback too, and nothing turns that off. Every route but the ones
+//! that sign a user in, say who is calling, add the first user and hand out the client asks who
+//! is calling: the CLI, the MCP server and the hooks send a token they
 //! were given for a user's name and password, and a browser sends the cookie the sign-in page set.
 //! A token is shown once, when it is issued, and the service keeps only its hash. A password is
 //! kept only as its argon2id hash.
@@ -24,9 +25,6 @@ pub const TOKEN_HEX_LEN: usize = 64;
 
 /// The cookie a browser that signed in sends its token in
 pub const SIGN_IN_COOKIE: &str = "reef_sign_in";
-
-/// The fewest characters a password may hold
-pub const PASSWORD_MIN: usize = 8;
 
 /// The most bytes a password may hold, so hashing one can't be made to take long
 pub const PASSWORD_MAX: usize = 1024;
@@ -354,7 +352,8 @@ pub struct Me {
     /// The user the caller's token signs in, if it signs one in
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<User>,
-    /// Whether the service asks every caller to sign in
+    /// Whether the service asks every caller to sign in: always, since every central reef asks,
+    /// though a server from before that may say it doesn't
     pub required: bool,
 }
 
@@ -390,7 +389,8 @@ pub fn check_user_name(name: &str) -> Result<(), String> {
     }
 }
 
-/// Checks a password is long enough to keep, and short enough to hash quickly
+/// Checks a password is one to keep: any length a person picks, but not empty, and short enough
+/// to hash quickly
 ///
 /// # Arguments
 ///
@@ -402,14 +402,14 @@ pub fn check_user_name(name: &str) -> Result<(), String> {
 /// use reef_api::user::check_password;
 ///
 /// assert!(check_password("correct horse").is_ok());
-/// assert!(check_password("short").is_err());
+/// assert!(check_password("short").is_ok());
+/// assert!(check_password("").is_err());
 /// ```
 pub fn check_password(password: &str) -> Result<(), String> {
-    // count characters, not bytes, for the floor a person reads
-    if password.chars().count() < PASSWORD_MIN {
-        return Err(format!(
-            "a password holds at least {PASSWORD_MIN} characters"
-        ));
+    // no floor but none at all, which a bare Enter at a prompt gives, and which signs in anyone
+    // who knows the name
+    if password.is_empty() {
+        return Err("a password can't be empty".to_string());
     }
     // and bytes for the ceiling, which bounds the hash's work
     if password.len() > PASSWORD_MAX {
@@ -646,7 +646,9 @@ mod tests {
         assert!(check_user_name(&"a".repeat(65)).is_err());
         // passwords
         assert!(check_password("12345678").is_ok());
-        assert!(check_password("1234567").is_err());
+        assert!(check_password("1").is_ok());
+        assert!(check_password("").is_err());
+        assert!(check_password(&"x".repeat(1024)).is_ok());
         assert!(check_password(&"x".repeat(1025)).is_err());
         // tokens
         assert!(is_token_shaped(&format!("reef_{}", "f".repeat(64))));

@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use common::git;
-use common::http::{Ax, fake_client, stamped};
+use common::http::{Ax, TESTER, fake_client, stamped};
 
 /// A served twin, a config naming its address, and a credentials file of the case's own
 struct Cx {
@@ -105,7 +105,7 @@ impl Cx {
         let fx = common::Fx::memory(&format!("cli-{case}")).await?;
         let client = fake_client(&fx.dir.join("release/bin/reef"), build)?;
         let served = reef_service::Served::read(&client).await?;
-        Cx::over(fx.api_serving(false, served).await?)
+        Cx::over(fx.api_serving(served).await?)
     }
 
     /// Writes a config naming a served twin's address, beside a credentials file of the case's
@@ -124,6 +124,15 @@ impl Cx {
             conf,
             credentials,
         })
+    }
+
+    /// A client of the case's service, as the CLI makes one from the case's config and
+    /// credentials
+    fn client(&self) -> anyhow::Result<reef::Client> {
+        // the config the CLI reads, and the login the case's credentials file keeps
+        let mut conf = reef::Conf::load(Some(&self.conf))?;
+        conf.credentials = Some(self.credentials.clone());
+        reef::Client::new(&conf)
     }
 
     /// Runs one `reef` command from a directory, returning what it printed
@@ -670,18 +679,78 @@ async fn the_cli_signs_in_and_writes_over_tls() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// With sign-in off, the CLI works with no login, and says nobody need sign in
+/// With no login kept, the CLI is refused on loopback too, told to run `reef login`, and says
+/// the service asks every caller to sign in
 #[tokio::test]
-async fn the_cli_needs_no_login_with_sign_in_off() -> anyhow::Result<()> {
-    let cx = Cx::new("no-login").await?;
+async fn the_cli_with_no_login_is_told_to_run_reef_login() -> anyhow::Result<()> {
+    let cx = Cx::signing_in("no-login").await?;
     let repo = cx.ax.repo.clone();
-    // a put with no token kept
+    // a put with no token kept is refused, saying how to sign in
     let node = cx.yaml("c1.yaml", &work("C1", &[]))?;
-    let put = cx.reef(&repo, &["node", "put", &node]).await?;
-    assert!(put.contains("C1"), "{put}");
-    // and nobody asked to sign in
+    let (_, refused) = cx.failing(&repo, &["node", "put", &node]).await?;
+    assert!(refused.contains("reef login"), "{refused}");
+    // and the service says it asks every caller
     let me = cx.reef(&repo, &["whoami"]).await?;
-    assert!(me.contains("asks no caller to sign in"), "{me}");
+    assert!(me.contains("asks every caller to sign in"), "{me}");
+    Ok(())
+}
+
+/// Every write through the CLI names the user it signs in, on loopback too: a put and a status, a
+/// start, a capture, a queued entry, and a reply to a thread and its resolve
+#[tokio::test]
+async fn every_write_through_the_cli_names_its_user() -> anyhow::Result<()> {
+    let cx = Cx::new("every-write").await?;
+    let repo = cli_project(&cx, &["A"]).await?;
+    let node = PlanName::new("cli", "docs")?.node("A")?;
+    let client = cx.client()?;
+    // A put, then set in progress, each edit in its history under the user's name
+    cx.reef(&repo, &["status", "A", "in-progress"]).await?;
+    let log = cx.reef(&repo, &["node", "log", "A"]).await?;
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "{log}");
+    assert!(
+        lines[0].ends_with("  tester: status unset → in-progress"),
+        "{log}"
+    );
+    assert!(lines[1].ends_with("  tester: added"), "{log}");
+    // A started on a branch, its record naming who started it
+    git::run(&repo, &["checkout", "-q", "-b", "work"])?;
+    cx.reef(&repo, &["start", "A"]).await?;
+    let records = client.work("cli").await?;
+    let record = records
+        .iter()
+        .find(|record| record.node == node)
+        .expect("A's start is recorded");
+    assert_eq!(record.started_by.describe().as_deref(), Some(TESTER));
+    // its work captured, the revision naming who sent it
+    write_files_in(&repo, &[("a.txt", b"A's work\n")])?;
+    commit_all(&repo, "A")?;
+    cx.reef(&repo, &["node", "capture"]).await?;
+    let revisions = client.revisions(&node).await?;
+    assert_eq!(revisions.len(), 1, "{revisions:?}");
+    assert_eq!(revisions[0].author.describe().as_deref(), Some(TESTER));
+    // queued, naming who queued it
+    cx.reef(&repo, &["queue", "add", "A"]).await?;
+    let listed = cx.reef(&repo, &["queue", "ls"]).await?;
+    assert!(listed.contains("queued by tester"), "{listed}");
+    // and a thread on it, replied to and resolved from the CLI, each act naming the user
+    let number = comment_on(&cx, "A", "Is it done?").await?;
+    cx.reef(&repo, &["comment", "reply", &number.to_string(), "It is."])
+        .await?;
+    cx.reef(&repo, &["comment", "resolve", &number.to_string()])
+        .await?;
+    let thread = thread_of(&cx, number).await?;
+    let authors: Vec<Option<String>> = thread
+        .comments
+        .iter()
+        .map(|comment| comment.author.describe())
+        .collect();
+    assert_eq!(
+        authors,
+        vec![Some(TESTER.to_string()), Some(TESTER.to_string())]
+    );
+    let resolved = thread.resolved_by().expect("the resolve linked a revision");
+    assert_eq!(resolved.author.describe().as_deref(), Some(TESTER));
     Ok(())
 }
 
@@ -1243,11 +1312,12 @@ async fn a_waiting_entry_shows_the_needs_it_waits_on() -> anyhow::Result<()> {
     assert_eq!(added, "`B` is queued 1 of 1\n");
     let added = cx.reef(&repo, &["queue", "add", "C", "--top"]).await?;
     assert_eq!(added, "`C` is queued 1 of 2\n");
-    // the queue says C is ready, and B waits on A
+    // the queue says C is ready, and B waits on A, each queued by the case's own user
     let ls = cx.reef(&repo, &["queue", "ls"]).await?;
     assert_eq!(
         ls,
-        "1. C  ready    C Some work\n2. B  waiting  B Some work\n      needs A (todo)\n"
+        "1. C  ready    C Some work\n      queued by tester\n2. B  waiting  B Some work\n      \
+         needs A (todo)\n      queued by tester\n"
     );
     // next takes C first, then A in plan order, and says it skipped B, and why
     let next = cx.reef(&repo, &["next"]).await?;
@@ -1260,7 +1330,11 @@ async fn a_waiting_entry_shows_the_needs_it_waits_on() -> anyhow::Result<()> {
     // once A is done, B is ready, and next takes the queue in its order
     cx.reef(&repo, &["status", "A", "done"]).await?;
     let ls = cx.reef(&repo, &["queue", "ls"]).await?;
-    assert_eq!(ls, "1. C  ready  C Some work\n2. B  ready  B Some work\n");
+    assert_eq!(
+        ls,
+        "1. C  ready  C Some work\n      queued by tester\n2. B  ready  B Some work\n      queued \
+         by tester\n"
+    );
     let next = cx.reef(&repo, &["next"]).await?;
     assert_eq!(
         next,
@@ -1303,7 +1377,10 @@ async fn next_spans_the_projects_plans_and_plan_narrows_it() -> anyhow::Result<(
          reef/central/A  A Some work\n\nWaiting (0):\n  nothing\n"
     );
     let ls = cx.reef(&repo, &["queue", "ls"]).await?;
-    assert_eq!(ls, "1. reef/other/X  ready  X Some work\n");
+    assert_eq!(
+        ls,
+        "1. reef/other/X  ready  X Some work\n                 queued by tester\n"
+    );
     // narrowed to central, as next of that plan alone was before the queue
     let next = cx.reef(&repo, &["next", "--plan", "central"]).await?;
     assert_eq!(
@@ -1318,7 +1395,7 @@ async fn next_spans_the_projects_plans_and_plan_narrows_it() -> anyhow::Result<(
     let ls = cx
         .reef(&repo, &["queue", "ls", "--plan", "central"])
         .await?;
-    assert_eq!(ls, "1. A  ready  A Some work\n");
+    assert_eq!(ls, "1. A  ready  A Some work\n      queued by tester\n");
     // and a place beside another plan's entry is refused, saying why
     let (_, error) = cx
         .failing(
@@ -2824,8 +2901,7 @@ async fn a_clone_of_a_remote_project_starts_and_captures_its_nodes() -> anyhow::
         "{captured}"
     );
     // kept as the node's revision, its file the one the user's clone changed
-    let conf = reef::Conf::load(Some(&cx.conf))?;
-    let client = reef::Client::new(&conf)?;
+    let client = cx.client()?;
     let node = PlanName::new("up", "docs")?.node("A")?;
     let revisions = client.revisions(&node).await?;
     let paths: Vec<&str> = revisions[0].files.iter().map(|file| file.path()).collect();
@@ -3081,8 +3157,7 @@ async fn changes_of(
     id: &str,
 ) -> anyhow::Result<Vec<(reef_api::Revision, Vec<reef_api::FileDiff>)>> {
     // a client of the case's service, as the CLI makes one
-    let conf = reef::Conf::load(Some(&cx.conf))?;
-    let client = reef::Client::new(&conf)?;
+    let client = cx.client()?;
     let node = PlanName::new("cli", "docs")?.node(id)?;
     // every revision, then every file each lists
     let mut changes = Vec::new();
@@ -3582,8 +3657,7 @@ async fn comment_on(cx: &Cx, id: &str, body: &str) -> anyhow::Result<u32> {
 /// * `number` - The thread's number
 async fn thread_of(cx: &Cx, number: u32) -> anyhow::Result<reef_api::Thread> {
     // a client of the case's service, as the CLI makes one
-    let conf = reef::Conf::load(Some(&cx.conf))?;
-    let client = reef::Client::new(&conf)?;
+    let client = cx.client()?;
     let plan = PlanName::new("cli", "docs")?;
     Ok(client
         .thread(&plan, number)
@@ -3871,11 +3945,11 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
     let listed = cx.reef(&repo, &["loop", "ls"]).await?;
     assert_eq!(
         listed,
-        "claude:4242  running, feeding every plan of `cli`, on `cli/docs/A`, session s1\n"
+        "claude:4242  running, feeding every plan of `cli`, on `cli/docs/A`, session s1, started \
+         by tester\n"
     );
     // a clear starts a new session in the pane, and the hook hands it the loop, printing nothing
-    let conf = reef::Conf::load(Some(&cx.conf))?;
-    let client = reef::Client::new(&conf)?;
+    let client = cx.client()?;
     let cleared = r#"{"session_id":"s2","source":"clear","hook_event_name":"SessionStart"}"#;
     let mut printed = Vec::new();
     reef::loops::session_start(
@@ -3892,7 +3966,8 @@ async fn a_loop_follows_its_pane_through_a_clear() -> anyhow::Result<()> {
     let listed = cx.reef(&repo, &["loop", "ls"]).await?;
     assert_eq!(
         listed,
-        "claude:4242  running, feeding every plan of `cli`, on `cli/docs/A`, session s2\n"
+        "claude:4242  running, feeding every plan of `cli`, on `cli/docs/A`, session s2, started \
+         by tester\n"
     );
     // a second pane's loop can't take A, and takes B
     let other = "claude:5151";

@@ -1,7 +1,7 @@
 //! The service's users: adding them, signing them in for a token, and knowing a token again
 //!
-//! - **Sign-in is off unless reef's config requires it.** Off, every caller is answered as
-//!   today, and only adding or listing users asks who is calling.
+//! - **Every caller signs in, on loopback too.** Nothing turns it off; only signing in, saying
+//!   who is calling, the users' own routes and fetching the client answer a caller with no token.
 //! - **The first user is added from the service's own host,** and is an admin whatever the
 //!   request says. After that only an admin adds or lists users, judged against the users as
 //!   they stand under the store's lock, so the first can't be added twice.
@@ -380,26 +380,10 @@ fn is_admin(users: &[StoredUser], asker: Asker<'_>, doing: &str) -> anyhow::Resu
 }
 
 impl<B: Backend> Service<B> {
-    /// Asks every caller to sign in, or none
-    ///
-    /// # Arguments
-    ///
-    /// * `required` - Whether every caller must sign in
-    pub fn requiring_sign_in(mut self, required: bool) -> Self {
-        self.requires_sign_in = required;
-        self
-    }
-
-    /// Whether every caller must sign in
-    pub fn sign_in_required(&self) -> bool {
-        self.requires_sign_in
-    }
-
     /// Checks the asker may register what is on the service's host: a directory, or a path a
     /// remote names
     ///
-    /// With sign-in off anyone may, as anyone may do anything, and the service serves this host
-    /// alone; on, only an admin, since the service reads or clones what they name.
+    /// Only an admin may, since the service reads or clones what they name.
     ///
     /// # Arguments
     ///
@@ -407,30 +391,22 @@ impl<B: Backend> Service<B> {
     /// * `doing` - What they ask to do, for the refusal
     #[instrument(name = "Service::judge_on_host", skip_all, err(Debug))]
     pub async fn judge_on_host(&self, asker: Asker<'_>, doing: &str) -> anyhow::Result<()> {
-        // anyone, with sign-in off
-        if !self.requires_sign_in {
-            return Ok(());
-        }
-        // else an admin, as the stored rows say
+        // an admin, as the stored rows say
         is_admin(&self.store.users().await?, asker, doing)
     }
 
     /// What a server says of signing in as it starts: that callers must, and how to add the
-    /// first user while there is none, or nothing with sign-in off
+    /// first user while there is none
     #[instrument(name = "Service::sign_in_note", skip_all, err(Debug))]
-    pub async fn sign_in_note(&self) -> anyhow::Result<Option<String>> {
-        // nothing to say with sign-in off
-        if !self.requires_sign_in {
-            return Ok(None);
-        }
-        // and how to add the first user while there is none
+    pub async fn sign_in_note(&self) -> anyhow::Result<String> {
+        // callers must, and how to add the first user while there is none
         let note = match self.store.users().await?.is_empty() {
             true => "callers must sign in, and reef has no user yet: add the first with \
                      `reef user add NAME` from this host"
                 .to_string(),
             false => "callers must sign in".to_string(),
         };
-        Ok(Some(note))
+        Ok(note)
     }
 
     /// Reads a page of the log of acts on reef's users, newest first, to an admin, or nothing

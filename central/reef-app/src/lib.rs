@@ -3,8 +3,8 @@
 //! Its front page picks a project's plan, and each plan opens full-window, beside its project's
 //! queue of work to take first (`queue`). The server answers
 //! the app's server functions, which call `reef-service`, and serves reef's JSON API on the same
-//! port, so the CLI, the MCP server and the app all reach one service. When the server asks
-//! callers to sign in, the bar says whom it takes the browser for (`sign_in`), and links to
+//! port, so the CLI, the MCP server and the app all reach one service. Every caller signs in, so
+//! the bar says whom the server takes the browser for (`sign_in`), and links to
 //! their account page, for their password and tokens, and every user to an admin (`account`).
 //!
 //! dx builds two sides from this crate: the wasm client with `web`, and the server with

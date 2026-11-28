@@ -2,14 +2,18 @@
 
 ## Signing in
 
-Sign-in is off unless reef's config asks for it with `[auth] required = true`, as reef's own unit
-runs with no config at all. The commands that add the first admin, sign in, and manage users and
+Every central reef asks its callers to sign in, on loopback too, and nothing turns it off (C128):
+a config that sets `[auth] required = false` is refused as it is loaded, naming the key, and one
+that sets it true is read and changes nothing. So every edit, start, capture, comment, session
+and test run names its user, and what was written before keeps no author. The commands that add the first admin, sign in, and manage users and
 tokens are in [The first admin](../central/deploy/first-admin.md), [Sign
 in](../central/using/sign-in.md) and [Users](../central/admin/users.md#users).
 
 - **A password is asked for on the terminal** with echo off, never taken as an argument, or read
   from `--password-file PATH` (`-` for standard input), through `reef_api::prompt`, which the
-  CLI and reef-serve share. The service keeps only its argon2id hash.
+  CLI and reef-serve share. The service keeps only its argon2id hash. A password may be any
+  length a person picks but empty, up to 1024 bytes, which bounds the hash's work
+  (`reef_api::user::check_password`), and reefadm holds the first admin's to that as it asks.
 - **A login keeps a token, never the password,** in `$XDG_CONFIG_HOME/reef/credentials.toml`,
   readable by its owner alone, a token for each server by its root (`https://127.0.0.1:12180`,
   or the one `[api] url` names). One kept for a plain-HTTP root, from before reef served HTTPS
@@ -42,8 +46,7 @@ in](../central/using/sign-in.md) and [Users](../central/admin/users.md#users).
 Every port speaks HTTPS (C87). The loopback port, for the service's own host, serves reef's own
 certificate, signed by a CA reef makes and keeps in `[api] certs`, which the CLI on the host
 trusts. Other hosts reach the JSON API, and the app, on a second listener, `[api.tls]`, serving
-the certificate it names or reef's own, which sign-in must be required for unless it is on
-loopback too. A plain-HTTP request on either is answered with a 307 to `https://` at the host,
+the certificate it names or reef's own, and its callers sign in as the host's do. A plain-HTTP request on either is answered with a 307 to `https://` at the host,
 port and path it asked for, read by `tls::redirect_answer` from the connection's first bytes,
 since a TLS client's open with a handshake record. The first admin is added on the service's
 host, over loopback. A `reef` on another host names the service by `[api] url`, which wins over
@@ -70,7 +73,7 @@ server](../central/using/index.md#point-it-at-the-server).
   be cloned from, for every caller.
 - **Known limits:** no HSTS, since it would make the warning a browser shows before it trusts
   reef's own CA one that can't be clicked through; no reading of a reverse proxy's
-  `X-Forwarded-*`, so a proxy in front makes every caller look local; and with sign-in off,
-  anything on the host reaches the loopback port. A page whose name a DNS rebinding points at
+  `X-Forwarded-*`, so a proxy in front makes every caller look local; and while reef has no user,
+  anything on the host can add the first, an admin, over the loopback port. A page whose name a DNS rebinding points at
   loopback is only redirected to `https://` at that name, which reef's certificate doesn't cover
   (C80).

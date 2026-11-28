@@ -1,7 +1,7 @@
 //! The sign-in suite, every case run against the in-memory twin and, with `embedded`, shoal
 //!
-//! Each case serves a service on a loopback port of its own, asking every caller to sign in
-//! unless the case is about sign-in off, over TLS beside it if the case is about TLS, and calls
+//! Each case serves a service on a loopback port of its own, which asks every caller to sign
+//! in, over TLS beside it if the case is about TLS, and calls
 //! it as the CLI and a browser do.
 
 // an in-process pool's open nests futures past the compiler's default depth
@@ -48,13 +48,12 @@ suite!(
     the_first_user_is_an_admin_and_admins_add_the_rest,
     a_token_signs_requests_in_until_revoked,
     the_browser_signs_in_with_a_cookie,
-    sign_in_off_changes_nothing,
+    a_server_whose_config_names_no_auth_signs_every_caller_in,
     cross_origin_writes_are_refused,
-    cross_origin_writes_are_refused_with_sign_in_off,
     signing_in_over_tls_sets_a_secure_cookie,
     tls_serves_http2_to_a_client_that_offers_it,
     plain_http_is_redirected_to_https,
-    this_hosts_port_serves_the_cli_over_https_with_sign_in_off,
+    this_hosts_port_serves_the_cli_over_https,
     only_an_admin_registers_what_is_on_the_host,
     a_revoked_token_signs_nothing_in,
     repeated_wrong_passwords_are_slowed,

@@ -2,8 +2,7 @@
 //!
 //! A browser sends its cookies with a form a page of another origin posts, and SameSite stops
 //! only another *site*: a page served from another port of the same host, or another subdomain,
-//! is the same site, and its posts carry reef's cookie. With sign-in off there is no cookie to
-//! carry, but any page a browser opens can still post to the service on localhost. So every write
+//! is the same site, and its posts carry reef's cookie. So every write
 //! is judged by where the browser says it came from, as Go's `CrossOriginProtection` judges it,
 //! with no token for a page to carry:
 //!
