@@ -777,13 +777,23 @@ fn mounted(mut view: View, data: &MountedData) {
     view.root.set(Some(el));
 }
 
+/// What keeps the keys typed in it: a text box, a text area, a select or an editable element
+const FIELDS: &str = "input, textarea, select, [contenteditable]:not([contenteditable='false'])";
+
 /// The view's keys, while it has the focus: zoom, fit, full screen, search, and letting go
+///
+/// A key typed in a field inside the view, such as the sidebar's comment box, is left to it.
 ///
 /// # Arguments
 ///
 /// * `view` - The view
 /// * `event` - The key pressed
 fn keyed(view: View, event: KeyboardEvent) {
+    // a key typed in a field is the field's, so the view's keys answer only outside one
+    if dom::target(&*event.data()).is_some_and(|el| dom::closest(&el, FIELDS).is_some()) {
+        return;
+    }
+    // a key held with Ctrl, Cmd or Alt is the browser's
     let mods = event.modifiers();
     if mods.ctrl() || mods.meta() || mods.alt() {
         return;

@@ -485,6 +485,72 @@ def c55_answers_the_pointer(page):
           and seen["width kept"][0] == seen["width kept"][1], seen)
 
 
+def c129_hotkeys_stay_out_of_text_boxes(page):
+    """C129: the keys typed in the sidebar's comment box go into it, Escape there keeps the node
+    and its draft, and with the focus on the canvas its keys do what they did. Runs on C54's plan."""
+    page.goto(URL + "/plans/check/draws")
+    wait_drawn(page)
+    transform = lambda: page.get_attribute(".reef-viewport", "transform")
+    full = lambda: page.evaluate("() => document.fullscreenElement !== null")
+    focused = lambda: page.evaluate(
+        "() => [document.activeElement.tagName.toLowerCase(), document.activeElement.className]")
+    page.locator(".reef-viewport .reef-node", has_text="W2 Build on it").click()
+    page.wait_for_selector(".reef-side")
+    page.click(".reef-side .reef-app-tab:text-is('Comments')")
+    box = ".reef-app-comments > .reef-app-composer textarea"
+    page.click(box)
+    # every key the canvas answers, typed in the box, goes into it and moves nothing
+    before = transform()
+    page.keyboard.type("f+=-_0/")
+    page.wait_for_timeout(300)
+    typed = {"value": page.input_value(box), "moved": transform() != before, "full screen": full(),
+             "focus": focused()[0]}
+    check("C129 keys typed in a comment box go into it, and the canvas stays put",
+          typed == {"value": "f+=-_0/", "moved": False, "full screen": False, "focus": "textarea"}, typed)
+    # Escape there leaves the node selected and its draft in the box
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(150)
+    escaped = {"sidebar": page.locator(".reef-side").count(), "value": page.input_value(box)}
+    check("C129 Escape in a comment box keeps the node selected and its draft",
+          escaped == {"sidebar": 1, "value": "f+=-_0/"}, escaped)
+    # no draft is left for later checks
+    page.fill(box, "")
+    # with the focus on the canvas and in no field, its keys do what they did
+    page.focus(".reef-app-graph")
+    seen = {}
+    first = transform()
+    page.keyboard.press("+")
+    page.wait_for_timeout(150)
+    seen["+ zooms in"] = transform() != first
+    zoomed = transform()
+    page.keyboard.press("-")
+    page.wait_for_timeout(150)
+    seen["- zooms out"] = transform() != zoomed
+    page.keyboard.press("+")
+    page.wait_for_timeout(150)
+    zoomed = transform()
+    page.keyboard.press("0")
+    page.wait_for_timeout(150)
+    seen["0 fits"] = transform() != zoomed
+    page.keyboard.press("/")
+    page.wait_for_timeout(150)
+    seen["/ searches"] = focused()[1] == "reef-search"
+    # Escape in the search box hands the focus back to the canvas
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(150)
+    seen["back on the canvas"] = "reef-app-graph" in focused()[1]
+    page.keyboard.press("f")
+    page.wait_for_timeout(300)
+    seen["f goes full screen"] = full()
+    page.keyboard.press("f")
+    page.wait_for_timeout(300)
+    seen["f again leaves it"] = not full()
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(150)
+    seen["Escape closes the sidebar"] = page.locator(".reef-side").count() == 0
+    check("C129 with the focus on the canvas its keys do what they did", all(seen.values()), seen)
+
+
 def c15_a_put_shows_live(page):
     """C15: a status set from the CLI shows up without a reload, keeping the groups and selection."""
     page.goto(URL + "/plans/check/draws")
@@ -3318,6 +3384,7 @@ def main():
                 c54_one_viewer_listens,
                 c55_matches_the_viewer,
                 c55_answers_the_pointer,
+                c129_hotkeys_stay_out_of_text_boxes,
                 c15_a_put_shows_live,
                 c20_a_stale_save_shows_the_newer,
                 c25_a_drag_writes_one_row,
